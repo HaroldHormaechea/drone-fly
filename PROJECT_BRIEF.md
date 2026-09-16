@@ -5,7 +5,7 @@ project:
   maturity_target: prototype
 stack:
   languages: [python]
-  frameworks: [pytorch, gymnasium, stable-baselines3, gym-pybullet-drones]
+  frameworks: [pytorch, gymnasium, stable-baselines3, gym-pybullet-drones, axonweave, connectome_interpreter, connectome_data_prep]
   runtimes: [server]
   versions: {python: "3.11", gymnasium: "1.3.0", stable_baselines3: "2.9.0", neuprint_python: "0.6.3"}
   data_stores: ["local filesystem (cached connectome, checkpoints, logs)", "neuprint (remote graph API)"]
@@ -52,6 +52,16 @@ connectome) be used to build — and reinforcement-learn — a neural controller
 quadrotor drone through a timed waypoint race course in simulation, avoiding floors,
 ceilings, and obstacles?
 
+> **Reframe (research update).** Running the MaleCNS connectome as a live neural substrate
+> is **no longer the hard, novel part of this project** — as of MaleCNS v1.0's release
+> (September 2026) it is already solved and open-source, with several mature substrate
+> libraries and end-to-end connectome→sim→RL templates publicly available (see
+> **Technologies** for the specific libraries and prior-art repos). drone-fly's real work is
+> therefore **integration + training**: wiring an *existing* connectome-substrate library to
+> an *existing* drone flight sim, and training it with RL for waypoint racing. The scope and
+> non-goals below reflect this — we **build** the integration and the training setup, and we
+> **reuse** the connectome runtime rather than reinventing it.
+
 **Primary users.**
 - The project owner / researcher — exploring connectome-seeded control as a learning project,
   with limited prior ML/RL experience (so the pipeline and docs must be teaching-oriented).
@@ -87,8 +97,9 @@ closed-source commercial FPV racing game with no official public API or mod/sim 
 driving it directly would require brittle screen-scraping and input injection. Instead,
 drone-fly trains in an **open, Gymnasium-style FPV quadrotor simulator** (e.g.
 `gym-pybullet-drones` or a Flightmare-style sim) that models a timed gate/waypoint course.
-Achieving Liftoff-level fidelity or actually flying inside Liftoff is recorded as a
-**stretch goal / non-goal** for now.
+Actually flying inside Liftoff is deferred to a **planned future milestone** (a feasible
+later Liftoff bridge — see "Planned future work" above and the Architecture section), not the
+initial prototype.
 
 ### Scope decision 3 — Training objective
 
@@ -98,24 +109,41 @@ or obstacles and **rewarded** for minimal door-to-door (gate-to-gate) time. "Rac
 timed waypoint course. A mainstream RL stack is used (Python + Gymnasium + a PPO/SAC
 implementation such as Stable-Baselines3).
 
-**In scope (must deliver).**
-1. A neuPrint-backed pipeline to fetch MaleCNS connectivity and derive a connectome-seeded
-   controller network topology.
-2. An open, Gymnasium-style quadrotor sim environment with a timed waypoint/gate racing task
-   and floor/ceiling/obstacle collision penalties.
-3. An RL training loop (PPO or SAC via Stable-Baselines3) that trains the connectome-seeded
-   controller to fly the course.
-4. A reward function optimizing fastest door-to-door (gate-to-gate) times with collision
-   avoidance.
+**In scope (what we build).** drone-fly's deliverables are the *integration glue* and the
+*training setup* around reused components — not a connectome runtime.
+1. **Integration** of an existing connectome-substrate library (see Technologies — AxonWeave
+   recommended) with an existing open quadrotor sim, adapting an existing open-source
+   connectome→sim→RL template rather than writing the plumbing from scratch.
+2. A neuPrint-backed step to obtain MaleCNS connectivity (reusing ready-made connectivity
+   matrices where available) and instantiate it as a trainable policy substrate via the
+   chosen library.
+3. An open, Gymnasium-style quadrotor sim environment with a timed waypoint/gate racing task
+   and floor/ceiling/obstacle collision penalties, wired behind the canonical control adapter
+   (see Architecture).
+4. An RL training loop (PPO via Stable-Baselines3) that trains the connectome-substrate policy
+   to fly the course, with a reward function optimizing fastest door-to-door (gate-to-gate)
+   times with collision avoidance.
 5. Teaching-oriented documentation and reproducible run scripts, given the owner's limited
    RL/connectome background.
 
-**Non-goals (explicitly out of scope).**
-1. Driving or integrating with the real Liftoff game (no public API) — stretch goal only.
+**Non-goals (explicitly out of scope for the prototype).**
+1. **Building a connectome simulator / runtime from scratch.** The connectome substrate is a
+   *reused* dependency — an existing, open-source library instantiates MaleCNS as a trainable
+   network (see Technologies). We do not reimplement it.
 2. A biophysically faithful, dynamics-level simulation of the fly brain.
 3. Real (physical) drone hardware / sim-to-real transfer.
 4. Multi-user, production-grade reliability or a hosted service.
 5. Anything beyond racing/waypoint-following behavior (e.g. freestyle, payload, swarm).
+
+**Planned future work (not in the initial prototype).**
+- **Liftoff bridge (later milestone — feasible, deferred).** Flying the trained policy in the
+  real Liftoff FPV game is reclassified from a dead-end non-goal to a **concrete planned future
+  integration**. Rationale: the owner already owns tooling that exports Liftoff terrain
+  information and streams real-time telemetry, so a future bridge is realistic. It stays out of
+  the initial prototype scope, but it is a real milestone rather than an impossibility. Crucially,
+  Liftoff uses standard FPV **"acro / rate mode"** controls, and the architecture deliberately
+  adopts that same canonical 4-channel control abstraction (see Architecture) so the eventual
+  port is a fine-tune, not a rebuild.
 
 **Success criteria.**
 - The connectome-fetch pipeline runs and produces a controller topology derived from MaleCNS
@@ -188,10 +216,46 @@ which keeps the project approachable.
   from GitHub (`pip install git+https://github.com/utiasDSL/gym-pybullet-drones`). A
   Flightmare-style sim is the fallback if this proves unsuitable. Recorded as a dependency to
   revisit during architecture.
-- **neuprint-python (0.6.3)** — official client for querying the MaleCNS connectome from the
-  neuPrint server.
+- **AxonWeave** (https://github.com/dhakalnirajan/axonweave) — **the connectome substrate: the
+  reused "already-solved" piece.** It exposes MaleCNS as a **sparse, trainable substrate** usable
+  from NumPy / PyTorch / TensorFlow, so the connectome runtime is a dependency, not something we
+  build (see the reuse strategy below). This is the **primary recommended** substrate library.
+  GitHub-installed (not on PyPI).
+- **connectome_interpreter** (https://github.com/YijieYin/connectome_interpreter) — alternative /
+  support: differentiable whole-brain connectome models. A fallback substrate if AxonWeave proves
+  unsuitable.
+- **connectome_data_prep** (https://github.com/YijieYin/connectome_data_prep) — alternative /
+  support: **ready-made MaleCNS connectivity matrices**, so we can skip hand-rolling the neuPrint
+  extraction where these fit.
+- **neuprint-python (0.6.3)** (https://github.com/connectome-neuprint/neuprint-python) — official
+  client for querying the MaleCNS connectome from the neuPrint server, for data access not already
+  covered by `connectome_data_prep`.
 - **numpy / pandas** — array math and tabular handling for connectivity data and rollouts.
 - **matplotlib / tensorboard** — training-curve and trajectory visualization (teaching aid).
+
+**Reuse strategy (the core of this project's framing).** The connectome→network→sim→
+reinforcement-loop plumbing is **adopted from existing open-source templates rather than built
+fresh**. The connectome runtime is reused (AxonWeave); the integration pattern is reused too. The
+following repos are cited as **interface templates / prior art** to follow:
+- **doomfly** (https://github.com/nftechie/doomfly) — MaleCNS → ViZDoom, with PPL101 dopamine-cell
+  reinforcement; the canonical "connectome as a game-playing policy" template.
+- **fly-craftax** (https://github.com/liuzihe02/fly-craftax) — connectome + PPO, i.e. exactly the
+  substrate-plus-PPO shape drone-fly needs.
+- **Flyhard** (https://github.com/MarkUnthank/flyhard) — MaleCNS steering a vehicle in CARLA, i.e.
+  **continuous control** from a connectome (closest to a drone's control regime).
+- **flybody** (https://github.com/TuragaLab/flybody) — a MuJoCo fly body with flight RL
+  environments; reference for the flight-RL env side.
+
+**Academic paradigm validation.** The connectome-as-trainable-network approach is validated in the
+literature: **flyGNN / FlyGM** (NeurIPS 2025; arXiv 2602.17997) instantiate the connectome as a
+**graph neural network trained with deep RL** for locomotion *and* flight. This confirms the
+substrate-plus-RL paradigm drone-fly reuses is sound, not speculative.
+
+**Install note.** Several core dependencies are **declared, not installed**, and are **GitHub-only**
+(not on PyPI) — notably **AxonWeave** and **gym-pybullet-drones**, installed via
+`pip install git+https://github.com/…`. `connectome_interpreter` and `connectome_data_prep` are
+likewise GitHub-sourced. Pinned versions and build commands (`uv run pytest` / `ruff`) are
+unchanged.
 
 **Data stores.**
 - No database engine. Connectome data is **fetched at runtime from neuPrint** (a hosted Neo4j
@@ -208,8 +272,10 @@ which keeps the project approachable.
 - (Aspirational / non-goal) Liftoff — no API; not integrated.
 
 **AI / ML dependency:** Local, self-trained models only — no hosted LLM/model provider. The RL
-policy (connectome-seeded PyTorch network) is trained from scratch in-repo via
-Stable-Baselines3. No external inference API.
+policy is the **reused connectome substrate** (AxonWeave instantiating MaleCNS as a trainable
+network), whose connection strengths are trained in-repo via Stable-Baselines3 PPO. The network
+architecture is reused/derived from the connectome; only the weights are learned. No external
+inference API.
 
 **Build tool:** `uv` (fast, modern Python packaging/venv manager) with a `pyproject.toml`.
 Chosen over bare `pip`/`venv` for reproducible, lockfile-backed installs — helpful for a
@@ -230,24 +296,75 @@ Python module boundaries, which is right for a single-user research prototype (s
 evolve, no distributed-system cost).
 
 **Components (modules under `src/drone_fly/`).**
-- `connectome` — queries neuPrint for MaleCNS connectivity and caches it locally. Responsible
-  for the only inbound external data.
-- `controller` — builds the connectome-seeded neural-network topology (PyTorch) from cached
-  connectivity; exposes it as a policy network for the RL agent.
+- `connectome` — obtains MaleCNS connectivity (ready-made matrices from `connectome_data_prep`
+  where they fit, else neuPrint via `neuprint-python`) and caches it locally. Responsible for
+  the only inbound external data.
+- `controller` — instantiates the connectome as a **trainable substrate** via the reused
+  **AxonWeave** library (not a hand-built topology); exposes it as a policy network for the RL
+  agent. Motor neurons map to the canonical 4-channel control (see below); sensory inputs map
+  to sensory neurons.
 - `env` — the Gymnasium quadrotor racing environment (waypoint/gate course, collision
-  penalties, door-to-door timing reward). Wraps `gym-pybullet-drones`.
-- `train` — the RL training loop (Stable-Baselines3 PPO/SAC) wiring the controller policy to
-  the env; writes checkpoints and TensorBoard logs.
+  penalties, door-to-door timing reward). Wraps `gym-pybullet-drones` **behind the canonical
+  control/observation adapter** (see the portable-control decision below).
+- `adapter` — the **thin sim-agnostic bridge**: maps the canonical 4-channel action and the
+  standardized observation to/from a given sim's native API. `gym-pybullet-drones` has its own
+  adapter today; a future Liftoff adapter plugs in behind the same interface.
+- `train` — the RL training loop (Stable-Baselines3 PPO) wiring the substrate policy to the env;
+  applies **domain randomization** (see below) and writes checkpoints and TensorBoard logs.
 - `evaluate` — loads a checkpoint, runs the agent on a course, reports lap/gate times vs. a
   random baseline, and renders trajectories.
 - `cli` — thin command-line entry points (`fetch-connectome`, `train`, `evaluate`) that
   orchestrate the above.
 
+### Load-bearing decision 1 — Portable canonical control abstraction (mandatory)
+
+The agent's **action space is the standard 4-channel FPV / quadcopter control**: **THROTTLE**
+(collective thrust), **ROLL**, **PITCH**, **YAW**, commanded as **body rates** — i.e. FPV
+**"acro / rate mode"**. This is equivalent to the **collective-thrust-plus-body-rates (CTBR)**
+abstraction that is standard in sim-to-real drone-racing RL (e.g. UZH's *Swift*). It is
+**sim-agnostic** and is **exactly what Liftoff uses**, which is what makes the future Liftoff port
+a *fine-tune* rather than a rebuild.
+
+Every sim plugs in behind the thin **`adapter`** that maps this canonical action/observation format
+to/from the sim's native API. The **observation format is standardized too**: relative next-gate
+pose, velocity, and attitude. The connectome substrate's motor neurons drive the 4 canonical
+channels; its sensory neurons receive the standardized observation.
+
+### Load-bearing decision 2 — Domain randomization (mandatory during training)
+
+Training **randomizes mass, drag, motor constants, and control latency** so the learned policy is
+robust to unseen dynamics and **ports across sims with light (or near-zero) fine-tuning** instead
+of overfitting one sim's physics. Together with the canonical adapter, this is what makes a
+cross-sim port cheap.
+
+### Integration shape (4 layers)
+
+1. **Connectome substrate** — AxonWeave instantiating MaleCNS as a trainable policy network
+   (reused, not built).
+2. **Sim** — `gym-pybullet-drones` behind the canonical `adapter`.
+3. **Glue** — a doomfly / fly-craftax-style interface: sensory input → sensory neurons; motor
+   neurons → the 4 canonical controls; a dopamine-cell / reward hook.
+4. **Training** — Stable-Baselines3 PPO rewarding fastest gate-to-gate time with collision
+   penalties.
+
+### Portability expectation (recorded honestly)
+
+Porting to another sim is a **warm-start + fine-tune, NOT a zero-shot copy**. The connectome
+**topology (fixed)** and the high-level **racing strategy** transfer well; the **low-level dynamics
+compensation** and the **I/O adapter** get re-tuned per sim. The **canonical adapter + domain
+randomization** are precisely what make that port cheap. **Liftoff specifically** will need a
+**vision / telemetry bridge** — the owner has terrain-export + real-time telemetry tooling for this
+— rather than a physics-level plug-in; it is recorded as a **future adapter behind the same
+canonical interface**, not a rewrite.
+
 **Communication (all in-process function calls):**
 - `cli` → `connectome`, `train`, `evaluate` (Python calls)
-- `connectome` → neuPrint (**HTTPS**, via `neuprint-python`)
-- `controller` → `connectome` (reads cached connectivity)
-- `train` → `env` + `controller` + Stable-Baselines3 (Python calls)
+- `connectome` → neuPrint (**HTTPS**, via `neuprint-python`) or `connectome_data_prep` (local
+  ready-made matrices)
+- `controller` → `connectome` (reads cached connectivity) + **AxonWeave** (instantiates the
+  trainable substrate)
+- `env` → `adapter` → `gym-pybullet-drones` (canonical action/observation ↔ native sim API)
+- `train` → `env` + `controller` + Stable-Baselines3 (Python calls), with domain randomization
 - `evaluate` → `env` + checkpoint files (Python calls)
 
 **Async workloads:** none in the distributed sense. RL training is a **long-running,
@@ -256,17 +373,22 @@ background workers. Checkpointing makes long runs resumable.
 
 **Integrations:**
 - **neuPrint** (read-only, inbound): MaleCNS connectivity, over HTTPS with an auth token.
-- **gym-pybullet-drones / PyBullet** (in-process): the simulator providing quadrotor dynamics
-  and gate geometry.
-- (Non-goal) Liftoff: no integration.
+- **AxonWeave** (in-process): the reused connectome substrate that instantiates MaleCNS as a
+  trainable policy network.
+- **gym-pybullet-drones / PyBullet** (in-process, via the canonical `adapter`): the simulator
+  providing quadrotor dynamics and gate geometry.
+- (Planned future) Liftoff: no integration in the prototype; a future **vision/telemetry adapter**
+  behind the same canonical control interface (owner has terrain-export + telemetry tooling).
 
-**Data flow narrative.** `fetch-connectome` calls neuPrint, pulls MaleCNS neuron/synapse
-connectivity, and caches it to `data/connectome/` (Parquet/CSV). `controller` reads that cache
-to construct the seeded policy-network topology. `train` instantiates the Gymnasium racing
-`env` and the seeded policy, runs PPO/SAC, and writes model checkpoints to `artifacts/models/`
-and metrics to `artifacts/logs/` (TensorBoard). `evaluate` loads a checkpoint, flies the course
-in the env, and emits timing metrics and trajectory plots to `artifacts/eval/`. Everything
-stays on the local filesystem.
+**Data flow narrative.** `fetch-connectome` obtains MaleCNS neuron/synapse connectivity (ready-made
+matrices from `connectome_data_prep`, else neuPrint) and caches it to `data/connectome/`
+(Parquet/CSV). `controller` reads that cache and hands it to **AxonWeave**, which instantiates the
+trainable connectome substrate as the policy network. `train` instantiates the Gymnasium racing
+`env` (wrapping `gym-pybullet-drones` behind the canonical `adapter`) and the substrate policy,
+runs **PPO with domain randomization** over the canonical 4-channel action space, and writes model
+checkpoints to `artifacts/models/` and metrics to `artifacts/logs/` (TensorBoard). `evaluate` loads
+a checkpoint, flies the course in the env, and emits timing metrics and trajectory plots to
+`artifacts/eval/`. Everything stays on the local filesystem.
 
 **Trust boundaries.** The only untrusted/external input is data pulled from neuPrint over the
 network; it is treated as read-only reference data and cached locally. The one secret is the

@@ -17,8 +17,30 @@ drone-fly is a research prototype that connects three things:
   Gymnasium quadrotor simulator to chase waypoints through gates, penalized for hitting the
   floor, ceiling, or obstacles and rewarded for the fastest gate-to-gate times.
 
+The connectome runtime is **reused, not built from scratch**: running MaleCNS as a trainable
+network is already solved and open-source. drone-fly's real work is the *integration* (wiring an
+existing connectome substrate to an existing drone sim) and the *training* (RL for waypoint
+racing).
+
 This repository is currently a structure-only scaffold: the pipeline stages exist as packages
 with documented responsibilities, but the logic is not implemented yet.
+
+## Prior art / references
+
+drone-fly reuses and follows existing open-source work rather than reinventing it:
+
+- [AxonWeave](https://github.com/dhakalnirajan/axonweave) — exposes MaleCNS as a sparse,
+  trainable substrate for NumPy/PyTorch/TensorFlow (the reused connectome runtime).
+- [doomfly](https://github.com/nftechie/doomfly) — MaleCNS → ViZDoom with dopamine-cell
+  reinforcement (interface template).
+- [fly-craftax](https://github.com/liuzihe02/fly-craftax) — connectome + PPO (the
+  substrate-plus-PPO shape this project needs).
+- [flybody](https://github.com/TuragaLab/flybody) — a MuJoCo fly body with flight RL
+  environments.
+- [gym-pybullet-drones](https://github.com/utiasDSL/gym-pybullet-drones) — the open quadrotor
+  simulator used behind a sim-agnostic control adapter.
+
+See `PROJECT_BRIEF.md` (Technologies and Architecture) for the full list and the reuse rationale.
 
 ## Requirements
 
