@@ -10,5 +10,5 @@ Statuses:
 
 | # | File | Title | Status | Updated |
 |---|------|-------|--------|---------|
-| 01 | [use-cases/01-connectome-plumbing-poc.md](use-cases/01-connectome-plumbing-poc.md) | Connectome plumbing POC | pending | 2026-09-16 |
+| 01 | [use-cases/01-connectome-plumbing-poc.md](use-cases/01-connectome-plumbing-poc.md) | Connectome plumbing POC | in-progress | 2026-09-16 |
 | 02 | [use-cases/02-start-gate-finish-flight.md](use-cases/02-start-gate-finish-flight.md) | Start→gate→finish flight training | pending | 2026-09-16 |
