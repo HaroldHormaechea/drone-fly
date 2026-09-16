@@ -78,11 +78,33 @@ class ConnectomeData:
     source:
         A human-readable provenance tag (e.g. the artifact directory or fixture
         name) recorded for traceability.
+    superclass:
+        Optional length-``N`` array of per-neuron MaleCNS superclass labels (e.g.
+        ``"descending_neuron"``, ``"visual_projection"``), aligned to the matrix row
+        order. ``None`` when the metadata lacks a ``superclass`` column (older/reduced
+        fixtures) — downstream population selection then degrades to a documented
+        placeholder rather than fabricating biology. Consumed by UC-02's
+        :mod:`drone_fly.controller.populations`.
+    sign:
+        Optional length-``N`` ``int8`` array of per-neuron excitatory/inhibitory sign
+        (``+1`` excitatory, ``-1`` inhibitory), derived from MaleCNS neurotransmitter
+        predictions and aligned to the matrix row order. ``None`` when the metadata
+        lacks a ``sign`` column, in which case the E/I mask degrades to a documented
+        default. The stored ``.npz`` weights are magnitudes only (all positive); this
+        column is the sole source of E/I biology.
+    top_nt:
+        Optional length-``N`` array of each neuron's predicted majority
+        neurotransmitter (``"gaba"``, ``"acetylcholine"``, ...), aligned to the matrix
+        row order, or ``None`` when absent. Retained for provenance/traceability; the
+        E/I contract is carried by :pyattr:`sign`.
     """
 
     adjacency: sp.csr_matrix
     neuron_ids: np.ndarray
     source: str
+    superclass: np.ndarray | None = None
+    sign: np.ndarray | None = None
+    top_nt: np.ndarray | None = None
 
     @property
     def neuron_count(self) -> int:
@@ -173,6 +195,38 @@ def _load_neuron_ids(meta_path: Path | None, n: int) -> np.ndarray:
     return ids
 
 
+#: Optional per-neuron metadata columns surfaced onto :class:`ConnectomeData`. Each maps
+#: a ``*_meta.csv`` column name to the ``ConnectomeData`` attribute it populates. Absent
+#: columns leave the attribute ``None`` (documented degrade — never fabricated).
+_OPTIONAL_META_COLUMNS = ("superclass", "sign", "top_nt")
+
+
+def _load_neuron_attrs(meta_path: Path | None, n: int) -> dict[str, np.ndarray | None]:
+    """Read optional per-neuron attribute columns, aligned to matrix row order.
+
+    Returns a mapping of ``ConnectomeData`` attribute name -> aligned array (or ``None``
+    when the column is absent). Alignment matches :func:`_load_neuron_ids`: rows are
+    sorted by ``idx`` when that column exists. ``sign`` is normalised to ``int8`` so the
+    downstream E/I mask is exactly ``+1`` / ``-1``. A column whose length disagrees with
+    the matrix dimension is treated as absent (``None``) rather than silently misaligned.
+    """
+    attrs: dict[str, np.ndarray | None] = dict.fromkeys(_OPTIONAL_META_COLUMNS, None)
+    if meta_path is None:
+        return attrs
+
+    meta = pd.read_csv(meta_path)
+    if "idx" in meta.columns:
+        meta = meta.sort_values("idx")
+    for column in _OPTIONAL_META_COLUMNS:
+        if column not in meta.columns:
+            continue
+        values = meta[column].to_numpy()
+        if len(values) != n:
+            continue
+        attrs[column] = values.astype(np.int8) if column == "sign" else values
+    return attrs
+
+
 def load_connectome(path: str | os.PathLike[str] | None = None) -> ConnectomeData:
     """Load a cached connectome from local disk (offline; no network, no neuPrint).
 
@@ -207,4 +261,12 @@ def load_connectome(path: str | os.PathLike[str] | None = None) -> ConnectomeDat
         )
 
     neuron_ids = _load_neuron_ids(meta_path, n)
-    return ConnectomeData(adjacency=adjacency, neuron_ids=neuron_ids, source=str(npz_path))
+    attrs = _load_neuron_attrs(meta_path, n)
+    return ConnectomeData(
+        adjacency=adjacency,
+        neuron_ids=neuron_ids,
+        source=str(npz_path),
+        superclass=attrs["superclass"],
+        sign=attrs["sign"],
+        top_nt=attrs["top_nt"],
+    )
