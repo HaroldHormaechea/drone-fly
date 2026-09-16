@@ -22,28 +22,33 @@ drone-fly is a research prototype that connects three things:
   Gymnasium quadrotor simulator to chase waypoints through gates, penalized for hitting the
   floor, ceiling, or obstacles and rewarded for the fastest gate-to-gate times.
 
-The connectome runtime is **reused, not built from scratch**: running MaleCNS as a trainable
-network is already solved and open-source. drone-fly's real work is the *integration* (wiring an
-existing connectome substrate to an existing drone sim) and the *training* (RL for waypoint
-racing).
+drone-fly does **not** build a full biophysical brain simulator, and — since no installable
+library actually does it (see the AxonWeave note below) — it also doesn't depend on a third-party
+connectome runtime. Instead it uses a **small in-repo substrate** (`SparseConnectomeLayer`): the
+real MaleCNS synapses as sparse *trainable* weights over a fixed sparsity pattern. The project's
+real work is that substrate plus the *integration* (wiring it to an open drone sim) and the
+*training* (RL for waypoint racing).
 
 This repository is an early prototype. The **connectome plumbing** (UC-01) is implemented and
 tested — offline connectome load, a connectome-seeded policy, and a full encode → network →
 decode roundtrip — while the flight environment, RL training, and evaluation stages are still
 package skeletons.
 
-> **AxonWeave note.** The intended connectome-substrate library, AxonWeave, is not installable in
-> this environment (absent from PyPI; source not publicly reachable at UC-01 time). The controller
-> uses it automatically if it ever becomes importable, and otherwise falls back to an in-repo
-> `SparseConnectomeLayer` shim that realises the same connectome edges as a sparse trainable
-> parameter. The plumbing contract and the roundtrip are identical either way.
+> **AxonWeave note.** AxonWeave is **not a usable dependency** and is **not** what this project
+> runs on. A source-verified check found it absent from PyPI and TestPyPI (HTTP 404 under every name
+> variant), its GitHub repo (`dhakalnirajan/axonweave`) has zero releases/tags and a Rust-PyO3
+> build, and its own README calls it "a production-oriented foundation, not a completed simulator."
+> The connectome substrate is therefore the **in-repo `SparseConnectomeLayer`** — the real MaleCNS
+> synapses as a sparse trainable PyTorch parameter over a fixed sparsity pattern. AxonWeave may be
+> revisited only if it ever ships a real tagged wheel.
 
 ## Prior art / references
 
 drone-fly reuses and follows existing open-source work rather than reinventing it:
 
-- [AxonWeave](https://github.com/dhakalnirajan/axonweave) — exposes MaleCNS as a sparse,
-  trainable substrate for NumPy/PyTorch/TensorFlow (the reused connectome runtime).
+- [AxonWeave](https://github.com/dhakalnirajan/axonweave) — an **unreleased/unusable** project (no
+  PyPI wheel, zero releases/tags, README self-describes as an incomplete foundation). **Not used**;
+  the substrate is the in-repo `SparseConnectomeLayer`. Listed only for provenance.
 - [doomfly](https://github.com/nftechie/doomfly) — MaleCNS → ViZDoom with dopamine-cell
   reinforcement (interface template).
 - [fly-craftax](https://github.com/liuzihe02/fly-craftax) — connectome + PPO (the

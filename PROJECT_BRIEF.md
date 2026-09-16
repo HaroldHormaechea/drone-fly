@@ -5,7 +5,7 @@ project:
   maturity_target: prototype
 stack:
   languages: [python]
-  frameworks: [pytorch, gymnasium, stable-baselines3, gym-pybullet-drones, axonweave, connectome_interpreter, connectome_data_prep]
+  frameworks: [pytorch, gymnasium, stable-baselines3, gym-pybullet-drones, connectome_interpreter, connectome_data_prep]
   runtimes: [server]
   versions: {python: "3.11", gymnasium: "1.3.0", stable_baselines3: "2.9.0", neuprint_python: "0.6.3"}
   data_stores: ["local filesystem (cached connectome, checkpoints, logs)", "neuprint (remote graph API)"]
@@ -52,15 +52,16 @@ connectome) be used to build — and reinforcement-learn — a neural controller
 quadrotor drone through a timed waypoint race course in simulation, avoiding floors,
 ceilings, and obstacles?
 
-> **Reframe (research update).** Running the MaleCNS connectome as a live neural substrate
-> is **no longer the hard, novel part of this project** — as of MaleCNS v1.0's release
-> (September 2026) it is already solved and open-source, with several mature substrate
-> libraries and end-to-end connectome→sim→RL templates publicly available (see
-> **Technologies** for the specific libraries and prior-art repos). drone-fly's real work is
-> therefore **integration + training**: wiring an *existing* connectome-substrate library to
-> an *existing* drone flight sim, and training it with RL for waypoint racing. The scope and
-> non-goals below reflect this — we **build** the integration and the training setup, and we
-> **reuse** the connectome runtime rather than reinventing it.
+> **Reframe (research update, corrected).** Instantiating the MaleCNS connectome as a
+> *trainable* neural network is tractable and low-risk — UC-01 proved it with a small in-repo
+> layer (`SparseConnectomeLayer`) that loads the real synapses as sparse trainable weights.
+> However, a source-verified investigation found that **no installable third-party library
+> actually does this** for an arbitrary connectome matrix: AxonWeave (the one that claimed to)
+> is unreleased and unusable, `flyvis` is optic-lobe-hardwired, and `connectome_interpreter`
+> freezes synapse weights (see **Technologies**). So drone-fly's substrate is a **small in-repo
+> component**, not a reused runtime. The project's real work is therefore that in-repo substrate
+> **plus integration + training**: wiring it to an *existing* open drone sim and training it with
+> RL for waypoint racing. We do **not** build a full biophysical brain simulator (see non-goals).
 
 **Primary users.**
 - The project owner / researcher — exploring connectome-seeded control as a learning project,
@@ -111,12 +112,11 @@ implementation such as Stable-Baselines3).
 
 **In scope (what we build).** drone-fly's deliverables are the *integration glue* and the
 *training setup* around reused components — not a connectome runtime.
-1. **Integration** of an existing connectome-substrate library (see Technologies — AxonWeave
-   recommended) with an existing open quadrotor sim, adapting an existing open-source
-   connectome→sim→RL template rather than writing the plumbing from scratch.
-2. A neuPrint-backed step to obtain MaleCNS connectivity (reusing ready-made connectivity
-   matrices where available) and instantiate it as a trainable policy substrate via the
-   chosen library.
+1. **Integration** of the in-repo connectome substrate (the small trainable `SparseConnectomeLayer`
+   — see Technologies) with an existing open quadrotor sim, behind the canonical control adapter.
+2. A neuPrint-backed step (via `neuprint-python`, or reusing ready-made `connectome_data_prep`
+   matrices) to obtain MaleCNS connectivity and instantiate it as a trainable in-repo policy
+   substrate.
 3. An open, Gymnasium-style quadrotor sim environment with a timed waypoint/gate racing task
    and floor/ceiling/obstacle collision penalties, wired behind the canonical control adapter
    (see Architecture).
@@ -127,9 +127,11 @@ implementation such as Stable-Baselines3).
    RL/connectome background.
 
 **Non-goals (explicitly out of scope for the prototype).**
-1. **Building a connectome simulator / runtime from scratch.** The connectome substrate is a
-   *reused* dependency — an existing, open-source library instantiates MaleCNS as a trainable
-   network (see Technologies). We do not reimplement it.
+1. **Building a full biophysical connectome simulator from scratch.** The in-repo substrate
+   (`SparseConnectomeLayer`) loads the real MaleCNS synapses as trainable sparse weights — it is
+   deliberately minimal. We do **not** build a dynamics-/receptor-/plasticity-level neural
+   simulator; nor (since no installable library provides it) do we depend on a third-party
+   connectome runtime.
 2. A biophysically faithful, dynamics-level simulation of the fly brain.
 3. Real (physical) drone hardware / sim-to-real transfer.
 4. Multi-user, production-grade reliability or a hosted service.
@@ -216,27 +218,53 @@ which keeps the project approachable.
   from GitHub (`pip install git+https://github.com/utiasDSL/gym-pybullet-drones`). A
   Flightmare-style sim is the fallback if this proves unsuitable. Recorded as a dependency to
   revisit during architecture.
-- **AxonWeave** (https://github.com/dhakalnirajan/axonweave) — **the connectome substrate: the
-  reused "already-solved" piece.** It exposes MaleCNS as a **sparse, trainable substrate** usable
-  from NumPy / PyTorch / TensorFlow, so the connectome runtime is a dependency, not something we
-  build (see the reuse strategy below). This is the **primary recommended** substrate library.
-  GitHub-installed (not on PyPI).
-- **connectome_interpreter** (https://github.com/YijieYin/connectome_interpreter) — alternative /
-  support: differentiable whole-brain connectome models. A fallback substrate if AxonWeave proves
-  unsuitable.
-- **connectome_data_prep** (https://github.com/YijieYin/connectome_data_prep) — alternative /
-  support: **ready-made MaleCNS connectivity matrices**, so we can skip hand-rolling the neuPrint
-  extraction where these fit.
-- **neuprint-python (0.6.3)** (https://github.com/connectome-neuprint/neuprint-python) — official
-  client for querying the MaleCNS connectome from the neuPrint server, for data access not already
-  covered by `connectome_data_prep`.
+- **In-repo `SparseConnectomeLayer`** (`src/drone_fly/controller/`) — **the actual connectome
+  substrate. There is no external library that provides it, so it lives in this repo.** It stores
+  the real MaleCNS synapses as a **sparse *trainable* PyTorch parameter over a fixed sparsity
+  pattern**: the synapse edges (index buffers) are fixed; the synapse *magnitudes* are the trainable
+  `nn.Module` parameters. This is what UC-01 delivered and validated. No third-party package offers
+  "arbitrary connectome matrix → trainable `nn.Module` whose parameters ARE the synapses": `flyvis`
+  is trainable but hardwired to the optic lobe; `connectome_interpreter` takes an arbitrary matrix
+  but **freezes** synapse weights (it trains only cell-type dynamics), so it is not a drop-in
+  substrate. The substrate is therefore built and owned in-repo.
+- **connectome_interpreter** (https://github.com/YijieYin/connectome_interpreter) — **optional
+  reference / dynamics helper, NOT the substrate.** Pip-installable, MIT-licensed; accepts an
+  arbitrary connectivity matrix but **freezes** the synapse weights and trains only cell-type
+  dynamics — so it can inform dynamics modelling but cannot serve as the trainable-synapse
+  substrate drone-fly needs. Kept as a reference, not a policy backend.
+- **connectome_data_prep** (https://github.com/YijieYin/connectome_data_prep) — **ready-made
+  MaleCNS connectivity matrices**, so we can skip hand-rolling the neuPrint extraction where these
+  fit. Used only for *data acquisition* (feeding `ConnectomeData`), not as a runtime substrate.
+- **flybody** (https://github.com/TuragaLab/flybody) — git-only (not on PyPI), Apache-2.0. A
+  **MuJoCo fly body + flight RL environments** — i.e. a body and env, **not a brain/substrate**.
+  Complementary and useful later on the flight-RL-env side, but it does not instantiate the
+  connectome.
+- **neuprint-python (0.6.3)** (https://github.com/connectome-neuprint/neuprint-python) — the
+  **canonical installable client** for querying the MaleCNS connectome from the neuPrint server,
+  for data access not already covered by `connectome_data_prep`. Data acquisition reality: there is
+  **no `axonweave substrate install`** — MaleCNS connectivity is fetched via `neuprint-python` or
+  downloaded `connectome_data_prep` matrices into the gitignored `data/connectome/` cache, then
+  sliced into `ConnectomeData` (CSR).
+
+> **AxonWeave is NOT a dependency (source-verified correction).** A prior research pass wrongly
+> claimed "AxonWeave v0.2.0 is on PyPI." A source-verified investigation proved this **false**:
+> `axonweave` returns HTTP 404 on PyPI *and* TestPyPI under every name variant; the GitHub repo
+> (dhakalnirajan/axonweave) is public but has **zero releases/tags**, uses a maturin/Rust-PyO3 build
+> (needs a Rust toolchain even to build from source), and its own README states it is "a
+> production-oriented foundation, not a completed simulator" (AI-generated scaffolding; the core
+> dynamics are unbuilt roadmap items). AxonWeave is therefore **not usable** and is **not a
+> dependency**. It may be revisited **only if** it ever publishes a real tagged wheel; until then
+> the substrate is the in-repo `SparseConnectomeLayer` described above.
 - **numpy / pandas** — array math and tabular handling for connectivity data and rollouts.
 - **matplotlib / tensorboard** — training-curve and trajectory visualization (teaching aid).
 
 **Reuse strategy (the core of this project's framing).** The connectome→network→sim→
-reinforcement-loop plumbing is **adopted from existing open-source templates rather than built
-fresh**. The connectome runtime is reused (AxonWeave); the integration pattern is reused too. The
-following repos are cited as **interface templates / prior art** to follow:
+reinforcement-loop *integration pattern* is **adopted from existing open-source templates rather
+than built fresh**. Note the correction: the trainable-connectome **substrate itself is built
+in-repo** (`SparseConnectomeLayer`), because no external library provides an arbitrary-matrix →
+trainable-synapse `nn.Module` — the earlier "reuse AxonWeave as the runtime" plan is retired (see
+the AxonWeave note above). What is genuinely reused is the *plumbing shape*. The following repos are
+cited as **interface templates / prior art** to follow:
 - **doomfly** (https://github.com/nftechie/doomfly) — MaleCNS → ViZDoom, with PPL101 dopamine-cell
   reinforcement; the canonical "connectome as a game-playing policy" template.
 - **fly-craftax** (https://github.com/liuzihe02/fly-craftax) — connectome + PPO, i.e. exactly the
@@ -251,11 +279,12 @@ literature: **flyGNN / FlyGM** (NeurIPS 2025; arXiv 2602.17997) instantiate the 
 **graph neural network trained with deep RL** for locomotion *and* flight. This confirms the
 substrate-plus-RL paradigm drone-fly reuses is sound, not speculative.
 
-**Install note.** Several core dependencies are **declared, not installed**, and are **GitHub-only**
-(not on PyPI) — notably **AxonWeave** and **gym-pybullet-drones**, installed via
-`pip install git+https://github.com/…`. `connectome_interpreter` and `connectome_data_prep` are
-likewise GitHub-sourced. Pinned versions and build commands (`uv run pytest` / `ruff`) are
-unchanged.
+**Install note.** The connectome **substrate is in-repo** (`SparseConnectomeLayer`), so it needs no
+external install. `gym-pybullet-drones` is **GitHub-only** (not on PyPI), installed via
+`pip install git+https://github.com/…`. `neuprint-python` is on PyPI. `connectome_interpreter`
+(optional reference) is pip-installable; `connectome_data_prep` matrices are downloaded for data
+acquisition. **AxonWeave is not installed and not a dependency** (no wheel exists — see the
+AxonWeave note above). Pinned versions and build commands (`uv run pytest` / `ruff`) are unchanged.
 
 **Data stores.**
 - No database engine. Connectome data is **fetched at runtime from neuPrint** (a hosted Neo4j
@@ -272,9 +301,9 @@ unchanged.
 - (Aspirational / non-goal) Liftoff — no API; not integrated.
 
 **AI / ML dependency:** Local, self-trained models only — no hosted LLM/model provider. The RL
-policy is the **reused connectome substrate** (AxonWeave instantiating MaleCNS as a trainable
-network), whose connection strengths are trained in-repo via Stable-Baselines3 PPO. The network
-architecture is reused/derived from the connectome; only the weights are learned. No external
+policy is the **in-repo connectome substrate** (`SparseConnectomeLayer` instantiating MaleCNS as a
+trainable network), whose synapse magnitudes are trained in-repo via Stable-Baselines3 PPO. The
+network *topology* is derived from the connectome; only the synapse weights are learned. No external
 inference API.
 
 **Build tool:** `uv` (fast, modern Python packaging/venv manager) with a `pyproject.toml`.
@@ -299,10 +328,12 @@ evolve, no distributed-system cost).
 - `connectome` — obtains MaleCNS connectivity (ready-made matrices from `connectome_data_prep`
   where they fit, else neuPrint via `neuprint-python`) and caches it locally. Responsible for
   the only inbound external data.
-- `controller` — instantiates the connectome as a **trainable substrate** via the reused
-  **AxonWeave** library (not a hand-built topology); exposes it as a policy network for the RL
-  agent. Motor neurons map to the canonical 4-channel control (see below); sensory inputs map
-  to sensory neurons.
+- `controller` — instantiates the connectome as a **trainable substrate** via the **in-repo
+  `SparseConnectomeLayer`** (not a third-party library, not a hand-built topology): the real MaleCNS
+  synapses become a sparse trainable PyTorch parameter over a fixed sparsity pattern. Exposes it as
+  a policy network for the RL agent. Motor neurons map to the canonical 4-channel control (see
+  below); sensory inputs map to sensory neurons. See the substrate subsection below for the
+  hardening this layer needs for RL training.
 - `env` — the Gymnasium quadrotor racing environment (waypoint/gate course, collision
   penalties, door-to-door timing reward). Wraps `gym-pybullet-drones` **behind the canonical
   control/observation adapter** (see the portable-control decision below).
@@ -337,10 +368,35 @@ robust to unseen dynamics and **ports across sims with light (or near-zero) fine
 of overfitting one sim's physics. Together with the canonical adapter, this is what makes a
 cross-sim port cheap.
 
+### Load-bearing decision 3 — Connectome substrate is in-repo, and its RL-hardening (UC-02 scope)
+
+The trainable connectome substrate is **in-repo (`SparseConnectomeLayer`), not a third-party
+library** — no external package instantiates an arbitrary connectome matrix as a trainable-synapse
+`nn.Module` (see Technologies). UC-01 delivered the basic layer; the following hardening is required
+before/for RL training and is the scope of **UC-02**:
+
+1. **Trainable sparse synapse weights on the real edges, with a FIXED sparsity pattern.** The
+   synapse *magnitudes* are the trainable parameters; the edge **index buffers are non-trainable**
+   (the wiring topology is fixed to the MaleCNS connectome).
+2. **Multi-step (recurrent unroll) propagation.** Signal is propagated over multiple steps so it
+   flows *across the graph* rather than through a single matmul — a recurrent unroll of the sparse
+   layer.
+3. **Fixed E/I sign mask.** A fixed excitatory/inhibitory sign mask is derived from MaleCNS
+   **neurotransmitter predictions**, so gradient training can adjust synapse *magnitudes* but
+   **cannot flip** a synapse's excitatory/inhibitory biology.
+4. **Thin input projection + 4-channel readout over a SELECTED sub-population.** A thin input
+   projection feeds the substrate, and a **4-channel (THROTTLE / ROLL / PITCH / YAW) readout head**
+   reads out from a **selected motor/premotor sub-population** rather than all ~166k neurons.
+   Full-state PPO rollouts over the whole connectome are intractable, so **sub-population selection
+   is the key scale decision** for this project.
+
+This substrate subsection sits **alongside** the canonical-control-abstraction and
+domain-randomization decisions above; those decisions are unchanged.
+
 ### Integration shape (4 layers)
 
-1. **Connectome substrate** — AxonWeave instantiating MaleCNS as a trainable policy network
-   (reused, not built).
+1. **Connectome substrate** — the in-repo `SparseConnectomeLayer` instantiating MaleCNS as a
+   trainable policy network (built in-repo, not a reused library).
 2. **Sim** — `gym-pybullet-drones` behind the canonical `adapter`.
 3. **Glue** — a doomfly / fly-craftax-style interface: sensory input → sensory neurons; motor
    neurons → the 4 canonical controls; a dopamine-cell / reward hook.
@@ -361,8 +417,8 @@ canonical interface**, not a rewrite.
 - `cli` → `connectome`, `train`, `evaluate` (Python calls)
 - `connectome` → neuPrint (**HTTPS**, via `neuprint-python`) or `connectome_data_prep` (local
   ready-made matrices)
-- `controller` → `connectome` (reads cached connectivity) + **AxonWeave** (instantiates the
-  trainable substrate)
+- `controller` → `connectome` (reads cached connectivity) + **in-repo `SparseConnectomeLayer`**
+  (instantiates the trainable substrate)
 - `env` → `adapter` → `gym-pybullet-drones` (canonical action/observation ↔ native sim API)
 - `train` → `env` + `controller` + Stable-Baselines3 (Python calls), with domain randomization
 - `evaluate` → `env` + checkpoint files (Python calls)
@@ -373,8 +429,9 @@ background workers. Checkpointing makes long runs resumable.
 
 **Integrations:**
 - **neuPrint** (read-only, inbound): MaleCNS connectivity, over HTTPS with an auth token.
-- **AxonWeave** (in-process): the reused connectome substrate that instantiates MaleCNS as a
-  trainable policy network.
+- **In-repo `SparseConnectomeLayer`** (in-process): the connectome substrate that instantiates
+  MaleCNS as a trainable policy network. Built and owned in-repo — not an external integration
+  (AxonWeave is unreleased/unusable; see Technologies).
 - **gym-pybullet-drones / PyBullet** (in-process, via the canonical `adapter`): the simulator
   providing quadrotor dynamics and gate geometry.
 - (Planned future) Liftoff: no integration in the prototype; a future **vision/telemetry adapter**
@@ -382,8 +439,8 @@ background workers. Checkpointing makes long runs resumable.
 
 **Data flow narrative.** `fetch-connectome` obtains MaleCNS neuron/synapse connectivity (ready-made
 matrices from `connectome_data_prep`, else neuPrint) and caches it to `data/connectome/`
-(Parquet/CSV). `controller` reads that cache and hands it to **AxonWeave**, which instantiates the
-trainable connectome substrate as the policy network. `train` instantiates the Gymnasium racing
+(Parquet/CSV). `controller` reads that cache and hands it to the **in-repo `SparseConnectomeLayer`**, which
+instantiates the trainable connectome substrate as the policy network. `train` instantiates the Gymnasium racing
 `env` (wrapping `gym-pybullet-drones` behind the canonical `adapter`) and the substrate policy,
 runs **PPO with domain randomization** over the canonical 4-channel action space, and writes model
 checkpoints to `artifacts/models/` and metrics to `artifacts/logs/` (TensorBoard). `evaluate` loads
