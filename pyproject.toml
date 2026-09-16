@@ -41,6 +41,20 @@ dev = [
     "pip-audit",
 ]
 
+# Optional simulator backend (UC-03). PyBullet is the native rigid-body engine the
+# PyBulletAdapter (mastery physics) drives. It is a prebuilt wheel with a native
+# extension; on some hosts pip must build it from source (needs a C/C++ toolchain).
+# NOTE: CI installs `--extra dev` ONLY and never this extra — the whole default/test/
+# smoke path uses the pure-numpy SimpleDroneAdapter, so CI stays hermetic (no pybullet).
+#
+# gym-pybullet-drones is GitHub-only (not on PyPI) and is therefore NOT listed here; it is
+# installed from a pinned commit by `scripts/train.sh` (see that script and the README
+# "Simulator bootstrap" boundary table). pybullet 3.2.6 requires numpy<2 at runtime
+# (its wheel is built against the numpy 1.x ABI); newer pybullet builds relax this.
+sim = [
+    "pybullet==3.2.6",
+]
+
 [project.scripts]
 drone-fly = "drone_fly.cli:main"
 
