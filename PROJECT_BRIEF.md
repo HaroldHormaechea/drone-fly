@@ -488,6 +488,11 @@ None
   documented `fetch-connectome` command pulls the real MaleCNS data for actual runs.
 - **Database migrations:** not applicable (no database).
 
+## Use Cases
+
+Use cases are captured individually under `use-cases/` and indexed with their status in
+`USE_CASES.md`. Each use case is implemented as a separate `develop` run.
+
 ## Scaffolding Plan
 
 > Structure-only. No dependencies installed, no builds run, no training executed. Git is
