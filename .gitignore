@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments / uv
+.venv/
+venv/
+uv.lock.tmp
+
+# Environment / secrets — the neuPrint token lives here and must never be committed
+.env
+.env.*
+!.env.example
+
+# Caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Connectome cache (fetched at runtime; not redistributed for licensing reasons)
+data/**
+!data/**/.gitkeep
+
+# Training artifacts: checkpoints, TensorBoard logs, evaluation outputs
+artifacts/**
+!artifacts/**/.gitkeep
+
+# Model / RL byproducts
+*.pt
+*.pth
+*.ckpt
+*.zip
+events.out.tfevents.*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

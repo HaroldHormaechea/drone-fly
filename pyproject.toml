@@ -1,0 +1,62 @@
+[project]
+name = "drone-fly"
+version = "0.0.0"
+description = "Connectome-seeded reinforcement-learning quadrotor racing controller, using the MaleCNS connectome."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Harold Hormaechea" }]
+
+# Runtime dependencies. Declared for reproducibility; NOT installed by scaffolding.
+# gym-pybullet-drones is not on PyPI — install from GitHub when setting up for real:
+#   uv pip install "git+https://github.com/utiasDSL/gym-pybullet-drones"
+dependencies = [
+    "torch",
+    "gymnasium==1.3.0",
+    "stable-baselines3==2.9.0",
+    "neuprint-python==0.6.3",
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "tensorboard",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "mypy",
+    "pip-audit",
+]
+
+[project.scripts]
+drone-fly = "drone_fly.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/drone_fly"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# A pragmatic prototype-friendly set: pyflakes, pycodestyle, isort, pyupgrade, bugbear.
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/drone_fly"]
+ignore_missing_imports = true
+# Non-blocking at prototype stage.
+warn_return_any = false
