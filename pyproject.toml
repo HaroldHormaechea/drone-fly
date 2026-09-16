@@ -10,12 +10,23 @@ authors = [{ name = "Harold Hormaechea" }]
 # Runtime dependencies. Declared for reproducibility; NOT installed by scaffolding.
 # gym-pybullet-drones is not on PyPI — install from GitHub when setting up for real:
 #   uv pip install "git+https://github.com/utiasDSL/gym-pybullet-drones"
+#
+# axonweave: intended as the connectome-substrate layer. As of UC-01 it is NOT
+# installable in this environment — it is absent from PyPI (all name variants 404) and
+# its source repository is not publicly reachable. The plan's grounding note that
+# "AxonWeave v0.2.0 is on PyPI" is therefore stale (flag for a later revise-brief).
+# Because an uninstallable dependency would break `uv pip install -e ".[dev]"` and CI,
+# axonweave is intentionally left OUT of the installed dependency set. The controller
+# uses AxonWeave automatically if it ever becomes importable, and otherwise falls back
+# to the in-repo SparseConnectomeLayer shim (see drone_fly.controller.policy). Add it
+# here once a real, installable distribution is reachable.
 dependencies = [
     "torch",
     "gymnasium==1.3.0",
     "stable-baselines3==2.9.0",
     "neuprint-python==0.6.3",
     "numpy",
+    "scipy",
     "pandas",
     "matplotlib",
     "tensorboard",

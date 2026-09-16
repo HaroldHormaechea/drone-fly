@@ -17,17 +17,18 @@ jobs:
       - name: Set up Python
         run: uv python install 3.11
 
-      # Install the project + dev tools. gym-pybullet-drones (GitHub-only) and the heavy
-      # sim/torch stack are intentionally not required for lint+test; the suite mocks
-      # external calls and does not run real training.
+      # Install the project + dev tools into an isolated, lockfile-pinned venv.
+      # gym-pybullet-drones (GitHub-only) and the heavy sim/torch stack are intentionally
+      # not required for lint+test; the suite mocks external calls and does not run real
+      # training. `uv sync` respects uv.lock for reproducible installs.
       - name: Install dev dependencies
-        run: uv pip install --system -e ".[dev]"
+        run: uv sync --extra dev
 
       - name: Ruff lint
-        run: ruff check .
+        run: uv run ruff check .
 
       - name: Ruff format check
-        run: ruff format --check .
+        run: uv run ruff format --check .
 
       - name: Pytest
-        run: pytest
+        run: uv run pytest
