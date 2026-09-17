@@ -33,7 +33,7 @@ import numpy as np
 from drone_fly.adapter import make_adapter
 from drone_fly.controller.encoding import ACTION_DIM, OBS_DIM
 from drone_fly.env.config import DynamicsParams, EnvConfig
-from drone_fly.env.geometry import TO_GATE, advance_phase, target_position
+from drone_fly.env.geometry import advance, current_target
 from drone_fly.env.randomization import sample_course, sample_dynamics
 from drone_fly.env.reward import compute_reward
 
@@ -79,7 +79,10 @@ class RaceEnv(gym.Env):
             dtype=np.float32,
         )
 
-        self._phase = TO_GATE
+        # Indexed N-gate walk state (UC-09): how many gates have been passed (0..N) and
+        # whether the finish has been crossed. Replaces the old string phase machine.
+        self._gates_passed = 0
+        self._done = False
         # The *active* course for the current episode (UC-08). Initialised to the fixed
         # config course; overwritten per-episode by reset() when course randomization is on.
         # Everything downstream (_observation / _dist_to_target / step) reads self._course,
@@ -87,6 +90,9 @@ class RaceEnv(gym.Env):
         self._course = self.config.course
         self._prev_pos = course.start.copy()
         self._step_count = 0
+        # Effective per-episode step budget (UC-09): base max_steps + steps_per_gate*(N-1).
+        # Recomputed each reset() from the active (possibly randomized) course. N=1 => 400.
+        self._max_steps = self.config.episode.max_steps
 
     @property
     def active_course(self):
@@ -100,7 +106,7 @@ class RaceEnv(gym.Env):
 
     # -- observation encoding -----------------------------------------------------------
     def _observation(self, state) -> np.ndarray:
-        target = target_position(self._phase, self._course)
+        target = current_target(self._course, self._gates_passed)
         rel = target - state.position
         obs = np.concatenate([rel, state.attitude, state.velocity, state.angular_velocity]).astype(
             np.float32
@@ -109,7 +115,7 @@ class RaceEnv(gym.Env):
         return np.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)
 
     def _dist_to_target(self, position: np.ndarray) -> float:
-        target = target_position(self._phase, self._course)
+        target = current_target(self._course, self._gates_passed)
         return float(np.linalg.norm(target - position))
 
     # -- gymnasium API ------------------------------------------------------------------
@@ -142,11 +148,32 @@ class RaceEnv(gym.Env):
             )
 
         state = self.adapter.reset(seed=seed)
-        self._phase = TO_GATE
+        self._gates_passed = 0
+        self._done = False
         self._prev_pos = state.position.copy()
         self._step_count = 0
-        info = {"phase": self._phase, "backend": self.backend}
+        # Effective step budget scales with the active course's gate count (UC-09): a longer
+        # course gets proportionally more time so it stays completable. N=1 => 400 exactly.
+        episode = self.config.episode
+        self._max_steps = episode.max_steps + episode.steps_per_gate * (self._course.num_gates - 1)
+        info = {
+            "phase": self._phase_str(),
+            "backend": self.backend,
+            "target_gate": self._gates_passed,
+        }
         return self._observation(state), info
+
+    def _phase_str(self) -> str:
+        """Human-readable phase derived from the indexed walk (back-compat ``info['phase']``).
+
+        ``done`` once the finish is crossed; ``to_finish`` once all gates are passed but the
+        finish is not yet crossed; else ``to_gate_<i>`` naming the current target gate index.
+        """
+        if self._done:
+            return "done"
+        if self._gates_passed >= self._course.num_gates:
+            return "to_finish"
+        return f"to_gate_{self._gates_passed}"
 
     def step(self, action):
         course = self._course
@@ -155,8 +182,9 @@ class RaceEnv(gym.Env):
         state = self.adapter.step(np.asarray(action, dtype=np.float64))
         self._step_count += 1
 
-        new_phase, event = advance_phase(self._phase, self._prev_pos, state.position, course)
-        self._phase = new_phase
+        self._gates_passed, self._done, event = advance(
+            course, self._gates_passed, self._done, self._prev_pos, state.position
+        )
         completed = event == "finish"
 
         # Distance to the (possibly newly-advanced) target, for the progress term.
@@ -169,18 +197,22 @@ class RaceEnv(gym.Env):
             collided=state.collided,
             completed=completed,
             cfg=self.config.reward,
+            num_gates=course.num_gates,
         )
 
         terminated = bool(completed or state.collided)
-        truncated = bool(not terminated and self._step_count >= self.config.episode.max_steps)
+        truncated = bool(not terminated and self._step_count >= self._max_steps)
 
         info = {
-            "phase": self._phase,
+            "phase": self._phase_str(),
             "backend": self.backend,
             "event": event,
             "collided": bool(state.collided),
             "completed": bool(completed),
             "steps": self._step_count,
+            # Current target gate index (UC-09): 0..N-1 while chasing gates, clamped to N
+            # once all gates are passed (targeting the finish). Additive; viewer highlights it.
+            "target_gate": min(self._gates_passed, course.num_gates),
             # World-frame drone position this step (UC-05 recording draws the flight path).
             # Additive key; existing tests assert membership, so this stays back-compatible.
             "position": state.position.copy(),

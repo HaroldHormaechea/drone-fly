@@ -29,6 +29,7 @@ import torch
 from drone_fly.connectome.loader import ConnectomeData
 from drone_fly.controller.actor import ConnectomeActorNetwork
 from drone_fly.controller.encoding import ACTION_DIM, OBS_DIM
+from drone_fly.env.config import CourseConfig
 from drone_fly.record.recorder import ActivationRecorder
 
 
@@ -165,3 +166,34 @@ def test_recording_without_course_is_backcompatible(
     assert _VIEWER_REQUIRED_META <= set(doc["meta"])
     assert set(doc["frames"]) == {"activations", "actions", "drone_position"}
     assert len(doc["frames"]["drone_position"]) == doc["meta"]["n_frames"]
+
+
+def test_n_gate_recording_stays_schema_valid(connectome: ConnectomeData, tmp_path: Path) -> None:
+    """A UC-09 N-gate recording (course + per-frame target_gate) is a valid viewer file.
+
+    The additive UC-09 changes — the ``meta.course.gates[]`` array and the optional
+    ``frames.target_gate`` track — layer on top of the pre-UC-09 schema without removing
+    anything: every field the three panels consume is still present, so the viewer loads it.
+    """
+    rec = ActivationRecorder(
+        connectome, tmp_path / "act", backend="simple", dt=0.05, course=CourseConfig()
+    )
+    n = connectome.neuron_count
+    target_gates = [0, 1, 2]
+    rec.start_episode(0, seed=0)
+    for f, tg in enumerate(target_gates):
+        rec.sink(np.linspace(-1.0, 1.0, n, dtype=np.float32) * (f + 1) / 3)
+        rec.capture_frame(np.zeros(ACTION_DIM), np.array([float(f), 0.0, 1.0]), target_gate=tg)
+    path = rec.finish_episode(completed=True, completion_time=0.15, total_reward=2.0, steps=3)
+
+    doc = json.loads(path.read_text())
+    # The full pre-UC-09 meta the viewer needs is present ...
+    assert _VIEWER_REQUIRED_META <= set(doc["meta"])
+    # ... plus the additive UC-09 N-gate course array (default course → 3 gates).
+    assert isinstance(doc["meta"]["course"]["gates"], list)
+    assert len(doc["meta"]["course"]["gates"]) == 3
+    # ... plus the additive per-frame target-gate track, aligned to the shared timeline.
+    assert doc["frames"]["target_gate"] == target_gates
+    assert len(doc["frames"]["target_gate"]) == doc["meta"]["n_frames"]
+    # The pre-UC-09 frame tracks are all still there.
+    assert {"activations", "actions", "drone_position"} <= set(doc["frames"])

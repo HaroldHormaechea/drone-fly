@@ -1,0 +1,36 @@
+# Use Case 09: Configurable number of gates (N free-3D waypoints)
+
+## Summary
+Generalize the race course from the hardcoded single start→gate→finish into a sequence of **N free-3D waypoint gates** the drone passes in order before the finish. `CourseConfig` (today a scalar `gate_x`/`gate_center_y`/`gate_center_z`/`gate_aperture`) grows a **list of gate specs**, each a 3D center plus an aperture, and gate passage switches from today's forward **plane-crossing** to **3D proximity/sphere detection**, since waypoints may sit anywhere and require the drone to turn. The phase machine in `env/geometry.py` (`TO_GATE → TO_FINISH → DONE`) becomes an indexed walk over the gate list; `advance_phase`/`gate_passed`/`target_position` key off the current gate index. The observation stays a **fixed 12-d vector encoding relative pose to the current target gate only** — the policy always knows the direction to its next gate (full observability of the next waypoint); the biologically-realistic "must visually search for an unseen gate" idea is explicitly deferred to a future use case. Reward is **normalized across N** (each gate contributes `gate_bonus/N`) so the total gate reward stays comparable as N is randomized. The UC-08 sampler (`env/randomization.py`) gains a **num_gates control** defaulting to **3**, randomized uniformly in **[1, 10]**, and randomizes **each gate's aperture (diameter)** within a configured range to force flight accuracy, with solvability checks ensuring gates are reachable, apertures stay above a flyable minimum, and adjacent gates are spaced flyably apart. The recorder JSON and `viewer.js` render all N gate rings, highlighting the current target. Existing trained checkpoints still load (obs shape unchanged) though they may warrant retraining.
+
+## Acceptance Criteria
+1. `CourseConfig` holds N ordered 3D gates (each: center + aperture); the default course has **3 gates**. `EnvConfig`/`CourseConfig` expose the gate count. Constructing a single-gate course yields a valid one-gate race.
+2. Gate passage uses **3D proximity detection**: a gate is passed when the drone comes within that gate's `aperture` (capture radius) of its center. The drone must pass all N gates **in order** before the finish counts — reaching gate *i+1*'s vicinity before gate *i* does not advance the phase.
+3. The observation is a fixed **12-d** vector encoding relative pose to the **current target gate**; obs shape is unchanged, so existing trained checkpoints still load architecturally (learned behavior may differ and warrant retraining).
+4. Reward fires a **normalized** per-gate bonus of `gate_bonus / N` for each gate passed (N bonuses total over an N-gate episode); the completion bonus fires exactly once; collision and time penalties are unchanged. For N=1 the per-gate bonus equals today's `gate_bonus` exactly.
+5. The randomization sampler varies, **per gate**, the 3D center position **and** the aperture (diameter) — each drawn from a configured range — plus `num_gates` uniformly in a configured integer range (default **[1, 10]**). Smaller sampled apertures force accurate flight. Every sampled course is **solvable**: every gate inside the floor/ceiling corridor and lateral bounds, every aperture ≥ a configured minimum flyable radius, adjacent gates spaced ≥ a configured minimum apart, and the start not already inside gate 0's capture sphere.
+6. Determinism: same seed + same config reproduces an identical course sequence and rollout. The seed-42 baseline fixture (`tests/data/uc08_baseline_rollout.npz`) is **regenerated** under the new default course and committed; the regression guard becomes "same seed → identical rollout" against the new baseline. The regeneration is called out explicitly in the commit message so it is not mistaken for an accidental break.
+7. The recorder serializes all N gates (a `gates: [...]` array); `viewer.js` draws one ring per gate with the **current target gate visually distinguished** from the rest; legacy single-`gate` recordings still render via an array-with-fallback read.
+8. New/updated tests cover: multi-gate ordered completion; out-of-order rejection (cannot skip a gate); normalized per-gate reward count and magnitude; sampler solvability + reproducibility for N across [1, 10]; that sampled apertures span the configured range (tight and wide gates both appear) with the tightest still passing solvability; and N=1 equivalence to a single-gate race. The full existing suite stays green.
+
+## Potential Pitfalls & Open Questions
+- **Risk (byte-identity relaxed)** — Switching plane-crossing → 3D proximity **and** defaulting to 3 gates means the old `uc08_baseline_rollout.npz` (seed 42, single-gate plane-crossing) can no longer be reproduced bit-for-bit. AC6 therefore **regenerates** that fixture rather than preserving it; the developer must call this out in the commit so it isn't read as an accidental regression.
+- **Assumption (observation)** — Encoding only the current target gate (fully observable next waypoint). The "explore to find the gate if not within the initial visual cortex" idea is a genuinely different, harder partial-observability problem — **deferred to a future use case**, recorded here so it isn't lost.
+- **Decision (proximity radius = aperture)** — A gate is "passed" when the drone is within that gate's `aperture` of its center; the randomized aperture doubles as the capture radius, so tighter gates are genuinely harder to hit. (No separate capture tolerance introduced.)
+- **Edge case (episode length)** — With N randomized up to 10, the max-steps budget may be too small for long courses to complete. The developer scales the step budget with N (or documents the chosen policy) so long courses remain completable.
+- **Edge case (minimum N)** — Minimum gate count is 1; a gateless start→finish mode is out of scope.
+
+## Original Description
+Make the number of gates in a course a configurable parameter. Currently the course is hardcoded as a single start→gate→finish; the drone should instead chase N gates in sequence. Must integrate with the existing EnvConfig, the UC-08 course/randomization sampler (number of gates can be randomized within a range), reward shaping (per-gate progress + gate-passage rewards for a sequence), and the 3D viewer markers (render all N gates, highlight the current target gate). Backward compatible: N=1 reproduces today's single-gate behavior.
+
+## Clarifications
+- Q: Gate geometry for N gates — how are the gates arranged?
+  A: Free 3D waypoints (drone may need to turn; proximity detection instead of plane-crossing).
+- Q: Observation encoding — how much of the course does the policy see?
+  A: "In a real scenario it may see only the next gate, or have to explore to find it if not within its initial visual cortex, so… I don't know." → Resolved to: encode the current target gate only (12-d, fully observable next waypoint); the visual-search/partial-observability variant is deferred to a future use case.
+- Q: Gate count — fixed default and randomization range?
+  A: Default 3, randomize 1 to 10.
+- Q: Per-gate reward scaling when N varies?
+  A: Normalized across N (each gate gives gate_bonus / N).
+- Q: Anything else before saving?
+  A: The gate diameter (aperture) must be randomized too, to force accuracy.

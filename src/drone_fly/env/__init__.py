@@ -15,17 +15,16 @@ from drone_fly.env.config import (
     DynamicsParams,
     EnvConfig,
     EpisodeConfig,
+    GateSpec,
     RandomizationConfig,
     RewardConfig,
+    single_gate_course,
 )
 from drone_fly.env.geometry import (
-    DONE,
-    TO_FINISH,
-    TO_GATE,
-    advance_phase,
+    advance,
+    current_target,
     finish_crossed,
-    gate_passed,
-    target_position,
+    gate_reached,
 )
 from drone_fly.env.racing_env import RaceEnv, build_vec_env, make_env
 from drone_fly.env.randomization import (
@@ -37,6 +36,8 @@ from drone_fly.env.reward import compute_reward
 
 __all__ = [
     "CourseConfig",
+    "GateSpec",
+    "single_gate_course",
     "DynamicsParams",
     "RandomizationConfig",
     "EnvConfig",
@@ -46,14 +47,11 @@ __all__ = [
     "make_env",
     "build_vec_env",
     "compute_reward",
-    "advance_phase",
-    "gate_passed",
+    "advance",
+    "current_target",
+    "gate_reached",
     "finish_crossed",
-    "target_position",
     "sample_course",
     "sample_dynamics",
     "is_course_solvable",
-    "TO_GATE",
-    "TO_FINISH",
-    "DONE",
 ]

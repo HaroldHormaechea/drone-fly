@@ -91,7 +91,9 @@ def record_rollout(
                 steps += 1
                 total_reward += float(reward)
                 if capturing:
-                    recorder.capture_frame(action_np, info["position"])
+                    recorder.capture_frame(
+                        action_np, info["position"], target_gate=info.get("target_gate")
+                    )
 
             if capturing:
                 actor.sink = None

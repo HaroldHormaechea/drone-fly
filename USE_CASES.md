@@ -18,3 +18,4 @@ Statuses:
 | 06 | [use-cases/06-3d-flight-viewer-neuron-beat.md](use-cases/06-3d-flight-viewer-neuron-beat.md) | 3D flight view + neuron "beat" in the playback viewer | done | 2026-09-17 |
 | 07 | [use-cases/07-post-training-activation-pruning.md](use-cases/07-post-training-activation-pruning.md) | Post-training activation pruning → minimal functional flight circuit | done | 2026-09-17 |
 | 08 | [use-cases/08-domain-randomization.md](use-cases/08-domain-randomization.md) | Domain randomization — per-episode course + optional dynamics | done | 2026-09-17 |
+| 09 | [use-cases/09-configurable-gate-count.md](use-cases/09-configurable-gate-count.md) | Configurable number of gates (N free-3D waypoints) | done | 2026-09-17 |
