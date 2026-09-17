@@ -14,6 +14,9 @@ const ROLE_COLORS = {
 const FALLBACK_COLOR = [107, 112, 137];
 const ROLE_RANK = { sensory: 0, interneuron: 1, motor: 2 };
 const PROJECTIONS = { xz: [0, 2], xy: [0, 1], yz: [1, 2] };
+// Anatomical brain-map view presets → projection plane. Only top/xz is anatomically pinned
+// (dorsal/top-down, per record/coordinates.py); front↔side is a reversible labeling convention.
+const MAP_VIEW_PRESETS = { front: "xy", side: "yz", top: "xz" };
 const ACTION_COLORS = ["#ffd54f", "#4fc3f7", "#81c784", "#ff8a65"];
 const SUPPORTED_SCHEMA = 1;
 
@@ -254,8 +257,9 @@ function renderAll() {
 
 function projectedPoints() {
   const pos = state.data.meta.positions;
-  const [a0, a1] = PROJECTIONS[el("axis-select").value] || PROJECTIONS.xz;
-  const isDefault = el("axis-select").value === (pos.projection || "xz");
+  const plane = MAP_VIEW_PRESETS[el("map-view-select").value] || "xz";
+  const [a0, a1] = PROJECTIONS[plane] || PROJECTIONS.xz;
+  const isDefault = plane === (pos.projection || "xz");
   const pts = new Array(pos.has_position.length);
   for (let i = 0; i < pts.length; i++) {
     const c3 = pos.coords3d[i];
@@ -766,7 +770,7 @@ el("speed-select").addEventListener("change", (ev) => {
   state.speed = parseFloat(ev.target.value) || 1;
 });
 
-el("axis-select").addEventListener("change", () => drawBrainMap());
+el("map-view-select").addEventListener("change", () => drawBrainMap());
 
 // View presets (AC13): change the 3D camera angle; the camera stays freely orbitable after.
 el("view-select").addEventListener("change", (ev) => {
