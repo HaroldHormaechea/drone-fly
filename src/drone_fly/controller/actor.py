@@ -73,6 +73,13 @@ class ConnectomeActorNetwork(nn.Module):
         self.sensory_size = int(sensory_idx.shape[0])
         self.motor_size = int(motor_idx.shape[0])
 
+        # Opt-in activation-recording hook (UC-05, AC2). Default ``None`` -> the forward
+        # pass is byte-identical to UC-01..04. When set to a callable, ``forward`` hands it
+        # a DETACHED, CLONED numpy copy of the post-propagation neuron state per call, so
+        # recording never perturbs the policy output or its gradients. A plain attribute
+        # (not a Parameter/buffer/submodule) -> it never touches state_dict or device moves.
+        self.sink = None
+
         self.layer = SparseConnectomeLayer(
             data.adjacency,
             sign=data.sign,
@@ -116,6 +123,11 @@ class ConnectomeActorNetwork(nn.Module):
         state = state.index_add(1, self.sensory_index, projected)
 
         propagated = self.layer(state)  # (B, N) — never returned as output
+        if self.sink is not None:
+            # Non-invasive capture (AC2): detach (no grad perturbation), move to CPU, and
+            # CLONE so the recorded array shares no storage with the live tensor — an
+            # in-place op on the recording can never corrupt the forward output.
+            self.sink(propagated.detach().cpu().clone().numpy())
         motor_state = propagated.index_select(1, self.motor_index)  # (B, |motor|)
         action = self._squash(self.readout(motor_state))  # (B, ACTION_DIM)
         return action.squeeze(0) if single else action

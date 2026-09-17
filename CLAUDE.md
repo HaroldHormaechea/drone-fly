@@ -17,6 +17,8 @@ but are required for normal implementation work:
 - Root user-facing docs — `README.md` (and `CHANGELOG.md` if/when one exists) — for keeping
   user-visible behavior and docs in sync per the developer role's documentation rules.
 - `.env.example` — template for required environment variables.
+- `viz/**` — the static, dependency-free activation-playback viewer (HTML/JS/CSS). Not Python
+  runtime code and not part of `paths.production`; it is a shipped web asset served/opened directly.
 
 The **QA** agent's write scope remains `paths.test` (`tests/**`) as declared in the brief, plus
 `.claude/allowed-commands.yaml` per the standard dev-team protocol.
