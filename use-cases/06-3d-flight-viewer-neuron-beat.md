@@ -70,6 +70,17 @@ are blocked by the browser's `file://` origin policy. The plan picks one and jus
 10. **Hermetic tests + docs.** The viewer JSON-contract test is extended for the new course-geometry
     fields; the recorder change is unit-tested; no browser/network in CI; UC-01..05 suites stay
     green. README documents the 3D controls (drag-rotate / wheel-zoom) and the neuron-beat behaviour.
+11. **Play restarts at end.** When playback has reached the last frame, pressing **Play** restarts
+    from the beginning (frame 0) and plays again — it must NOT be a no-op at the end (the current
+    behaviour). (Equivalently: Play at end = seek-to-start-then-play.)
+12. **0.25× speed.** The playback speed options include **0.25×** (quarter speed) in addition to the
+    existing speeds, so slow, detailed inspection is possible. All speeds keep every panel synced.
+13. **Human-readable view labels + top-down default.** The 3D view / projection selector is labelled
+    in plain terms — **"front", "side", "top-down"** — NOT raw axis names (x/y/z). Each label maps to
+    the appropriate camera angle (top-down = looking straight down at the floor; front / side = the
+    two orthogonal horizontal views), derived from the confirmed up-axis. The user should never need
+    to know which axis is which. **The default view on load is "top-down."** (The camera remains
+    freely orbitable by dragging; the labels are quick presets, and top-down is the initial preset.)
 
 ## Potential Pitfalls & Open Questions
 - **`file://` + ES modules = CORS failure** (the #1 gotcha). Must use a classic `<script>` global

@@ -35,6 +35,7 @@ import numpy as np
 
 from drone_fly.connectome.loader import ConnectomeData
 from drone_fly.controller.encoding import ACTION_DIM, ACTION_LAYOUT
+from drone_fly.env.config import CourseConfig
 from drone_fly.record.coordinates import DEFAULT_PROJECTION, neuron_roles, provision_positions
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,12 @@ class ActivationRecorder:
         Recorded verbatim in each file's metadata for provenance/reproducibility.
     projection:
         Top-down projection plane for the stored 2-D positions (default ``"xz"``, dorsal).
+    course:
+        Optional course geometry (start / gate / finish / floor / ceiling from
+        :mod:`drone_fly.env.config`). When given, the semantic anchors are serialised as an
+        **additive** ``meta.course`` block so the viewer can place the 3-D floor and the
+        start / gate / finish markers (UC-06 AC8). ``None`` omits the block entirely, keeping
+        older files back-compatible; the viewer degrades gracefully when it is absent.
     """
 
     def __init__(
@@ -105,12 +112,14 @@ class ActivationRecorder:
         checkpoint: str | None = None,
         dt: float | None = None,
         projection: str = DEFAULT_PROJECTION,
+        course: CourseConfig | None = None,
     ) -> None:
         self.out_dir = Path(out_dir)
         self.gzip_output = gzip_output
         self.backend = backend
         self.checkpoint = checkpoint
         self.dt = dt
+        self.course = course
         self.n_neurons = data.neuron_count
         self.neuron_ids = [
             int(x) if _is_int_like(x) else str(x) for x in np.asarray(data.neuron_ids)
@@ -197,24 +206,30 @@ class ActivationRecorder:
         if self._episode_index is None:
             raise RuntimeError("finish_episode() called before start_episode().")
 
+        meta = {
+            "neuron_ids": self.neuron_ids,
+            "superclass": self.superclass,
+            "roles": self.roles,
+            "positions": self.positions,
+            "episode_index": self._episode_index,
+            "seed": self._seed,
+            "checkpoint": self.checkpoint,
+            "backend": self.backend,
+            "n_frames": self.n_frames,
+            "n_neurons": self.n_neurons,
+            "action_layout": ACTION_LAYOUT_LOWER,
+            "dt": self.dt,
+            "activation_scale": ACTIVATION_SCALE,
+            "activation_offset": ACTIVATION_OFFSET,
+        }
+        if self.course is not None:
+            # Additive, back-compatible block (UC-06 AC8): semantic course anchors only —
+            # the viewer owns display sizing. Absent when no course is supplied.
+            meta["course"] = _course_meta(self.course)
+
         document = {
             "schema_version": SCHEMA_VERSION,
-            "meta": {
-                "neuron_ids": self.neuron_ids,
-                "superclass": self.superclass,
-                "roles": self.roles,
-                "positions": self.positions,
-                "episode_index": self._episode_index,
-                "seed": self._seed,
-                "checkpoint": self.checkpoint,
-                "backend": self.backend,
-                "n_frames": self.n_frames,
-                "n_neurons": self.n_neurons,
-                "action_layout": ACTION_LAYOUT_LOWER,
-                "dt": self.dt,
-                "activation_scale": ACTIVATION_SCALE,
-                "activation_offset": ACTIVATION_OFFSET,
-            },
+            "meta": meta,
             "frames": {
                 "activations": self._activations,
                 "actions": self._actions,
@@ -248,6 +263,32 @@ class ActivationRecorder:
             size_mb,
         )
         return path
+
+
+def _course_meta(course: CourseConfig) -> dict:
+    """Serialise :class:`CourseConfig` into the additive ``meta.course`` block (UC-06 AC8).
+
+    Values are read from the actual config (never hardcoded) so a re-tuned course flows
+    through to the viewer. Coordinate frame is z-up / +x-forward / right-handed — recorded
+    explicitly via ``forward_axis`` / ``up_axis`` so the viewer never has to guess.
+    """
+    return {
+        "start": [float(v) for v in course.start_position],
+        "gate": {
+            "center": [
+                float(course.gate_x),
+                float(course.gate_center_y),
+                float(course.gate_center_z),
+            ],
+            "aperture": float(course.gate_aperture),
+            "plane": "yz",
+        },
+        "finish": {"x": float(course.finish_x)},
+        "floor_z": float(course.floor_z),
+        "ceiling_z": float(course.ceiling_z),
+        "forward_axis": "x",
+        "up_axis": "z",
+    }
 
 
 def _is_int_like(value: object) -> bool:

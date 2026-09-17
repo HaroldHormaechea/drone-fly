@@ -26,7 +26,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from drone_fly.env.config import EnvConfig
+from drone_fly.env.config import CourseConfig, EnvConfig
 from drone_fly.env.racing_env import build_vec_env
 from drone_fly.train.config import TrainConfig
 from drone_fly.train.device import resolve_device
@@ -117,6 +117,7 @@ def evaluate_checkpoint(
         backend=backend,
         checkpoint=checkpoint,
         dt=ecfg.episode.dt,
+        course=ecfg.course,
         connectome_path=connectome_path,
         prune=prune,
         prune_k=prune_k,
@@ -191,6 +192,7 @@ def _build_recorder(
     backend: str,
     checkpoint: str,
     dt: float,
+    course: CourseConfig | None = None,
     connectome_path: str | None,
     prune: bool,
     prune_k: int | None,
@@ -235,4 +237,5 @@ def _build_recorder(
         backend=str(backend),
         checkpoint=checkpoint,
         dt=dt,
+        course=course,
     )
