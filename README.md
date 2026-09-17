@@ -97,14 +97,44 @@ The UC-01 tests run fully offline against a small, committed real-MaleCNS subgra
 `tests/fixtures/`. A neuPrint token is only needed later, for fetching a fresh connectome — set
 it via `cp .env.example .env` then edit `NEUPRINT_TOKEN` when that path is implemented.
 
-### Provisioning connectome data
+### Provisioning connectome data (required before training)
 
-- **Test fixture (committed):** a ~300-neuron real-MaleCNS slice lives under `tests/fixtures/`,
-  regenerated deterministically by `uv run python scripts/build_test_fixture.py` (needs network;
-  never run in CI). Its provenance and slice rule are recorded in
-  `tests/fixtures/FIXTURE_PROVENANCE.md`.
-- **Full matrix (optional):** point `DRONE_FLY_CONNECTOME_DIR` at a directory holding a full
-  MaleCNS `.npz` + `*_meta.csv` to load the whole dataset instead of the fixture.
+Every `train` / `smoke-train` / `evaluate` command needs a `--connectome <dir>` — a directory that
+holds **one** SciPy-sparse `.npz` connectivity matrix plus a sidecar CSV. **Important naming rule:**
+the loader looks for the CSV named after the matrix stem — a matrix `foo.npz` must sit next to
+`foo_meta.csv` in the same directory. If the names don't match, the loader can't find the metadata.
+
+You have three options, easiest first:
+
+**Option A — use the committed fixture (zero download, recommended to start).** A real ~300-neuron
+MaleCNS slice already ships in the repo under `tests/fixtures/` (`mcns_fixture.npz` +
+`mcns_fixture_meta.csv`). It's small but real, and training works against it immediately:
+
+```sh
+uv run drone-fly train --connectome tests/fixtures --timesteps 1000000
+```
+
+**Option B — download a fuller MaleCNS matrix.** Pull the canonical whole-brain MaleCNS
+connectivity from the `connectome_data_prep` dataset into a folder, **renaming the meta CSV so its
+stem matches the `.npz`**:
+
+```sh
+mkdir -p data/connectome
+BASE=https://raw.githubusercontent.com/YijieYin/connectome_data_prep/main/data/maleCNS
+curl -L "$BASE/mcns_inprop_all_neuron.npz" -o data/connectome/mcns_inprop_all_neuron.npz
+# note the rename: the source is mcns_all_neuron_meta.csv, saved as <npz-stem>_meta.csv
+curl -L "$BASE/mcns_all_neuron_meta.csv"   -o data/connectome/mcns_inprop_all_neuron_meta.csv
+
+uv run drone-fly train --connectome data/connectome --timesteps 1000000
+```
+
+`data/connectome/` is the default location (`DRONE_FLY_CONNECTOME_DIR`, else `data/connectome`), so
+once those two files are there you may omit `--connectome` entirely. `data/` contents are
+gitignored — the download stays local. (The dataset is CC-BY; cite MaleCNS / `connectome_data_prep`.)
+
+**Option C — regenerate the committed slice.** `uv run python scripts/build_test_fixture.py`
+downloads the same source and writes a deterministic slice to `tests/fixtures/` (dev-time only,
+needs network; provenance recorded in `tests/fixtures/FIXTURE_PROVENANCE.md`).
 
 ## Flight training (UC-03)
 
@@ -136,7 +166,10 @@ loudly which backend is active**. `smoke-train` always forces `simple`.
 uv run drone-fly smoke-train --connectome tests/fixtures
 
 # Full mastery training (owner's machine). Auto-detects the device; resumable.
-uv run drone-fly train --connectome /path/to/connectome --timesteps 1000000
+# --connectome points at a provisioned connectome dir — see "Provisioning connectome
+# data" above. `tests/fixtures` works out of the box; swap in data/connectome for the
+# fuller matrix.
+uv run drone-fly train --connectome tests/fixtures --timesteps 1000000
 
 # Resume an interrupted run from a checkpoint (step counter continues, not restarts).
 uv run drone-fly train --resume artifacts/models/ppo_racer_120000_steps.zip
@@ -147,9 +180,26 @@ uv run drone-fly evaluate \
   --vecnormalize artifacts/models/vecnormalize.pkl --episodes 20
 ```
 
-Checkpoints (+ `VecNormalize` stats) are written to `artifacts/models/` every N steps; a
-TensorBoard **and** CSV learning curve go to `artifacts/logs/`. An interrupted run loses at most
-the steps since the last checkpoint.
+### Where training output is stored (and how to move it without git)
+
+All output lands under an **`artifacts/` folder created in the directory you run the command from**
+— i.e. `<repo>/artifacts/` when you launch from the repo root (as `scripts/train.sh` does). Nothing
+is written anywhere else, and **`artifacts/` is gitignored**, so it is never committed or synced —
+the only copy of your trained model is whatever is on that disk until *you* copy it.
+
+| Path | Contents |
+|---|---|
+| `<repo>/artifacts/models/` | Checkpoints `ppo_racer_<steps>_steps.zip` (every N steps), the matching `ppo_racer_vecnormalize_<steps>_steps.pkl`, and the canonical `vecnormalize.pkl`. **This is your trained agent.** |
+| `<repo>/artifacts/logs/` | The learning curve: `progress.csv` (open in any spreadsheet) and TensorBoard `events.out.tfevents.*`. |
+
+To **back up or move** a run to another machine, just copy the whole `artifacts/` folder (Finder
+drag-and-drop, or `cp -R artifacts /somewhere/`, or a USB drive) — no git needed. To resume later,
+put `artifacts/models/` back in the repo root and run
+`drone-fly train --resume artifacts/models/ppo_racer_<steps>_steps.zip` (or just re-run
+`scripts/train.sh`, which auto-resumes from the latest checkpoint). To evaluate a model you moved,
+pass its `--checkpoint` and `--vecnormalize` paths explicitly. An interrupted run loses at most the
+steps since the last checkpoint (default every 25,000 steps — tune `checkpoint_freq` in
+`src/drone_fly/train/config.py`).
 
 ### Mastery bar (a goal, not a CI gate)
 
