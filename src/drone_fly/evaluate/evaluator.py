@@ -45,6 +45,7 @@ class EvalMetrics:
     threshold: float
     meets_mastery: bool
     backend: str
+    randomized: bool = False  # UC-08: True when this eval ran over randomized courses/dynamics
 
     def summary(self) -> str:
         """One-line human summary (used by the CLI)."""
@@ -54,10 +55,14 @@ class EvalMetrics:
             else "n/a (0 completed)"
         )
         verdict = "MASTERY" if self.meets_mastery else "below bar"
+        # The randomized number is the HONEST robustness metric (over N different courses);
+        # the fixed-course number is the memorization-inflated one. Flagged so they're never
+        # conflated (UC-08 AC8).
+        mode = "randomized" if self.randomized else "fixed-course"
         return (
             f"completion_rate={self.completion_rate:.1%} "
             f"({self.completed_count}/{self.n_episodes}) [{verdict} @ {self.threshold:.0%}]; "
-            f"mean_completion_time={mct}; backend={self.backend}"
+            f"mean_completion_time={mct}; mode={mode}; backend={self.backend}"
         )
 
 
@@ -139,6 +144,11 @@ def evaluate_checkpoint(
             recorder.start_episode(ep, seed)
 
         obs = venv.reset()
+        if capturing:
+            # Stamp THIS episode's actually-sampled course (UC-08 AC9): with course
+            # randomization on, each reset() drew a fresh course off the seeded stream, so
+            # read it back from the env rather than recording the static config default.
+            recorder.set_course(venv.get_attr("active_course")[0])
         done = False
         info: dict = {}
         total_reward = 0.0
@@ -171,6 +181,7 @@ def evaluate_checkpoint(
     mean_time = float(np.mean(completed_times)) if completed_times else None
     venv.close()
 
+    rcfg = ecfg.randomization
     metrics = EvalMetrics(
         n_episodes=n,
         completed_count=completed_count,
@@ -179,6 +190,7 @@ def evaluate_checkpoint(
         threshold=tcfg.mastery_threshold,
         meets_mastery=completion_rate >= tcfg.mastery_threshold,
         backend=backend,
+        randomized=bool(rcfg.enable_course or rcfg.enable_dynamics),
     )
     logger.info("Evaluation: %s", metrics.summary())
     return metrics

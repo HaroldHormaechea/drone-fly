@@ -278,11 +278,12 @@ actionable toolchain message if that build/import ever fails.
 ### Course geometry & fixed dynamics
 
 The course (start, one gate with a circular aperture, finish line, arena floor/ceiling) and the
-episode timing are documented, tunable constants in `src/drone_fly/env/config.py`. **Drone
-dynamics are fixed for UC-03** — no domain randomization, no obstacles beyond floor/ceiling, no
-multi-gate; those are deliberately deferred to a later use case. A fixed seed yields a
-deterministic evaluation for a given checkpoint (bit-exact reproducibility *across a resume
-boundary* is best-effort, as on-policy PPO keeps no replay buffer).
+episode timing are documented, tunable constants in `src/drone_fly/env/config.py`. By default the
+course and drone dynamics are **fixed** (the UC-03 behaviour); **per-episode course and dynamics
+randomization are opt-in as of UC-08** — see [Domain randomization (UC-08)](#domain-randomization-uc-08).
+Obstacles beyond floor/ceiling and multi-gate courses remain deferred to a later use case. A fixed
+seed yields a deterministic evaluation for a given checkpoint (bit-exact reproducibility *across a
+resume boundary* is best-effort, as on-policy PPO keeps no replay buffer).
 
 ### CLI stubs
 
@@ -492,6 +493,73 @@ bank reads as a right turn on screen rather than a mirrored one.
 
 Gzipped recordings (`.json.gz`) are decompressed in-browser via `DecompressionStream`.
 
+## Domain randomization (UC-08)
+
+UC-03 trained on a **single fixed course**, so the policy could memorize one trajectory — which is
+what the suspiciously perfect "100% completion / 1.00s" fixed-course number really was: one
+replayed path, not flying ability. UC-08 makes the task **vary per episode**, so the only way to
+earn reward is to actually fly to wherever the waypoints are. Two independent, **off-by-default**
+axes:
+
+- **Course randomization (`--randomize`)** — the primary anti-memorization axis. Each `reset()`
+  samples a new start / gate (position + aperture) / finish within configured ranges. The
+  observation already carries the *relative* next-waypoint pose and the geometry/reward are already
+  course-parameterized, so no observation- or reward-shape change is needed — only *which* course
+  flows in per episode.
+- **Dynamics randomization (`--randomize-dynamics`)** — a secondary robustness / sim-to-sim axis.
+  Each `reset()` samples per-episode mass, drag, thrust response, body-rate limit, and control
+  latency. Mass and thrust are **independent** knobs (`thrust_acc = throttle · max_thrust / mass`),
+  so a heavier drone genuinely flies differently rather than silently cancelling out.
+
+Either axis can be enabled with the other off; both default off, so an unflagged `train` /
+`evaluate` is **byte-identical to UC-03** (a disabled axis makes no RNG draw, so it can't even
+perturb the seeded stream).
+
+```sh
+# Train on randomized courses (the honest, anti-memorization setup)
+uv run drone-fly train --randomize
+# Add dynamics randomization for robustness
+uv run drone-fly train --randomize --randomize-dynamics
+# Evaluate over N DIFFERENT sampled courses (seeded -> the eval set is reproducible)
+uv run drone-fly evaluate --checkpoint artifacts/models/ppo_racer_final.zip --randomize
+```
+
+**Ranges are a difficulty knob.** The per-parameter ranges live as documented, tunable constants in
+`RandomizationConfig` (`src/drone_fly/env/config.py`), centred on the current `CourseConfig` /
+dynamics defaults. Too narrow ⇒ still near-memorization; too wide ⇒ may be untrainable on a laptop
+budget. The defaults meaningfully vary the course while staying solvable.
+
+**Every sampled course is flyable (reject-then-clamp).** A pure sampler
+(`src/drone_fly/env/randomization.py`) draws off the env's seeded RNG and a solvability guard
+(`is_course_solvable`) enforces: the gate sits between start and finish with minimum gaps, the
+aperture is at least `aperture_min`, all waypoint heights sit *strictly* inside the arena's
+vertical safety corridor (`floor_z + z_margin`, `ceiling_z − z_margin`), and lateral positions stay
+within bounds. Degenerate draws are **rejected and resampled** up to `max_resample_attempts`, then
+**clamped to the base course** (guaranteed solvable) — so sampling is deterministic and can never
+loop forever.
+
+**Seeded and reproducible.** A given seed reproduces the same course *and* dynamics stream (the draw
+order is pinned: course then dynamics). `evaluate --randomize` runs over N different sampled courses
+that are themselves reproducible for a fixed seed, so two checkpoints are compared on the *same*
+course set.
+
+> **The honest-metric drop (read this).** The moment you switch to randomized training, the
+> "100% / 1.00s" fixed-course figure **will fall** — because it was a memorized single path. This is
+> the *point*, not a regression. `evaluate --randomize` reports a *distinct* number (tagged
+> `mode=randomized` in the summary and `randomized=True` on `EvalMetrics`); that lower-but-honest
+> completion rate over randomized courses is the **real baseline**. Do not read the drop as a step
+> backward.
+
+**Recorder stamps the per-episode course.** With randomization on, each recorded episode's
+`meta.course` reflects **that episode's sampled course** (read back from the env's `active_course`),
+so the UC-06 3D viewer draws the correct start / gate / finish / aperture markers per episode rather
+than the static default.
+
+**Scope guard.** UC-08 delivers course randomization + optional dynamics randomization + config/CLI
+toggles + eval-over-randomized + recorder per-episode course stamping — **and nothing more**. It does
+**not** add curriculum learning, obstacles / multi-gate courses, or any change to the training
+algorithm; those remain deferred to future use cases.
+
 ## Project layout
 
 ```
@@ -520,8 +588,9 @@ decisions.
 
 - Early prototype: UC-01 (connectome load), UC-02 (trainable substrate), UC-03 (flight task —
   env, PPO train/resume, evaluation, bootstrap), UC-04 (opt-in sensory→motor subcircuit
-  pruning), and UC-05 (opt-in activation recording + static playback viewer) are implemented;
-  later stages (domain randomization, obstacles, multi-gate courses) are deferred.
+  pruning), UC-05 (opt-in activation recording + static playback viewer), and UC-08 (opt-in
+  per-episode course + dynamics randomization) are implemented; later stages (obstacles,
+  multi-gate courses, curriculum learning) are deferred.
 - The activation viewer is a static, top-down playback tool (spatial map + heatmap + flight),
   not a live-streaming server or a 3D fly-through; training-time recording is best-effort
   (evaluation recording is the tested, deterministic path).

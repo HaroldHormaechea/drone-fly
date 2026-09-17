@@ -148,6 +148,15 @@ class ActivationRecorder:
         self._episode_index = int(episode_index)
         self._seed = None if seed is None else int(seed)
 
+    def set_course(self, course: CourseConfig | None) -> None:
+        """Set the course stamped into this episode's ``meta.course`` (UC-08 AC9).
+
+        With domain randomization on, the caller passes the env's actual per-episode
+        ``active_course`` so the recorded ``meta.course`` reflects the **sampled** geometry
+        (not the static config default), and the UC-06 viewer draws the right markers.
+        """
+        self.course = course
+
     # -- capture ------------------------------------------------------------------------
     def sink(self, activation: np.ndarray) -> None:
         """Actor hook: stash the latest post-propagation activation (pull-based capture).

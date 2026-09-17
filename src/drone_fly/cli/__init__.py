@@ -59,6 +59,47 @@ def _add_record_args(p: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_randomize_args(p: argparse.ArgumentParser) -> None:
+    """Add the opt-in UC-08 domain-randomization flags (shared by train / evaluate).
+
+    Both default off, so an unflagged invocation is byte-identical to UC-03. The two axes
+    are independent: either may be enabled with the other off.
+    """
+    p.add_argument(
+        "--randomize",
+        action="store_true",
+        help="Randomize the COURSE (start / gate / finish) per episode within configured, "
+        "solvable ranges (UC-08). Off by default; the anti-memorization axis.",
+    )
+    p.add_argument(
+        "--randomize-dynamics",
+        action="store_true",
+        help="Randomize DYNAMICS (mass / drag / thrust / body-rate / control latency) per "
+        "episode (UC-08). Off by default; the robustness / sim-to-sim axis, independent of "
+        "--randomize.",
+    )
+
+
+def _build_env_config(args: argparse.Namespace):
+    """Build an :class:`EnvConfig` from the randomization flags, or ``None`` if both off.
+
+    Returning ``None`` when neither axis is requested keeps train / evaluate byte-identical
+    to UC-03 (the callees treat ``env_config=None`` as the fixed default).
+    """
+    enable_course = bool(getattr(args, "randomize", False))
+    enable_dynamics = bool(getattr(args, "randomize_dynamics", False))
+    if not (enable_course or enable_dynamics):
+        return None
+    from drone_fly.env.config import EnvConfig, RandomizationConfig
+
+    return EnvConfig(
+        randomization=RandomizationConfig(
+            enable_course=enable_course,
+            enable_dynamics=enable_dynamics,
+        )
+    )
+
+
 def _add_train_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--resume", default=None, help="Checkpoint .zip to continue from.")
     p.add_argument(
@@ -91,6 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_train_args(train_p)
     _add_prune_args(train_p)
     _add_record_args(train_p)
+    _add_randomize_args(train_p)
 
     smoke_p = sub.add_parser("smoke-train", help="A few-step CI/correctness run (numpy backend).")
     smoke_p.add_argument("--timesteps", type=int, default=None, help="Override smoke timesteps.")
@@ -112,6 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_prune_args(eval_p)
     _add_record_args(eval_p)
+    _add_randomize_args(eval_p)
 
     prune_p = sub.add_parser(
         "prune",
@@ -153,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
 
         train(
             connectome_path=args.connectome,
+            env_config=_build_env_config(args),
             adapter=args.adapter,
             device=args.device,
             resume=args.resume,
@@ -185,6 +229,7 @@ def main(argv: list[str] | None = None) -> int:
             episodes=args.episodes,
             seed=args.seed,
             adapter=args.adapter,
+            env_config=_build_env_config(args),
             device=args.device,
             record=args.record,
             record_every=args.record_every,
