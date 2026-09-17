@@ -211,3 +211,136 @@ def test_pybullet_adapter_construction_raises_actionable_error_without_sim() -> 
         PyBulletAdapter(np.array([0.0, 0.0, 1.0]), floor_z=0.0, ceiling_z=2.5, dt=0.05)
     # The message must point the user at the bootstrap, not be a cryptic import failure.
     assert "train.sh" in str(exc.value) or "adapter='simple'" in str(exc.value)
+
+
+# ===========================================================================
+# UC-08 — reconfigure() spawn/dynamics + control-latency (AC5, AC7)
+# ===========================================================================
+from drone_fly.adapter.base import DroneAdapter  # noqa: E402
+from drone_fly.env.config import DynamicsParams  # noqa: E402
+
+
+def _rollout(adapter: SimpleDroneAdapter, actions, seed: int = 3) -> list[np.ndarray]:
+    adapter.reset(seed=seed)
+    return [adapter.step(a).position.copy() for a in actions]
+
+
+def test_reconfigure_updates_start_mass_drag_and_rate() -> None:
+    """reconfigure() applies a new spawn and each dynamics knob independently (AC5)."""
+    ad = _adapter()
+    ad.reconfigure(
+        start=np.array([1.0, -2.0, 1.5]),
+        dynamics=DynamicsParams(
+            mass=1.3, drag=0.25, max_body_rate=6.0, max_thrust=25.0, latency_steps=2
+        ),
+    )
+    # Spawn reflected at the next reset.
+    st = ad.reset(seed=0)
+    np.testing.assert_array_equal(st.position, np.array([1.0, -2.0, 1.5]))
+    # Independent instance knobs updated (mass/thrust do NOT recompute each other).
+    assert ad._mass == 1.3
+    assert ad._drag == 0.25
+    assert ad._max_body_rate == 6.0
+    assert ad._max_thrust == 25.0
+    assert ad._latency == 2
+
+
+def test_reconfigure_none_args_are_a_no_op() -> None:
+    """A reconfigure(start=None, dynamics=None) leaves spawn and dynamics untouched (AC7)."""
+    ad = _adapter()
+    ad.reconfigure(start=None, dynamics=None)
+    st = ad.reset(seed=0)
+    np.testing.assert_array_equal(st.position, np.array([0.0, 0.0, 1.0]))
+    assert ad._mass == 1.0
+    assert ad._latency == 0
+
+
+def test_defaults_are_byte_identical_to_never_reconfigured() -> None:
+    """A DynamicsParams() reconfigure reproduces the fixed UC-01..06 dynamics exactly (AC7)."""
+    rng = np.random.default_rng(0)
+    actions = [rng.uniform([0, -1, -1, -1], [1, 1, 1, 1]) for _ in range(40)]
+
+    plain = _adapter()
+    reconf = _adapter()
+    reconf.reconfigure(dynamics=DynamicsParams())  # latency 0, base constants
+
+    for pa, pb in zip(_rollout(plain, actions), _rollout(reconf, actions), strict=True):
+        np.testing.assert_array_equal(pa, pb)
+
+
+def test_latency_zero_is_bit_identical_to_no_buffer_path() -> None:
+    """Reconfiguring latency=0 keeps the no-buffer passthrough — bit-identical (AC5/AC7)."""
+    rng = np.random.default_rng(4)
+    actions = [rng.uniform([0, -1, -1, -1], [1, 1, 1, 1]) for _ in range(40)]
+
+    plain = _adapter()
+    zero = _adapter()
+    zero.reconfigure(dynamics=DynamicsParams(latency_steps=0))
+    for pa, pb in zip(_rollout(plain, actions), _rollout(zero, actions), strict=True):
+        np.testing.assert_array_equal(pa, pb)
+
+
+def test_latency_n_delays_the_command_stream_by_exactly_n() -> None:
+    """latency=N delays real commands by exactly N steps, warming up with hover (AC5).
+
+    A latency=N adapter applying ``[a0, a1, ...]`` must equal a latency-0 adapter applying
+    ``[hover]*N + [a0, a1, ...]`` — i.e. the applied stream is shifted by exactly N.
+    """
+    warm = np.array([0.5, 0.0, 0.0, 0.0])
+    rng = np.random.default_rng(6)
+    actions = [rng.uniform([0.2, -0.5, -0.5, -0.5], [1.0, 0.5, 0.5, 0.5]) for _ in range(30)]
+
+    for n in (1, 2, 3):
+        delayed = _adapter()
+        delayed.reconfigure(dynamics=DynamicsParams(latency_steps=n))
+        delayed_pos = _rollout(delayed, actions, seed=1)
+
+        # Reference (latency 0): the APPLIED stream is [warm]*N ++ actions. The delayed
+        # adapter applies exactly the first len(actions) elements of that stream, so its
+        # i-th position must equal the reference's i-th position over the combined stream.
+        combined = [warm] * n + list(actions)
+        ref = _adapter()
+        ref.reset(seed=1)
+        ref_all = [ref.step(a).position.copy() for a in combined]
+
+        for i, d in enumerate(delayed_pos):
+            np.testing.assert_array_equal(
+                d, ref_all[i], err_msg=f"latency={n} mismatch at step {i}"
+            )
+
+
+def test_latency_n_actually_differs_from_latency_zero() -> None:
+    """Sanity: a non-zero latency genuinely changes the trajectory (guards a silent no-op)."""
+    rng = np.random.default_rng(8)
+    actions = [rng.uniform([0.2, -0.5, -0.5, -0.5], [1.0, 0.5, 0.5, 0.5]) for _ in range(30)]
+    zero = _adapter()
+    two = _adapter()
+    two.reconfigure(dynamics=DynamicsParams(latency_steps=2))
+    assert not np.array_equal(
+        np.array(_rollout(zero, actions, seed=1)), np.array(_rollout(two, actions, seed=1))
+    )
+
+
+def test_base_adapter_reconfigure_is_a_silent_no_op() -> None:
+    """The DroneAdapter base ``reconfigure`` default ignores both knobs (AC5 no-op default).
+
+    A backend that cannot honour a knob safely inherits this no-op — a call with a spawn and
+    dynamics must not raise and must change nothing observable.
+    """
+
+    class _Minimal(DroneAdapter):
+        backend = "minimal"
+
+        def reset(self, seed=None):
+            return DroneState(np.zeros(3), np.zeros(3), np.zeros(3), np.zeros(3), False)
+
+        def step(self, action):
+            return DroneState(np.zeros(3), np.zeros(3), np.zeros(3), np.zeros(3), False)
+
+    ad = _Minimal()
+    # Must not raise, and returns None (a pure hook).
+    assert (
+        ad.reconfigure(start=np.array([9.0, 9.0, 9.0]), dynamics=DynamicsParams(mass=2.0)) is None
+    )
+    # State is unaffected — the base class stores nothing.
+    np.testing.assert_array_equal(ad.reset().position, np.zeros(3))

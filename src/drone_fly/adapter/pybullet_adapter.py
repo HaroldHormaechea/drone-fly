@@ -125,6 +125,44 @@ class PyBulletAdapter(DroneAdapter):
         self._env = None
         self._hover_rpm = 0.0
         self._max_rpm = 0.0
+        self._pending_dynamics = None
+
+    def reconfigure(self, *, start=None, dynamics=None) -> None:  # pragma: no cover - sim path
+        """Best-effort per-episode reconfiguration on the sim backend (UC-08 AC5).
+
+        ``start`` updates the spawn used at the next ``_build_env`` (forcing a rebuild so
+        the new ``initial_xyzs`` takes effect). ``dynamics`` (mass / drag) is applied to the
+        drone's rigid body after the env exists. This path is **not asserted** by the
+        hermetic suite — the ``SimpleDroneAdapter`` carries the tested reconfigure contract;
+        here mass/drag are applied on a best-effort basis and documented as such.
+        """
+        if start is not None:
+            self._start = np.asarray(start, dtype=np.float64).reshape(3).copy()
+            if self._env is not None:
+                self._env.close()
+                self._env = None  # force a rebuild with the new initial_xyzs
+        if dynamics is not None:
+            self._pending_dynamics = dynamics
+            self._apply_dynamics()
+
+    def _apply_dynamics(self) -> None:  # pragma: no cover - sim path
+        """Apply pending mass/drag to the pybullet body, best-effort (not asserted)."""
+        if self._env is None or self._pending_dynamics is None:
+            return
+        try:
+            import pybullet as p
+
+            body_id = self._env.DRONE_IDS[0]
+            client = self._env.CLIENT
+            p.changeDynamics(
+                body_id,
+                -1,
+                mass=float(self._pending_dynamics.mass),
+                linearDamping=float(self._pending_dynamics.drag),
+                physicsClientId=client,
+            )
+        except Exception:  # noqa: BLE001 - best-effort; documented as not asserted
+            pass
 
     def _build_env(self):  # pragma: no cover - sim path
         ctrl_freq = int(round(1.0 / self._dt))
@@ -160,6 +198,7 @@ class PyBulletAdapter(DroneAdapter):
         if self._env is None:
             self._env = self._build_env()
         self._env.reset(seed=seed)
+        self._apply_dynamics()  # best-effort mass/drag on the freshly-built body (UC-08)
         return self._read_state(
             self._start[2] <= self._floor_z or self._start[2] >= self._ceiling_z
         )

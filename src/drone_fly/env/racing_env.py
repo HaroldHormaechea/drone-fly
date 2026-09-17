@@ -32,8 +32,9 @@ import numpy as np
 
 from drone_fly.adapter import make_adapter
 from drone_fly.controller.encoding import ACTION_DIM, OBS_DIM
-from drone_fly.env.config import EnvConfig
+from drone_fly.env.config import DynamicsParams, EnvConfig
 from drone_fly.env.geometry import TO_GATE, advance_phase, target_position
+from drone_fly.env.randomization import sample_course, sample_dynamics
 from drone_fly.env.reward import compute_reward
 
 logger = logging.getLogger(__name__)
@@ -79,12 +80,27 @@ class RaceEnv(gym.Env):
         )
 
         self._phase = TO_GATE
+        # The *active* course for the current episode (UC-08). Initialised to the fixed
+        # config course; overwritten per-episode by reset() when course randomization is on.
+        # Everything downstream (_observation / _dist_to_target / step) reads self._course,
+        # NOT self.config.course, so a randomized course actually drives the geometry.
+        self._course = self.config.course
         self._prev_pos = course.start.copy()
         self._step_count = 0
 
+    @property
+    def active_course(self):
+        """The :class:`CourseConfig` in force for the current episode (UC-08 AC9).
+
+        Equals ``config.course`` unless course randomization sampled a fresh course at the
+        last ``reset()``. Read by the evaluator / recorder to stamp each episode's true
+        sampled course into ``meta.course`` (so the UC-06 viewer draws the right markers).
+        """
+        return self._course
+
     # -- observation encoding -----------------------------------------------------------
     def _observation(self, state) -> np.ndarray:
-        target = target_position(self._phase, self.config.course)
+        target = target_position(self._phase, self._course)
         rel = target - state.position
         obs = np.concatenate([rel, state.attitude, state.velocity, state.angular_velocity]).astype(
             np.float32
@@ -93,12 +109,38 @@ class RaceEnv(gym.Env):
         return np.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)
 
     def _dist_to_target(self, position: np.ndarray) -> float:
-        target = target_position(self._phase, self.config.course)
+        target = target_position(self._phase, self._course)
         return float(np.linalg.norm(target - position))
 
     # -- gymnasium API ------------------------------------------------------------------
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
+        rcfg = self.config.randomization
+
+        # Pinned draw order: course then dynamics, each guarded so a *disabled* axis makes
+        # NO np_random draw (else it would perturb the RNG stream and break UC-01..06
+        # determinism / byte-identity, AC7). When enabled the sampler draws off the env's
+        # seeded RNG, so a seed reproduces the same course *and* dynamics stream (AC4).
+        if rcfg.enable_course:
+            self._course = sample_course(self.np_random, rcfg, self.config.course)
+        else:
+            self._course = self.config.course
+
+        if rcfg.enable_dynamics:
+            dynamics = sample_dynamics(self.np_random, rcfg, DynamicsParams())
+        else:
+            dynamics = None
+
+        # Apply the per-episode spawn / dynamics before the adapter reset. When BOTH axes
+        # are off we skip the call entirely (not even a no-op reconfigure) so the fixed
+        # path is byte-identical and never depends on the adapter implementing the hook —
+        # a scripted test-double adapter without reconfigure() still works unchanged (AC7).
+        if rcfg.enable_course or rcfg.enable_dynamics:
+            self.adapter.reconfigure(
+                start=self._course.start if rcfg.enable_course else None,
+                dynamics=dynamics,
+            )
+
         state = self.adapter.reset(seed=seed)
         self._phase = TO_GATE
         self._prev_pos = state.position.copy()
@@ -107,7 +149,7 @@ class RaceEnv(gym.Env):
         return self._observation(state), info
 
     def step(self, action):
-        course = self.config.course
+        course = self._course
         dist_prev = self._dist_to_target(self._prev_pos)
 
         state = self.adapter.step(np.asarray(action, dtype=np.float64))

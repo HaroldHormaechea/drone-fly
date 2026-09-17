@@ -48,6 +48,13 @@ class RecordingCallback(BaseCallback):
         self._steps = 0
         if self._capturing:
             self.recorder.start_episode(self._episode, self.seed)
+            # UC-08 AC9 (best-effort): stamp env-0's per-episode active course so a
+            # randomized-training playback shows the true sampled geometry. Guarded — an
+            # env without the property must never crash the training callback.
+            try:
+                self.recorder.set_course(self.training_env.get_attr("active_course")[0])
+            except Exception:  # noqa: BLE001 - best-effort; recording never breaks training
+                pass
             if self._actor is not None:
                 self._actor.sink = self.recorder.sink
         elif self._actor is not None:

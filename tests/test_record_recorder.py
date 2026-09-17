@@ -296,3 +296,84 @@ def test_build_recorder_forwards_course(connectome: ConnectomeData) -> None:
 
     params = inspect.signature(_build_recorder).parameters
     assert "course" in params, "_build_recorder must accept a course argument to plumb AC8"
+
+
+# ===========================================================================
+# UC-08 AC9 — set_course() stamps the per-episode SAMPLED course
+# ===========================================================================
+def test_set_course_overrides_the_static_default_in_meta(
+    connectome: ConnectomeData, tmp_path: Path
+) -> None:
+    """set_course() makes meta.course reflect a per-episode sampled course, not the ctor default.
+
+    The recorder is built with the fixed default course (as ``evaluate`` does), but each
+    episode calls ``set_course(active_course)`` with the geometry the env actually sampled,
+    so the recorded ``meta.course`` is the sampled one (UC-06 viewer draws the right markers).
+    """
+    rec = ActivationRecorder(
+        connectome, tmp_path / "act", backend="simple", dt=0.05, course=CourseConfig()
+    )
+    sampled = CourseConfig(
+        start_position=(0.3, -0.7, 1.2),
+        gate_x=3.4,
+        gate_center_y=0.5,
+        gate_center_z=1.4,
+        gate_aperture=0.55,
+        finish_x=6.5,
+    )
+    n = connectome.neuron_count
+    rec.start_episode(episode_index=0, seed=0)
+    rec.set_course(sampled)  # the env's active_course for THIS episode
+    for f in range(2):
+        rec.sink(np.linspace(-1.0, 1.0, n, dtype=np.float32) * (f + 1) / 2)
+        rec.capture_frame(np.array([0.1, 0.2, 0.3, 0.4]), np.array([float(f), 0.0, 1.0]))
+    path = rec.finish_episode(completed=True, completion_time=0.1, total_reward=1.0, steps=2)
+
+    block = json.loads(path.read_text())["meta"]["course"]
+    # The SAMPLED geometry, not the default (0,0,1)/gate x=3/finish x=6.
+    assert block["start"] == [0.3, -0.7, 1.2]
+    assert block["gate"]["center"] == [3.4, 0.5, 1.4]
+    assert block["gate"]["aperture"] == 0.55
+    assert block["finish"]["x"] == 6.5
+
+
+def test_set_course_is_per_episode(connectome: ConnectomeData, tmp_path: Path) -> None:
+    """Each episode's meta.course reflects that episode's own set_course value (AC9)."""
+    rec = ActivationRecorder(
+        connectome, tmp_path / "act", backend="simple", dt=0.05, course=CourseConfig()
+    )
+    n = connectome.neuron_count
+    courses = [
+        CourseConfig(start_position=(0.1, 0.0, 1.0), gate_x=2.5),
+        CourseConfig(start_position=(-0.2, 0.4, 1.3), gate_x=3.8),
+    ]
+    written = []
+    for ep, course in enumerate(courses):
+        rec.start_episode(episode_index=ep, seed=ep)
+        rec.set_course(course)
+        rec.sink(np.zeros(n, dtype=np.float32))
+        rec.capture_frame(np.zeros(ACTION_DIM), np.zeros(3))
+        written.append(
+            rec.finish_episode(completed=False, completion_time=None, total_reward=0.0, steps=1)
+        )
+
+    b0 = json.loads(written[0].read_text())["meta"]["course"]
+    b1 = json.loads(written[1].read_text())["meta"]["course"]
+    assert b0["start"] == [0.1, 0.0, 1.0]
+    assert b0["gate"]["center"][0] == 2.5
+    assert b1["start"] == [-0.2, 0.4, 1.3]
+    assert b1["gate"]["center"][0] == 3.8
+
+
+def test_set_course_none_omits_meta_course(connectome: ConnectomeData, tmp_path: Path) -> None:
+    """set_course(None) reverts to the back-compat 'no course block' behaviour (AC9/AC7)."""
+    rec = ActivationRecorder(
+        connectome, tmp_path / "act", backend="simple", dt=0.05, course=CourseConfig()
+    )
+    n = connectome.neuron_count
+    rec.start_episode(episode_index=0, seed=0)
+    rec.set_course(None)
+    rec.sink(np.zeros(n, dtype=np.float32))
+    rec.capture_frame(np.zeros(ACTION_DIM), np.zeros(3))
+    path = rec.finish_episode(completed=False, completion_time=None, total_reward=0.0, steps=1)
+    assert "course" not in json.loads(path.read_text())["meta"]

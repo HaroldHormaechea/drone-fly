@@ -46,6 +46,75 @@ class CourseConfig:
 
 
 @dataclass(frozen=True)
+class DynamicsParams:
+    """Resolved per-episode drone dynamics handed to the adapter (UC-08 AC5).
+
+    These are **absolute** resolved values (not multipliers): the adapter applies them
+    verbatim. The defaults are exactly the ``SimpleDroneAdapter`` module constants, so a
+    ``DynamicsParams()`` reconfigure is byte-identical to the fixed UC-01..06 dynamics.
+    :func:`drone_fly.env.randomization.sample_dynamics` multiplies a base
+    ``DynamicsParams`` by the configured factors to produce a randomized instance.
+    """
+
+    mass: float = 1.0  # kg
+    drag: float = 0.15  # 1/s linear velocity damping
+    max_body_rate: float = 4.0  # rad/s at full stick
+    max_thrust: float = 2.0 * 1.0 * 9.81  # N (== 2 * BASE_MASS * GRAVITY == 19.62)
+    latency_steps: int = 0  # control-latency delay in steps (0 == no delay)
+
+
+@dataclass(frozen=True)
+class RandomizationConfig:
+    """Per-episode domain-randomization ranges and enable flags (UC-08 AC1, AC5).
+
+    **Off by default** on both axes so ``EnvConfig()`` — and therefore every existing
+    caller — is byte-identical to UC-01..06 (AC7). Ranges are documented ``(lo, hi)``
+    tuples centred on the current :class:`CourseConfig` / dynamics defaults and are a
+    tunable **difficulty knob** (AC-ambiguity: wider ⇒ harder, narrower ⇒ near-memorization).
+
+    Two independently-toggleable axes:
+
+    * **course** (``enable_course``) — primary anti-memorization axis: samples a fresh
+      start / gate / finish geometry each ``reset()`` (AC2).
+    * **dynamics** (``enable_dynamics``) — secondary robustness / sim-to-sim axis: samples
+      mass / drag / thrust / body-rate / control-latency each ``reset()`` (AC5).
+
+    Solvability parameters bound the course sampler so every sampled course is flyable
+    (AC3); degenerate draws are rejected-and-resampled up to ``max_resample_attempts`` and
+    then clamped to the base course (guaranteed solvable, can never loop forever).
+    """
+
+    # -- enable flags (both off by default -> byte-identical when unset) -----------------
+    enable_course: bool = False
+    enable_dynamics: bool = False
+
+    # -- course sampling ranges (lo, hi); defaults centred on CourseConfig ---------------
+    start_x_range: tuple[float, float] = (-0.5, 0.5)
+    start_y_range: tuple[float, float] = (-1.0, 1.0)
+    start_z_range: tuple[float, float] = (0.7, 1.5)
+    gate_x_range: tuple[float, float] = (2.0, 4.0)
+    gate_center_y_range: tuple[float, float] = (-1.0, 1.0)
+    gate_center_z_range: tuple[float, float] = (0.8, 1.8)
+    gate_aperture_range: tuple[float, float] = (0.4, 0.8)
+    finish_x_range: tuple[float, float] = (5.0, 7.0)
+    aperture_min: float = 0.4
+
+    # -- solvability guard --------------------------------------------------------------
+    min_start_gate_gap: float = 1.0  # gate_x - start_x must be at least this
+    min_gate_finish_gap: float = 1.0  # finish_x - gate_x must be at least this
+    z_margin: float = 0.2  # keep waypoints strictly this far off floor/ceiling
+    lateral_bound: float = 2.0  # |y| bound for start / gate centre
+    max_resample_attempts: int = 50  # hard cap -> clamp to base course, never loop forever
+
+    # -- dynamics sampling factors (lo, hi); multiply the base DynamicsParams -----------
+    mass_factor_range: tuple[float, float] = (0.8, 1.2)
+    drag_factor_range: tuple[float, float] = (0.8, 1.2)
+    thrust_factor_range: tuple[float, float] = (0.8, 1.2)
+    rate_factor_range: tuple[float, float] = (0.8, 1.2)
+    latency_steps_range: tuple[int, int] = (0, 2)
+
+
+@dataclass(frozen=True)
 class RewardConfig:
     """Reward shaping weights (AC3). See :func:`drone_fly.env.reward.compute_reward`.
 
@@ -76,3 +145,4 @@ class EnvConfig:
     course: CourseConfig = field(default_factory=CourseConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
     episode: EpisodeConfig = field(default_factory=EpisodeConfig)
+    randomization: RandomizationConfig = field(default_factory=RandomizationConfig)

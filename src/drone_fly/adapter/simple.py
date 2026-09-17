@@ -32,18 +32,32 @@ noise without changing the current deterministic behaviour.
 
 from __future__ import annotations
 
+from collections import deque
+
 import numpy as np
 
 from drone_fly.adapter.base import DroneAdapter, DroneState, sanitize_action
 
-# --- Fixed dynamics constants (documented; AC11) ---------------------------------------
+# --- Base dynamics constants (documented) ----------------------------------------------
+# These are the *defaults*: with no reconfigure (UC-08 randomization off) the instance
+# dynamics equal these exactly, so a fixed-course episode is byte-identical to UC-01..06.
 GRAVITY = 9.81  # m/s^2
-MASS = 1.0  # kg (point mass)
-MAX_THRUST = 2.0 * MASS * GRAVITY  # N — hover is throttle≈0.5, leaving head/foot room
-MAX_BODY_RATE = 4.0  # rad/s at full stick — maps normalised [-1,1] attitude command
+BASE_MASS = 1.0  # kg (point mass)
+BASE_MAX_THRUST = 2.0 * BASE_MASS * GRAVITY  # N — hover is throttle≈0.5, leaving head/foot room
+BASE_MAX_BODY_RATE = 4.0  # rad/s at full stick — maps normalised [-1,1] attitude command
+BASE_LINEAR_DRAG = 0.15  # 1/s — velocity damping coefficient
 ATTITUDE_LIMIT = np.pi / 3.0  # rad — clamp roll/pitch so tilt projection stays sane
-LINEAR_DRAG = 0.15  # 1/s — velocity damping coefficient
 MAX_SPEED = 25.0  # m/s — hard clamp so a divergent policy can't produce non-finite state
+
+# Back-compat aliases (pre-UC-08 names). The instance attributes below are the live knobs.
+MASS = BASE_MASS
+MAX_THRUST = BASE_MAX_THRUST
+MAX_BODY_RATE = BASE_MAX_BODY_RATE
+LINEAR_DRAG = BASE_LINEAR_DRAG
+
+#: Warm-up action applied while the control-latency buffer fills (exact hover at base
+#: dynamics: throttle 0.5 -> 0.5 * 19.62 / 1.0 == 9.81 == g, level attitude).
+_WARMUP_ACTION = np.array([0.5, 0.0, 0.0, 0.0], dtype=np.float64)
 
 
 class SimpleDroneAdapter(DroneAdapter):
@@ -75,10 +89,36 @@ class SimpleDroneAdapter(DroneAdapter):
         self._ceiling_z = float(ceiling_z)
         self._dt = float(dt)
         self._rng = np.random.default_rng(0)
+        # Independent, reconfigurable dynamics knobs (UC-08 AC5). Defaults == the base
+        # constants, so with no reconfigure the model is byte-identical to UC-01..06.
+        self._mass = BASE_MASS
+        self._max_thrust = BASE_MAX_THRUST
+        self._drag = BASE_LINEAR_DRAG
+        self._max_body_rate = BASE_MAX_BODY_RATE
+        self._latency = 0  # control-latency delay in steps (0 == no buffer in the path)
+        self._action_queue: deque[np.ndarray] = deque()
         self._position = self._start.copy()
         self._velocity = np.zeros(3, dtype=np.float64)
         self._attitude = np.zeros(3, dtype=np.float64)
         self._angular_velocity = np.zeros(3, dtype=np.float64)
+
+    def reconfigure(self, *, start=None, dynamics=None) -> None:
+        """Apply a new spawn and/or dynamics for the next episode (UC-08 AC5, AC7).
+
+        Called by the env at ``reset()`` **before** :meth:`reset`. Each argument is applied
+        only when not ``None`` — a call with both ``None`` (the disabled-randomization path)
+        is a pure no-op, leaving the fixed dynamics and spawn untouched (byte-identity). The
+        knobs are stored independently: mass and thrust do **not** recompute each other, so
+        ``sample_dynamics`` scaling mass alone genuinely perturbs the trajectory.
+        """
+        if start is not None:
+            self._start = np.asarray(start, dtype=np.float64).reshape(3).copy()
+        if dynamics is not None:
+            self._mass = float(dynamics.mass)
+            self._max_thrust = float(dynamics.max_thrust)
+            self._drag = float(dynamics.drag)
+            self._max_body_rate = float(dynamics.max_body_rate)
+            self._latency = int(dynamics.latency_steps)
 
     def _state(self, collided: bool) -> DroneState:
         return DroneState(
@@ -96,15 +136,27 @@ class SimpleDroneAdapter(DroneAdapter):
         self._velocity = np.zeros(3, dtype=np.float64)
         self._attitude = np.zeros(3, dtype=np.float64)
         self._angular_velocity = np.zeros(3, dtype=np.float64)
+        # Prime the control-latency buffer with warm-up hover actions so real commands are
+        # delayed by exactly ``_latency`` steps. Empty (and never touched) when latency == 0.
+        self._action_queue = deque()
+        if self._latency > 0:
+            warm = sanitize_action(_WARMUP_ACTION)
+            for _ in range(self._latency):
+                self._action_queue.append(warm)
         collided = self._position[2] <= self._floor_z or self._position[2] >= self._ceiling_z
         return self._state(collided)
 
     def step(self, action: np.ndarray) -> DroneState:
         a = sanitize_action(action)
+        if self._latency > 0:
+            # FIFO control latency: enqueue the fresh command, apply the oldest pending one.
+            # With latency == 0 this branch is skipped entirely (bit-identical to UC-03).
+            self._action_queue.append(a)
+            a = self._action_queue.popleft()
         throttle, roll_cmd, pitch_cmd, yaw_cmd = a
 
         # First-order attitude response to normalised body-rate commands.
-        rates = np.array([roll_cmd, pitch_cmd, yaw_cmd], dtype=np.float64) * MAX_BODY_RATE
+        rates = np.array([roll_cmd, pitch_cmd, yaw_cmd], dtype=np.float64) * self._max_body_rate
         self._angular_velocity = rates
         self._attitude = self._attitude + rates * self._dt
         # Clamp roll/pitch so the thrust projection stays physical; wrap yaw to [-pi, pi].
@@ -113,8 +165,10 @@ class SimpleDroneAdapter(DroneAdapter):
         self._attitude[2] = float((self._attitude[2] + np.pi) % (2.0 * np.pi) - np.pi)
 
         roll, pitch, _yaw = self._attitude
-        thrust = throttle * MAX_THRUST
-        thrust_acc = thrust / MASS
+        thrust = throttle * self._max_thrust
+        # thrust_acc = throttle * max_thrust / mass -> mass is a genuine, independent knob
+        # (scaling mass alone changes the trajectory; max_thrust is NOT recomputed from mass).
+        thrust_acc = thrust / self._mass
 
         # World-frame acceleration from the tilted collective thrust, minus gravity/drag.
         acc = np.array(
@@ -125,7 +179,7 @@ class SimpleDroneAdapter(DroneAdapter):
             ],
             dtype=np.float64,
         )
-        acc -= LINEAR_DRAG * self._velocity
+        acc -= self._drag * self._velocity
 
         self._velocity = self._velocity + acc * self._dt
         speed = float(np.linalg.norm(self._velocity))

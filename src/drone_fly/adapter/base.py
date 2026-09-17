@@ -105,5 +105,16 @@ class DroneAdapter(abc.ABC):
         envelope.
         """
 
+    def reconfigure(self, *, start=None, dynamics=None) -> None:  # noqa: B027 - optional hook
+        """Per-episode reconfiguration hook (UC-08). Default **no-op**.
+
+        The racing env calls this at ``reset()`` before :meth:`reset` when domain
+        randomization is enabled. ``start`` (a length-3 world-frame spawn) and ``dynamics``
+        (a :class:`~drone_fly.env.config.DynamicsParams`) are each applied only when
+        **not** ``None``; a backend that cannot honour a knob may safely ignore it. The
+        default no-op means a call with both ``None`` — the disabled-randomization path —
+        changes nothing, keeping the fixed-course behaviour byte-identical (AC7).
+        """
+
     def close(self) -> None:  # noqa: B027 - intentional optional hook; most backends need no teardown
         """Release any backend resources. Default no-op; pybullet overrides it."""
