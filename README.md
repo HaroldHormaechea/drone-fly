@@ -4,6 +4,19 @@ Can the wiring diagram of a real fruit-fly brain (the MaleCNS connectome) seed a
 controller that reinforcement-learns to fly a quadrotor through a timed race course in
 simulation?
 
+## Quick start: train a fly to fly
+
+Terse path from clone to a trained policy. Each step links to its full write-up below.
+
+1. **Install** — `git clone <repo> && cd drone-fly && uv sync --extra dev`. See [Requirements](#requirements).
+2. **Provision a connectome** — point at the committed fixture (`tests/fixtures`, works offline), or download the full MaleCNS matrix into `data/connectome`. See [Provisioning connectome data](#provisioning-connectome-data-required-before-training).
+3. *(Optional)* **Prune once, reuse** — `uv run drone-fly prune --connectome data/connectome --out data/pruned` writes a reusable sensory→motor slice. See [Subcircuit pruning](#subcircuit-pruning-uc-04).
+4. **Train** — `uv run drone-fly train --connectome <dir> --timesteps 1000000` (use `data/pruned` for the pruned slice, or add `--prune` to prune on the fly). See [Flight training](#flight-training-uc-03).
+5. **Resume** — `uv run drone-fly train --resume artifacts/models/ppo_racer_<steps>_steps.zip`.
+6. **Evaluate** — `uv run drone-fly evaluate --checkpoint artifacts/models/ppo_racer_final.zip --vecnormalize artifacts/models/vecnormalize.pkl --episodes 20`.
+
+> Hermetic sanity check (no network, seconds): `uv run drone-fly smoke-train --connectome tests/fixtures`.
+
 ## What it does
 
 drone-fly is a research prototype that connects three things:
@@ -321,6 +334,28 @@ drone-fly smoke-train --connectome tests/fixtures --prune
 own connectome graph, so re-pruning would desync it. There is no `--prune` flag on `evaluate` for
 the same reason — the pruned graph is carried inside the checkpoint.
 
+### Prune once, reuse (the `prune` export command)
+
+Pruning the full 25M-edge matrix is a one-time cost you don't want to pay on every `train` run. The
+`prune` subcommand runs the pruning once and **writes the pruned connectome to disk** in the same
+on-disk format the loader reads, so you can point `train`/`smoke-train` at the saved slice with no
+`--prune` flag and no recompute:
+
+```sh
+# Prune the full matrix once and save the reusable slice.
+drone-fly prune --connectome data/connectome --out data/pruned            # default rule + k=2
+drone-fly prune --connectome data/connectome --out data/pruned0 --prune-k 0  # tighter slice
+
+# Reuse it directly — no --prune, no re-pruning.
+drone-fly train --connectome data/pruned --timesteps 1000000
+```
+
+The output directory gets `connectome_pruned.npz` + `connectome_pruned_meta.csv` (carrying the
+re-aligned `idx` / `bodyid` / `superclass` / `sign` / `top_nt` columns) plus a `PRUNE_PROVENANCE.md`
+note (source, rule, `k`, input→pruned counts). The write **round-trips**: `load_connectome(<out>)`
+reproduces the same pruned graph (identical neuron/edge counts and aligned meta), and is
+deterministic. This also gives downstream tooling a stable, saved slice to work from.
+
 **Reduction on the committed fixture** (the small 300-neuron / 10,600-edge real-MaleCNS hub-slice
 under `tests/fixtures/`, measured by the tests):
 
@@ -354,7 +389,7 @@ src/drone_fly/
   env/          Gymnasium start→gate→finish racing env (geometry, reward, RaceEnv)
   train/        PPO training loop, checkpoint/resume, device auto-detect
   evaluate/     run a trained agent, report completion rate + mean time
-  cli/          command-line entry points (train, evaluate, smoke-train)
+  cli/          command-line entry points (train, evaluate, smoke-train, prune)
 scripts/        dev-time utilities (build_test_fixture.py — regenerates the fixture)
 tests/          pytest suite (import + connectome-plumbing tests)
 tests/fixtures/ committed small real-MaleCNS subgraph used by the offline tests

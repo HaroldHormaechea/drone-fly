@@ -55,6 +55,16 @@ actual pruned neuron/edge counts achieved on the full MaleCNS.
 10. **Hermetic tests:** the full test suite runs on the committed fixture with no network; pruning
     the fixture yields a valid, smaller, still-connected subcircuit. UC-01/UC-02/UC-03 suites stay
     green.
+11. **Export the pruned slice to disk (added):** a `drone-fly prune --connectome <input> --out <dir>
+    [--prune-k K] [--prune-rule R]` subcommand writes the pruned connectome as a `.npz` matrix + a
+    `<stem>_meta.csv` (superclass/sign/top_nt/bodyid/idx columns) in the same on-disk format
+    `load_connectome` reads, so the user can **prune once and reuse** it via
+    `train --connectome <dir>` without re-pruning (and UC-05 can visualize a stable saved slice).
+    It **round-trips** (`load_connectome(<dir>)` reproduces the pruned `ConnectomeData` — same
+    neuron/edge counts, meta present and aligned), is deterministic, writes a small provenance note
+    (source, rule, k, input→pruned counts), and logs the reduction. Errors surface clearly (bad
+    output path, same failure modes as the pruning function). Exercised hermetically on the fixture
+    (prune → write to a tmp dir → reload → assert equivalence).
 
 ## Potential Pitfalls & Open Questions
 - **Rule aggressiveness (the design fork above).** Too strict → drops circuitry the policy needs;

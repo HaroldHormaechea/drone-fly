@@ -90,6 +90,27 @@ k=1 → 175/5988; k=2 → 274/10070. 18/18 motor present, 0 unreachable in the p
    k (k=0 → 59/300) for an unambiguous shrink.
 4. `--prune` is a no-op on `--resume` (guarded + warned).
 
+## Scope addition (post-approval, user-directed) — export the pruned slice + README quick guide
+
+Added by the user after approval (small, additive; does not change the pruning algorithm):
+
+1. **`drone-fly prune` export subcommand.** New CLI subcommand
+   `drone-fly prune --connectome <input> --out <dir> [--prune-k K] [--prune-rule R]` that loads a
+   connectome, prunes it via `prune_to_subcircuit`, and **writes the pruned connectome to `<dir>`**
+   as a `.npz` matrix + `<stem>_meta.csv` in the exact on-disk format `load_connectome` reads (mirror
+   the writer in `scripts/build_test_fixture.py`; preserve `idx/bodyid/superclass/sign/top_nt`
+   columns). Also write a small provenance note (source, rule, k, input→pruned counts). Purpose:
+   **prune once, reuse** via `train --connectome <dir>` (no re-pruning), and give UC-05 a stable saved
+   slice to visualize. Must **round-trip**: `load_connectome(<dir>)` reproduces the pruned
+   `ConnectomeData` (same counts, meta aligned). Deterministic; clear errors. This is AC11.
+2. **README quick guide.** Add a concise **numbered, step-by-step "Quick start: train a fly to fly"**
+   section at the TOP of the README (right after the intro) — terse numbered bullets only (clone/
+   install → provision connectome → optionally prune → train → resume → evaluate), with the detailed
+   paragraphs kept below it. Also document the new `prune` export command in the pruning section.
+
+QA additions: round-trip test for the `prune` export (prune → write tmp dir → `load_connectome` →
+assert equivalence of counts + meta) and a `test_cli.py` case for the `prune` subcommand parse/dispatch.
+
 ## Challenger final verdict
 APPROVE (v2). Fixed the v1 Major AC2 reachability gap via Option A shortest-path inclusion (motor
 endpoints stay connected in the pruned subgraph for any k — a pure corridor would have stranded them
