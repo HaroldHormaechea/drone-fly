@@ -25,6 +25,7 @@ from drone_fly.connectome.prune import (
     DEFAULT_PRUNE_RULE,
     PRUNE_RULE_PATH_SLACK,
     prune_to_subcircuit,
+    slice_connectome,
 )
 
 __all__ = [
@@ -41,4 +42,5 @@ __all__ = [
     "DEFAULT_PRUNE_RULE",
     "PRUNE_RULE_PATH_SLACK",
     "prune_to_subcircuit",
+    "slice_connectome",
 ]

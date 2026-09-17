@@ -36,6 +36,12 @@ class ConnectomeFeaturesExtractor(BaseFeaturesExtractor):
         Loaded connectome the actor is built from.
     n_steps, propagation_mode, motor_size, sensory_size:
         Forwarded to :class:`ConnectomeActorNetwork`.
+    sensory_index, motor_index:
+        Optional pinned sub-populations (UC-07), forwarded verbatim to
+        :class:`ConnectomeActorNetwork`. When supplied they bypass ``select_populations``;
+        crucially, because they live in ``features_extractor_kwargs`` they are pickled into
+        the checkpoint, so ``PPO.load`` (which passes no connectome) rebuilds the actor with
+        the *same* pinned neurons rather than re-selecting a possibly-misaligned sub-pop.
     """
 
     def __init__(
@@ -47,6 +53,8 @@ class ConnectomeFeaturesExtractor(BaseFeaturesExtractor):
         propagation_mode: str = "scatter",
         motor_size: int = MOTOR_POP_SIZE,
         sensory_size: int = SENSORY_POP_SIZE,
+        sensory_index=None,
+        motor_index=None,
     ) -> None:
         super().__init__(observation_space, features_dim=ACTION_DIM)
         self.actor = ConnectomeActorNetwork(
@@ -55,6 +63,8 @@ class ConnectomeFeaturesExtractor(BaseFeaturesExtractor):
             propagation_mode=propagation_mode,
             motor_size=motor_size,
             sensory_size=sensory_size,
+            sensory_index=sensory_index,
+            motor_index=motor_index,
         )
 
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
