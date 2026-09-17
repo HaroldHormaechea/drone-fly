@@ -17,7 +17,13 @@ from drone_fly.adapter.base import DroneState
 from drone_fly.adapter.simple import SimpleDroneAdapter
 from drone_fly.controller.encoding import ACTION_DIM, OBS_DIM
 from drone_fly.env import EnvConfig, make_env
-from drone_fly.env.config import EpisodeConfig, RandomizationConfig
+from drone_fly.env.config import (
+    CourseConfig,
+    EpisodeConfig,
+    GateSpec,
+    RandomizationConfig,
+    single_gate_course,
+)
 from drone_fly.env.randomization import is_course_solvable
 
 HOVER = np.array([0.5, 0.0, 0.0, 0.0], dtype=np.float32)
@@ -100,14 +106,24 @@ def test_step_returns_five_tuple_with_finite_obs() -> None:
 
 
 # --- AC1: termination on completion / collision / timeout ---------------------------
+# Default 3-gate course: g0 (2.5,0,1.0), g1 (4.0,0.6,1.3), g2 (5.5,-0.5,0.9); finish x=7.
+_THREE_GATE_PATH = [
+    (0.0, 0.0, 1.0),
+    (2.5, 0.0, 1.0),  # g0
+    (4.0, 0.6, 1.3),  # g1
+    (5.5, -0.5, 0.9),  # g2
+    (6.9, -0.5, 0.9),
+    (7.1, -0.5, 0.9),  # finish
+]
+
+
 def test_terminates_on_course_completion() -> None:
-    # Scripted walk: start → through gate (x=3) → through finish (x=6).
-    path = [(0, 0, 1), (2.9, 0, 1), (3.1, 0, 1), (5.9, 0, 1), (6.1, 0, 1)]
-    env = _env_with(_ScriptedAdapter(path))
+    # Scripted walk through all three default gates in order, then the finish plane.
+    env = _env_with(_ScriptedAdapter(_THREE_GATE_PATH))
     env.reset()
     terminated = False
     info = {}
-    for _ in range(len(path)):
+    for _ in range(len(_THREE_GATE_PATH)):
         _obs, _r, terminated, truncated, info = env.step(HOVER)
         if terminated or truncated:
             break
@@ -117,11 +133,52 @@ def test_terminates_on_course_completion() -> None:
     assert info["completion_time"] is not None
 
 
+def test_terminates_on_completion_advances_target_gate_in_order() -> None:
+    """UC-09 AC2: ``info['target_gate']`` steps 0→1→2→3 as gates are passed in order."""
+    env = _env_with(_ScriptedAdapter(_THREE_GATE_PATH))
+    env.reset()
+    seen = []
+    for _ in range(len(_THREE_GATE_PATH)):
+        _obs, _r, terminated, truncated, info = env.step(HOVER)
+        seen.append(info["target_gate"])
+        if terminated or truncated:
+            break
+    # After g0,g1,g2 the target index climbs to 3 (== N, now chasing the finish).
+    assert seen == [1, 2, 3, 3, 3]
+
+
+def test_out_of_order_gate_is_rejected_at_env_level() -> None:
+    """UC-09 AC2: flying through gate 1's vicinity before gate 0 does not advance.
+
+    The path hovers at gate 1's centre (never near gate 0), then crosses the finish plane.
+    Because only the current gate (index 0) is ever tested, nothing advances and the course
+    never completes — you cannot skip a gate.
+    """
+    path = [
+        (3.8, 0.6, 1.3),  # start already near g1 but g0 (2.5,0,1) is untouched
+        (4.0, 0.6, 1.3),  # through g1's centre — but current gate is still g0
+        (6.9, 0.6, 1.3),
+        (7.1, 0.6, 1.3),  # crosses the finish plane
+    ]
+    env = _env_with(_ScriptedAdapter(path))
+    env.reset()
+    completed_any = False
+    target_gates = []
+    for _ in range(len(path)):
+        _obs, _r, terminated, truncated, info = env.step(HOVER)
+        completed_any = completed_any or info["completed"]
+        target_gates.append(info["target_gate"])
+        if terminated or truncated:
+            break
+    assert completed_any is False
+    assert set(target_gates) == {0}  # never advanced past gate 0
+
+
 def test_finish_before_gate_does_not_complete() -> None:
-    # Fly the whole trajectory off-axis (y=2.0, well outside the 0.6 aperture) so the gate
-    # is NEVER validly passed, yet the drone still forward-crosses both the gate plane and
-    # the finish plane. Crossing the finish while still TO_GATE must not complete-as-success.
-    path = [(0, 2, 1), (3.1, 2, 1), (6.1, 2, 1), (7.0, 2, 1)]
+    # Fly the whole trajectory off-axis (y=2.0, well outside the 0.6 aperture) so no gate is
+    # ever validly passed, yet the drone still forward-crosses the finish plane. Crossing
+    # the finish before all gates are passed must not complete-as-success.
+    path = [(0, 2, 1), (3.1, 2, 1), (6.1, 2, 1), (7.1, 2, 1)]
     env = _env_with(_ScriptedAdapter(path))
     env.reset()
     completed_any = False
@@ -131,6 +188,22 @@ def test_finish_before_gate_does_not_complete() -> None:
         if terminated or truncated:
             break
     assert completed_any is False
+
+
+def test_single_gate_course_completes_like_a_one_gate_race() -> None:
+    """UC-09 AC1: an N=1 course is a valid one-gate start→gate→finish race."""
+    cfg = EnvConfig(course=single_gate_course())  # gate x=3, finish x=6
+    path = [(0, 0, 1), (2.9, 0, 1), (3.1, 0, 1), (5.9, 0, 1), (6.1, 0, 1)]
+    env = _env_with(_ScriptedAdapter(path), cfg)
+    env.reset()
+    terminated = False
+    info = {}
+    for _ in range(5):
+        _obs, _r, terminated, truncated, info = env.step(HOVER)
+        if terminated or truncated:
+            break
+    assert terminated is True
+    assert info["completed"] is True
 
 
 def test_terminates_on_collision() -> None:
@@ -150,7 +223,9 @@ def test_terminates_on_collision() -> None:
 
 
 def test_truncates_on_timeout() -> None:
-    cfg = EnvConfig(episode=EpisodeConfig(dt=0.05, max_steps=8))
+    # Small custom EpisodeConfig, kept fast: steps_per_gate=0 pins the budget to max_steps=8
+    # regardless of the default 3-gate course, so hover truncates promptly at step 8.
+    cfg = EnvConfig(episode=EpisodeConfig(dt=0.05, max_steps=8, steps_per_gate=0))
     env = make_env(cfg, adapter="simple")
     env.reset(seed=0)
     truncated = False
@@ -162,6 +237,66 @@ def test_truncates_on_timeout() -> None:
             break
     assert truncated is True
     assert steps == 8
+
+
+# --- UC-09 AC1/AC5: the effective step budget scales with the gate count -------------
+def _n_gate_course(n: int) -> CourseConfig:
+    """Build an N-gate course (geometry need only be well-formed for the budget check)."""
+    gates = tuple(
+        GateSpec(center=(2.0 + 1.5 * i, 0.0, 1.0), aperture=0.6) for i in range(n)
+    )
+    return CourseConfig(gates=gates, finish_x=2.0 + 1.5 * n + 1.0)
+
+
+def test_effective_step_budget_scales_with_num_gates() -> None:
+    """N=1⇒400, N=3⇒800, N=10⇒2200 (max_steps + steps_per_gate*(N-1)); N=1 == base (AC1)."""
+    # N=1 via the single-gate factory keeps the 400 floor exactly.
+    env1 = make_env(EnvConfig(course=single_gate_course()), adapter="simple")
+    env1.reset(seed=0)
+    assert env1._max_steps == 400
+
+    # N=3 (the default course).
+    env3 = make_env(EnvConfig(), adapter="simple")
+    env3.reset(seed=0)
+    assert env3._course.num_gates == 3
+    assert env3._max_steps == 800
+
+    # N=10.
+    env10 = make_env(EnvConfig(course=_n_gate_course(10)), adapter="simple")
+    env10.reset(seed=0)
+    assert env10._course.num_gates == 10
+    assert env10._max_steps == 2200
+
+
+def test_truncation_fires_at_the_scaled_budget() -> None:
+    """A hovering 2-gate episode truncates at max_steps + steps_per_gate*(N-1) (AC5).
+
+    Keep it fast with a small custom EpisodeConfig: max_steps=5, steps_per_gate=3 ⇒ for the
+    2-gate course the budget is 5 + 3*(2-1) = 8.
+    """
+    cfg = EnvConfig(
+        course=_n_gate_course(2),
+        episode=EpisodeConfig(dt=0.05, max_steps=5, steps_per_gate=3),
+    )
+    env = make_env(cfg, adapter="simple")
+    env.reset(seed=0)
+    assert env._max_steps == 8
+    truncated = False
+    steps = 0
+    for _ in range(50):
+        _obs, _r, terminated, truncated, _info = env.step(HOVER)
+        steps += 1
+        if terminated or truncated:
+            break
+    assert truncated is True
+    assert steps == 8
+
+
+def test_reset_info_exposes_target_gate() -> None:
+    """UC-09 AC7 wiring: reset()'s info carries the initial target-gate index (0)."""
+    env = make_env(EnvConfig(), adapter="simple")
+    _obs, info = env.reset(seed=0)
+    assert info["target_gate"] == 0
 
 
 # --- AC11: fixed dynamics -----------------------------------------------------------
@@ -226,14 +361,17 @@ def _rollout_obs(config, seed, actions):
     return np.array(trace, dtype=np.float32)
 
 
-# --- AC7: byte-identity vs a pre-UC-08 baseline rollout ------------------------------
-def test_randomization_off_is_byte_identical_to_pre_uc08_baseline() -> None:
-    """With both axes off, the env reproduces a fixed-seed PRE-UC-08 rollout bit-for-bit.
+# --- UC-09 AC6: seed-42 determinism regression guard vs the REGENERATED baseline ------
+# The baseline fixture ``tests/data/uc08_baseline_rollout.npz`` was REGENERATED under the
+# new UC-09 default 3-gate course (see scripts/regen_uc08_baseline.py, AC6). The guard is no
+# longer "matches a frozen pre-UC-09 trace" — it is "the current default env @ seed 42
+# reproduces the committed baseline" (same seed → identical rollout). It still FAILS if any
+# future change perturbs the seed-42 rollout, which is exactly the regression it guards.
+def test_default_env_seed42_reproduces_the_committed_baseline() -> None:
+    """The current default env @ seed 42 reproduces the committed (regenerated) baseline (AC6).
 
-    The golden trace in ``fixtures/uc08_baseline_rollout.npz`` was captured by running the
-    fixed-course env at the commit **before** UC-08 (seed=42, the stored action script).
-    Any RNG draw or dynamics change leaking into the disabled path would break this. This is
-    the load-bearing AC7 guarantee (the challenger's explicit verification hook).
+    Any RNG draw or dynamics change leaking into the disabled path — or any perturbation of
+    the default course/geometry/reward wiring — breaks this same-seed determinism guard.
     """
     golden = np.load(_BASELINE_ROLLOUT)
     actions = list(golden["actions"])
@@ -246,7 +384,7 @@ def test_randomization_off_is_byte_identical_to_pre_uc08_baseline() -> None:
 
 
 def test_explicit_disabled_randomization_matches_default() -> None:
-    """An explicitly-disabled RandomizationConfig is identical to the default (AC7)."""
+    """An explicitly-disabled RandomizationConfig reproduces the same baseline (AC6/AC7)."""
     golden = np.load(_BASELINE_ROLLOUT)
     actions = list(golden["actions"])
     cfg = EnvConfig(randomization=RandomizationConfig(enable_course=False, enable_dynamics=False))

@@ -118,14 +118,18 @@ def test_recorded_file_satisfies_viewer_contract(recorded_doc: dict) -> None:
     assert len(doc["frames"]["activations"]) == n_frames
 
 
-# --- UC-06 AC8: the additive meta.course block the 3D panel reads for markers/floor -----
+# --- UC-06 AC8 / UC-09 AC7: the additive meta.course block with the N-gate array --------
 def test_recorded_file_carries_course_geometry(recorded_doc_with_course: dict) -> None:
-    """A course-carrying recording documents the course anchors the viewer places (AC8)."""
+    """A course-carrying recording documents the anchors the viewer places (AC8/UC-09 AC7).
+
+    UC-09: the course carries a ``gates: [...]`` **array** (one entry per gate) rather than a
+    singular ``gate`` block — the default course has 3 gates.
+    """
     course = recorded_doc_with_course["meta"]["course"]
-    # Every field the 3D flight panel reads to place the floor + start/gate/finish markers.
+    # Every field the 3D flight panel reads to place the floor + start/gates/finish markers.
     assert set(course) >= {
         "start",
-        "gate",
+        "gates",
         "finish",
         "floor_z",
         "ceiling_z",
@@ -133,9 +137,15 @@ def test_recorded_file_carries_course_geometry(recorded_doc_with_course: dict) -
         "up_axis",
     }
     assert len(course["start"]) == 3
-    assert set(course["gate"]) >= {"center", "aperture", "plane"}
-    assert len(course["gate"]["center"]) == 3
+    # N-gate array (default course → 3 gates); each carries center/aperture/plane.
+    assert isinstance(course["gates"], list)
+    assert len(course["gates"]) == 3
+    for gate in course["gates"]:
+        assert set(gate) >= {"center", "aperture", "plane"}
+        assert len(gate["center"]) == 3
     assert "x" in course["finish"]
+    # The pre-UC-09 singular `gate` block is gone.
+    assert "gate" not in course
     # Axis conventions are stamped so the viewer never guesses handedness/up (AC5 foot-gun).
     assert course["forward_axis"] == "x"
     assert course["up_axis"] == "z"
@@ -216,6 +226,30 @@ def test_viewer_js_has_3d_orbit_projector_and_markers() -> None:
     # The old flat 2D path is GONE (replaced by the 3D scene).
     assert "path-canvas" not in js, "flat 2D path-canvas must be removed (replaced by 3D)"
     assert "drawPath" not in js, "flat 2D drawPath must be removed (replaced by 3D)"
+
+
+def test_viewer_js_reads_n_gate_array_with_legacy_fallback() -> None:
+    """UC-09 AC7: viewer.js reads ``course.gates[]`` with a legacy single-``gate`` fallback.
+
+    Static assertion (CI is headless): the viewer normalises the course into an array of
+    gate specs — new files carry ``course.gates: [...]``; pre-UC-09 files carry a singular
+    ``course.gate`` — via the array-with-fallback read ``course.gates || (course.gate ? …)``,
+    so both render. It also reads the per-frame ``target_gate`` track to highlight the
+    current target gate distinctly (brighter/thicker), dimming the rest.
+    """
+    js = (_VIZ / "viewer.js").read_text()
+    # Array-with-fallback read (UC-09 AC7): new `gates[]`, legacy singular `gate`.
+    assert "course.gates" in js, "viewer.js must read the N-gate array course.gates"
+    assert "course.gate" in js, "viewer.js must keep the legacy singular course.gate fallback"
+    # The exact fallback idiom: `course.gates || (course.gate ? [course.gate] : [])`.
+    normalised = re.sub(r"\s+", "", js)
+    assert "course.gates||(course.gate?[course.gate]:[])" in normalised, (
+        "viewer.js must normalise to an array with the legacy single-gate fallback"
+    )
+    # Per-frame current-target-gate track drives the highlight (AC7).
+    assert "target_gate" in js
+    # A distinct colour/style for the current target gate vs the others.
+    assert "gateTarget" in js, "viewer.js must style the current target gate distinctly"
 
 
 def test_viewer_js_has_neuron_beat_envelope() -> None:

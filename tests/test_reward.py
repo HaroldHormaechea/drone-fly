@@ -1,4 +1,4 @@
-"""AC3 — reward function: fastest valid completion wins; collisions penalised.
+"""AC3 (UC-03) + AC4 (UC-09) — reward: fastest valid completion + normalised gate bonus.
 
 :func:`drone_fly.env.reward.compute_reward` is pure (scalars + bools + a config), so the
 "documented and unit-tested on hand-constructed transitions" contract is exercised here
@@ -8,9 +8,15 @@ without any env or sim. The key ordering guarantees:
 * a collision → strictly penalised,
 * a shortcut through the floor scores strictly worse than a valid completion,
 * the completion bonus fires *only* on a valid gate-then-finish (``completed=True``).
+
+UC-09 AC4 adds the **normalised per-gate bonus**: each gate awards ``gate_bonus / N`` so an
+N-gate episode awards ``gate_bonus`` in total (comparable as N is randomized), and N=1 is
+exactly today's ``gate_bonus``.
 """
 
 from __future__ import annotations
+
+import pytest
 
 from drone_fly.env.config import RewardConfig
 from drone_fly.env.reward import compute_reward
@@ -19,7 +25,13 @@ CFG = RewardConfig()
 
 
 def _step(
-    *, progress_prev=0.0, progress_curr=0.0, event=None, collided=False, completed=False
+    *,
+    progress_prev=0.0,
+    progress_curr=0.0,
+    event=None,
+    collided=False,
+    completed=False,
+    num_gates=1,
 ) -> float:
     return compute_reward(
         dist_to_target_prev=progress_prev,
@@ -28,6 +40,7 @@ def _step(
         collided=collided,
         completed=completed,
         cfg=CFG,
+        num_gates=num_gates,
     )
 
 
@@ -83,8 +96,9 @@ def test_completion_bonus_only_on_valid_completion() -> None:
 
 
 def test_gate_bonus_awarded_on_gate_event() -> None:
-    gate = _step(event="gate")
-    none = _step(event=None)
+    # UC-09 AC4: for N=1 (the default) the per-gate bonus equals gate_bonus exactly.
+    gate = _step(event="gate", num_gates=1)
+    none = _step(event=None, num_gates=1)
     assert gate - none == CFG.gate_bonus
 
 
@@ -92,3 +106,51 @@ def test_completion_dominates_collision_magnitude() -> None:
     # Config invariant that makes the ordering robust: a valid completion's bonus outweighs
     # a single collision penalty, so a clean finish always beats crashing into the goal.
     assert CFG.completion_bonus >= CFG.collision_penalty
+
+
+# --- UC-09 AC4: normalised per-gate bonus -------------------------------------------
+def test_single_gate_bonus_equals_gate_bonus_exactly() -> None:
+    """N=1 == pre-UC-09 behaviour: one gate event awards the full ``gate_bonus`` (AC4)."""
+    delta = _step(event="gate", num_gates=1) - _step(event=None, num_gates=1)
+    assert delta == CFG.gate_bonus
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 5, 10])
+def test_per_gate_bonus_is_gate_bonus_over_n(n: int) -> None:
+    """A single gate event awards exactly ``gate_bonus / N`` for the active N (AC4)."""
+    delta = _step(event="gate", num_gates=n) - _step(event=None, num_gates=n)
+    assert delta == pytest.approx(CFG.gate_bonus / n)
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 5, 10])
+def test_n_gate_bonuses_sum_to_gate_bonus(n: int) -> None:
+    """N gate events over an N-gate episode sum to exactly ``gate_bonus`` total (AC4).
+
+    This is the load-bearing invariant: total gate reward stays comparable as N varies.
+    """
+    baseline = _step(event=None, num_gates=n)  # per-step floor (time penalty only)
+    per_gate = _step(event="gate", num_gates=n) - baseline
+    total = n * per_gate
+    assert total == pytest.approx(CFG.gate_bonus)
+
+
+def test_larger_n_gives_smaller_per_gate_bonus() -> None:
+    """More gates ⇒ each individual gate is worth proportionally less (AC4)."""
+    one = _step(event="gate", num_gates=1) - _step(event=None, num_gates=1)
+    ten = _step(event="gate", num_gates=10) - _step(event=None, num_gates=10)
+    assert one > ten
+    assert one == pytest.approx(10 * ten)
+
+
+def test_num_gates_zero_is_guarded_against_div_by_zero() -> None:
+    """The ``max(1, num_gates)`` guard means N=0 degrades to the N=1 bonus, never a crash."""
+    delta = _step(event="gate", num_gates=0) - _step(event=None, num_gates=0)
+    assert delta == CFG.gate_bonus
+
+
+def test_completion_bonus_is_not_normalised_by_n() -> None:
+    """Only the per-gate bonus is normalised; the one-off completion bonus is N-independent."""
+    for n in (1, 4, 10):
+        with_bonus = _step(completed=True, num_gates=n)
+        without = _step(completed=False, num_gates=n)
+        assert with_bonus - without == CFG.completion_bonus

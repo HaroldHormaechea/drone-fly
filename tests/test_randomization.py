@@ -1,22 +1,24 @@
-"""UC-08 AC3/AC4/AC5 — the pure domain-randomization samplers.
+"""UC-08 + UC-09 AC5/AC6 — the pure domain-randomization samplers (N-gate courses).
 
 Covers :mod:`drone_fly.env.randomization` (``sample_course`` / ``sample_dynamics`` /
-``is_course_solvable``) and the load-bearing physical consequence of the dynamics knobs:
+``is_course_solvable`` / ``_fallback_course``) for the UC-09 N-gate course model:
 
-* **AC3 (solvability + bounds)** — thousands of sampled courses are *all* flyable
-  (``is_course_solvable``) and sit inside every configured bound, with the start height
-  **strictly inside** ``(floor_z + z_margin, ceiling_z - z_margin)`` (the strictness is
-  load-bearing: :meth:`SimpleDroneAdapter.reset` flags a step-0 collision if the spawn
-  touches a bound).
-* **AC3 (reject-then-clamp, no hang)** — with a pathological, empty-feasible range set the
-  sampler exhausts its attempt cap and **clamps to the base course** (guaranteed solvable),
-  returning promptly rather than looping forever.
-* **AC4 (seeded reproducibility)** — a given seed reproduces the same *sequence* of courses
-  (and dynamics); a different seed produces a different sequence.
-* **AC5 (dynamics bounds + pinned order + per-knob effect)** — sampled dynamics stay inside
-  the configured factor ranges, the draw order is pinned (same seed → identical params), and
-  **mass alone genuinely perturbs the trajectory** (the anti-cancellation guard: the adapter
-  must not recompute ``max_thrust`` from instance mass).
+* **UC-09 AC5 (num_gates)** — the sampler draws ``num_gates`` uniformly across the
+  configured integer range (default ``[1, 10]``); the full range is exercised.
+* **UC-09 AC5 (solvability + bounds)** — thousands of sampled courses are *all* flyable
+  (``is_course_solvable``) for every N: every gate inside the floor/ceiling corridor and
+  lateral bounds, apertures ≥ ``aperture_min``, x strictly increasing, adjacent gates
+  ≥ ``min_gate_spacing`` apart, the finish beyond the last gate, and the **start outside
+  gate 0's capture sphere**.
+* **UC-09 AC5 (aperture range)** — sampled per-gate apertures span the configured range
+  (tight and wide gates both appear), with the tightest still passing solvability.
+* **UC-09 AC5/AC6 (deterministic zero-RNG fallback)** — pathological (empty-feasible)
+  ranges exhaust the attempt cap and fall back to a solvable-by-construction course for
+  every N∈[1,10], drawing nothing off the RNG.
+* **UC-09 AC6 (reproducibility)** — a given seed reproduces the same *sequence* of courses
+  (fixed draw count per attempt given N); a different seed differs.
+* **UC-08 AC5 (dynamics)** — sampled dynamics stay inside the configured factor ranges, the
+  draw order is pinned, and mass / drag alone genuinely perturb the trajectory.
 
 Pure + hermetic: drives the samplers off explicit ``numpy`` generators; the one physical
 check builds two :class:`SimpleDroneAdapter` instances directly (no env / sim / network).
@@ -24,50 +26,90 @@ check builds two :class:`SimpleDroneAdapter` instances directly (no env / sim / 
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 
 from drone_fly.adapter.simple import SimpleDroneAdapter
-from drone_fly.env.config import CourseConfig, DynamicsParams, RandomizationConfig
+from drone_fly.env.config import CourseConfig, DynamicsParams, GateSpec, RandomizationConfig
 from drone_fly.env.randomization import (
+    _fallback_course,
     is_course_solvable,
     sample_course,
     sample_dynamics,
 )
 
 
-# --- AC3: every sampled course is solvable and within bounds -------------------------
-def test_sampled_courses_are_all_solvable_and_within_bounds() -> None:
-    """2000+ draws off one RNG are each flyable and inside every configured bound (AC3)."""
+def _gate_zs(course: CourseConfig) -> list[float]:
+    return [float(g.center[2]) for g in course.gates]
+
+
+# =====================================================================================
+# UC-09 AC5 — num_gates draw across the configured range
+# =====================================================================================
+def test_num_gates_spans_the_full_default_range() -> None:
+    """Sampled ``num_gates`` covers the whole default [1, 10] integer range (AC5)."""
     rcfg = RandomizationConfig(enable_course=True)
     base = CourseConfig()
     rng = np.random.default_rng(2024)
+    counts = {sample_course(rng, rcfg, base).num_gates for _ in range(600)}
+    assert min(counts) == 1
+    assert max(counts) == 10
+    assert counts == set(range(1, 11)), f"missing gate counts: {set(range(1, 11)) - counts}"
+
+
+def test_num_gates_respects_a_narrow_configured_range() -> None:
+    """A configured [lo, hi] range bounds the drawn gate count (AC5)."""
+    rcfg = RandomizationConfig(enable_course=True, num_gates_range=(2, 4))
+    base = CourseConfig()
+    rng = np.random.default_rng(0)
+    counts = {sample_course(rng, rcfg, base).num_gates for _ in range(300)}
+    assert counts == {2, 3, 4}
+
+
+# =====================================================================================
+# UC-09 AC5 — every sampled course is solvable and within bounds, for every N
+# =====================================================================================
+def test_sampled_courses_are_all_solvable_and_within_bounds() -> None:
+    """2500 draws off one RNG are each flyable and inside every configured bound (AC5)."""
+    rcfg = RandomizationConfig(enable_course=True)
+    base = CourseConfig()
+    rng = np.random.default_rng(7)
 
     lo_z = base.floor_z + rcfg.z_margin
     hi_z = base.ceiling_z - rcfg.z_margin
 
-    n = 2500
-    for _ in range(n):
+    for _ in range(2500):
         course = sample_course(rng, rcfg, base)
         # The sampler's own contract: never returns an unsolvable course.
         assert is_course_solvable(course, rcfg)
 
         sx, sy, sz = course.start_position
-        # start_z STRICTLY inside the vertical safety corridor (load-bearing: a spawn on
-        # the bound flags a step-0 collision in SimpleDroneAdapter.reset).
+        # start height STRICTLY inside the vertical safety corridor (load-bearing: a spawn
+        # on the bound flags a step-0 collision in SimpleDroneAdapter.reset).
         assert lo_z < sz < hi_z
-        # gate-centre z (and therefore the finish z, which inherits it) also strictly inside.
-        assert lo_z < course.gate_center_z < hi_z
-
-        # gate strictly between start and finish along +x, with the configured min gaps.
-        assert course.gate_x - sx >= rcfg.min_start_gate_gap
-        assert course.finish_x - course.gate_x >= rcfg.min_gate_finish_gap
-
-        # the drone must fit through the aperture.
-        assert course.gate_aperture >= rcfg.aperture_min
-
-        # lateral bounds on start-y and gate-centre-y.
         assert abs(sy) <= rcfg.lateral_bound
-        assert abs(course.gate_center_y) <= rcfg.lateral_bound
+
+        # start must be OUTSIDE gate 0's capture sphere (else it auto-passes at step 0).
+        g0 = course.gates[0]
+        assert float(np.linalg.norm(course.start - g0.position)) > g0.aperture
+
+        # per-gate bounds + strictly-increasing x + 3D spacing.
+        prev_x = None
+        prev_c = None
+        for g in course.gates:
+            gx, gy, gz = g.center
+            assert lo_z < gz < hi_z
+            assert abs(gy) <= rcfg.lateral_bound
+            assert g.aperture >= rcfg.aperture_min
+            if prev_x is not None:
+                assert gx > prev_x  # strictly increasing x
+                assert float(np.linalg.norm(g.position - prev_c)) >= rcfg.min_gate_spacing
+            prev_x, prev_c = gx, g.position
+
+        # first gate ahead of start, finish beyond last gate.
+        assert course.gates[0].center[0] - sx >= rcfg.min_start_gate_gap
+        assert course.finish_x - course.gates[-1].center[0] >= rcfg.min_gate_finish_gap
 
         # arena bounds are NOT randomized — copied verbatim from the base course.
         assert course.floor_z == base.floor_z
@@ -75,7 +117,7 @@ def test_sampled_courses_are_all_solvable_and_within_bounds() -> None:
 
 
 def test_sampled_courses_actually_vary() -> None:
-    """Sampling is not degenerate: many draws yield many distinct courses (AC2/AC3)."""
+    """Sampling is not degenerate: many draws yield many distinct courses (AC5)."""
     rcfg = RandomizationConfig(enable_course=True)
     base = CourseConfig()
     rng = np.random.default_rng(0)
@@ -83,51 +125,163 @@ def test_sampled_courses_actually_vary() -> None:
     assert len(starts) > 150  # overwhelmingly distinct spawns
 
 
-# --- AC3: reject-then-clamp on an empty-feasible range set (no infinite loop) --------
-def test_pathological_ranges_clamp_to_base_course_without_hanging() -> None:
-    """Empty-feasible ranges exhaust the cap and clamp to the base course, promptly (AC3)."""
-    # gate_x is pinned behind the start, so gate_x - start_x is always negative < the 1.0
-    # minimum gap: EVERY draw is rejected, forcing the attempt-cap clamp fallback.
+def test_every_fixed_n_is_solvable() -> None:
+    """For each N in [1, 10] pinned, every sampled course is solvable (AC5)."""
+    base = CourseConfig()
+    for n in range(1, 11):
+        rcfg = RandomizationConfig(enable_course=True, num_gates_range=(n, n))
+        rng = np.random.default_rng(100 + n)
+        for _ in range(200):
+            course = sample_course(rng, rcfg, base)
+            assert course.num_gates == n
+            assert is_course_solvable(course, rcfg)
+
+
+# =====================================================================================
+# UC-09 AC5 — per-gate aperture range spans tight+wide, tightest still solvable
+# =====================================================================================
+def test_sampled_apertures_span_the_configured_range() -> None:
+    """Per-gate apertures span the configured range — tight AND wide gates both appear (AC5).
+
+    The tightest sampled aperture still passes solvability (it is ≥ ``aperture_min``),
+    so smaller apertures force accuracy without ever making a course unflyable.
+    """
+    rcfg = RandomizationConfig(enable_course=True)  # aperture range (0.4, 0.8), min 0.4
+    base = CourseConfig()
+    rng = np.random.default_rng(11)
+
+    apertures: list[float] = []
+    for _ in range(1500):
+        course = sample_course(rng, rcfg, base)
+        # Only collect from RNG-sampled courses (all solvable); fallback shares one aperture.
+        apertures.extend(g.aperture for g in course.gates)
+
+    lo, hi = rcfg.gate_aperture_range
+    amin, amax = min(apertures), max(apertures)
+    # Wide gates appear near the top of the range and tight gates near the bottom.
+    assert amax > hi - 0.05, f"no wide gates sampled (max aperture {amax})"
+    assert amin < lo + 0.05, f"no tight gates sampled (min aperture {amin})"
+    # The tightest gate is still flyable — never below the configured minimum.
+    assert amin >= rcfg.aperture_min
+
+
+# =====================================================================================
+# UC-09 AC5/AC6 — deterministic zero-RNG fallback on exhaustion
+# =====================================================================================
+def test_pathological_ranges_fall_back_deterministically_without_hanging() -> None:
+    """Empty-feasible ranges exhaust the cap and return the zero-RNG fallback (AC5/AC6).
+
+    Every gate is drawn above the ceiling corridor, so EVERY candidate is rejected and the
+    sampler must return :func:`_fallback_course` — solvable-by-construction and RNG-free.
+    """
     rcfg = RandomizationConfig(
         enable_course=True,
-        start_x_range=(0.5, 0.5),
-        gate_x_range=(0.0, 0.0),
+        num_gates_range=(3, 3),
+        gate_center_z_range=(9.0, 9.0),  # far above the ceiling corridor → always rejected
         max_resample_attempts=25,
     )
     base = CourseConfig()
     rng = np.random.default_rng(1)
 
-    # Runs to completion (the attempt cap guarantees termination) and returns the base.
     result = sample_course(rng, rcfg, base)
-    assert result == base  # frozen-dataclass equality: the exact base course
-    assert is_course_solvable(result, rcfg) is True  # the fallback is guaranteed flyable
+    expected = _fallback_course(3, base, rcfg)
+    assert result == expected  # frozen-dataclass equality: the exact fallback course
+    assert is_course_solvable(result, rcfg) is True
+
+
+def test_fallback_course_is_solvable_for_every_n() -> None:
+    """The zero-RNG fallback is solvable-by-construction for every N∈[1, 10] (AC5)."""
+    rcfg = RandomizationConfig(enable_course=True)
+    base = CourseConfig()
+    for n in range(1, 11):
+        course = _fallback_course(n, base, rcfg)
+        assert course.num_gates == n
+        assert is_course_solvable(course, rcfg)
+
+
+def test_fallback_course_draws_nothing_off_the_rng() -> None:
+    """The fallback is deterministic and RNG-free: same inputs → identical course (AC6)."""
+    rcfg = RandomizationConfig(enable_course=True)
+    base = CourseConfig()
+    a = _fallback_course(5, base, rcfg)
+    b = _fallback_course(5, base, rcfg)
+    assert a == b
+
+
+# =====================================================================================
+# UC-09 AC5 — is_course_solvable rejects each documented degenerate mode
+# =====================================================================================
+def _replace_gate(course: CourseConfig, idx: int, **kw) -> CourseConfig:
+    gates = list(course.gates)
+    gates[idx] = dataclasses.replace(gates[idx], **kw)
+    return dataclasses.replace(course, gates=tuple(gates))
 
 
 def test_is_course_solvable_flags_each_degenerate_mode() -> None:
-    """The guard rejects each documented degenerate case (AC3)."""
+    """The guard rejects each documented degenerate case for N-gate courses (AC5)."""
     rcfg = RandomizationConfig()
-    base = CourseConfig()
+    base = CourseConfig()  # the default 3-gate course
     assert is_course_solvable(base, rcfg) is True
 
-    # gate behind / too close to the start.
-    assert not is_course_solvable(CourseConfig(start_position=(2.5, 0.0, 1.0), gate_x=3.0), rcfg)
-    # finish inside / too close to the gate.
-    assert not is_course_solvable(CourseConfig(gate_x=3.0, finish_x=3.5), rcfg)
-    # aperture smaller than the drone.
-    assert not is_course_solvable(CourseConfig(gate_aperture=rcfg.aperture_min - 0.01), rcfg)
+    # empty course (num_gates < 1).
+    assert not is_course_solvable(dataclasses.replace(base, gates=()), rcfg)
+
+    # first gate too close to / behind the start.
+    near = _replace_gate(base, 0, center=(0.5, 0.0, 1.0))
+    assert not is_course_solvable(near, rcfg)
+
+    # start inside gate 0's capture sphere (would auto-pass at step 0).
+    inside = dataclasses.replace(base, start_position=(2.4, 0.0, 1.0))
+    assert not is_course_solvable(inside, rcfg)
+
+    # non-monotonic x: gate 1 not strictly ahead of gate 0.
+    nonmono = _replace_gate(base, 1, center=(2.0, 0.6, 1.3))
+    assert not is_course_solvable(nonmono, rcfg)
+
+    # adjacent gates closer than min_gate_spacing in 3D.
+    crowded = _replace_gate(base, 1, center=(2.6, 0.0, 1.0))  # 0.1 from g0
+    assert not is_course_solvable(crowded, rcfg)
+
+    # aperture smaller than the flyable minimum.
+    tiny = _replace_gate(base, 0, aperture=rcfg.aperture_min - 0.01)
+    assert not is_course_solvable(tiny, rcfg)
+
+    # a gate centre above the ceiling corridor.
+    high = _replace_gate(base, 2, center=(5.5, 0.0, base.ceiling_z - rcfg.z_margin + 0.01))
+    assert not is_course_solvable(high, rcfg)
+
     # start height on the floor corridor edge (must be STRICTLY inside).
-    assert not is_course_solvable(CourseConfig(start_position=(0.0, 0.0, rcfg.z_margin)), rcfg)
-    # gate centre above the ceiling corridor.
-    assert not is_course_solvable(CourseConfig(gate_center_z=2.5 - rcfg.z_margin + 0.01), rcfg)
+    on_edge = dataclasses.replace(base, start_position=(0.0, 0.0, rcfg.z_margin))
+    assert not is_course_solvable(on_edge, rcfg)
+
     # start pushed outside the lateral bound.
-    assert not is_course_solvable(
-        CourseConfig(start_position=(0.0, rcfg.lateral_bound + 0.1, 1.0)), rcfg
+    wide = dataclasses.replace(base, start_position=(0.0, rcfg.lateral_bound + 0.1, 1.0))
+    assert not is_course_solvable(wide, rcfg)
+
+    # finish too close to the last gate.
+    close_finish = dataclasses.replace(base, finish_x=base.gates[-1].center[0] + 0.1)
+    assert not is_course_solvable(close_finish, rcfg)
+
+
+def test_start_inside_gate0_sphere_is_rejected_specifically() -> None:
+    """A start that already sits inside gate 0's aperture is unsolvable (AC5)."""
+    rcfg = RandomizationConfig()
+    # A one-gate course whose start is 0.3 from the gate centre, inside a 0.6 aperture.
+    course = CourseConfig(
+        start_position=(2.7, 0.0, 1.0),
+        gates=(GateSpec(center=(3.0, 0.0, 1.0), aperture=0.6),),
+        finish_x=6.0,
     )
+    g0 = course.gates[0]
+    assert float(np.linalg.norm(course.start - g0.position)) <= g0.aperture
+    assert is_course_solvable(course, rcfg) is False
 
 
-# --- AC4: seeded reproducibility of the course stream -------------------------------
+# =====================================================================================
+# UC-09 AC6 — seeded reproducibility of the course stream
+# =====================================================================================
 def test_same_seed_reproduces_identical_course_sequence() -> None:
-    """A given seed reproduces the same *sequence* of sampled courses (AC4)."""
+    """A given seed reproduces the same *sequence* of sampled courses (AC6)."""
     rcfg = RandomizationConfig(enable_course=True)
     base = CourseConfig()
 
@@ -149,7 +303,9 @@ def test_different_seed_produces_different_course_sequence() -> None:
     assert sequence(1) != sequence(2)
 
 
-# --- AC5: dynamics bounds, pinned draw order, per-knob effect ------------------------
+# =====================================================================================
+# UC-08 AC5 — dynamics bounds, pinned draw order, per-knob effect
+# =====================================================================================
 def test_sampled_dynamics_within_configured_factor_ranges() -> None:
     """Every sampled DynamicsParams sits inside the configured multiplicative ranges (AC5)."""
     rcfg = RandomizationConfig(enable_dynamics=True)
@@ -179,7 +335,7 @@ def test_sampled_dynamics_within_configured_factor_ranges() -> None:
 
 
 def test_dynamics_draw_order_is_pinned_same_seed_identical() -> None:
-    """The dynamics draw order is pinned: the same seed reproduces identical params (AC4)."""
+    """The dynamics draw order is pinned: the same seed reproduces identical params (AC6)."""
     rcfg = RandomizationConfig(enable_dynamics=True)
     base = DynamicsParams()
     a = sample_dynamics(np.random.default_rng(3), rcfg, base)
@@ -189,7 +345,7 @@ def test_dynamics_draw_order_is_pinned_same_seed_identical() -> None:
     assert a != c
 
 
-def test_disabled_dynamics_axis_is_never_drawn_here_defaults_are_base() -> None:
+def test_disabled_dynamics_axis_defaults_equal_adapter_constants() -> None:
     """A DynamicsParams() (the disabled-axis value) equals today's constants exactly (AC7).
 
     The env hands ``DynamicsParams()`` semantics (or ``None``) when dynamics is off, so the
