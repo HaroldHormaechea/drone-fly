@@ -242,6 +242,7 @@ def train(
             backend=venv.get_attr("backend")[0],
             checkpoint="(training)",
             dt=(env_config or EnvConfig()).episode.dt,
+            course=(env_config or EnvConfig()).course,
         )
         callbacks.append(RecordingCallback(recorder, record_every=record_every, seed=cfg.seed))
         logger.info(

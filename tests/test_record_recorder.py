@@ -9,6 +9,9 @@ Covers :class:`drone_fly.record.recorder.ActivationRecorder` and its quantisatio
 * **AC10** — activations are stored **quantised to ``uint8``** (round-trips within one
   quantisation step over ``[-1, 1]``); optional gzip round-trips; the file path + size
   are logged.
+* **UC-06 AC8** — when a :class:`CourseConfig` is supplied, the file grows an **additive**
+  ``meta.course`` block (start / gate / finish / floor / ceiling + axis conventions) read
+  from the actual config; ``course=None`` omits the block entirely (back-compat).
 * The capture guards (no start, no sink, width mismatch) raise loudly.
 
 Hermetic: drives the recorder directly with synthetic activations on the committed
@@ -27,6 +30,7 @@ import pytest
 
 from drone_fly.connectome.loader import ConnectomeData
 from drone_fly.controller.encoding import ACTION_DIM
+from drone_fly.env.config import CourseConfig
 from drone_fly.record.recorder import (
     ACTIVATION_OFFSET,
     ACTIVATION_SCALE,
@@ -205,3 +209,90 @@ def test_capture_width_mismatch_raises(connectome: ConnectomeData, tmp_path: Pat
     rec.sink(np.zeros(connectome.neuron_count + 1, dtype=np.float32))
     with pytest.raises(ValueError, match="misaligned|neuron count"):
         rec.capture_frame(np.zeros(ACTION_DIM), np.zeros(3))
+
+
+# --- UC-06 AC8: additive meta.course block ---------------------------------------------
+def _record_with_course(
+    connectome: ConnectomeData, out_dir: Path, course: CourseConfig | None
+) -> dict:
+    """Record a tiny episode with the given ``course`` and return the parsed document."""
+    rec = ActivationRecorder(connectome, out_dir, backend="simple", dt=0.05, course=course)
+    n = connectome.neuron_count
+    rec.start_episode(episode_index=0, seed=0)
+    for f in range(2):
+        rec.sink(np.linspace(-1.0, 1.0, n, dtype=np.float32) * (f + 1) / 2)
+        rec.capture_frame(np.array([0.1, 0.2, 0.3, 0.4]), np.array([float(f), 0.0, 1.0]))
+    path = rec.finish_episode(completed=True, completion_time=0.1, total_reward=1.0, steps=2)
+    return json.loads(path.read_text())
+
+
+def test_meta_course_serialises_default_config(connectome: ConnectomeData, tmp_path: Path) -> None:
+    """A supplied ``CourseConfig`` is serialised verbatim into ``meta.course`` (AC8).
+
+    Every value comes from the actual config (never hardcoded in the recorder), and the
+    z-up / +x-forward / right-handed frame is stamped explicitly so the viewer never guesses.
+    """
+    course = CourseConfig()  # documented defaults: start (0,0,1), gate x=3 r=0.6, finish x=6
+    doc = _record_with_course(connectome, tmp_path / "act", course)
+
+    assert "course" in doc["meta"], "meta.course must be present when a CourseConfig is given"
+    block = doc["meta"]["course"]
+    assert block == {
+        "start": [0.0, 0.0, 1.0],
+        "gate": {"center": [3.0, 0.0, 1.0], "aperture": 0.6, "plane": "yz"},
+        "finish": {"x": 6.0},
+        "floor_z": 0.0,
+        "ceiling_z": 2.5,
+        "forward_axis": "x",
+        "up_axis": "z",
+    }
+
+
+def test_meta_course_reads_values_from_config_not_hardcoded(
+    connectome: ConnectomeData, tmp_path: Path
+) -> None:
+    """A re-tuned course flows through — the values are read from the config, not constants."""
+    course = CourseConfig(
+        start_position=(1.0, 2.0, 3.0),
+        gate_x=5.0,
+        gate_center_y=0.5,
+        gate_center_z=1.5,
+        gate_aperture=0.9,
+        finish_x=11.0,
+        floor_z=0.2,
+        ceiling_z=4.0,
+    )
+    block = _record_with_course(connectome, tmp_path / "act", course)["meta"]["course"]
+
+    assert block["start"] == [1.0, 2.0, 3.0]
+    assert block["gate"]["center"] == [5.0, 0.5, 1.5]
+    assert block["gate"]["aperture"] == 0.9
+    assert block["gate"]["plane"] == "yz"
+    assert block["finish"]["x"] == 11.0
+    assert block["floor_z"] == 0.2
+    assert block["ceiling_z"] == 4.0
+    # Axis conventions are fixed by the env frame, independent of tuning.
+    assert block["forward_axis"] == "x"
+    assert block["up_axis"] == "z"
+
+
+def test_course_none_omits_meta_course_block(connectome: ConnectomeData, tmp_path: Path) -> None:
+    """``course=None`` (the default) writes NO ``meta.course`` key — back-compatible (AC8)."""
+    doc = _record_with_course(connectome, tmp_path / "act", None)
+    assert "course" not in doc["meta"], "meta.course must be absent when no course is supplied"
+    # The rest of the documented schema is unchanged (no keys added/removed).
+    assert set(doc["meta"]) == _DOC_META_KEYS
+
+
+def test_build_recorder_forwards_course(connectome: ConnectomeData) -> None:
+    """The evaluate plumbing exposes a ``course`` param that reaches the recorder (AC8).
+
+    Signature-level check (constructing a full recorder needs a trained model): confirms
+    ``_build_recorder`` accepts ``course`` so ``evaluate`` can pass ``ecfg.course`` through.
+    """
+    import inspect
+
+    from drone_fly.evaluate.evaluator import _build_recorder
+
+    params = inspect.signature(_build_recorder).parameters
+    assert "course" in params, "_build_recorder must accept a course argument to plumb AC8"

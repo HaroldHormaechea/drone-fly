@@ -76,3 +76,10 @@ canvas { width: 100%; height: auto; background: #0a0c17; border-radius: 8px; dis
 
 footer { color: var(--muted); font-size: 12px; border-top: 1px solid #22263d; margin-top: 24px; }
 .error { color: #ff8a80; }
+
+/* 3D flight panel: single reused 2D canvas, drag-to-orbit / wheel-to-zoom.
+ * Fixed CSS height gives ResizeObserver a stable box (no layout feedback loop with
+ * the DPR-scaled backing store); width tracks the panel. */
+#flight-canvas { width: 100%; height: 320px; cursor: grab; touch-action: none; }
+#flight-canvas:active { cursor: grabbing; }
+#flight-3d-legend { margin-top: 6px; }

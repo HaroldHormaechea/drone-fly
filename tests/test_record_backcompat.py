@@ -10,17 +10,26 @@ gradients. This is the hard back-compat contract UC-05 adds to UC-01..04's actor
 * gradients are **unchanged** by capture (the sink detaches);
 * the sink defaults to ``None`` (recording is off by default).
 
-Hermetic: pure-torch on the committed fixture, no env / checkpoint / network.
+UC-06 adds a second back-compat contract on the **recorded file**: the new ``meta.course``
+block is additive, so a recording made without a course (a UC-05-era file) stays schema-
+compatible — it carries every field the viewer reads and simply lacks the optional course
+block (the viewer degrades gracefully, omitting the markers it lacks; AC8).
+
+Hermetic: pure-torch / direct-recorder on the committed fixture, no env / checkpoint / network.
 """
 
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 import numpy as np
 import torch
 
 from drone_fly.connectome.loader import ConnectomeData
 from drone_fly.controller.actor import ConnectomeActorNetwork
-from drone_fly.controller.encoding import OBS_DIM
+from drone_fly.controller.encoding import ACTION_DIM, OBS_DIM
+from drone_fly.record.recorder import ActivationRecorder
 
 
 def test_sink_defaults_to_none(connectome: ConnectomeData) -> None:
@@ -114,3 +123,45 @@ def test_gradients_unaffected_by_capture(connectome: ConnectomeData) -> None:
     for name in grads_off:
         assert torch.equal(grads_off[name], grads_on[name]), name
     assert len(captured) == 1  # capture happened, yet grads are identical
+
+
+# --- UC-06 AC8: a course-less recording stays schema-compatible ------------------------
+# The viewer reads these from every recording regardless of course geometry; a UC-05-era
+# file (no meta.course) must still carry them so the viewer loads it and just omits markers.
+_VIEWER_REQUIRED_META = {
+    "neuron_ids",
+    "roles",
+    "positions",
+    "n_frames",
+    "n_neurons",
+    "action_layout",
+    "activation_scale",
+    "activation_offset",
+}
+
+
+def test_recording_without_course_is_backcompatible(
+    connectome: ConnectomeData, tmp_path: Path
+) -> None:
+    """A recording made with no course omits ``meta.course`` yet stays a valid viewer file.
+
+    This is the file-side of AC8's back-compat guarantee: the new block is purely additive,
+    so an older-style recording (course=None, the default) carries the full pre-UC-06 schema
+    the three synced panels consume — the viewer degrades gracefully, omitting the markers it
+    cannot place rather than failing to load.
+    """
+    rec = ActivationRecorder(connectome, tmp_path / "act", backend="simple", dt=0.05)
+    n = connectome.neuron_count
+    rec.start_episode(0, seed=0)
+    for f in range(3):
+        rec.sink(np.linspace(-1.0, 1.0, n, dtype=np.float32) * (f + 1) / 3)
+        rec.capture_frame(np.zeros(ACTION_DIM), np.array([float(f), 0.0, 1.0]))
+    path = rec.finish_episode(completed=False, completion_time=None, total_reward=-0.5, steps=3)
+
+    doc = json.loads(path.read_text())
+    # The optional UC-06 block is absent (default course=None) ...
+    assert "course" not in doc["meta"]
+    # ... yet every field the viewer relies on for the three panels is present.
+    assert _VIEWER_REQUIRED_META <= set(doc["meta"])
+    assert set(doc["frames"]) == {"activations", "actions", "drone_position"}
+    assert len(doc["frames"]["drone_position"]) == doc["meta"]["n_frames"]

@@ -2,8 +2,9 @@
 /* drone-fly activation playback viewer — vanilla JS, no build step.
  * Loads a recorded episode file (plain JSON or gzip) picked from disk (FileReader /
  * DecompressionStream, so it works from file:// with no server) and renders three panels
- * synced on one timeline: an anatomical top-down brain map, a neurons×time heatmap, and a
- * flight panel (4 action traces + drone path). See use-cases/05 and the recorder schema. */
+ * synced on one timeline: an anatomical top-down brain map (with a per-neuron activation
+ * "beat"), a neurons×time heatmap, and a flight panel (4 action traces + an orbitable 3D
+ * flight scene). See use-cases/05 & 06 and the recorder schema. */
 
 const ROLE_COLORS = {
   sensory: [79, 195, 247],
@@ -16,6 +17,57 @@ const PROJECTIONS = { xz: [0, 2], xy: [0, 1], yz: [1, 2] };
 const ACTION_COLORS = ["#ffd54f", "#4fc3f7", "#81c784", "#ff8a65"];
 const SUPPORTED_SCHEMA = 1;
 
+// ---- neuron "beat" (AC6) --------------------------------------------------------------
+// Brain-map neurons render small at rest and pulse when active: radius = 2px at rest, ~9px
+// at full activation (r_inst = 2 + 7·act/255). During continuous playback a per-neuron
+// envelope adds a fast attack + exponential release toward rest (real-time, ~0.2s), floored
+// at the instantaneous radius. When paused/scrubbing we draw the instantaneous radius for
+// the current frame (no stale decay) so a frame's size always reflects that frame.
+const BEAT_REST = 2; // px radius at rest
+const BEAT_PEAK = 9; // px radius at full activation
+const BEAT_SPAN = BEAT_PEAK - BEAT_REST; // 7
+const BEAT_RELEASE_TAU = 0.06; // s; exponential release ~= back to rest over ~0.2s
+
+// ---- 3D flight panel constants --------------------------------------------------------
+// World frame (confirmed from env/config.py + adapter): z UP, +x FORWARD, +y = LEFT,
+// −y = RIGHT, right-handed. A right bank (+roll → −y) must read as a right turn on screen,
+// so the scene vertical is world +z and y is NOT mirrored. AC5 foot-gun — do not "fix" this.
+const FLIGHT_FOV = Math.PI / 3; // 60° vertical field of view
+const FLIGHT_MAX_PITCH = Math.PI / 2 - 0.01; // clamp shy of straight-down (gimbal guard)
+// View presets (AC13): human labels front/side/top-down; top-down is the default. Derived
+// from the confirmed up-axis so the user never sees x/y/z:
+//   top   = straight down −z  (+x up-screen, −y → screen-right)
+//   front = down the +x course/forward axis (altitude vertical)
+//   side  = along +y (altitude profile; +x to the right)
+const VIEW_PRESETS = {
+  front: { yaw: Math.PI, pitch: 0 },
+  side: { yaw: -Math.PI / 2, pitch: 0 },
+  top: { yaw: Math.PI, pitch: FLIGHT_MAX_PITCH },
+};
+const COURSE_COLORS = { start: "#66bb6a", gate: "#ffca28", finish: "#ff5252", drone: "#ffffff" };
+
+// tiny vec3 helpers (plain arrays, no deps)
+const v3 = {
+  sub: (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
+  add: (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+  scale: (a, s) => [a[0] * s, a[1] * s, a[2] * s],
+  dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
+  cross: (a, b) => [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ],
+  len: (a) => Math.hypot(a[0], a[1], a[2]),
+  norm: (a) => {
+    const l = Math.hypot(a[0], a[1], a[2]) || 1;
+    return [a[0] / l, a[1] / l, a[2] / l];
+  },
+};
+
+//: Live 3D flight controller over a single reused canvas. Created on file load and torn
+//: down (destroy()) on the next load so no canvas context leaks (AC9 lifecycle).
+let flight = null;
+
 const el = (id) => document.getElementById(id);
 const state = {
   data: null,
@@ -24,6 +76,7 @@ const state = {
   speed: 1,
   rowOrder: null, // neuron indices ordered sensory->inter->motor (heatmap rows)
   heatmap: null, // offscreen canvas (n_frames x n_neurons)
+  beat: null, // per-neuron pulse envelope radii (AC6); Float32Array or null
   lastTs: 0,
   acc: 0,
 };
@@ -78,11 +131,20 @@ function loadDocument(doc, name) {
   state.playing = false;
   state.rowOrder = computeRowOrder(doc.meta.roles);
   state.heatmap = buildHeatmap(doc, state.rowOrder);
+  state.beat = new Float32Array(nNeurons).fill(BEAT_REST);
 
   renderMetaBar(doc, name);
   renderPositionSource(doc.meta.positions);
   renderFlightLegend(doc.meta.action_layout);
   renderOutcome(doc.outcome);
+
+  // (Re)build the 3D flight scene: tear down any previous controller (AC9), create a fresh
+  // one over the single reused canvas, load this episode's geometry, and apply the current
+  // view preset (top-down by default on first load).
+  destroyFlight3D();
+  flight = createFlight3D(el("flight-canvas"));
+  flight.setScene(doc);
+  flight.applyPreset(el("view-select").value);
 
   const scrubber = el("scrubber");
   scrubber.max = Math.max(0, nFrames - 1);
@@ -178,7 +240,7 @@ function renderAll() {
   drawBrainMap();
   drawHeatmap();
   drawActions();
-  drawPath();
+  if (flight) flight.render();
 }
 
 function projectedPoints() {
@@ -221,18 +283,47 @@ function drawBrainMap() {
   const act = doc.frames.activations[state.frame];
   const roles = doc.meta.roles;
   const hasPos = doc.meta.positions.has_position;
+  // Beat (AC6): during continuous playback use the per-neuron envelope (fast attack +
+  // real-time release); when paused/scrubbing use the instantaneous radius for this frame.
+  const usingEnvelope = state.playing && state.beat;
   for (let i = 0; i < pts.length; i++) {
     const p = pts[i];
     if (!p) continue;
     const x = pad + (p[0] - b.minX) * sx;
     const y = H - pad - (p[1] - b.minY) * sy; // flip Y so +axis points up
     const brightness = act[i] / 255;
+    const rInst = BEAT_REST + BEAT_SPAN * brightness;
+    const radius = usingEnvelope ? state.beat[i] : rInst;
     const color = hasPos[i] ? (ROLE_COLORS[roles[i]] || FALLBACK_COLOR) : FALLBACK_COLOR;
     const alpha = 0.18 + 0.82 * brightness;
     ctx.beginPath();
     ctx.fillStyle = `rgba(${color[0]},${color[1]},${color[2]},${alpha.toFixed(3)})`;
-    ctx.arc(x, y, 2.6 + 2.4 * brightness, 0, Math.PI * 2);
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
     ctx.fill();
+  }
+}
+
+// Evolve the per-neuron beat envelope by `dtReal` seconds of real (wall-clock) time. Fast
+// attack + exponential release toward rest, floored at each neuron's instantaneous radius so
+// the current frame's activation is never under-drawn (AC6). Called once per rAF while playing.
+function updateBeat(dtReal) {
+  if (!state.beat || !state.data) return;
+  const act = state.data.frames.activations[state.frame];
+  const decay = Math.exp(-Math.max(0, dtReal) / BEAT_RELEASE_TAU);
+  for (let i = 0; i < state.beat.length; i++) {
+    const rInst = BEAT_REST + BEAT_SPAN * (act[i] / 255);
+    const released = BEAT_REST + (state.beat[i] - BEAT_REST) * decay;
+    state.beat[i] = Math.max(released, rInst);
+  }
+}
+
+// Seed the envelope to the current frame's instantaneous radii (called when playback starts)
+// so the first animated frames don't inherit a stale pulse from a previous run.
+function seedBeat() {
+  if (!state.beat || !state.data) return;
+  const act = state.data.frames.activations[state.frame];
+  for (let i = 0; i < state.beat.length; i++) {
+    state.beat[i] = BEAT_REST + BEAT_SPAN * (act[i] / 255);
   }
 }
 
@@ -284,39 +375,309 @@ function drawActions() {
   ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, H); ctx.stroke();
 }
 
-function drawPath() {
-  const canvas = el("path-canvas");
+// ---- 3D flight scene ------------------------------------------------------------------
+// A dependency-free canvas-2D perspective projector (ported from the owner's
+// liftoff-flight-analyzer approach, extended with a floor grid + start/gate/finish markers).
+// Genuinely 3D & orbitable (AC1), no three.js, no npm, no ES modules — stays file://-safe.
+
+// Build the scene geometry once per loaded episode: the flight path plus the display extent
+// (bbox over the path ∪ course anchors, padded, z clamped to the arena) that sizes the floor
+// and the finish plane so the floor always contains the trajectory. Works with or without
+// meta.course (graceful degradation — AC8): without it, no markers and the floor sits at the
+// path's own minimum z.
+function buildFlightScene(doc) {
+  const path = (doc.frames.drone_position || []).map((p) => [p[0], p[1], p[2]]);
+  const course = doc.meta.course || null;
+
+  // Anchor points that must always be inside the display extent.
+  const anchors = path.slice();
+  if (course) {
+    if (course.start) anchors.push(course.start);
+    if (course.gate && course.gate.center) anchors.push(course.gate.center);
+    if (course.finish && course.finish.x != null) {
+      // finish anchor: use the gate's lateral centre at the finish x so x-extent reaches it
+      const cy = course.gate && course.gate.center ? course.gate.center[1] : 0;
+      const cz = course.gate && course.gate.center ? course.gate.center[2] : 0;
+      anchors.push([course.finish.x, cy, cz]);
+    }
+  }
+
+  const bb = bbox3(anchors.length ? anchors : [[0, 0, 0], [1, 1, 1]]);
+  // Pad ~10% laterally so nothing hugs the edge.
+  const padX = (bb.max[0] - bb.min[0] || 1) * 0.1;
+  const padY = (bb.max[1] - bb.min[1] || 1) * 0.1;
+  bb.min[0] -= padX; bb.max[0] += padX;
+  bb.min[1] -= padY; bb.max[1] += padY;
+
+  // Vertical extent: clamp to the arena [floor_z, ceiling_z] when the course provides it.
+  const floorZ = course && course.floor_z != null ? course.floor_z : bb.min[2];
+  const ceilZ = course && course.ceiling_z != null ? course.ceiling_z : bb.max[2];
+  bb.min[2] = Math.min(bb.min[2], floorZ);
+  bb.max[2] = Math.max(bb.max[2], ceilZ);
+
+  const center = [
+    (bb.min[0] + bb.max[0]) / 2,
+    (bb.min[1] + bb.max[1]) / 2,
+    (bb.min[2] + bb.max[2]) / 2,
+  ];
+  const radius =
+    0.5 * v3.len([bb.max[0] - bb.min[0], bb.max[1] - bb.min[1], bb.max[2] - bb.min[2]]) || 1;
+
+  return { path, course, bb, center, radius, floorZ, ceilZ };
+}
+
+function bbox3(pts) {
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (const p of pts) {
+    if (!p) continue;
+    for (let k = 0; k < 3; k++) {
+      if (p[k] < min[k]) min[k] = p[k];
+      if (p[k] > max[k]) max[k] = p[k];
+    }
+  }
+  for (let k = 0; k < 3; k++) {
+    if (!isFinite(min[k])) { min[k] = 0; max[k] = 1; }
+    if (max[k] - min[k] < 1e-6) { min[k] -= 0.5; max[k] += 0.5; }
+  }
+  return { min, max };
+}
+
+function createFlight3D(canvas) {
   const ctx = canvas.getContext("2d");
-  const W = canvas.width, H = canvas.height, pad = 14;
-  ctx.clearRect(0, 0, W, H);
-  const pos = state.data.frames.drone_position;
-  if (!pos.length) return;
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const p of pos) {
-    minX = Math.min(minX, p[0]); maxX = Math.max(maxX, p[0]);
-    minY = Math.min(minY, p[1]); maxY = Math.max(maxY, p[1]);
+  // Orbit camera in spherical coords about the scene centre; scene up = world +z.
+  const cam = { yaw: VIEW_PRESETS.top.yaw, pitch: VIEW_PRESETS.top.pitch, dist: 10 };
+  let scene = null;
+  let dpr = 1, cssW = canvas.clientWidth || 440, cssH = canvas.clientHeight || 320;
+  const drag = { active: false, x: 0, y: 0 };
+
+  function resize() {
+    dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    cssW = canvas.clientWidth || cssW;
+    cssH = canvas.clientHeight || cssH;
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    render();
   }
-  const sx = (W - 2 * pad) / (maxX - minX || 1);
-  const sy = (H - 2 * pad) / (maxY - minY || 1);
-  const px = (p) => pad + (p[0] - minX) * sx;
-  const py = (p) => H - pad - (p[1] - minY) * sy;
-  // faint full path
-  ctx.strokeStyle = "rgba(108,168,255,0.25)"; ctx.lineWidth = 1;
-  ctx.beginPath();
-  pos.forEach((p, i) => (i ? ctx.lineTo(px(p), py(p)) : ctx.moveTo(px(p), py(p))));
-  ctx.stroke();
-  // travelled portion
-  ctx.strokeStyle = "rgba(108,168,255,0.95)"; ctx.lineWidth = 1.8;
-  ctx.beginPath();
-  for (let i = 0; i <= state.frame && i < pos.length; i++) {
-    const p = pos[i];
-    if (i === 0) ctx.moveTo(px(p), py(p)); else ctx.lineTo(px(p), py(p));
+
+  // Build the view basis and project a world point to CSS-pixel screen space + depth.
+  function project(p) {
+    const eye = v3.add(scene.center, [
+      cam.dist * Math.cos(cam.pitch) * Math.cos(cam.yaw),
+      cam.dist * Math.cos(cam.pitch) * Math.sin(cam.yaw),
+      cam.dist * Math.sin(cam.pitch),
+    ]);
+    const f = v3.norm(v3.sub(scene.center, eye)); // forward (into screen)
+    let r = v3.cross(f, [0, 0, 1]); // right = forward × world-up
+    if (v3.len(r) < 1e-6) r = v3.cross(f, [1, 0, 0]); // gimbal fallback (straight up/down)
+    r = v3.norm(r);
+    const u = v3.cross(r, f); // true up = right × forward
+    const rel = v3.sub(p, eye);
+    const camZ = v3.dot(rel, f); // depth
+    if (camZ <= 0.01) return null; // behind the camera
+    const focal = 0.5 * cssH / Math.tan(FLIGHT_FOV / 2);
+    const s = focal / camZ;
+    return { x: cssW / 2 + v3.dot(rel, r) * s, y: cssH / 2 - v3.dot(rel, u) * s, z: camZ };
   }
-  ctx.stroke();
-  // current marker
-  const cur = pos[Math.min(state.frame, pos.length - 1)];
-  ctx.fillStyle = "#ffffff";
-  ctx.beginPath(); ctx.arc(px(cur), py(cur), 4, 0, Math.PI * 2); ctx.fill();
+
+  function line(a, b, style, width) {
+    const pa = project(a), pb = project(b);
+    if (!pa || !pb) return;
+    ctx.strokeStyle = style;
+    ctx.lineWidth = width || 1;
+    ctx.beginPath();
+    ctx.moveTo(pa.x, pa.y);
+    ctx.lineTo(pb.x, pb.y);
+    ctx.stroke();
+  }
+
+  function dot(p, color, radiusPx) {
+    const s = project(p);
+    if (!s) return;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, radiusPx, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawFloorGrid() {
+    const bb = scene.bb, z = scene.floorZ;
+    const N = 10;
+    ctx.save();
+    for (let i = 0; i <= N; i++) {
+      const tx = bb.min[0] + (bb.max[0] - bb.min[0]) * (i / N);
+      const ty = bb.min[1] + (bb.max[1] - bb.min[1]) * (i / N);
+      const grid = "rgba(120,140,190,0.22)";
+      line([tx, bb.min[1], z], [tx, bb.max[1], z], grid, 1);
+      line([bb.min[0], ty, z], [bb.max[0], ty, z], grid, 1);
+    }
+    ctx.restore();
+  }
+
+  function drawMarkers() {
+    const c = scene.course;
+    if (!c) return; // graceful degradation: no course geometry → no markers
+    // start (green)
+    if (c.start) dot(c.start, COURSE_COLORS.start, 6);
+    // gate: ring of radius=aperture in the y–z plane at gate.center
+    if (c.gate && c.gate.center) {
+      const [gx, gy, gz] = c.gate.center;
+      const rad = c.gate.aperture || 0.5;
+      const SEG = 48;
+      ctx.strokeStyle = COURSE_COLORS.gate;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i <= SEG; i++) {
+        const a = (i / SEG) * Math.PI * 2;
+        const s = project([gx, gy + rad * Math.cos(a), gz + rad * Math.sin(a)]);
+        if (!s) { started = false; continue; }
+        if (!started) { ctx.moveTo(s.x, s.y); started = true; } else ctx.lineTo(s.x, s.y);
+      }
+      ctx.stroke();
+    }
+    // finish: low-alpha wireframe rectangle in the x = finish_x plane
+    if (c.finish && c.finish.x != null) {
+      const fx = c.finish.x, bb = scene.bb;
+      const corners = [
+        [fx, bb.min[1], scene.floorZ],
+        [fx, bb.max[1], scene.floorZ],
+        [fx, bb.max[1], scene.ceilZ],
+        [fx, bb.min[1], scene.ceilZ],
+      ];
+      // translucent fill + wireframe edges
+      const proj = corners.map(project);
+      if (proj.every(Boolean)) {
+        ctx.fillStyle = "rgba(255,82,82,0.10)";
+        ctx.beginPath();
+        ctx.moveTo(proj[0].x, proj[0].y);
+        for (let i = 1; i < proj.length; i++) ctx.lineTo(proj[i].x, proj[i].y);
+        ctx.closePath();
+        ctx.fill();
+      }
+      for (let i = 0; i < corners.length; i++) {
+        line(corners[i], corners[(i + 1) % corners.length], "rgba(255,82,82,0.7)", 1.5);
+      }
+    }
+  }
+
+  function drawTrajectory() {
+    const path = scene.path;
+    if (!path.length) return;
+    const cut = Math.min(state.frame, path.length - 1);
+    // remaining (dim)
+    ctx.strokeStyle = "rgba(108,168,255,0.30)";
+    ctx.lineWidth = 1.4;
+    strokePolyline(path, cut, path.length - 1);
+    // flown (bright)
+    ctx.strokeStyle = "rgba(108,168,255,0.95)";
+    ctx.lineWidth = 2.2;
+    strokePolyline(path, 0, cut);
+    // moving drone marker at the shared playhead
+    dot(path[cut], COURSE_COLORS.drone, 4.5);
+  }
+
+  function strokePolyline(path, i0, i1) {
+    ctx.beginPath();
+    let started = false;
+    for (let i = i0; i <= i1; i++) {
+      const s = project(path[i]);
+      if (!s) { started = false; continue; }
+      if (!started) { ctx.moveTo(s.x, s.y); started = true; } else ctx.lineTo(s.x, s.y);
+    }
+    ctx.stroke();
+  }
+
+  function render() {
+    if (!scene) {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      return;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // work in CSS pixels; crisp on HiDPI
+    ctx.clearRect(0, 0, cssW, cssH);
+    drawFloorGrid();
+    drawMarkers();
+    drawTrajectory();
+  }
+
+  // -- interaction: drag to orbit, wheel to zoom (camera stays orbitable after a preset) --
+  function onPointerDown(ev) {
+    drag.active = true;
+    drag.x = ev.clientX;
+    drag.y = ev.clientY;
+    if (canvas.setPointerCapture) canvas.setPointerCapture(ev.pointerId);
+  }
+  function onPointerMove(ev) {
+    if (!drag.active) return;
+    const dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
+    drag.x = ev.clientX;
+    drag.y = ev.clientY;
+    cam.yaw += dx * 0.01;
+    cam.pitch = clamp(cam.pitch + dy * 0.01, -FLIGHT_MAX_PITCH, FLIGHT_MAX_PITCH);
+    render();
+  }
+  function onPointerUp(ev) {
+    drag.active = false;
+    if (canvas.releasePointerCapture && ev.pointerId != null) {
+      try { canvas.releasePointerCapture(ev.pointerId); } catch (_e) { /* ignore */ }
+    }
+  }
+  function onWheel(ev) {
+    ev.preventDefault();
+    const factor = Math.exp(ev.deltaY * 0.001);
+    cam.dist = clamp(cam.dist * factor, 0.05, 1e6);
+    render();
+  }
+
+  canvas.addEventListener("pointerdown", onPointerDown);
+  canvas.addEventListener("pointermove", onPointerMove);
+  canvas.addEventListener("pointerup", onPointerUp);
+  canvas.addEventListener("pointercancel", onPointerUp);
+  canvas.addEventListener("wheel", onWheel, { passive: false });
+
+  const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => resize()) : null;
+  if (ro) ro.observe(canvas);
+
+  resize();
+
+  return {
+    setScene(doc) {
+      scene = buildFlightScene(doc);
+      // Fit distance so the whole scene is comfortably in frame.
+      cam.dist = (scene.radius / Math.tan(FLIGHT_FOV / 2)) * 1.6;
+      render();
+    },
+    applyPreset(name) {
+      const p = VIEW_PRESETS[name] || VIEW_PRESETS.top;
+      cam.yaw = p.yaw;
+      cam.pitch = p.pitch;
+      render();
+    },
+    render,
+    destroy() {
+      if (ro) ro.disconnect();
+      canvas.removeEventListener("pointerdown", onPointerDown);
+      canvas.removeEventListener("pointermove", onPointerMove);
+      canvas.removeEventListener("pointerup", onPointerUp);
+      canvas.removeEventListener("pointercancel", onPointerUp);
+      canvas.removeEventListener("wheel", onWheel);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      scene = null;
+    },
+  };
+}
+
+function destroyFlight3D() {
+  if (flight) {
+    flight.destroy();
+    flight = null;
+  }
+}
+
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
 }
 
 // ---- transport --------------------------------------------------------------------
@@ -325,8 +686,16 @@ el("play-btn").addEventListener("click", () => {
   state.playing = !state.playing;
   el("play-btn").textContent = state.playing ? "⏸ Pause" : "▶ Play";
   if (state.playing) {
+    // AC11: pressing Play at the end restarts from frame 0 (seek-to-start-then-play),
+    // instead of the old no-op that left the playhead pinned at the last frame.
+    const nFrames = state.data.frames.activations.length;
+    if (state.frame >= nFrames - 1) {
+      state.frame = 0;
+      renderAll();
+    }
     state.lastTs = 0;
     state.acc = 0;
+    seedBeat();
     requestAnimationFrame(tick);
   }
 });
@@ -344,6 +713,11 @@ el("speed-select").addEventListener("change", (ev) => {
 
 el("axis-select").addEventListener("change", () => drawBrainMap());
 
+// View presets (AC13): change the 3D camera angle; the camera stays freely orbitable after.
+el("view-select").addEventListener("change", (ev) => {
+  if (flight) flight.applyPreset(ev.target.value);
+});
+
 function tick(ts) {
   if (!state.playing || !state.data) return;
   const nFrames = state.data.frames.activations.length;
@@ -352,6 +726,7 @@ function tick(ts) {
   const elapsed = (ts - state.lastTs) / 1000; // real seconds
   state.lastTs = ts;
   state.acc += (elapsed * state.speed) / dt; // frames to advance
+  let frameChanged = false;
   if (state.acc >= 1) {
     state.frame += Math.floor(state.acc);
     state.acc -= Math.floor(state.acc);
@@ -360,7 +735,12 @@ function tick(ts) {
       state.playing = false;
       el("play-btn").textContent = "▶ Play";
     }
-    renderAll();
+    frameChanged = true;
   }
+  // Evolve the beat envelope in REAL time every rAF (decoupled from the frame accumulator),
+  // then redraw: a full sync when the frame advanced, else just the animating brain map.
+  updateBeat(elapsed);
+  if (frameChanged) renderAll();
+  else drawBrainMap();
   if (state.playing) requestAnimationFrame(tick);
 }

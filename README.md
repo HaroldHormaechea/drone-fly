@@ -412,6 +412,28 @@ exact dequantisation) — roughly 4× smaller than float32; the recorder logs ea
 size. Best paired with the **UC-04 pruned slice** (a few thousand neurons is legible; the full
 161k is not).
 
+Each recording also carries the **course geometry** under `meta.course`, so the viewer can
+place the 3D floor and the start/gate/finish markers without any external config. It is an
+**additive, back-compatible** block (recordings written before UC-06 simply lack it; the viewer
+degrades gracefully). The values are read from `env/config.py`'s `CourseConfig` — coordinates
+are in the env frame (z up, +x forward, right-handed):
+
+```json
+"course": {
+  "start":  [0.0, 0.0, 1.0],
+  "gate":   { "center": [3.0, 0.0, 1.0], "aperture": 0.6, "plane": "yz" },
+  "finish": { "x": 6.0 },
+  "floor_z": 0.0,
+  "ceiling_z": 2.5,
+  "forward_axis": "x",
+  "up_axis": "z"
+}
+```
+
+These are semantic anchors only; the viewer derives the displayed floor/finish extent itself
+(a padded bounding box over the trajectory and these anchors) so the floor always contains the
+flown path.
+
 ### Anatomical coordinates (real soma positions, tokenless by default)
 
 The spatial brain map draws each neuron at its **real soma position**. These come from the
@@ -443,12 +465,30 @@ uv run python scripts/fetch_soma_positions.py   # writes tests/fixtures/mcns_fix
 ### Viewer (`viz/`, no build step)
 
 Open `viz/viewer.html` directly in a browser (no server, no npm) and pick a recorded file with
-the file picker (works from `file://`). Three panels share one play/pause + scrubber timeline:
+the file picker (works from `file://`). Three panels share one play/pause + scrubber timeline,
+with speed presets **0.25× / 0.5× / 1× / 2× / 4×** (0.25× for slow, detailed inspection).
+Pressing **Play** at the end restarts from the beginning.
 
-- **Anatomical brain map** — neurons as dots at their projected soma positions, brightness =
-  activation, role-coloured, with an axis selector and an anatomical-vs-computed label.
+- **Anatomical brain map** — neurons as dots at their projected soma positions, role-coloured,
+  with an axis selector and an anatomical-vs-computed label. Each neuron renders **~2px at
+  rest** and **"beats"** — pulsing to ~9px on activation and easing back to rest over ~0.2s —
+  so activation reads as a visible beat, not just a colour change. While paused or scrubbing,
+  a neuron's size reflects *that frame's* activation exactly (no lingering animation).
 - **Activation heatmap** — neurons × time, rows ordered sensory → interneuron → motor.
-- **Flight panel** — the 4 action traces and the drone path, synced to the same playhead.
+- **Flight panel** — the 4 action traces plus a genuinely **3D, orbitable flight scene**:
+  a floor grid, **start** (green) / **gate** (ring, radius = aperture) / **finish** (a
+  translucent wireframe plane) markers, the 3D trajectory (flown bright, remaining dim), and a
+  moving drone marker — all synced to the same playhead.
+  - **Controls:** **drag to rotate** the camera, **wheel to zoom**.
+  - **View presets:** a **front / side / top-down** selector (plain terms, never axis names);
+    **top-down is the default**. The camera stays freely orbitable after picking a preset.
+  - The 3D rendering is a **dependency-free** hand-rolled canvas-2D perspective projector (no
+    three.js, no npm, no ES modules) so it stays `file://`-safe. Markers need the recording's
+    course geometry (see below); older recordings without it still load — the scene just omits
+    the markers it lacks (graceful degradation).
+
+The scene uses the env's real coordinate frame (z up, +x forward, right-handed), so a right
+bank reads as a right turn on screen rather than a mirrored one.
 
 Gzipped recordings (`.json.gz`) are decompressed in-browser via `DecompressionStream`.
 
