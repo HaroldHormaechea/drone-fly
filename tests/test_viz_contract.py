@@ -304,6 +304,42 @@ def test_viewer_html_view_select_is_human_labelled_top_default() -> None:
         assert axis not in body, f"view-select must not expose raw axis label {axis!r}"
 
 
+def test_viewer_html_map_view_select_is_human_labelled_top_default() -> None:
+    """Anatomical brain-map selector offers front/side/top-down with **top** the default.
+
+    Mirrors ``test_viewer_html_view_select_is_human_labelled_top_default`` but targets the
+    anatomical ``map-view-select`` element. ``_extract_select`` anchors on the literal
+    ``id="..."`` so ``view-select`` and ``map-view-select`` do not collide. As with the
+    flight selector, assert on the option VALUES (not a bare "top-down" text grep) — the
+    panel ``<span class="hint">`` also carries preset wording and would be a false positive.
+    """
+    html = (_VIZ / "viewer.html").read_text()
+    body = _extract_select(html, "map-view-select")
+    opts = _options(body)
+    values = [v for v, _ in opts]
+    assert values == ["front", "side", "top"], f"map-view-select option values wrong: {values}"
+    # Exactly one default, and it is 'top' (top-down / dorsal on load — anatomically pinned).
+    selected = [v for v, sel in opts if sel]
+    assert selected == ["top"], f"default map view must be 'top' (top-down); got {selected}"
+    # Human-readable label text (never raw axis names x/y/z) — scoped to this select body.
+    assert "top-down" in body
+    for axis in (">x<", ">y<", ">z<"):
+        assert axis not in body, f"map-view-select must not expose raw axis label {axis!r}"
+
+
+def test_viewer_js_has_map_view_presets_constant() -> None:
+    """The human labels are provably wired to real projection planes via MAP_VIEW_PRESETS.
+
+    Mirrors the static-assert style used for the flight ``VIEW_PRESETS`` elsewhere: a plain
+    substring check that ``viewer.js`` declares the anatomical preset→plane constant. This is
+    the fixed contract handle the HTML select id ``map-view-select`` resolves against.
+    """
+    js = (_VIZ / "viewer.js").read_text()
+    assert "MAP_VIEW_PRESETS" in js, (
+        "viewer.js must declare MAP_VIEW_PRESETS mapping preset names to projection planes"
+    )
+
+
 # --- AC10/AC12 docs --------------------------------------------------------------------
 def test_readme_documents_recording_and_viewer() -> None:
     readme = (_REPO_ROOT / "README.md").read_text()
