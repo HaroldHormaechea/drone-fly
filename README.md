@@ -4,6 +4,19 @@ Can the wiring diagram of a real fruit-fly brain (the MaleCNS connectome) seed a
 controller that reinforcement-learns to fly a quadrotor through a timed race course in
 simulation?
 
+## Quick start: train a fly to fly
+
+Terse path from clone to a trained policy. Each step links to its full write-up below.
+
+1. **Install** — `git clone <repo> && cd drone-fly && uv sync --extra dev`. See [Requirements](#requirements).
+2. **Provision a connectome** — point at the committed fixture (`tests/fixtures`, works offline), or download the full MaleCNS matrix into `data/connectome`. See [Provisioning connectome data](#provisioning-connectome-data-required-before-training).
+3. *(Optional)* **Prune once, reuse** — `uv run drone-fly prune --connectome data/connectome --out data/pruned` writes a reusable sensory→motor slice. See [Subcircuit pruning](#subcircuit-pruning-uc-04).
+4. **Train** — `uv run drone-fly train --connectome <dir> --timesteps 1000000` (use `data/pruned` for the pruned slice, or add `--prune` to prune on the fly). See [Flight training](#flight-training-uc-03).
+5. **Resume** — `uv run drone-fly train --resume artifacts/models/ppo_racer_<steps>_steps.zip`.
+6. **Evaluate** — `uv run drone-fly evaluate --checkpoint artifacts/models/ppo_racer_final.zip --vecnormalize artifacts/models/vecnormalize.pkl --episodes 20`.
+
+> Hermetic sanity check (no network, seconds): `uv run drone-fly smoke-train --connectome tests/fixtures`.
+
 ## What it does
 
 drone-fly is a research prototype that connects three things:
@@ -276,17 +289,107 @@ boundary* is best-effort, as on-policy PPO keeps no replay buffer).
 `fetch-connectome` remains a documented stub (connectome provisioning is UC-01 / owner territory —
 see [Provisioning connectome data](#provisioning-connectome-data)).
 
+## Subcircuit pruning (UC-04)
+
+Running the **full** MaleCNS connectome (~161k neurons / ~25M edges) as the live policy network
+makes PPO intractable on a laptop (full-connectome smoke-training runs at ~0.85 steps/s ≈ weeks for
+1M steps), because every forward/backward pass propagates the whole graph even though only the
+directed **sensory → motor** subcircuit drives the 4 control outputs. UC-04 adds an opt-in,
+deterministic, direction-aware **pruning step** that reduces a loaded connectome to that subcircuit
+before the policy is built.
+
+`prune_to_subcircuit(data, *, k=2, rule="path_slack")`
+(`src/drone_fly/connectome/prune.py`) returns a **new** `ConnectomeData` — the input is never
+mutated — keeping only the neurons and edges on the directed pathway from the sensory population
+(`visual_projection`) to the motor population (`descending_neuron`), with `neuron_ids` /
+`superclass` / `sign` / `top_nt` re-aligned to the pruned rows. It is **not** a random or
+top-degree slice — it is the actual control circuit.
+
+**The rule.** A single configurable **path-slack corridor** with parameter `k` (default `2`):
+
+- Forward BFS from every sensory neuron over **successors** (respecting the `A[i,j] = j→i`
+  convention), and backward BFS from every motor neuron over **predecessors**, give each node its
+  distance from the sensory set (`d_fwd`) and to the motor set (`d_bwd`).
+- Retained = all sensory neurons ∪ one reconstructed shortest sensory→motor path per reachable
+  motor (so every retained motor stays reachable *within the pruned graph* for any `k`) ∪ the
+  corridor `{u : d_fwd(u) + d_bwd(u) ≤ L + k}`, where `L` is the shortest sensory→motor path length.
+- `k = 0` is the tight shortest-path corridor; larger `k` yields a monotone **superset** (richer
+  k-hop neighbourhood). The default `k = 2` favours richness, since descending neurons integrate
+  broadly. A motor neuron unreachable from any sensory neuron is dropped with a warning; an absent
+  `superclass` column, a missing sensory/motor population, `k < 0`, an unknown rule, or a degenerate
+  (empty) result all raise a clear error.
+
+**Usage** (opt-in; omitting `--prune` leaves UC-01/02/03 behaviour byte-identical):
+
+```sh
+# Train on the pruned subcircuit of the full matrix (owner's machine — measures the real reduction).
+drone-fly train --connectome data/connectome --prune            # default k=2
+drone-fly train --connectome data/connectome --prune --prune-k 0  # tightest corridor
+
+# Same flags on the hermetic smoke run.
+drone-fly smoke-train --connectome tests/fixtures --prune
+```
+
+`--prune` is a **no-op on `--resume`** (skipped with a warning): a checkpoint already serialises its
+own connectome graph, so re-pruning would desync it. There is no `--prune` flag on `evaluate` for
+the same reason — the pruned graph is carried inside the checkpoint.
+
+### Prune once, reuse (the `prune` export command)
+
+Pruning the full 25M-edge matrix is a one-time cost you don't want to pay on every `train` run. The
+`prune` subcommand runs the pruning once and **writes the pruned connectome to disk** in the same
+on-disk format the loader reads, so you can point `train`/`smoke-train` at the saved slice with no
+`--prune` flag and no recompute:
+
+```sh
+# Prune the full matrix once and save the reusable slice.
+drone-fly prune --connectome data/connectome --out data/pruned            # default rule + k=2
+drone-fly prune --connectome data/connectome --out data/pruned0 --prune-k 0  # tighter slice
+
+# Reuse it directly — no --prune, no re-pruning.
+drone-fly train --connectome data/pruned --timesteps 1000000
+```
+
+The output directory gets `connectome_pruned.npz` + `connectome_pruned_meta.csv` (carrying the
+re-aligned `idx` / `bodyid` / `superclass` / `sign` / `top_nt` columns) plus a `PRUNE_PROVENANCE.md`
+note (source, rule, `k`, input→pruned counts). The write **round-trips**: `load_connectome(<out>)`
+reproduces the same pruned graph (identical neuron/edge counts and aligned meta), and is
+deterministic. This also gives downstream tooling a stable, saved slice to work from.
+
+**Reduction on the committed fixture** (the small 300-neuron / 10,600-edge real-MaleCNS hub-slice
+under `tests/fixtures/`, measured by the tests):
+
+| `k` | Neurons | Edges |
+|---|---|---|
+| 0 | 59 / 300 | 751 / 10,600 |
+| 1 | 175 / 300 | 5,988 / 10,600 |
+| 2 | 274 / 300 | 10,070 / 10,600 |
+
+> **The fixture numbers are measured; the full-MaleCNS numbers are a *projection, not a
+> measurement*.** The committed fixture is a dense, near-fully-connected hub-slice, so even `k = 2`
+> barely reduces it — that is an artifact of the slice, not of the rule. On the full 161k-neuron /
+> 25M-edge matrix the sensory→motor subcircuit is expected to be order-thousands of neurons (≪ 161k),
+> but the multi-GB dataset is not present in this repo, so those figures are not asserted here. To
+> **measure** the real reduction, provision the full matrix (see
+> [Provisioning connectome data](#provisioning-connectome-data)) and run:
+>
+> ```sh
+> drone-fly train --connectome <full-matrix-dir> --prune
+> ```
+>
+> The prune step logs the exact input→pruned neuron and edge counts.
+
 ## Project layout
 
 ```
 src/drone_fly/
-  connectome/   load cached MaleCNS connectivity from disk (offline loader.py)
+  connectome/   load cached MaleCNS connectivity from disk (offline loader.py) + sensory→motor pruning (prune.py)
   controller/   connectome-seeded PyTorch policy + encode/decode roundtrip
   adapter/      sim-agnostic drone backends (numpy SimpleDroneAdapter + guarded PyBulletAdapter)
   env/          Gymnasium start→gate→finish racing env (geometry, reward, RaceEnv)
   train/        PPO training loop, checkpoint/resume, device auto-detect
   evaluate/     run a trained agent, report completion rate + mean time
-  cli/          command-line entry points (train, evaluate, smoke-train)
+  cli/          command-line entry points (train, evaluate, smoke-train, prune)
 scripts/        dev-time utilities (build_test_fixture.py — regenerates the fixture)
 tests/          pytest suite (import + connectome-plumbing tests)
 tests/fixtures/ committed small real-MaleCNS subgraph used by the offline tests
@@ -300,9 +403,10 @@ decisions.
 
 ## Known limitations
 
-- Early prototype: UC-01 (connectome load), UC-02 (trainable substrate), and UC-03 (flight task —
-  env, PPO train/resume, evaluation, bootstrap) are implemented; later stages (domain
-  randomization, obstacles, multi-gate courses) are deferred.
+- Early prototype: UC-01 (connectome load), UC-02 (trainable substrate), UC-03 (flight task —
+  env, PPO train/resume, evaluation, bootstrap), and UC-04 (opt-in sensory→motor subcircuit
+  pruning) are implemented; later stages (domain randomization, obstacles, multi-gate courses)
+  are deferred.
 - Mastery (≥ 80% completion) is a dev-time goal on real PyBullet physics, verified on the owner's
   hardware — **not** something CI checks (CI runs only a hermetic numpy-backend smoke-train).
 - Does not integrate with the Liftoff game (no public API); an open sim stands in for it. This

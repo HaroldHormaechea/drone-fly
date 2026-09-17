@@ -12,19 +12,33 @@ fetching is a separate, later concern. See :mod:`drone_fly.connectome.loader`.
 from drone_fly.connectome.loader import (
     CONNECTOME_DIR_ENV,
     DEFAULT_CONNECTOME_DIR,
+    DEFAULT_SAVE_STEM,
     FIXTURE_EXPECTED_SCALE,
     MALECNS_V1_EXPECTED_SCALE,
     ConnectomeData,
     ExpectedScale,
     load_connectome,
+    save_connectome,
+)
+from drone_fly.connectome.prune import (
+    DEFAULT_PRUNE_K,
+    DEFAULT_PRUNE_RULE,
+    PRUNE_RULE_PATH_SLACK,
+    prune_to_subcircuit,
 )
 
 __all__ = [
     "CONNECTOME_DIR_ENV",
     "DEFAULT_CONNECTOME_DIR",
+    "DEFAULT_SAVE_STEM",
     "FIXTURE_EXPECTED_SCALE",
     "MALECNS_V1_EXPECTED_SCALE",
     "ConnectomeData",
     "ExpectedScale",
     "load_connectome",
+    "save_connectome",
+    "DEFAULT_PRUNE_K",
+    "DEFAULT_PRUNE_RULE",
+    "PRUNE_RULE_PATH_SLACK",
+    "prune_to_subcircuit",
 ]

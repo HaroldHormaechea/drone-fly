@@ -270,3 +270,61 @@ def load_connectome(path: str | os.PathLike[str] | None = None) -> ConnectomeDat
         sign=attrs["sign"],
         top_nt=attrs["top_nt"],
     )
+
+
+#: Default matrix stem used by :func:`save_connectome`. The meta sidecar is written as
+#: ``<stem>_meta.csv`` so :func:`load_connectome` (which infers the sidecar from the npz
+#: stem) round-trips the directory.
+DEFAULT_SAVE_STEM = "connectome_pruned"
+
+
+def save_connectome(
+    data: ConnectomeData,
+    out_dir: str | os.PathLike[str],
+    *,
+    stem: str = DEFAULT_SAVE_STEM,
+) -> tuple[Path, Path]:
+    """Write ``data`` to ``out_dir`` in the on-disk format :func:`load_connectome` reads.
+
+    Produces ``<out_dir>/<stem>.npz`` (the CSR ``float32`` adjacency) plus the sidecar
+    ``<out_dir>/<stem>_meta.csv`` carrying ``idx`` (contiguous ``0..N-1``), ``bodyid``
+    (from :pyattr:`ConnectomeData.neuron_ids`), and whichever of ``superclass`` / ``top_nt``
+    / ``sign`` are present — the same columns the loader consumes. The pair round-trips:
+    ``load_connectome(out_dir)`` reproduces an equivalent :class:`ConnectomeData` (same
+    neuron/edge counts, meta aligned). Deterministic — identical input yields byte-identical
+    files. Returns the ``(npz_path, meta_path)`` written.
+
+    Raises
+    ------
+    NotADirectoryError
+        If ``out_dir`` exists but is a regular file (not a directory).
+    """
+    out = Path(out_dir)
+    if out.exists() and not out.is_dir():
+        raise NotADirectoryError(
+            f"Cannot write connectome: output path '{out}' exists and is not a directory."
+        )
+    out.mkdir(parents=True, exist_ok=True)
+
+    npz_path = out / f"{stem}.npz"
+    meta_path = out / f"{stem}_meta.csv"
+
+    sp.save_npz(npz_path, data.adjacency.tocsr().astype(np.float32))
+
+    n = data.neuron_count
+    # Column order mirrors scripts/build_test_fixture.py (minus type/cell_type, which
+    # ConnectomeData does not carry). 'idx' is contiguous so the loader's idx-sort is a
+    # no-op and row order is preserved exactly.
+    columns: dict[str, np.ndarray] = {
+        "idx": np.arange(n, dtype=np.int64),
+        "bodyid": np.asarray(data.neuron_ids),
+    }
+    if data.superclass is not None:
+        columns["superclass"] = np.asarray(data.superclass)
+    if data.top_nt is not None:
+        columns["top_nt"] = np.asarray(data.top_nt)
+    if data.sign is not None:
+        columns["sign"] = np.asarray(data.sign)
+    pd.DataFrame(columns).to_csv(meta_path, index=False)
+
+    return npz_path, meta_path
