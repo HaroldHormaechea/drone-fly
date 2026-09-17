@@ -6,7 +6,8 @@ subpackages (:mod:`drone_fly.train`, :mod:`drone_fly.evaluate`).
 
 Subcommands
 -----------
-* ``train`` — full PPO training; ``--resume``, ``--device``, ``--timesteps``, ``--adapter``.
+* ``train`` — full PPO training; ``--resume``, ``--device``, ``--timesteps``, ``--n-envs``,
+  ``--adapter``.
 * ``evaluate`` — load a checkpoint and report completion rate + mean time over N episodes.
 * ``smoke-train`` — a few-step CI/correctness run on the pure-numpy backend (no pybullet).
 * ``fetch-connectome`` — documented stub (connectome provisioning is UC-01/owner territory).
@@ -109,6 +110,13 @@ def _add_train_args(p: argparse.ArgumentParser) -> None:
         help="Explicit torch device; omit for the Apple-Silicon-aware auto-policy.",
     )
     p.add_argument("--timesteps", type=int, default=None, help="Override total timesteps.")
+    p.add_argument(
+        "--n-envs",
+        type=int,
+        default=None,
+        help="Override TrainConfig.n_envs (default 1): number of parallel rollout envs. "
+        "Raise it to use more CPU cores / increase throughput. Omit for unchanged behaviour.",
+    )
     p.add_argument(
         "--adapter",
         default="auto",
@@ -273,6 +281,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.command == "train":
+        if args.n_envs is not None and args.n_envs < 1:
+            build_parser().error("--n-envs must be >= 1")
         from drone_fly.train.loop import train
 
         train(
@@ -282,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
             device=args.device,
             resume=args.resume,
             total_timesteps=args.timesteps,
+            n_envs=args.n_envs,
             prune=args.prune,
             prune_k=args.prune_k,
             record=args.record,

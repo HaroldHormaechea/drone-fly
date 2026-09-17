@@ -269,3 +269,67 @@ def test_evaluate_dispatch_with_randomize(tmp_path, monkeypatch, capsys) -> None
     out = capsys.readouterr().out
     assert "completion_rate" in out
     assert "randomized" in out  # the honest-metric mode is disclosed
+
+
+# --------------------------------------------------------------------------- #
+# --n-envs — override TrainConfig.n_envs from the train CLI (train parser only)
+# --------------------------------------------------------------------------- #
+def test_parser_train_n_envs_flag() -> None:
+    """`train --n-envs 4` parses to args.n_envs == 4; omitted stays None (unchanged)."""
+    args = build_parser().parse_args(["train", "--n-envs", "4"])
+    assert args.n_envs == 4
+
+    omitted = build_parser().parse_args(["train"])
+    assert omitted.n_envs is None
+
+
+def test_train_dispatch_forwards_n_envs(monkeypatch) -> None:
+    """`main` threads --n-envs into the train() call (patch the call-time import point)."""
+    captured: dict = {}
+
+    def fake_train(*args, **kwargs):
+        captured.update(kwargs)
+        return None
+
+    # main() does `from drone_fly.train.loop import train` at call time, so the live
+    # attribute to patch is drone_fly.train.loop.train — not drone_fly.cli.train.
+    monkeypatch.setattr("drone_fly.train.loop.train", fake_train)
+
+    rc = main(["train", "--n-envs", "4", "--adapter", "simple", "--device", "cpu"])
+    assert rc == 0
+    assert captured["n_envs"] == 4
+
+
+def test_train_dispatch_n_envs_defaults_none(monkeypatch) -> None:
+    """Omitting --n-envs forwards n_envs=None (byte-identical to the unflagged run)."""
+    captured: dict = {}
+
+    def fake_train(*args, **kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr("drone_fly.train.loop.train", fake_train)
+
+    rc = main(["train", "--adapter", "simple", "--device", "cpu"])
+    assert rc == 0
+    assert captured["n_envs"] is None
+
+
+def test_train_n_envs_zero_rejected() -> None:
+    """The <1 guard rejects --n-envs 0 with a clean argparse error (exit code 2)."""
+    with pytest.raises(SystemExit) as exc:
+        main(["train", "--n-envs", "0", "--adapter", "simple", "--device", "cpu"])
+    assert exc.value.code == 2
+
+
+def test_train_n_envs_negative_rejected() -> None:
+    """The guard also rejects negative env counts."""
+    with pytest.raises(SystemExit) as exc:
+        main(["train", "--n-envs", "-3", "--adapter", "simple", "--device", "cpu"])
+    assert exc.value.code == 2
+
+
+def test_smoke_train_rejects_n_envs() -> None:
+    """--n-envs is train-parser-only: smoke-train does not accept it."""
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["smoke-train", "--n-envs", "2"])

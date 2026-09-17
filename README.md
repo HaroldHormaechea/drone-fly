@@ -184,6 +184,9 @@ uv run drone-fly smoke-train --connectome tests/fixtures
 # fuller matrix.
 uv run drone-fly train --connectome tests/fixtures --timesteps 1000000
 
+# Raise rollout parallelism to use more CPU cores (default is 1 env unless --n-envs is passed).
+uv run drone-fly train --connectome tests/fixtures --timesteps 1000000 --n-envs 4
+
 # Resume an interrupted run from a checkpoint (step counter continues, not restarts).
 uv run drone-fly train --resume artifacts/models/ppo_racer_120000_steps.zip
 
@@ -192,6 +195,11 @@ uv run drone-fly evaluate \
   --checkpoint artifacts/models/ppo_racer_final.zip \
   --vecnormalize artifacts/models/vecnormalize.pkl --episodes 20
 ```
+
+`--n-envs N` overrides `TrainConfig.n_envs` (parallel PPO rollout environments) for a single
+`train` run: raise it to spread rollout collection across more CPU cores / increase throughput.
+It defaults to **1** and omitting the flag is byte-identical to today's behaviour; it is also safe
+with `--resume` (Stable-Baselines3 rebuilds the rollout buffer to match the new env count).
 
 ### Where training output is stored (and how to move it without git)
 
