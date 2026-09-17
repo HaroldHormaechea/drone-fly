@@ -17,6 +17,17 @@ const PROJECTIONS = { xz: [0, 2], xy: [0, 1], yz: [1, 2] };
 const ACTION_COLORS = ["#ffd54f", "#4fc3f7", "#81c784", "#ff8a65"];
 const SUPPORTED_SCHEMA = 1;
 
+// ---- neuron "beat" (AC6) --------------------------------------------------------------
+// Brain-map neurons render small at rest and pulse when active: radius = 2px at rest, ~9px
+// at full activation (r_inst = 2 + 7·act/255). During continuous playback a per-neuron
+// envelope adds a fast attack + exponential release toward rest (real-time, ~0.2s), floored
+// at the instantaneous radius. When paused/scrubbing we draw the instantaneous radius for
+// the current frame (no stale decay) so a frame's size always reflects that frame.
+const BEAT_REST = 2; // px radius at rest
+const BEAT_PEAK = 9; // px radius at full activation
+const BEAT_SPAN = BEAT_PEAK - BEAT_REST; // 7
+const BEAT_RELEASE_TAU = 0.06; // s; exponential release ~= back to rest over ~0.2s
+
 // ---- 3D flight panel constants --------------------------------------------------------
 // World frame (confirmed from env/config.py + adapter): z UP, +x FORWARD, +y = LEFT,
 // −y = RIGHT, right-handed. A right bank (+roll → −y) must read as a right turn on screen,
@@ -65,6 +76,7 @@ const state = {
   speed: 1,
   rowOrder: null, // neuron indices ordered sensory->inter->motor (heatmap rows)
   heatmap: null, // offscreen canvas (n_frames x n_neurons)
+  beat: null, // per-neuron pulse envelope radii (AC6); Float32Array or null
   lastTs: 0,
   acc: 0,
 };
@@ -119,6 +131,7 @@ function loadDocument(doc, name) {
   state.playing = false;
   state.rowOrder = computeRowOrder(doc.meta.roles);
   state.heatmap = buildHeatmap(doc, state.rowOrder);
+  state.beat = new Float32Array(nNeurons).fill(BEAT_REST);
 
   renderMetaBar(doc, name);
   renderPositionSource(doc.meta.positions);
@@ -270,18 +283,47 @@ function drawBrainMap() {
   const act = doc.frames.activations[state.frame];
   const roles = doc.meta.roles;
   const hasPos = doc.meta.positions.has_position;
+  // Beat (AC6): during continuous playback use the per-neuron envelope (fast attack +
+  // real-time release); when paused/scrubbing use the instantaneous radius for this frame.
+  const usingEnvelope = state.playing && state.beat;
   for (let i = 0; i < pts.length; i++) {
     const p = pts[i];
     if (!p) continue;
     const x = pad + (p[0] - b.minX) * sx;
     const y = H - pad - (p[1] - b.minY) * sy; // flip Y so +axis points up
     const brightness = act[i] / 255;
+    const rInst = BEAT_REST + BEAT_SPAN * brightness;
+    const radius = usingEnvelope ? state.beat[i] : rInst;
     const color = hasPos[i] ? (ROLE_COLORS[roles[i]] || FALLBACK_COLOR) : FALLBACK_COLOR;
     const alpha = 0.18 + 0.82 * brightness;
     ctx.beginPath();
     ctx.fillStyle = `rgba(${color[0]},${color[1]},${color[2]},${alpha.toFixed(3)})`;
-    ctx.arc(x, y, 2.6 + 2.4 * brightness, 0, Math.PI * 2);
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
     ctx.fill();
+  }
+}
+
+// Evolve the per-neuron beat envelope by `dtReal` seconds of real (wall-clock) time. Fast
+// attack + exponential release toward rest, floored at each neuron's instantaneous radius so
+// the current frame's activation is never under-drawn (AC6). Called once per rAF while playing.
+function updateBeat(dtReal) {
+  if (!state.beat || !state.data) return;
+  const act = state.data.frames.activations[state.frame];
+  const decay = Math.exp(-Math.max(0, dtReal) / BEAT_RELEASE_TAU);
+  for (let i = 0; i < state.beat.length; i++) {
+    const rInst = BEAT_REST + BEAT_SPAN * (act[i] / 255);
+    const released = BEAT_REST + (state.beat[i] - BEAT_REST) * decay;
+    state.beat[i] = Math.max(released, rInst);
+  }
+}
+
+// Seed the envelope to the current frame's instantaneous radii (called when playback starts)
+// so the first animated frames don't inherit a stale pulse from a previous run.
+function seedBeat() {
+  if (!state.beat || !state.data) return;
+  const act = state.data.frames.activations[state.frame];
+  for (let i = 0; i < state.beat.length; i++) {
+    state.beat[i] = BEAT_REST + BEAT_SPAN * (act[i] / 255);
   }
 }
 
@@ -653,6 +695,7 @@ el("play-btn").addEventListener("click", () => {
     }
     state.lastTs = 0;
     state.acc = 0;
+    seedBeat();
     requestAnimationFrame(tick);
   }
 });
@@ -683,6 +726,7 @@ function tick(ts) {
   const elapsed = (ts - state.lastTs) / 1000; // real seconds
   state.lastTs = ts;
   state.acc += (elapsed * state.speed) / dt; // frames to advance
+  let frameChanged = false;
   if (state.acc >= 1) {
     state.frame += Math.floor(state.acc);
     state.acc -= Math.floor(state.acc);
@@ -691,7 +735,12 @@ function tick(ts) {
       state.playing = false;
       el("play-btn").textContent = "▶ Play";
     }
-    renderAll();
+    frameChanged = true;
   }
+  // Evolve the beat envelope in REAL time every rAF (decoupled from the frame accumulator),
+  // then redraw: a full sync when the frame advanced, else just the animating brain map.
+  updateBeat(elapsed);
+  if (frameChanged) renderAll();
+  else drawBrainMap();
   if (state.playing) requestAnimationFrame(tick);
 }
