@@ -14,4 +14,4 @@ Statuses:
 | 02 | [use-cases/02-harden-connectome-substrate.md](use-cases/02-harden-connectome-substrate.md) | Harden the connectome substrate for RL | done | 2026-09-16 |
 | 03 | [use-cases/03-start-gate-finish-flight.md](use-cases/03-start-gate-finish-flight.md) | Start→gate→finish flight training | done | 2026-09-16 |
 | 04 | [use-cases/04-connectome-subgraph-pruning.md](use-cases/04-connectome-subgraph-pruning.md) | Function-targeted connectome subgraph pruning | done | 2026-09-17 |
-| 05 | [use-cases/05-activation-record-playback.md](use-cases/05-activation-record-playback.md) | Neuron-activation recording + playback visualization | in-progress | 2026-09-17 |
+| 05 | [use-cases/05-activation-record-playback.md](use-cases/05-activation-record-playback.md) | Neuron-activation recording + playback visualization | done | 2026-09-17 |
