@@ -44,7 +44,16 @@ const VIEW_PRESETS = {
   side: { yaw: -Math.PI / 2, pitch: 0 },
   top: { yaw: Math.PI, pitch: FLIGHT_MAX_PITCH },
 };
-const COURSE_COLORS = { start: "#66bb6a", gate: "#ffca28", finish: "#ff5252", drone: "#ffffff" };
+// gate = the amber ring for gates NOT currently targeted (dimmed); gateTarget = the brighter
+// cyan ring for the current target gate (UC-09 AC7). Legacy files (no per-frame target_gate)
+// draw every gate with the uniform `gate` colour — no highlight.
+const COURSE_COLORS = {
+  start: "#66bb6a",
+  gate: "#ffca28",
+  gateTarget: "#4fc3f7",
+  finish: "#ff5252",
+  drone: "#ffffff",
+};
 
 // tiny vec3 helpers (plain arrays, no deps)
 const v3 = {
@@ -388,16 +397,24 @@ function drawActions() {
 function buildFlightScene(doc) {
   const path = (doc.frames.drone_position || []).map((p) => [p[0], p[1], p[2]]);
   const course = doc.meta.course || null;
+  // N gates as an array, with a legacy single-`gate` fallback (UC-09 AC7): new files carry
+  // `course.gates: [...]`; pre-UC-09 files carry a singular `course.gate`.
+  const gates = courseGates(course);
 
-  // Anchor points that must always be inside the display extent.
+  // Anchor points that must always be inside the display extent — every gate centre plus
+  // start and finish, so the floor/finish plane always contain the whole course.
   const anchors = path.slice();
   if (course) {
     if (course.start) anchors.push(course.start);
-    if (course.gate && course.gate.center) anchors.push(course.gate.center);
+    for (const g of gates) {
+      if (g && g.center) anchors.push(g.center);
+    }
     if (course.finish && course.finish.x != null) {
-      // finish anchor: use the gate's lateral centre at the finish x so x-extent reaches it
-      const cy = course.gate && course.gate.center ? course.gate.center[1] : 0;
-      const cz = course.gate && course.gate.center ? course.gate.center[2] : 0;
+      // finish anchor: use the LAST gate's lateral centre at the finish x so x-extent reaches
+      // it (the finish inherits the last gate's y/z — see geometry.current_target).
+      const lastGate = gates.length ? gates[gates.length - 1] : null;
+      const cy = lastGate && lastGate.center ? lastGate.center[1] : 0;
+      const cz = lastGate && lastGate.center ? lastGate.center[2] : 0;
       anchors.push([course.finish.x, cy, cz]);
     }
   }
@@ -423,7 +440,24 @@ function buildFlightScene(doc) {
   const radius =
     0.5 * v3.len([bb.max[0] - bb.min[0], bb.max[1] - bb.min[1], bb.max[2] - bb.min[2]]) || 1;
 
-  return { path, course, bb, center, radius, floorZ, ceilZ };
+  return { path, course, gates, bb, center, radius, floorZ, ceilZ };
+}
+
+// Normalise a meta.course into an array of gate specs (UC-09 AC7). New recordings carry
+// `course.gates: [...]`; pre-UC-09 recordings carry a singular `course.gate`. Returns [] when
+// there is no course (graceful degradation).
+function courseGates(course) {
+  if (!course) return [];
+  return course.gates || (course.gate ? [course.gate] : []);
+}
+
+// The current target-gate index at the playhead frame (UC-09 AC7), or null when the recording
+// has no per-frame `target_gate` track (legacy/single-gate files → uniform, no highlight).
+function targetGateAtPlayhead() {
+  const tg = state.data && state.data.frames ? state.data.frames.target_gate : null;
+  if (!tg || !tg.length) return null;
+  const i = Math.min(state.frame, tg.length - 1);
+  return tg[i];
 }
 
 function bbox3(pts) {
@@ -514,27 +548,48 @@ function createFlight3D(canvas) {
     ctx.restore();
   }
 
+  // Draw a single gate as a ring of radius `rad` in the y–z plane at `center`. When a
+  // target track exists (`highlightActive`), the current target gate is brighter/thicker in
+  // COURSE_COLORS.gateTarget and non-targets are dimmed; without a track every gate uses the
+  // uniform amber `gate` colour (UC-09 AC7).
+  function drawGateRing(center, rad, isTarget, highlightActive) {
+    const [gx, gy, gz] = center;
+    const SEG = 48;
+    let style = COURSE_COLORS.gate;
+    let width = 2;
+    if (highlightActive) {
+      style = isTarget ? COURSE_COLORS.gateTarget : "rgba(255,202,40,0.35)";
+      width = isTarget ? 3 : 1.5;
+    }
+    ctx.strokeStyle = style;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    let started = false;
+    for (let i = 0; i <= SEG; i++) {
+      const a = (i / SEG) * Math.PI * 2;
+      const s = project([gx, gy + rad * Math.cos(a), gz + rad * Math.sin(a)]);
+      if (!s) { started = false; continue; }
+      if (!started) { ctx.moveTo(s.x, s.y); started = true; } else ctx.lineTo(s.x, s.y);
+    }
+    ctx.stroke();
+  }
+
   function drawMarkers() {
     const c = scene.course;
     if (!c) return; // graceful degradation: no course geometry → no markers
     // start (green)
     if (c.start) dot(c.start, COURSE_COLORS.start, 6);
-    // gate: ring of radius=aperture in the y–z plane at gate.center
-    if (c.gate && c.gate.center) {
-      const [gx, gy, gz] = c.gate.center;
-      const rad = c.gate.aperture || 0.5;
-      const SEG = 48;
-      ctx.strokeStyle = COURSE_COLORS.gate;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      let started = false;
-      for (let i = 0; i <= SEG; i++) {
-        const a = (i / SEG) * Math.PI * 2;
-        const s = project([gx, gy + rad * Math.cos(a), gz + rad * Math.sin(a)]);
-        if (!s) { started = false; continue; }
-        if (!started) { ctx.moveTo(s.x, s.y); started = true; } else ctx.lineTo(s.x, s.y);
-      }
-      ctx.stroke();
+    // gates: one yz-plane ring per gate at gate.center, radius = aperture (UC-09 AC7). The
+    // current target gate (from frames.target_gate at the playhead) is drawn brighter/thicker
+    // in a distinct colour; the rest are dimmed. Legacy files with no target_gate track →
+    // every gate uniform (targetIdx === null → no highlight).
+    const gates = scene.gates || [];
+    const targetIdx = targetGateAtPlayhead();
+    for (let gi = 0; gi < gates.length; gi++) {
+      const g = gates[gi];
+      if (!g || !g.center) continue;
+      const isTarget = targetIdx !== null && gi === targetIdx;
+      drawGateRing(g.center, g.aperture || 0.5, isTarget, targetIdx !== null);
     }
     // finish: low-alpha wireframe rectangle in the x = finish_x plane
     if (c.finish && c.finish.x != null) {

@@ -277,13 +277,19 @@ actionable toolchain message if that build/import ever fails.
 
 ### Course geometry & fixed dynamics
 
-The course (start, one gate with a circular aperture, finish line, arena floor/ceiling) and the
-episode timing are documented, tunable constants in `src/drone_fly/env/config.py`. By default the
-course and drone dynamics are **fixed** (the UC-03 behaviour); **per-episode course and dynamics
-randomization are opt-in as of UC-08** — see [Domain randomization (UC-08)](#domain-randomization-uc-08).
-Obstacles beyond floor/ceiling and multi-gate courses remain deferred to a later use case. A fixed
-seed yields a deterministic evaluation for a given checkpoint (bit-exact reproducibility *across a
-resume boundary* is best-effort, as on-policy PPO keeps no replay buffer).
+The course (start, an ordered sequence of **N gates** — each a 3D centre with a spherical
+capture aperture — a finish line, and the arena floor/ceiling) and the episode timing are
+documented, tunable constants in `src/drone_fly/env/config.py`. The default course has **3
+gates** (UC-09); `single_gate_course()` builds the one-gate course that reproduces the earlier
+single-gate behaviour. Gates are passed **in order** by 3D proximity (coming within a gate's
+aperture of its centre), and are strictly x-monotonic so the finish stays reachable. The
+per-episode step budget scales with the gate count (`max_steps + steps_per_gate·(N−1)`), so N=1
+keeps the 400-step floor. By default the course and drone dynamics are **fixed**; **per-episode
+course and dynamics randomization are opt-in as of UC-08** (the course axis now also randomizes
+the number of gates) — see [Domain randomization (UC-08)](#domain-randomization-uc-08). Obstacles
+beyond floor/ceiling remain deferred to a later use case. A fixed seed yields a deterministic
+evaluation for a given checkpoint (bit-exact reproducibility *across a resume boundary* is
+best-effort, as on-policy PPO keeps no replay buffer).
 
 ### CLI stubs
 
@@ -489,13 +495,18 @@ Each recording also carries the **course geometry** under `meta.course`, so the 
 place the 3D floor and the start/gate/finish markers without any external config. It is an
 **additive, back-compatible** block (recordings written before UC-06 simply lack it; the viewer
 degrades gracefully). The values are read from `env/config.py`'s `CourseConfig` — coordinates
-are in the env frame (z up, +x forward, right-handed):
+are in the env frame (z up, +x forward, right-handed). Since UC-09 a course holds **N ordered
+gates**, so the block carries a `gates: [...]` array (one entry per gate, in pass order):
 
 ```json
 "course": {
   "start":  [0.0, 0.0, 1.0],
-  "gate":   { "center": [3.0, 0.0, 1.0], "aperture": 0.6, "plane": "yz" },
-  "finish": { "x": 6.0 },
+  "gates": [
+    { "center": [2.5,  0.0, 1.0], "aperture": 0.6, "plane": "yz" },
+    { "center": [4.0,  0.6, 1.3], "aperture": 0.6, "plane": "yz" },
+    { "center": [5.5, -0.5, 0.9], "aperture": 0.6, "plane": "yz" }
+  ],
+  "finish": { "x": 7.0 },
   "floor_z": 0.0,
   "ceiling_z": 2.5,
   "forward_axis": "x",
@@ -505,7 +516,11 @@ are in the env frame (z up, +x forward, right-handed):
 
 These are semantic anchors only; the viewer derives the displayed floor/finish extent itself
 (a padded bounding box over the trajectory and these anchors) so the floor always contains the
-flown path.
+flown path. The viewer reads `course.gates`, falling back to a legacy singular `course.gate`
+for pre-UC-09 recordings, and draws one ring per gate. When the file also carries a per-frame
+`frames.target_gate` track (UC-09), the **current target gate** is highlighted (brighter, in a
+distinct colour) while the others are dimmed; legacy files without the track render every gate
+uniformly.
 
 ### Anatomical coordinates (real soma positions, tokenless by default)
 
@@ -549,9 +564,11 @@ Pressing **Play** at the end restarts from the beginning.
   a neuron's size reflects *that frame's* activation exactly (no lingering animation).
 - **Activation heatmap** — neurons × time, rows ordered sensory → interneuron → motor.
 - **Flight panel** — the 4 action traces plus a genuinely **3D, orbitable flight scene**:
-  a floor grid, **start** (green) / **gate** (ring, radius = aperture) / **finish** (a
-  translucent wireframe plane) markers, the 3D trajectory (flown bright, remaining dim), and a
-  moving drone marker — all synced to the same playhead.
+  a floor grid, **start** (green) / **gates** (one ring per gate, radius = aperture, with the
+  **current target gate highlighted** and the rest dimmed when the recording carries a
+  per-frame target-gate track) / **finish** (a translucent wireframe plane) markers, the 3D
+  trajectory (flown bright, remaining dim), and a moving drone marker — all synced to the same
+  playhead.
   - **Controls:** **drag to rotate** the camera, **wheel to zoom**.
   - **View presets:** a **front / side / top-down** selector (plain terms, never axis names);
     **top-down is the default**. The camera stays freely orbitable after picking a preset.
@@ -574,10 +591,11 @@ earn reward is to actually fly to wherever the waypoints are. Two independent, *
 axes:
 
 - **Course randomization (`--randomize`)** — the primary anti-memorization axis. Each `reset()`
-  samples a new start / gate (position + aperture) / finish within configured ranges. The
-  observation already carries the *relative* next-waypoint pose and the geometry/reward are already
-  course-parameterized, so no observation- or reward-shape change is needed — only *which* course
-  flows in per episode.
+  samples a new **number of gates** (default range `[1, 10]`, UC-09), a start, and per-gate 3D
+  centre + aperture within configured ranges. The observation already carries the *relative*
+  next-waypoint pose and the geometry/reward are course-parameterized (the per-gate bonus is
+  normalized by gate count, so total gate reward stays comparable as N varies), so no observation-
+  or reward-shape change is needed — only *which* course flows in per episode.
 - **Dynamics randomization (`--randomize-dynamics`)** — a secondary robustness / sim-to-sim axis.
   Each `reset()` samples per-episode mass, drag, thrust response, body-rate limit, and control
   latency. Mass and thrust are **independent** knobs (`thrust_acc = throttle · max_thrust / mass`),
@@ -601,13 +619,16 @@ uv run drone-fly evaluate --checkpoint artifacts/models/ppo_racer_final.zip --ra
 dynamics defaults. Too narrow ⇒ still near-memorization; too wide ⇒ may be untrainable on a laptop
 budget. The defaults meaningfully vary the course while staying solvable.
 
-**Every sampled course is flyable (reject-then-clamp).** A pure sampler
-(`src/drone_fly/env/randomization.py`) draws off the env's seeded RNG and a solvability guard
-(`is_course_solvable`) enforces: the gate sits between start and finish with minimum gaps, the
-aperture is at least `aperture_min`, all waypoint heights sit *strictly* inside the arena's
-vertical safety corridor (`floor_z + z_margin`, `ceiling_z − z_margin`), and lateral positions stay
-within bounds. Degenerate draws are **rejected and resampled** up to `max_resample_attempts`, then
-**clamped to the base course** (guaranteed solvable) — so sampling is deterministic and can never
+**Every sampled course is flyable (reject-then-fallback).** A pure sampler
+(`src/drone_fly/env/randomization.py`) draws off the env's seeded RNG, walking x forward from the
+start in incremental deltas (so gate ordering and spacing are structural), and a solvability guard
+(`is_course_solvable`) enforces for **every** gate: apertures at least `aperture_min`, strictly
+increasing x with adjacent gates at least `min_gate_spacing` apart in 3D, all gate/start heights
+*strictly* inside the arena's vertical safety corridor (`floor_z + z_margin`, `ceiling_z − z_margin`),
+lateral positions within bounds, the first gate a minimum gap ahead of the start, the finish beyond
+the last gate, and the start outside gate 0's capture sphere. Degenerate draws are **rejected and
+resampled** up to `max_resample_attempts`, then replaced by a deterministic, **zero-RNG fallback
+course** that is solvable-by-construction for every N — so sampling is deterministic and can never
 loop forever.
 
 **Seeded and reproducible.** A given seed reproduces the same course *and* dynamics stream (the draw

@@ -45,9 +45,7 @@ def _forward_crossing_fraction(prev_x: float, curr_x: float, plane_x: float) -> 
     return None
 
 
-def _segment_point_distance(
-    prev_pos: np.ndarray, curr_pos: np.ndarray, point: np.ndarray
-) -> float:
+def _segment_point_distance(prev_pos: np.ndarray, curr_pos: np.ndarray, point: np.ndarray) -> float:
     """Closest distance from ``point`` to the segment ``prev_pos→curr_pos`` (3D).
 
     Degrades to the point-to-``prev_pos`` distance when the segment has ~zero length (a
