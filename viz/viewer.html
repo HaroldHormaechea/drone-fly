@@ -28,6 +28,7 @@
       <label class="speed">
         speed
         <select id="speed-select">
+          <option value="0.25">0.25×</option>
           <option value="0.5">0.5×</option>
           <option value="1" selected>1×</option>
           <option value="2">2×</option>
@@ -68,10 +69,29 @@
       </section>
 
       <section class="panel">
-        <div class="panel-head"><h2>Flight <span class="hint">(actions &amp; path)</span></h2></div>
+        <div class="panel-head">
+          <h2>Flight <span class="hint">(actions &amp; 3D path)</span></h2>
+          <div class="panel-tools">
+            <label class="axes">
+              view
+              <select id="view-select">
+                <option value="front">front</option>
+                <option value="side">side</option>
+                <option value="top" selected>top-down</option>
+              </select>
+            </label>
+          </div>
+        </div>
         <canvas id="actions-canvas" width="440" height="230"></canvas>
-        <canvas id="path-canvas" width="440" height="200"></canvas>
+        <canvas id="flight-canvas" width="440" height="300"></canvas>
         <div class="legend" id="flight-legend"></div>
+        <div class="legend" id="flight-3d-legend">
+          drag to rotate · wheel to zoom ·
+          <span class="dot" style="background:#66bb6a"></span> start
+          <span class="dot" style="background:#ffca28"></span> gate
+          <span class="dot" style="background:#ff5252"></span> finish
+          <span class="dot" style="background:#ffffff"></span> drone
+        </div>
       </section>
     </div>
 
