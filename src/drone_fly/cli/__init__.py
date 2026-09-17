@@ -38,6 +38,27 @@ def _add_prune_args(p: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_record_args(p: argparse.ArgumentParser) -> None:
+    """Add the opt-in UC-05 activation-recording flags (shared by evaluate / train)."""
+    p.add_argument(
+        "--record",
+        action="store_true",
+        help="Record per-frame neuron activations + actions + drone path for playback in "
+        "viz/viewer.html (UC-05). Off by default (eval/train numerics unchanged).",
+    )
+    p.add_argument(
+        "--record-every",
+        type=int,
+        default=1,
+        help="Record every Nth episode (default 1 = every episode).",
+    )
+    p.add_argument(
+        "--record-dir",
+        default=None,
+        help="Directory for episode_<n>.json playback files (default artifacts/activations/).",
+    )
+
+
 def _add_train_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--resume", default=None, help="Checkpoint .zip to continue from.")
     p.add_argument(
@@ -69,6 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_p = sub.add_parser("train", help="Train the PPO racing policy.")
     _add_train_args(train_p)
     _add_prune_args(train_p)
+    _add_record_args(train_p)
 
     smoke_p = sub.add_parser("smoke-train", help="A few-step CI/correctness run (numpy backend).")
     smoke_p.add_argument("--timesteps", type=int, default=None, help="Override smoke timesteps.")
@@ -82,6 +104,14 @@ def build_parser() -> argparse.ArgumentParser:
     eval_p.add_argument("--seed", type=int, default=0, help="Evaluation seed.")
     eval_p.add_argument("--device", default=None, choices=["cpu", "cuda", "mps"])
     eval_p.add_argument("--adapter", default="auto", choices=["auto", "simple", "pybullet"])
+    eval_p.add_argument(
+        "--connectome",
+        default=None,
+        help="Connectome dir/.npz to re-load for --record (MUST match the one used to train "
+        "this checkpoint; the checkpoint does not retain neuron_ids/superclass/positions).",
+    )
+    _add_prune_args(eval_p)
+    _add_record_args(eval_p)
 
     prune_p = sub.add_parser(
         "prune",
@@ -129,6 +159,9 @@ def main(argv: list[str] | None = None) -> int:
             total_timesteps=args.timesteps,
             prune=args.prune,
             prune_k=args.prune_k,
+            record=args.record,
+            record_every=args.record_every,
+            record_dir=args.record_dir,
         )
         return 0
 
@@ -153,6 +186,12 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
             adapter=args.adapter,
             device=args.device,
+            record=args.record,
+            record_every=args.record_every,
+            record_dir=args.record_dir,
+            connectome_path=args.connectome,
+            prune=args.prune,
+            prune_k=args.prune_k,
         )
         print(metrics.summary())
         return 0

@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>drone-fly · activation playback</title>
+  <link rel="stylesheet" href="viewer.css" />
+</head>
+<body>
+  <header>
+    <h1>drone-fly · neuron-activation playback</h1>
+    <p class="sub">
+      Open a recorded episode file (<code>artifacts/activations/episode_&lt;n&gt;.json</code>,
+      or its <code>.json.gz</code>). No server needed — the file is read locally in your browser.
+    </p>
+    <div class="loader">
+      <input type="file" id="file-input" accept=".json,.gz,application/json,application/gzip" />
+      <span id="load-status" class="status">no file loaded</span>
+    </div>
+    <div id="meta-bar" class="meta-bar hidden"></div>
+  </header>
+
+  <main id="app" class="hidden">
+    <section class="controls">
+      <button id="play-btn" type="button">▶ Play</button>
+      <input type="range" id="scrubber" min="0" max="0" value="0" step="1" />
+      <span id="frame-label" class="frame-label">frame 0 / 0</span>
+      <label class="speed">
+        speed
+        <select id="speed-select">
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+          <option value="4">4×</option>
+        </select>
+      </label>
+    </section>
+
+    <div class="panels">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Anatomical brain map <span class="hint">(top-down)</span></h2>
+          <div class="panel-tools">
+            <span id="pos-source" class="pos-source"></span>
+            <label class="axes">
+              plane
+              <select id="axis-select">
+                <option value="xz" selected>x–z (dorsal)</option>
+                <option value="xy">x–y</option>
+                <option value="yz">y–z</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <canvas id="brain-canvas" width="440" height="440"></canvas>
+        <div class="legend">
+          <span class="dot sensory"></span> sensory
+          <span class="dot interneuron"></span> interneuron
+          <span class="dot motor"></span> motor
+          <span class="dot fallback"></span> fallback-placed (no soma)
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>Activation heatmap <span class="hint">(neurons × time)</span></h2></div>
+        <canvas id="heatmap-canvas" width="440" height="440"></canvas>
+        <div class="legend">rows ordered sensory → interneuron → motor; brighter = more active</div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>Flight <span class="hint">(actions &amp; path)</span></h2></div>
+        <canvas id="actions-canvas" width="440" height="230"></canvas>
+        <canvas id="path-canvas" width="440" height="200"></canvas>
+        <div class="legend" id="flight-legend"></div>
+      </section>
+    </div>
+
+    <section id="outcome" class="outcome"></section>
+  </main>
+
+  <footer>
+    <p>
+      Positions labelled <em>computed</em> are a deterministic spectral layout, <strong>not</strong>
+      anatomy. Gzipped files are decompressed in-browser via <code>DecompressionStream</code>.
+    </p>
+  </footer>
+
+  <script src="viewer.js"></script>
+</body>
+</html>

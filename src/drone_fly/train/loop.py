@@ -107,6 +107,9 @@ def train(
     total_timesteps: int | None = None,
     prune: bool = False,
     prune_k: int = DEFAULT_PRUNE_K,
+    record: bool = False,
+    record_every: int = 1,
+    record_dir: str | None = None,
 ):
     """Run (or resume) PPO training; return the trained model.
 
@@ -225,10 +228,31 @@ def train(
         save_vecnormalize=True,
     )
 
+    callbacks: list = [checkpoint_cb]
+    if record:
+        # UC-05 best-effort training-time capture (documented; eval is the tested primary).
+        # Records env-0's every-Nth episode during on-policy rollout collection. Guarded so
+        # a recording error can never crash a training run.
+        from drone_fly.record.recorder import ActivationRecorder
+        from drone_fly.train.record_callback import RecordingCallback
+
+        recorder = ActivationRecorder(
+            connectome,
+            record_dir or "artifacts/activations",
+            backend=venv.get_attr("backend")[0],
+            checkpoint="(training)",
+            dt=(env_config or EnvConfig()).episode.dt,
+        )
+        callbacks.append(RecordingCallback(recorder, record_every=record_every, seed=cfg.seed))
+        logger.info(
+            "Training-time activation recording enabled (every %d episodes, best-effort).",
+            record_every,
+        )
+
     model.learn(
         total_timesteps=steps,
         reset_num_timesteps=not resuming,
-        callback=checkpoint_cb,
+        callback=callbacks if len(callbacks) > 1 else checkpoint_cb,
         progress_bar=False,
     )
 

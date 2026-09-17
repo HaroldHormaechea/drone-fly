@@ -379,23 +379,98 @@ under `tests/fixtures/`, measured by the tests):
 >
 > The prune step logs the exact input→pruned neuron and edge counts.
 
+## Activation recording & playback (UC-05)
+
+Make the connectome controller *observable*: record what the fly "brain" is doing while it
+flies, then play it back in a dependency-free browser viewer. Recording is **opt-in and off
+by default** — with it off, train/eval numerics are byte-identical to UC-01…UC-04.
+
+### Recording (flags)
+
+Recording attaches to the **evaluate** path (the tested, deterministic primary) and, best-effort,
+to **train** (capture the brain mid-learning). It captures, for every Nth episode, the per-frame
+neuron-activation vector over the pruned graph, the 4 control channels (throttle/roll/pitch/yaw),
+the drone trajectory, and the episode outcome:
+
+```sh
+# Record every 5th eval episode. IMPORTANT: pass the SAME --connectome/--prune/--prune-k you
+# trained with — the checkpoint does NOT store neuron_ids / superclass / soma positions, so the
+# recorder re-loads the connectome and hard-asserts len(neuron_ids) == the actor's neuron count.
+uv run drone-fly evaluate --checkpoint artifacts/models/ppo_racer_final.zip \
+  --vecnormalize artifacts/models/vecnormalize.pkl \
+  --connectome data/pruned --record --record-every 5
+
+# Training-time capture (documented best-effort; eval is the tested path):
+uv run drone-fly train --connectome data/full --prune --record --record-every 50
+```
+
+Flags: `--record` (enable), `--record-every N` (cadence, default 1), `--record-dir <dir>`
+(default `artifacts/activations/`). Each recorded episode is written to its own self-contained
+file `artifacts/activations/episode_<n>.json`. Activations are `tanh`-bounded to `[-1, 1]` and
+stored **quantised to `uint8`** (with `activation_scale`/`activation_offset` in the metadata for
+exact dequantisation) — roughly 4× smaller than float32; the recorder logs each file's path and
+size. Best paired with the **UC-04 pruned slice** (a few thousand neurons is legible; the full
+161k is not).
+
+### Anatomical coordinates (real soma positions, tokenless by default)
+
+The spatial brain map draws each neuron at its **real soma position**. These come from the
+`somaLocation` column of the MaleCNS `connectome_data_prep` metadata — the *same value*
+neuPrint's `fetch_neurons().somaLocation` returns, mirrored on public GitHub under CC-BY — so
+the committed fixture demo is anatomical **offline, with no token**. The coordinate source order:
+
+1. **Committed / local anatomical CSV** (tokenless, the default): a fixture sidecar
+   `tests/fixtures/mcns_fixture_soma.csv` (produced by `scripts/fetch_soma_positions.py`), or a
+   CSV named by `DRONE_FLY_SOMA_CSV`.
+2. **neuPrint** via `neuprint-python` + `NEUPRINT_TOKEN` — a dev-time, networked step, only
+   needed for arbitrary slices whose bodyids are not in a committed sidecar.
+3. **Deterministic spectral layout** — a seed-free, sign-canonicalised spectral embedding of the
+   pruned graph, used when no anatomy is reachable and **clearly labelled "computed (NOT
+   anatomical)"** in the file and the viewer. Neurons missing a soma are flagged
+   (`has_position=False`) and fallback-placed — never dropped, never fabricated.
+
+Positions are stored full-3D plus a top-down projection (default dorsal **x–z** plane; the
+viewer's axis selector switches planes). The 8 nm voxel scale is assumed and irrelevant to a
+normalised top-down map.
+
+Provision the fixture's real coordinates (dev-time, needs network — **tested boundary**: this
+script is run and its 300/300 coverage asserted; it is not run in CI):
+
+```sh
+uv run python scripts/fetch_soma_positions.py   # writes tests/fixtures/mcns_fixture_soma.csv
+```
+
+### Viewer (`viz/`, no build step)
+
+Open `viz/viewer.html` directly in a browser (no server, no npm) and pick a recorded file with
+the file picker (works from `file://`). Three panels share one play/pause + scrubber timeline:
+
+- **Anatomical brain map** — neurons as dots at their projected soma positions, brightness =
+  activation, role-coloured, with an axis selector and an anatomical-vs-computed label.
+- **Activation heatmap** — neurons × time, rows ordered sensory → interneuron → motor.
+- **Flight panel** — the 4 action traces and the drone path, synced to the same playhead.
+
+Gzipped recordings (`.json.gz`) are decompressed in-browser via `DecompressionStream`.
+
 ## Project layout
 
 ```
 src/drone_fly/
   connectome/   load cached MaleCNS connectivity from disk (offline loader.py) + sensory→motor pruning (prune.py)
-  controller/   connectome-seeded PyTorch policy + encode/decode roundtrip
+  controller/   connectome-seeded PyTorch policy + encode/decode roundtrip (opt-in activation sink)
   adapter/      sim-agnostic drone backends (numpy SimpleDroneAdapter + guarded PyBulletAdapter)
   env/          Gymnasium start→gate→finish racing env (geometry, reward, RaceEnv)
+  record/       UC-05 activation recording: recorder, rollout driver, soma-coordinate provisioning
   train/        PPO training loop, checkpoint/resume, device auto-detect
   evaluate/     run a trained agent, report completion rate + mean time
   cli/          command-line entry points (train, evaluate, smoke-train, prune)
-scripts/        dev-time utilities (build_test_fixture.py — regenerates the fixture)
+viz/            dependency-free static activation-playback viewer (HTML/JS/CSS, no build step)
+scripts/        dev-time utilities (build_test_fixture.py, fetch_soma_positions.py)
 tests/          pytest suite (import + connectome-plumbing tests)
 tests/fixtures/ committed small real-MaleCNS subgraph used by the offline tests
 docs/adr/       architecture decision records
 data/           runtime connectome cache (gitignored contents)
-artifacts/      model checkpoints, TensorBoard logs, eval outputs (gitignored contents)
+artifacts/      model checkpoints, TensorBoard logs, eval outputs, activation recordings (gitignored contents)
 ```
 
 See `PROJECT_BRIEF.md` for the full project definition and the reasoning behind the scope
@@ -404,9 +479,12 @@ decisions.
 ## Known limitations
 
 - Early prototype: UC-01 (connectome load), UC-02 (trainable substrate), UC-03 (flight task —
-  env, PPO train/resume, evaluation, bootstrap), and UC-04 (opt-in sensory→motor subcircuit
-  pruning) are implemented; later stages (domain randomization, obstacles, multi-gate courses)
-  are deferred.
+  env, PPO train/resume, evaluation, bootstrap), UC-04 (opt-in sensory→motor subcircuit
+  pruning), and UC-05 (opt-in activation recording + static playback viewer) are implemented;
+  later stages (domain randomization, obstacles, multi-gate courses) are deferred.
+- The activation viewer is a static, top-down playback tool (spatial map + heatmap + flight),
+  not a live-streaming server or a 3D fly-through; training-time recording is best-effort
+  (evaluation recording is the tested, deterministic path).
 - Mastery (≥ 80% completion) is a dev-time goal on real PyBullet physics, verified on the owner's
   hardware — **not** something CI checks (CI runs only a hermetic numpy-backend smoke-train).
 - Does not integrate with the Liftoff game (no public API); an open sim stands in for it. This

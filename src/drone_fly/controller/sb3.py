@@ -60,3 +60,35 @@ class ConnectomeFeaturesExtractor(BaseFeaturesExtractor):
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
         """Return the connectome actor's ``(B, ACTION_DIM)`` feature output."""
         return self.actor(observations)
+
+    # -- UC-05 activation-recording passthrough -----------------------------------------
+    # The recorder toggles capture via the actor's ``sink`` (see
+    # :class:`~drone_fly.controller.actor.ConnectomeActorNetwork`). These pin the hook to
+    # the single feature-extraction (pi/actor) path, so capture happens exactly once per
+    # env step — SB3 calls the shared features extractor once to build the policy latent,
+    # not separately for the value head — avoiding any double-capture of the same frame.
+    @property
+    def sink(self):
+        """The actor's activation sink (``None`` when recording is off)."""
+        return self.actor.sink
+
+    @sink.setter
+    def sink(self, fn) -> None:
+        self.actor.sink = fn
+
+
+def actor_from_model(model) -> ConnectomeActorNetwork:
+    """Return the :class:`ConnectomeActorNetwork` inside a loaded SB3 model.
+
+    The connectome substrate lives at ``model.policy.features_extractor.actor``. Raises a
+    clear error if the model was not built with :class:`ConnectomeFeaturesExtractor` (so a
+    recording request against an incompatible checkpoint fails loudly, not cryptically).
+    """
+    extractor = getattr(getattr(model, "policy", None), "features_extractor", None)
+    actor = getattr(extractor, "actor", None)
+    if not isinstance(actor, ConnectomeActorNetwork):
+        raise TypeError(
+            "The loaded model's features extractor is not a ConnectomeFeaturesExtractor; "
+            "activation recording requires a connectome-seeded policy (UC-02/03)."
+        )
+    return actor

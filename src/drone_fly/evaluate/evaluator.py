@@ -71,16 +71,35 @@ def evaluate_checkpoint(
     env_config: EnvConfig | None = None,
     train_config: TrainConfig | None = None,
     device: str | None = None,
+    record: bool = False,
+    record_every: int = 1,
+    record_dir: str | None = None,
+    connectome_path: str | None = None,
+    prune: bool = False,
+    prune_k: int | None = None,
 ) -> EvalMetrics:
-    """Evaluate ``checkpoint`` over N deterministic episodes; return :class:`EvalMetrics`."""
+    """Evaluate ``checkpoint`` over N deterministic episodes; return :class:`EvalMetrics`.
+
+    Recording (UC-05, opt-in, default off → behaviour byte-identical to prior UCs)
+    ------------------------------------------------------------------------------
+    When ``record`` is set, every ``record_every``-th episode's per-frame neuron
+    activations, actions, and drone path are written to ``record_dir`` (default
+    ``artifacts/activations/``) as a self-contained playback file (see
+    :class:`~drone_fly.record.recorder.ActivationRecorder`). The recorder needs the
+    ``neuron_ids`` / ``superclass`` / soma positions the checkpoint does **not** carry, so
+    it re-loads the connectome from ``connectome_path`` (applying ``--prune``/``--prune-k``
+    exactly as at training time) and a hard alignment assertion
+    (``len(neuron_ids) == actor.n_neurons``) guards against a checkpoint/connectome mismatch.
+    """
     from stable_baselines3 import PPO
 
     tcfg = train_config or TrainConfig()
     n = episodes if episodes is not None else tcfg.eval_episodes
     resolved_device = resolve_device(device)
+    ecfg = env_config or EnvConfig()
 
     venv = build_vec_env(
-        config=env_config,
+        config=ecfg,
         adapter=adapter,
         n_envs=1,
         seed=seed,
@@ -91,23 +110,61 @@ def evaluate_checkpoint(
     model = PPO.load(checkpoint, env=venv, device=resolved_device)
     backend = venv.get_attr("backend")[0]
 
+    recorder = _build_recorder(
+        model=model,
+        record=record,
+        record_dir=record_dir,
+        backend=backend,
+        checkpoint=checkpoint,
+        dt=ecfg.episode.dt,
+        connectome_path=connectome_path,
+        prune=prune,
+        prune_k=prune_k,
+    )
+    actor = None
+    if recorder is not None:
+        from drone_fly.controller.sb3 import actor_from_model
+
+        actor = actor_from_model(model)
+
     completed_times: list[float] = []
     completed_count = 0
 
-    for _ep in range(n):
+    for ep in range(n):
+        capturing = recorder is not None and (ep % max(record_every, 1)) == 0
+        if actor is not None:
+            actor.sink = recorder.sink if capturing else None
+        if capturing:
+            recorder.start_episode(ep, seed)
+
         obs = venv.reset()
         done = False
         info: dict = {}
+        total_reward = 0.0
+        steps = 0
         while not done:
             action, _ = model.predict(obs, deterministic=True)
-            obs, _reward, dones, infos = venv.step(action)
+            obs, reward, dones, infos = venv.step(action)
             done = bool(dones[0])
             info = infos[0]
+            total_reward += float(reward[0])
+            steps += 1
+            if capturing:
+                recorder.capture_frame(action[0], info["position"])
         if info.get("completed"):
             completed_count += 1
             ct = info.get("completion_time")
             if ct is not None:
                 completed_times.append(float(ct))
+        if capturing:
+            recorder.finish_episode(
+                completed=bool(info.get("completed", False)),
+                completion_time=info.get("completion_time"),
+                total_reward=total_reward,
+                steps=steps,
+            )
+    if actor is not None:
+        actor.sink = None
 
     completion_rate = completed_count / n if n else 0.0
     mean_time = float(np.mean(completed_times)) if completed_times else None
@@ -124,3 +181,58 @@ def evaluate_checkpoint(
     )
     logger.info("Evaluation: %s", metrics.summary())
     return metrics
+
+
+def _build_recorder(
+    *,
+    model,
+    record: bool,
+    record_dir: str | None,
+    backend: str,
+    checkpoint: str,
+    dt: float,
+    connectome_path: str | None,
+    prune: bool,
+    prune_k: int | None,
+):
+    """Construct an :class:`ActivationRecorder` for a recording eval run, or ``None``.
+
+    Re-loads the connectome the checkpoint was trained on (the checkpoint does not retain
+    ``neuron_ids`` / ``superclass`` / adjacency), applies the same pruning, and enforces the
+    hard alignment assertion against the model's actor before any frame is captured.
+    """
+    if not record:
+        return None
+
+    from drone_fly.connectome import load_connectome
+    from drone_fly.connectome.prune import DEFAULT_PRUNE_K, prune_to_subcircuit
+    from drone_fly.controller.sb3 import actor_from_model
+    from drone_fly.record.recorder import DEFAULT_RECORD_DIR, ActivationRecorder
+
+    connectome = load_connectome(connectome_path)
+    if prune:
+        connectome = prune_to_subcircuit(
+            connectome, k=prune_k if prune_k is not None else DEFAULT_PRUNE_K
+        )
+
+    actor = actor_from_model(model)
+    if connectome.neuron_count != actor.n_neurons:
+        raise ValueError(
+            f"Recording alignment failure: the re-loaded connectome has "
+            f"{connectome.neuron_count} neurons but the checkpoint's actor has "
+            f"{actor.n_neurons}. Pass the SAME --connectome/--prune/--prune-k used to train "
+            f"this checkpoint so the recorded activations align to neuron_ids."
+        )
+
+    logger.info(
+        "Recording enabled: %d-neuron connectome '%s' aligned to the checkpoint actor.",
+        connectome.neuron_count,
+        getattr(connectome, "source", "?"),
+    )
+    return ActivationRecorder(
+        connectome,
+        record_dir or DEFAULT_RECORD_DIR,
+        backend=str(backend),
+        checkpoint=checkpoint,
+        dt=dt,
+    )

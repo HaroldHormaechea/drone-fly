@@ -139,6 +139,9 @@ class RaceEnv(gym.Env):
             "collided": bool(state.collided),
             "completed": bool(completed),
             "steps": self._step_count,
+            # World-frame drone position this step (UC-05 recording draws the flight path).
+            # Additive key; existing tests assert membership, so this stays back-compatible.
+            "position": state.position.copy(),
         }
         if terminated or truncated:
             info["completion_time"] = (

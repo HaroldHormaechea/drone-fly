@@ -1,0 +1,101 @@
+"""Best-effort training-time activation recording callback (UC-05, AC4).
+
+Recording during **evaluation** (see :mod:`drone_fly.evaluate.evaluator`) is the tested,
+deterministic primary path. This callback adds the *documented best-effort* training path:
+it captures env-0's every-Nth episode during PPO's on-policy rollout collection, so you can
+watch the brain change as it learns. It is intentionally defensive — any capture error
+disables recording and logs, but never crashes training — because training is
+mid-optimisation with sampled (non-deterministic) actions and normalised rewards, so its
+playbacks are illustrative rather than reproducible.
+
+Only env 0 is recorded. The connectome actor's ``sink`` (wired at training start) stashes
+the batched ``(n_envs, N)`` post-propagation state each forward; on each ``_on_step`` we pull
+env-0's row and pair it with env-0's action / ``info["position"]``. Episode boundaries are
+detected from ``dones[0]``; the recorded ``total_reward`` is the sum of the *normalised*
+per-step rewards seen during training (documented caveat).
+"""
+
+from __future__ import annotations
+
+import logging
+
+from stable_baselines3.common.callbacks import BaseCallback
+
+from drone_fly.controller.sb3 import actor_from_model
+from drone_fly.record.recorder import ActivationRecorder
+
+logger = logging.getLogger(__name__)
+
+
+class RecordingCallback(BaseCallback):
+    """Record env-0's every-``record_every``-th training episode into ``recorder``."""
+
+    def __init__(self, recorder: ActivationRecorder, *, record_every: int = 1, seed: int = 0):
+        super().__init__()
+        self.recorder = recorder
+        self.record_every = max(int(record_every), 1)
+        self.seed = int(seed)
+        self._actor = None
+        self._episode = 0
+        self._capturing = False
+        self._total_reward = 0.0
+        self._steps = 0
+        self._enabled = True
+
+    def _begin_episode(self) -> None:
+        self._capturing = (self._episode % self.record_every) == 0
+        self._total_reward = 0.0
+        self._steps = 0
+        if self._capturing:
+            self.recorder.start_episode(self._episode, self.seed)
+            if self._actor is not None:
+                self._actor.sink = self.recorder.sink
+        elif self._actor is not None:
+            self._actor.sink = None
+
+    def _on_training_start(self) -> None:
+        try:
+            self._actor = actor_from_model(self.model)
+        except TypeError as exc:  # non-connectome policy — nothing to record
+            logger.warning("Recording disabled: %s", exc)
+            self._enabled = False
+            return
+        self._episode = 0
+        self._begin_episode()
+
+    def _on_step(self) -> bool:
+        if not self._enabled:
+            return True
+        try:
+            infos = self.locals.get("infos") or []
+            dones = self.locals.get("dones")
+            actions = self.locals.get("actions")
+            rewards = self.locals.get("rewards")
+            if not infos or dones is None or actions is None:
+                return True
+            info0 = infos[0]
+            if self._capturing and "position" in info0:
+                self.recorder.capture_frame(actions[0], info0["position"])
+                self._steps += 1
+                if rewards is not None:
+                    self._total_reward += float(rewards[0])
+            if bool(dones[0]):
+                if self._capturing:
+                    self.recorder.finish_episode(
+                        completed=bool(info0.get("completed", False)),
+                        completion_time=info0.get("completion_time"),
+                        total_reward=self._total_reward,
+                        steps=self._steps,
+                    )
+                self._episode += 1
+                self._begin_episode()
+        except Exception as exc:  # never crash training over a recording glitch
+            logger.warning("Disabling training-time recording after error: %s", exc)
+            self._enabled = False
+            if self._actor is not None:
+                self._actor.sink = None
+        return True
+
+    def _on_training_end(self) -> None:
+        if self._actor is not None:
+            self._actor.sink = None
