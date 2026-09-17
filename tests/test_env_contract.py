@@ -242,9 +242,7 @@ def test_truncates_on_timeout() -> None:
 # --- UC-09 AC1/AC5: the effective step budget scales with the gate count -------------
 def _n_gate_course(n: int) -> CourseConfig:
     """Build an N-gate course (geometry need only be well-formed for the budget check)."""
-    gates = tuple(
-        GateSpec(center=(2.0 + 1.5 * i, 0.0, 1.0), aperture=0.6) for i in range(n)
-    )
+    gates = tuple(GateSpec(center=(2.0 + 1.5 * i, 0.0, 1.0), aperture=0.6) for i in range(n))
     return CourseConfig(gates=gates, finish_x=2.0 + 1.5 * n + 1.0)
 
 

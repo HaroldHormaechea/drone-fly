@@ -368,12 +368,8 @@ def test_set_course_is_per_episode(connectome: ConnectomeData, tmp_path: Path) -
     )
     n = connectome.neuron_count
     courses = [
-        CourseConfig(
-            start_position=(0.1, 0.0, 1.0), gates=(GateSpec(center=(2.5, 0.0, 1.0)),)
-        ),
-        CourseConfig(
-            start_position=(-0.2, 0.4, 1.3), gates=(GateSpec(center=(3.8, 0.0, 1.0)),)
-        ),
+        CourseConfig(start_position=(0.1, 0.0, 1.0), gates=(GateSpec(center=(2.5, 0.0, 1.0)),)),
+        CourseConfig(start_position=(-0.2, 0.4, 1.3), gates=(GateSpec(center=(3.8, 0.0, 1.0)),)),
     ]
     written = []
     for ep, course in enumerate(courses):

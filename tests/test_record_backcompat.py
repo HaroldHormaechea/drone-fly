@@ -168,9 +168,7 @@ def test_recording_without_course_is_backcompatible(
     assert len(doc["frames"]["drone_position"]) == doc["meta"]["n_frames"]
 
 
-def test_n_gate_recording_stays_schema_valid(
-    connectome: ConnectomeData, tmp_path: Path
-) -> None:
+def test_n_gate_recording_stays_schema_valid(connectome: ConnectomeData, tmp_path: Path) -> None:
     """A UC-09 N-gate recording (course + per-frame target_gate) is a valid viewer file.
 
     The additive UC-09 changes — the ``meta.course.gates[]`` array and the optional
