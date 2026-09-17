@@ -161,7 +161,9 @@ def evaluate_checkpoint(
             total_reward += float(reward[0])
             steps += 1
             if capturing:
-                recorder.capture_frame(action[0], info["position"])
+                recorder.capture_frame(
+                    action[0], info["position"], target_gate=info.get("target_gate")
+                )
         if info.get("completed"):
             completed_count += 1
             ct = info.get("completion_time")

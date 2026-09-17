@@ -141,6 +141,11 @@ class ActivationRecorder:
         self._activations: list[list[int]] = []
         self._actions: list[list[float]] = []
         self._positions: list[list[float]] = []
+        # Per-frame current-target-gate index (UC-09). Populated only when the caller passes
+        # ``target_gate`` to :meth:`capture_frame`; serialised as ``frames.target_gate`` when
+        # present, omitted entirely otherwise (keeps older single-gate files schema-valid).
+        self._target_gates: list[int] = []
+        self._has_target_gates = False
 
     def start_episode(self, episode_index: int, seed: int | None = None) -> None:
         """Begin a fresh episode buffer (discarding any half-captured previous episode)."""
@@ -167,12 +172,22 @@ class ActivationRecorder:
         """
         self._pending = activation
 
-    def capture_frame(self, action: np.ndarray, drone_position: np.ndarray) -> None:
+    def capture_frame(
+        self,
+        action: np.ndarray,
+        drone_position: np.ndarray,
+        target_gate: int | None = None,
+    ) -> None:
         """Commit one frame: the pending activation + this step's action and drone position.
 
         Raises if no activation was captured since the last frame (the actor ``sink`` was not
         wired, or forward never ran) or if the activation width disagrees with ``n_neurons``
         (the alignment guard — a checkpoint/connectome mismatch).
+
+        ``target_gate`` (UC-09): the current target-gate index for this frame (``info``'s
+        ``target_gate``). When supplied it is recorded per-frame and serialised as
+        ``frames.target_gate`` so the viewer can highlight the gate being chased. Omit it
+        (``None``) for single-gate / legacy recordings — the key is then left out entirely.
         """
         if self._episode_index is None:
             raise RuntimeError("capture_frame() called before start_episode().")
@@ -195,6 +210,9 @@ class ActivationRecorder:
         self._actions.append([float(v) for v in action_vec[:ACTION_DIM]])
         pos_vec = np.asarray(drone_position, dtype=np.float64).reshape(-1)
         self._positions.append([float(v) for v in pos_vec[:3]])
+        if target_gate is not None:
+            self._has_target_gates = True
+            self._target_gates.append(int(target_gate))
         self._pending = None
 
     @property
@@ -236,14 +254,21 @@ class ActivationRecorder:
             # the viewer owns display sizing. Absent when no course is supplied.
             meta["course"] = _course_meta(self.course)
 
+        frames: dict = {
+            "activations": self._activations,
+            "actions": self._actions,
+            "drone_position": self._positions,
+        }
+        if self._has_target_gates:
+            # Additive per-frame current-target-gate track (UC-09 AC7). Present only when the
+            # caller supplied target_gate; older/single-gate recordings omit it and the viewer
+            # falls back to no highlight.
+            frames["target_gate"] = self._target_gates
+
         document = {
             "schema_version": SCHEMA_VERSION,
             "meta": meta,
-            "frames": {
-                "activations": self._activations,
-                "actions": self._actions,
-                "drone_position": self._positions,
-            },
+            "frames": frames,
             "outcome": {
                 "completed": bool(completed),
                 "completion_time": (None if completion_time is None else float(completion_time)),
@@ -275,23 +300,28 @@ class ActivationRecorder:
 
 
 def _course_meta(course: CourseConfig) -> dict:
-    """Serialise :class:`CourseConfig` into the additive ``meta.course`` block (UC-06 AC8).
+    """Serialise :class:`CourseConfig` into the additive ``meta.course`` block (UC-09 AC7).
 
-    Values are read from the actual config (never hardcoded) so a re-tuned course flows
-    through to the viewer. Coordinate frame is z-up / +x-forward / right-handed — recorded
-    explicitly via ``forward_axis`` / ``up_axis`` so the viewer never has to guess.
+    Emits **all N gates** as a ``gates: [...]`` array (each ``{center, aperture, plane}``),
+    replacing the pre-UC-09 singular ``gate`` block. Values are read from the actual config
+    (never hardcoded) so a re-tuned or sampled course flows through to the viewer. Coordinate
+    frame is z-up / +x-forward / right-handed — recorded explicitly via ``forward_axis`` /
+    ``up_axis`` so the viewer never has to guess.
     """
     return {
         "start": [float(v) for v in course.start_position],
-        "gate": {
-            "center": [
-                float(course.gate_x),
-                float(course.gate_center_y),
-                float(course.gate_center_z),
-            ],
-            "aperture": float(course.gate_aperture),
-            "plane": "yz",
-        },
+        "gates": [
+            {
+                "center": [
+                    float(gate.center[0]),
+                    float(gate.center[1]),
+                    float(gate.center[2]),
+                ],
+                "aperture": float(gate.aperture),
+                "plane": "yz",
+            }
+            for gate in course.gates
+        ],
         "finish": {"x": float(course.finish_x)},
         "floor_z": float(course.floor_z),
         "ceiling_z": float(course.ceiling_z),

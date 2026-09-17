@@ -82,7 +82,9 @@ class RecordingCallback(BaseCallback):
                 return True
             info0 = infos[0]
             if self._capturing and "position" in info0:
-                self.recorder.capture_frame(actions[0], info0["position"])
+                self.recorder.capture_frame(
+                    actions[0], info0["position"], target_gate=info0.get("target_gate")
+                )
                 self._steps += 1
                 if rewards is not None:
                     self._total_reward += float(rewards[0])

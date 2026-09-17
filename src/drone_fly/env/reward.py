@@ -34,6 +34,7 @@ def compute_reward(
     collided: bool,
     completed: bool,
     cfg: RewardConfig,
+    num_gates: int = 1,
 ) -> float:
     """Return the scalar step reward.
 
@@ -41,22 +42,30 @@ def compute_reward(
     ----------
     dist_to_target_prev, dist_to_target_curr:
         Euclidean distance to the *current* target waypoint before and after the step.
-        Their difference is the progress term (positive when closing in).
+        Their difference is the progress term (positive when closing in). The progress term
+        needs **no** N-dependence: it telescopes across gate transitions, so its total over
+        an episode is independent of the number of gates.
     event:
-        ``"gate"`` on the step the gate is validly passed, ``"finish"`` on completion,
-        else ``None`` — from :func:`drone_fly.env.geometry.advance_phase`.
+        ``"gate"`` on the step a gate is validly passed, ``"finish"`` on completion,
+        else ``None`` — from :func:`drone_fly.env.geometry.advance`.
     collided:
         Whether the drone touched the floor or ceiling this step.
     completed:
-        Whether the course was validly completed this step (phase reached DONE). Passed in
-        explicitly so the completion bonus can never fire on a finish-before-gate.
+        Whether the course was validly completed this step (all gates passed then finish).
+        Passed in explicitly so the completion bonus can never fire before all gates.
     cfg:
         Reward weights.
+    num_gates:
+        Number of gates on the active course (UC-09 AC4). The per-gate bonus is
+        **normalised** to ``gate_bonus / num_gates`` so an N-gate episode awards
+        ``gate_bonus`` in total across its N gates, keeping gate reward comparable as N is
+        randomized. For ``num_gates == 1`` the per-gate bonus equals ``gate_bonus`` exactly
+        (backward compatible). ``max(1, num_gates)`` guards against a zero divisor.
     """
     reward = -cfg.time_penalty
     reward += cfg.progress_weight * (dist_to_target_prev - dist_to_target_curr)
     if event == "gate":
-        reward += cfg.gate_bonus
+        reward += cfg.gate_bonus / max(1, num_gates)
     if completed:
         reward += cfg.completion_bonus
     if collided:
