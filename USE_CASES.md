@@ -15,4 +15,4 @@ Statuses:
 | 03 | [use-cases/03-start-gate-finish-flight.md](use-cases/03-start-gate-finish-flight.md) | Start→gate→finish flight training | done | 2026-09-16 |
 | 04 | [use-cases/04-connectome-subgraph-pruning.md](use-cases/04-connectome-subgraph-pruning.md) | Function-targeted connectome subgraph pruning | done | 2026-09-17 |
 | 05 | [use-cases/05-activation-record-playback.md](use-cases/05-activation-record-playback.md) | Neuron-activation recording + playback visualization | done | 2026-09-17 |
-| 06 | [use-cases/06-3d-flight-viewer-neuron-beat.md](use-cases/06-3d-flight-viewer-neuron-beat.md) | 3D flight view + neuron "beat" in the playback viewer | in-progress | 2026-09-17 |
+| 06 | [use-cases/06-3d-flight-viewer-neuron-beat.md](use-cases/06-3d-flight-viewer-neuron-beat.md) | 3D flight view + neuron "beat" in the playback viewer | done | 2026-09-17 |
