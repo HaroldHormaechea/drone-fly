@@ -539,9 +539,9 @@ the committed fixture demo is anatomical **offline, with no token**. The coordin
    anatomical)"** in the file and the viewer. Neurons missing a soma are flagged
    (`has_position=False`) and fallback-placed — never dropped, never fabricated.
 
-Positions are stored full-3D plus a top-down projection (default dorsal **x–z** plane; the
-viewer's axis selector switches planes). The 8 nm voxel scale is assumed and irrelevant to a
-normalised top-down map.
+Positions are stored full-3D plus a top-down projection (default dorsal plane; the viewer's
+**front / side / top-down** view-preset selector switches planes, **top-down** default). The
+8 nm voxel scale is assumed and irrelevant to a normalised top-down map.
 
 Provision the fixture's real coordinates (dev-time, needs network — **tested boundary**: this
 script is run and its 300/300 coverage asserted; it is not run in CI):
@@ -558,7 +558,8 @@ with speed presets **0.25× / 0.5× / 1× / 2× / 4×** (0.25× for slow, detail
 Pressing **Play** at the end restarts from the beginning.
 
 - **Anatomical brain map** — neurons as dots at their projected soma positions, role-coloured,
-  with an axis selector and an anatomical-vs-computed label. Each neuron renders **~2px at
+  with a **front / side / top-down** view-preset selector (plain terms, never axis names;
+  **top-down** default) and an anatomical-vs-computed label. Each neuron renders **~2px at
   rest** and **"beats"** — pulsing to ~9px on activation and easing back to rest over ~0.2s —
   so activation reads as a visible beat, not just a colour change. While paused or scrubbing,
   a neuron's size reflects *that frame's* activation exactly (no lingering animation).
