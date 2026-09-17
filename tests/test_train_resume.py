@@ -132,3 +132,112 @@ def test_find_latest_checkpoint_none_when_empty(tmp_path) -> None:
     empty = tmp_path / "empty"
     empty.mkdir()
     assert find_latest_checkpoint(str(empty)) is None
+
+
+# --------------------------------------------------------------------------- #
+# --n-envs — loop-level override of cfg.n_envs at the build_vec_env call site
+# --------------------------------------------------------------------------- #
+class _StopBeforeTrain(Exception):
+    """Sentinel to abort train() right after build_vec_env, keeping the test hermetic/fast."""
+
+
+def test_train_n_envs_overrides_cfg_at_build_vec_env(connectome, tiny_cfg, monkeypatch) -> None:
+    """Passing n_envs=N to train() reaches build_vec_env(n_envs=N), overriding cfg.n_envs."""
+    assert tiny_cfg.n_envs == 1  # the override value below must differ to be meaningful
+    captured: dict = {}
+
+    def fake_build_vec_env(*args, **kwargs):
+        captured["n_envs"] = kwargs.get("n_envs")
+        raise _StopBeforeTrain
+
+    monkeypatch.setattr("drone_fly.train.loop.build_vec_env", fake_build_vec_env)
+
+    with pytest.raises(_StopBeforeTrain):
+        train(
+            tiny_cfg,
+            connectome=connectome,
+            adapter="simple",
+            device="cpu",
+            n_envs=3,
+            total_timesteps=64,
+        )
+    assert captured["n_envs"] == 3
+
+
+def test_train_n_envs_defaults_to_cfg_when_omitted(connectome, tmp_path, monkeypatch) -> None:
+    """Omitting n_envs falls back to cfg.n_envs (not a hardcoded default)."""
+    cfg = TrainConfig(
+        models_dir=str(tmp_path / "models"),
+        logs_dir=str(tmp_path / "logs"),
+        checkpoint_freq=64,
+        n_envs=2,  # distinct from 1 so a fallback bug (hardcoded 1) would be caught
+        n_steps=64,
+        batch_size=32,
+        seed=0,
+    )
+    captured: dict = {}
+
+    def fake_build_vec_env(*args, **kwargs):
+        captured["n_envs"] = kwargs.get("n_envs")
+        raise _StopBeforeTrain
+
+    monkeypatch.setattr("drone_fly.train.loop.build_vec_env", fake_build_vec_env)
+
+    with pytest.raises(_StopBeforeTrain):
+        train(cfg, connectome=connectome, adapter="simple", device="cpu", total_timesteps=64)
+    assert captured["n_envs"] == 2
+
+
+def test_train_n_envs_save_freq_uses_resolved_count(connectome, tiny_cfg, monkeypatch) -> None:
+    """The checkpoint save_freq divisor uses the resolved (overridden) n_envs, not cfg.n_envs.
+
+    checkpoint_freq=64, n_envs override=4 -> save_freq = max(64 // 4, 1) = 16. We stop the run
+    right after the CheckpointCallback is constructed and inspect its save_freq.
+    """
+    import stable_baselines3.common.callbacks as sb3_cb
+
+    captured: dict = {}
+    RealCB = sb3_cb.CheckpointCallback
+
+    class SpyCheckpointCallback(RealCB):
+        def __init__(self, *args, **kwargs):
+            captured["save_freq"] = kwargs.get("save_freq", args[0] if args else None)
+            raise _StopBeforeTrain
+
+    monkeypatch.setattr(
+        "stable_baselines3.common.callbacks.CheckpointCallback", SpyCheckpointCallback
+    )
+
+    with pytest.raises(_StopBeforeTrain):
+        train(
+            tiny_cfg,
+            connectome=connectome,
+            adapter="simple",
+            device="cpu",
+            n_envs=4,
+            total_timesteps=64,
+        )
+    # tiny_cfg.checkpoint_freq == 64; resolved n_envs == 4 -> 64 // 4 == 16
+    assert captured["save_freq"] == 16
+
+
+def test_resume_smoke_tolerates_changed_n_envs(connectome, tiny_cfg) -> None:
+    """Optional end-to-end: a checkpoint trained at n_envs=1 resumes fine at --n-envs 2."""
+    m1 = smoke_train(connectome=connectome, cfg=tiny_cfg, timesteps=128)
+    steps0 = m1.num_timesteps
+    assert steps0 == 128
+    ckpt = find_latest_checkpoint(tiny_cfg.models_dir)
+    assert ckpt is not None
+
+    m2 = train(
+        tiny_cfg,
+        connectome=connectome,
+        adapter="simple",
+        device="cpu",
+        resume=ckpt,
+        total_timesteps=64,
+        n_envs=2,
+    )
+    # Resume continued (did not restart) even though the parallel env count changed.
+    assert m2.num_timesteps > steps0
+    assert m2.get_env().num_envs == 2
