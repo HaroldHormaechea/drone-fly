@@ -380,6 +380,78 @@ under `tests/fixtures/`, measured by the tests):
 >
 > The prune step logs the exact input→pruned neuron and edge counts.
 
+## Post-training activation pruning (UC-07)
+
+UC-04 prunes the connectome **structurally, before training**, so a trainable sensory→motor circuit
+exists at all. UC-07 is the complement: **data-driven, post-training** pruning of a *trained*
+policy. Once a policy has learned to fly, many interneurons sit near-zero across a rollout — fly-brain
+functions (smell, memory, …) that training never recruited. This step **measures each neuron's
+activation over a representative set of episodes**, removes the below-threshold interneurons, then
+**fine-tunes** the survivors. The output is two things at once: a **smaller, faster policy** and the
+**minimal functional flight circuit** — the sub-network the trained policy actually uses — saved as a
+loadable, viewer-ready `ConnectomeData` slice. It is **opt-in** (a distinct `prune-trained`
+subcommand); omitting it leaves UC-01…UC-06 byte-identical.
+
+**The distribution caveat — read this first.** "Never activates" is only meaningful relative to an
+input distribution. With no domain randomization, a trained policy memorizes one path, and measuring
+on that path prunes the circuit down to that path — compressing the fly brain into a lookup table for
+one trajectory. So measure over a **varied** distribution (`--randomize` / `--randomize-dynamics`,
+UC-08). When neither axis is enabled the step **loudly warns** that the produced circuit is
+**course-specific** (a demonstration of *this* run's used sub-network, not a general fly circuit) and
+records that in the report and the slice provenance. In hermetic CI (fixed course) the warning always
+fires by design.
+
+**Importance metric.** Default `mean_abs` = per-neuron mean `|activation|` over all measured frames;
+the secondary `active_fraction` (fraction of frames above `--eps`) is always reported too. Both are
+cheap magnitude statistics; a gradient/ablation metric would be more faithful but costlier and is
+left as a documented future option. Pruning aggressiveness is always judged by **completion-rate
+after**, never the proxy alone. `--threshold` (default `1e-3`, absolute, calibrated against the
+`tanh`-bounded `[-1, 1]` activation range) sets the cut; `--threshold-mode percentile` interprets it
+as "drop the least-active X%" instead.
+
+**What it guarantees.** The sensory (`visual_projection`) and motor (`descending_neuron`) endpoints
+are **always retained** — pruning targets interneurons only, so the input/output boundary is never
+silently severed. Sub-populations are **pinned by neuron identity** and persisted into the checkpoint,
+so `PPO.load` rebuilds the same circuit rather than re-selecting a drifted sub-population. Trained
+weights transfer **exactly** (retain-all ⇒ the pruned policy's action equals the original bit-for-bit
+— the faithfulness anchor). After slicing, a forward-reachability check confirms each pinned motor is
+still reachable from the sensory set on the pruned graph (partial ⇒ warn + `disconnected_motors` in
+the report; zero ⇒ hard error). The input checkpoint and connectome are never mutated, and a fixed
+`(seed, metric, threshold, episodes)` yields a deterministic pruned graph.
+
+**Usage** (opt-in; the checkpoint does **not** store the connectome, so pass the SAME
+`--connectome`/`--prune`/`--prune-k` used at training time):
+
+```sh
+# Measure over 20 randomized episodes, drop dead interneurons, fine-tune, and save the minimal circuit.
+drone-fly prune-trained \
+  --checkpoint artifacts/models/ppo_racer_final.zip \
+  --connectome data/pruned \
+  --vecnormalize artifacts/models/vecnormalize.pkl \
+  --metric mean_abs --threshold 1e-3 --episodes 20 \
+  --finetune-steps 50000 --randomize \
+  --out artifacts/minimal_circuit
+
+# Hermetic demonstration on the fixture (fires the course-specific warning by design):
+drone-fly prune-trained --checkpoint <ckpt> --connectome tests/fixtures --prune \
+  --episodes 3 --finetune-steps 0 --out /tmp/uc07_demo
+```
+
+The `--out` directory gets: `pruned_model.zip` (the fine-tuned smaller checkpoint), its
+`vecnormalize.pkl`, `connectome_pruned.npz` + `_meta.csv` (the pruned slice — round-trips through
+`load_connectome`, loadable by the UC-05/UC-06 viewer), a `PRUNE_TRAINED_PROVENANCE.md` note, and a
+`PRUNE_TRAINED_REPORT.md` reporting neurons/edges before→after, the metric summary, the
+**completion rate before / immediately-after-prune / after-fine-tune** (honest even when fine-tune
+does not fully recover), `disconnected_motors`, and the course-specific warning when applicable.
+
+> **Real reduction / completion numbers are a dev-time step on the owner's machine** with the full
+> trained policy and a real fine-tune (documented boundary, mirroring UC-03/UC-04). The hermetic
+> tests assert the plumbing — measurement, structured prune, endpoint retention, exact weight
+> transfer, save→`PPO.load` round-trip, and the guards — not flight convergence. **Scope:**
+> activation measurement + structured neuron-level pruning (reusing UC-04's `slice_connectome`) +
+> short fine-tune + saving the checkpoint and slice + the report. Out of scope: any new training
+> regime, domain randomization (UC-08 owns it), and viewer changes (UC-06 owns those).
+
 ## Activation recording & playback (UC-05)
 
 Make the connectome controller *observable*: record what the fly "brain" is doing while it

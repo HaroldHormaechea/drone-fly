@@ -183,8 +183,89 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Pruning rule (default {DEFAULT_PRUNE_RULE!r}).",
     )
 
+    _add_prune_trained_parser(sub)
+
     sub.add_parser("fetch-connectome", help="[stub] Provision connectome data (see README).")
     return parser
+
+
+def _add_prune_trained_parser(sub) -> None:
+    """Add the opt-in UC-07 post-training activation-pruning subcommand.
+
+    Off by default (a distinct subcommand); omitting it leaves UC-01..06 byte-identical. The
+    ``--prune``/``--prune-k`` flags rebuild the SAME base graph the checkpoint was trained on
+    (composing UC-04 then UC-07).
+    """
+    from drone_fly.prune_trained.importance import (
+        ABSOLUTE_MODE,
+        DEFAULT_THRESHOLD,
+        THRESHOLD_MODES,
+    )
+    from drone_fly.prune_trained.measure import DEFAULT_EPS, DEFAULT_METRIC, METRICS
+    from drone_fly.prune_trained.workflow import DEFAULT_EPISODES, DEFAULT_FINETUNE_STEPS
+
+    p = sub.add_parser(
+        "prune-trained",
+        help="Post-training activation prune: measure per-neuron usage on a trained policy, "
+        "remove dead interneurons, fine-tune, and save the minimal circuit (UC-07).",
+    )
+    p.add_argument("--checkpoint", required=True, help="Trained checkpoint .zip to prune.")
+    p.add_argument(
+        "--connectome",
+        default=None,
+        help="Connectome dir/.npz the checkpoint was trained on (MUST match; the checkpoint does "
+        "not retain neuron_ids/superclass/adjacency). Defaults to DRONE_FLY_CONNECTOME_DIR.",
+    )
+    p.add_argument(
+        "--vecnormalize",
+        default=None,
+        help="VecNormalize stats .pkl used at training time (carried into measurement + "
+        "fine-tune; warn + fresh stats if absent).",
+    )
+    p.add_argument("--out", required=True, help="Output directory for the pruned artifacts.")
+    _add_prune_args(p)  # --prune / --prune-k rebuild the base (UC-04) graph the ckpt trained on
+    p.add_argument(
+        "--metric",
+        default=DEFAULT_METRIC,
+        choices=list(METRICS),
+        help=f"Per-neuron importance metric (default {DEFAULT_METRIC!r}).",
+    )
+    p.add_argument(
+        "--threshold",
+        type=float,
+        default=DEFAULT_THRESHOLD,
+        help=f"Interneurons at/below this importance are pruned (default {DEFAULT_THRESHOLD}; "
+        "absolute mode is calibrated against the tanh [-1,1] activation range).",
+    )
+    p.add_argument(
+        "--threshold-mode",
+        default=ABSOLUTE_MODE,
+        choices=list(THRESHOLD_MODES),
+        help=f"Interpret --threshold as an absolute cut or percentile (default {ABSOLUTE_MODE!r}).",
+    )
+    p.add_argument(
+        "--episodes",
+        type=int,
+        default=DEFAULT_EPISODES,
+        help=f"Episodes to measure importance / completion over (default {DEFAULT_EPISODES}).",
+    )
+    p.add_argument(
+        "--eps",
+        type=float,
+        default=DEFAULT_EPS,
+        help=f"Activity epsilon for active_fraction (default {DEFAULT_EPS:g}).",
+    )
+    p.add_argument(
+        "--finetune-steps",
+        type=int,
+        default=DEFAULT_FINETUNE_STEPS,
+        help=f"Short PPO continue-training budget after pruning (default {DEFAULT_FINETUNE_STEPS} "
+        "= skip; a real recovery run is a dev-time step on the owner's machine).",
+    )
+    p.add_argument("--adapter", default="simple", choices=["auto", "simple", "pybullet"])
+    p.add_argument("--device", default=None, choices=["cpu", "cuda", "mps"])
+    p.add_argument("--seed", type=int, default=0, help="Measurement / fine-tune seed.")
+    _add_randomize_args(p)  # measurement distribution (drives the course-specific warning)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -244,6 +325,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "prune":
         return _run_prune_export(args)
 
+    if args.command == "prune-trained":
+        return _run_prune_trained(args)
+
     if args.command == "fetch-connectome":
         print(
             "fetch-connectome is a stub. Provision the cached connectome under "
@@ -302,6 +386,48 @@ def _run_prune_export(args: argparse.Namespace) -> int:
         f"Reuse via: drone-fly train --connectome {args.out}"
     )
     return 0
+
+
+def _run_prune_trained(args: argparse.Namespace) -> int:
+    """Drive the UC-07 post-training activation-pruning workflow from CLI args."""
+    from drone_fly.prune_trained.workflow import prune_trained
+
+    report = prune_trained(
+        checkpoint=args.checkpoint,
+        out_dir=args.out,
+        connectome_path=args.connectome,
+        vecnormalize_path=args.vecnormalize,
+        prune=args.prune,
+        prune_k=args.prune_k,
+        metric=args.metric,
+        threshold=args.threshold,
+        threshold_mode=args.threshold_mode,
+        episodes=args.episodes,
+        eps=args.eps,
+        finetune_steps=args.finetune_steps,
+        env_config=_build_env_config(args),
+        adapter=args.adapter,
+        device=args.device,
+        seed=args.seed,
+    )
+    print(
+        f"prune-trained: {report.neurons_before}->{report.neurons_after} neurons, "
+        f"{report.edges_before}->{report.edges_after} edges; completion "
+        f"before/after-prune/after-finetune = "
+        f"{report.completion_before:.0%}/{report.completion_after_prune:.0%}/"
+        f"{report.completion_after_finetune:.0%}. "
+        f"Artifacts in {report.out_dir}/ (see {REPORT_NAME_HINT})."
+    )
+    if report.course_specific:
+        print(
+            "WARNING: course-specific circuit (no domain randomization) — not a general minimal "
+            "fly flight circuit. Re-run with --randomize for a robust result."
+        )
+    return 0
+
+
+#: Report filename hint printed by the CLI (kept in sync with workflow.REPORT_NAME).
+REPORT_NAME_HINT = "PRUNE_TRAINED_REPORT.md"
 
 
 if __name__ == "__main__":  # pragma: no cover

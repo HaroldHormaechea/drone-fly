@@ -126,6 +126,51 @@ def _endpoints(superclass: np.ndarray, label: str) -> np.ndarray:
     return np.nonzero(np.asarray(superclass) == label)[0]
 
 
+def slice_connectome(
+    data: ConnectomeData,
+    kept: np.ndarray,
+    *,
+    source: str,
+) -> ConnectomeData:
+    """Return the induced subgraph of ``data`` on the neuron indices ``kept`` (a new object).
+
+    This is the neuron-removal + meta-realignment primitive shared by UC-04's structural
+    pruning (:func:`prune_to_subcircuit`) and UC-07's post-training activation pruning
+    (:mod:`drone_fly.prune_trained`). Given a 1-D array of retained neuron indices, it keeps
+    only the intra-retained edges (``adjacency[kept][:, kept]``) and re-aligns every
+    per-neuron meta array (``neuron_ids`` / ``superclass`` / ``sign`` / ``top_nt``) to the
+    pruned matrix rows, remapping indices to ``0..M-1``. Per-edge signs are preserved because
+    :class:`~drone_fly.controller.policy.SparseConnectomeLayer` rebuilds the sign mask from
+    the presynaptic (column) neuron's sign, and ``sign[kept]`` carries every retained
+    neuron's sign. **The input ``data`` is never mutated** — a fresh :class:`ConnectomeData`
+    is returned.
+
+    Parameters
+    ----------
+    data:
+        The connectome to slice.
+    kept:
+        1-D integer array of retained neuron indices, in the row order the pruned graph
+        should adopt (callers pass a sorted array for a deterministic layout).
+    source:
+        Provenance tag stamped onto the returned :class:`ConnectomeData`.
+    """
+    kept = np.asarray(kept, dtype=np.int64)
+    sliced_adj = data.adjacency.tocsr()[kept][:, kept].tocsr().astype(np.float32)
+    sliced_ids = np.asarray(data.neuron_ids)[kept]
+    sliced_superclass = None if data.superclass is None else np.asarray(data.superclass)[kept]
+    sliced_sign = None if data.sign is None else np.asarray(data.sign)[kept]
+    sliced_top_nt = None if data.top_nt is None else np.asarray(data.top_nt)[kept]
+    return ConnectomeData(
+        adjacency=sliced_adj,
+        neuron_ids=sliced_ids,
+        source=source,
+        superclass=sliced_superclass,
+        sign=sliced_sign,
+        top_nt=sliced_top_nt,
+    )
+
+
 def prune_to_subcircuit(
     data: ConnectomeData,
     *,
@@ -246,16 +291,12 @@ def prune_to_subcircuit(
             k,
         )
 
-    # Submatrix + meta re-slice. adjacency[kept][:, kept] keeps only intra-retained edges;
-    # slicing per-neuron meta by the same `kept` re-aligns it to rows 0..M-1. Per-edge signs
-    # are preserved because policy.py derives them from the presynaptic (column) neuron's
-    # sign, and sign[kept] carries every retained neuron's sign (AC4).
-    pruned_adj = data.adjacency.tocsr()[kept][:, kept].tocsr().astype(np.float32)
-    pruned_ids = np.asarray(data.neuron_ids)[kept]
-    pruned_superclass = superclass[kept]
-    pruned_sign = None if data.sign is None else np.asarray(data.sign)[kept]
-    pruned_top_nt = None if data.top_nt is None else np.asarray(data.top_nt)[kept]
+    # Submatrix + meta re-slice via the shared primitive: adjacency[kept][:, kept] keeps only
+    # intra-retained edges and per-neuron meta is re-aligned to rows 0..M-1. Per-edge signs are
+    # preserved because policy.py derives them from the presynaptic (column) neuron's sign, and
+    # sign[kept] carries every retained neuron's sign (AC4).
     pruned_source = f"{data.source} [pruned:{rule} k={k}]"
+    pruned = slice_connectome(data, kept, source=pruned_source)
 
     logger.info(
         "Pruned connectome '%s' (rule=%s, k=%d): %d -> %d neurons, %d -> %d edges "
@@ -266,17 +307,10 @@ def prune_to_subcircuit(
         n,
         int(kept.size),
         data.edge_count,
-        int(pruned_adj.nnz),
+        int(pruned.edge_count),
         int(sensory.size),
         int(motor.size - len(dropped_motor)),
         int(motor.size),
     )
 
-    return ConnectomeData(
-        adjacency=pruned_adj,
-        neuron_ids=pruned_ids,
-        source=pruned_source,
-        superclass=pruned_superclass,
-        sign=pruned_sign,
-        top_nt=pruned_top_nt,
-    )
+    return pruned
