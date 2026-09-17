@@ -105,6 +105,7 @@ def train(
     device: str | None = None,
     resume: str | None = None,
     total_timesteps: int | None = None,
+    n_envs: int | None = None,
     prune: bool = False,
     prune_k: int = DEFAULT_PRUNE_K,
     record: bool = False,
@@ -128,6 +129,9 @@ def train(
         Path to a checkpoint ``.zip`` to continue from (``reset_num_timesteps=False``).
     total_timesteps:
         Override ``cfg.total_timesteps`` for this call.
+    n_envs:
+        Override ``cfg.n_envs`` (parallel rollout envs) for this call; ``None`` leaves the
+        config value untouched (byte-identical to the unflagged run).
     prune:
         Opt-in (UC-04): reduce the loaded connectome to its directed sensory→motor
         subcircuit via :func:`~drone_fly.connectome.prune.prune_to_subcircuit` before the
@@ -143,6 +147,7 @@ def train(
 
     cfg = cfg or TrainConfig()
     steps = total_timesteps if total_timesteps is not None else cfg.total_timesteps
+    resolved_n_envs = n_envs if n_envs is not None else cfg.n_envs
     resolved_device = resolve_device(device)
 
     if connectome is None:
@@ -192,7 +197,7 @@ def train(
     venv = build_vec_env(
         config=env_config,
         adapter=adapter,
-        n_envs=cfg.n_envs,
+        n_envs=resolved_n_envs,
         seed=cfg.seed,
         training=True,
         vecnormalize_path=stats_path,
@@ -222,7 +227,7 @@ def train(
     model.set_logger(_make_logger(cfg.logs_dir))
 
     checkpoint_cb = CheckpointCallback(
-        save_freq=max(cfg.checkpoint_freq // max(cfg.n_envs, 1), 1),
+        save_freq=max(cfg.checkpoint_freq // max(resolved_n_envs, 1), 1),
         save_path=cfg.models_dir,
         name_prefix=CHECKPOINT_PREFIX,
         save_vecnormalize=True,
