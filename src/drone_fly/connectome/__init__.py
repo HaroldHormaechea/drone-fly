@@ -18,6 +18,12 @@ from drone_fly.connectome.loader import (
     ExpectedScale,
     load_connectome,
 )
+from drone_fly.connectome.prune import (
+    DEFAULT_PRUNE_K,
+    DEFAULT_PRUNE_RULE,
+    PRUNE_RULE_PATH_SLACK,
+    prune_to_subcircuit,
+)
 
 __all__ = [
     "CONNECTOME_DIR_ENV",
@@ -27,4 +33,8 @@ __all__ = [
     "ConnectomeData",
     "ExpectedScale",
     "load_connectome",
+    "DEFAULT_PRUNE_K",
+    "DEFAULT_PRUNE_RULE",
+    "PRUNE_RULE_PATH_SLACK",
+    "prune_to_subcircuit",
 ]

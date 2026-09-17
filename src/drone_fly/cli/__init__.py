@@ -18,6 +18,25 @@ import argparse
 import logging
 import sys
 
+from drone_fly.connectome.prune import DEFAULT_PRUNE_K
+
+
+def _add_prune_args(p: argparse.ArgumentParser) -> None:
+    """Add the opt-in UC-04 subcircuit-pruning flags (shared by train / smoke-train)."""
+    p.add_argument(
+        "--prune",
+        action="store_true",
+        help="Prune the connectome to its directed sensory->motor subcircuit before "
+        "building the policy (UC-04). Off by default (UC-01/02/03 behaviour unchanged).",
+    )
+    p.add_argument(
+        "--prune-k",
+        type=int,
+        default=DEFAULT_PRUNE_K,
+        help=f"Path-slack corridor width for --prune (default {DEFAULT_PRUNE_K}; 0 = tight "
+        "shortest-path corridor, larger = richer neighbourhood).",
+    )
+
 
 def _add_train_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--resume", default=None, help="Checkpoint .zip to continue from.")
@@ -49,10 +68,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     train_p = sub.add_parser("train", help="Train the PPO racing policy.")
     _add_train_args(train_p)
+    _add_prune_args(train_p)
 
     smoke_p = sub.add_parser("smoke-train", help="A few-step CI/correctness run (numpy backend).")
     smoke_p.add_argument("--timesteps", type=int, default=None, help="Override smoke timesteps.")
     smoke_p.add_argument("--connectome", default=None, help="Path to the cached connectome.")
+    _add_prune_args(smoke_p)
 
     eval_p = sub.add_parser("evaluate", help="Evaluate a checkpoint over N episodes.")
     eval_p.add_argument("--checkpoint", required=True, help="Checkpoint .zip to evaluate.")
@@ -79,13 +100,20 @@ def main(argv: list[str] | None = None) -> int:
             device=args.device,
             resume=args.resume,
             total_timesteps=args.timesteps,
+            prune=args.prune,
+            prune_k=args.prune_k,
         )
         return 0
 
     if args.command == "smoke-train":
         from drone_fly.train.loop import smoke_train
 
-        smoke_train(connectome_path=args.connectome, timesteps=args.timesteps)
+        smoke_train(
+            connectome_path=args.connectome,
+            timesteps=args.timesteps,
+            prune=args.prune,
+            prune_k=args.prune_k,
+        )
         return 0
 
     if args.command == "evaluate":

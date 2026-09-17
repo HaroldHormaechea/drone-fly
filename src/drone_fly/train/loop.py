@@ -28,6 +28,7 @@ from pathlib import Path
 
 from drone_fly.connectome import load_connectome
 from drone_fly.connectome.loader import ConnectomeData
+from drone_fly.connectome.prune import DEFAULT_PRUNE_K, prune_to_subcircuit
 from drone_fly.controller.sb3 import ConnectomeFeaturesExtractor
 from drone_fly.env.config import EnvConfig
 from drone_fly.env.racing_env import build_vec_env
@@ -104,6 +105,8 @@ def train(
     device: str | None = None,
     resume: str | None = None,
     total_timesteps: int | None = None,
+    prune: bool = False,
+    prune_k: int = DEFAULT_PRUNE_K,
 ):
     """Run (or resume) PPO training; return the trained model.
 
@@ -122,6 +125,15 @@ def train(
         Path to a checkpoint ``.zip`` to continue from (``reset_num_timesteps=False``).
     total_timesteps:
         Override ``cfg.total_timesteps`` for this call.
+    prune:
+        Opt-in (UC-04): reduce the loaded connectome to its directed sensory→motor
+        subcircuit via :func:`~drone_fly.connectome.prune.prune_to_subcircuit` before the
+        policy is built. Default ``False`` leaves UC-01/02/03 behaviour byte-identical.
+        A no-op (skipped with a warning) when ``resume`` is set, since the checkpoint
+        already carries its own (possibly pruned) graph.
+    prune_k:
+        Corridor slack passed to the pruner when ``prune`` is set (default
+        :data:`~drone_fly.connectome.prune.DEFAULT_PRUNE_K`).
     """
     from stable_baselines3 import PPO
     from stable_baselines3.common.callbacks import CheckpointCallback
@@ -132,6 +144,26 @@ def train(
 
     if connectome is None:
         connectome = load_connectome(connectome_path)
+
+    if prune:
+        if resume is not None:
+            logger.warning(
+                "Ignoring --prune on a resume run: the checkpoint %s already carries its own "
+                "(possibly pruned) connectome graph, so re-pruning here would desync it.",
+                resume,
+            )
+        else:
+            before = (connectome.neuron_count, connectome.edge_count)
+            connectome = prune_to_subcircuit(connectome, k=prune_k)
+            logger.info(
+                "Applied subcircuit pruning (k=%d): %d -> %d neurons, %d -> %d edges.",
+                prune_k,
+                before[0],
+                connectome.neuron_count,
+                before[1],
+                connectome.edge_count,
+            )
+
     logger.info(
         "Training on connectome '%s' (%d neurons, %d edges); device=%s; adapter=%s",
         getattr(connectome, "source", "?"),
@@ -215,11 +247,15 @@ def smoke_train(
     connectome_path: str | None = None,
     cfg: TrainConfig | None = None,
     timesteps: int | None = None,
+    prune: bool = False,
+    prune_k: int = DEFAULT_PRUNE_K,
 ):
     """A few-step training run on the pure-numpy backend (AC9, CI).
 
     Forces ``adapter="simple"`` (no pybullet) and a tiny step budget, proving the env +
-    connectome policy + PPO loop + checkpointing wire together and stay finite.
+    connectome policy + PPO loop + checkpointing wire together and stay finite. ``prune`` /
+    ``prune_k`` (UC-04) are threaded through so the pruned subcircuit can be smoke-tested
+    end-to-end.
     """
     cfg = cfg or TrainConfig()
     steps = timesteps if timesteps is not None else cfg.smoke_timesteps
@@ -233,4 +269,6 @@ def smoke_train(
         adapter="simple",
         device="cpu",
         total_timesteps=steps,
+        prune=prune,
+        prune_k=prune_k,
     )
