@@ -13,3 +13,4 @@ Statuses:
 | 01 | [use-cases/01-connectome-plumbing-poc.md](use-cases/01-connectome-plumbing-poc.md) | Connectome plumbing POC | done | 2026-09-16 |
 | 02 | [use-cases/02-harden-connectome-substrate.md](use-cases/02-harden-connectome-substrate.md) | Harden the connectome substrate for RL | done | 2026-09-16 |
 | 03 | [use-cases/03-start-gate-finish-flight.md](use-cases/03-start-gate-finish-flight.md) | Start→gate→finish flight training | done | 2026-09-16 |
+| 04 | [use-cases/04-connectome-subgraph-pruning.md](use-cases/04-connectome-subgraph-pruning.md) | Function-targeted connectome subgraph pruning | pending | 2026-09-17 |
