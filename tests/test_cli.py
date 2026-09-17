@@ -171,3 +171,101 @@ def test_prune_subcommand_unknown_rule_errors(tmp_path) -> None:
     out = tmp_path / "pruned"
     with pytest.raises(ValueError, match="rule|Unknown"):
         main(["prune", "--connectome", FIXTURE_DIR, "--out", str(out), "--prune-rule", "bogus"])
+
+
+# --------------------------------------------------------------------------- #
+# UC-08 (AC6) — opt-in randomization flags on train / evaluate
+# --------------------------------------------------------------------------- #
+def test_parser_train_randomize_flags_default_off() -> None:
+    """train exposes --randomize / --randomize-dynamics, both default off (AC6)."""
+    args = build_parser().parse_args(["train"])
+    assert args.randomize is False
+    assert args.randomize_dynamics is False
+
+
+def test_parser_train_randomize_flags_parsed() -> None:
+    args = build_parser().parse_args(["train", "--randomize", "--randomize-dynamics"])
+    assert args.randomize is True
+    assert args.randomize_dynamics is True
+
+
+def test_parser_evaluate_randomize_flags_default_off() -> None:
+    """evaluate exposes the same two flags, both default off (AC6)."""
+    args = build_parser().parse_args(["evaluate", "--checkpoint", "x.zip"])
+    assert args.randomize is False
+    assert args.randomize_dynamics is False
+
+
+def test_parser_evaluate_randomize_flags_parsed() -> None:
+    args = build_parser().parse_args(
+        ["evaluate", "--checkpoint", "x.zip", "--randomize", "--randomize-dynamics"]
+    )
+    assert args.randomize is True
+    assert args.randomize_dynamics is True
+
+
+def test_parser_randomize_axes_are_independent() -> None:
+    """Either axis can be enabled with the other off (AC5/AC6)."""
+    course_only = build_parser().parse_args(["train", "--randomize"])
+    assert course_only.randomize is True and course_only.randomize_dynamics is False
+    dyn_only = build_parser().parse_args(["train", "--randomize-dynamics"])
+    assert dyn_only.randomize is False and dyn_only.randomize_dynamics is True
+
+
+def test_build_env_config_none_when_both_off() -> None:
+    """No flags -> _build_env_config returns None (byte-identical to UC-03) (AC6/AC7)."""
+    from drone_fly.cli import _build_env_config
+
+    args = build_parser().parse_args(["train"])
+    assert _build_env_config(args) is None
+
+
+def test_build_env_config_enables_requested_axes() -> None:
+    """The flags flow into an EnvConfig.randomization with the right enable flags (AC6)."""
+    from drone_fly.cli import _build_env_config
+
+    course = _build_env_config(build_parser().parse_args(["train", "--randomize"]))
+    assert course is not None
+    assert course.randomization.enable_course is True
+    assert course.randomization.enable_dynamics is False
+
+    both = _build_env_config(
+        build_parser().parse_args(
+            ["evaluate", "--checkpoint", "x.zip", "--randomize", "--randomize-dynamics"]
+        )
+    )
+    assert both.randomization.enable_course is True
+    assert both.randomization.enable_dynamics is True
+
+    dyn = _build_env_config(build_parser().parse_args(["train", "--randomize-dynamics"]))
+    assert dyn.randomization.enable_course is False
+    assert dyn.randomization.enable_dynamics is True
+
+
+def test_evaluate_dispatch_with_randomize(tmp_path, monkeypatch, capsys) -> None:
+    """`evaluate --randomize` dispatches end-to-end and reports the randomized metric (AC6/AC8)."""
+    monkeypatch.chdir(tmp_path)
+    assert main(["smoke-train", "--connectome", FIXTURE_DIR, "--timesteps", "128"]) == 0
+    models = tmp_path / "artifacts" / "models"
+    ckpt = models / f"{CHECKPOINT_PREFIX}_final.zip"
+    stats = models / "vecnormalize.pkl"
+    rc = main(
+        [
+            "evaluate",
+            "--checkpoint",
+            str(ckpt),
+            "--vecnormalize",
+            str(stats),
+            "--episodes",
+            "2",
+            "--adapter",
+            "simple",
+            "--device",
+            "cpu",
+            "--randomize",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "completion_rate" in out
+    assert "randomized" in out  # the honest-metric mode is disclosed

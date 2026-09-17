@@ -20,8 +20,11 @@ from __future__ import annotations
 
 import os
 
+import numpy as np
 import pytest
 
+from drone_fly.env.config import EnvConfig, RandomizationConfig
+from drone_fly.env.racing_env import build_vec_env
 from drone_fly.evaluate.evaluator import EvalMetrics, evaluate_checkpoint
 from drone_fly.train.config import TrainConfig
 from drone_fly.train.loop import CHECKPOINT_PREFIX, smoke_train
@@ -122,3 +125,91 @@ def test_evaluate_deterministic_for_fixed_seed(trained_checkpoint) -> None:
     assert a.completion_rate == b.completion_rate
     assert a.completed_count == b.completed_count
     assert a.mean_completion_time == b.mean_completion_time
+
+
+# ===========================================================================
+# UC-08 AC8 — evaluate over N different, reproducible randomized courses
+# ===========================================================================
+def _eval_course_starts(seed: int, n: int = 5) -> list[tuple]:
+    """The start positions the eval env samples over ``n`` episodes (the eval mechanism)."""
+    venv = build_vec_env(
+        config=EnvConfig(randomization=RandomizationConfig(enable_course=True)),
+        adapter="simple",
+        n_envs=1,
+        seed=seed,
+        training=False,
+        norm_reward=False,
+    )
+    try:
+        starts = []
+        for _ in range(n):
+            venv.reset()
+            starts.append(tuple(np.round(venv.get_attr("active_course")[0].start_position, 6)))
+        return starts
+    finally:
+        venv.close()
+
+
+def test_eval_runs_over_n_different_courses() -> None:
+    """A randomized eval draws a *different* course each episode (AC8)."""
+    starts = _eval_course_starts(seed=0, n=5)
+    assert len(set(starts)) == 5  # N distinct courses, not the same one N times
+
+
+def test_eval_course_set_is_reproducible_for_a_fixed_seed() -> None:
+    """The randomized eval set is itself seeded → identical across runs (AC8)."""
+    assert _eval_course_starts(seed=0) == _eval_course_starts(seed=0)
+    assert _eval_course_starts(seed=0) != _eval_course_starts(seed=1)
+
+
+def test_eval_metrics_randomized_flag_defaults_false() -> None:
+    """The default EvalMetrics is the fixed-course (non-randomized) metric (AC8)."""
+    m = EvalMetrics(
+        n_episodes=4,
+        completed_count=1,
+        completion_rate=0.25,
+        mean_completion_time=1.0,
+        threshold=0.8,
+        meets_mastery=False,
+        backend="simple",
+    )
+    assert m.randomized is False
+    assert "fixed-course" in m.summary()
+
+
+def test_eval_metrics_randomized_flag_distinct_in_summary() -> None:
+    """A randomized run is flagged distinctly so the honest number is never conflated (AC8)."""
+    m = EvalMetrics(
+        n_episodes=4,
+        completed_count=1,
+        completion_rate=0.25,
+        mean_completion_time=1.0,
+        threshold=0.8,
+        meets_mastery=False,
+        backend="simple",
+        randomized=True,
+    )
+    assert m.randomized is True
+    assert "randomized" in m.summary()
+    assert "fixed-course" not in m.summary()
+
+
+def test_evaluate_sets_randomized_flag_from_env_config(trained_checkpoint) -> None:
+    """evaluate_checkpoint marks metrics.randomized from the env config's axes (AC8)."""
+    ckpt, stats = trained_checkpoint
+
+    fixed = evaluate_checkpoint(
+        ckpt, vecnormalize_path=stats, episodes=2, seed=0, adapter="simple", device="cpu"
+    )
+    assert fixed.randomized is False
+
+    randomized = evaluate_checkpoint(
+        ckpt,
+        vecnormalize_path=stats,
+        episodes=2,
+        seed=0,
+        adapter="simple",
+        device="cpu",
+        env_config=EnvConfig(randomization=RandomizationConfig(enable_course=True)),
+    )
+    assert randomized.randomized is True
