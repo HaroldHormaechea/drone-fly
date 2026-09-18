@@ -681,6 +681,31 @@ script is run and its 300/300 coverage asserted; it is not run in CI):
 uv run python scripts/fetch_soma_positions.py   # writes tests/fixtures/mcns_fixture_soma.csv
 ```
 
+#### Brain-outline asset (`viz/brain_outline.js`)
+
+The anatomical panel's MRI-style heatmap overlays a **static brain outline** committed as
+`viz/brain_outline.js` (a plain `const BRAIN_OUTLINE = {…}`, loaded via a classic `<script>`
+before `viewer.js` — no fetch, no build step, `file://`-safe). It holds the full-brain 3D
+bounding box plus a concave silhouette polygon per view plane (top = xz, front = xy, side = yz),
+all in the **same neuPrint MaleCNS 8 nm voxel space** as the soma positions — so the heatmap
+registers to the outline by construction, no separate alignment step.
+
+The silhouette is derived from **all brain soma positions** in the public
+`connectome_data_prep` MaleCNS metadata (CC-BY, tokenless — same source as the coordinates
+above). **Region:** it is filtered to **brain** somas (optic-lobe + central-brain + visual +
+descending neurons via the `superclass` field), excluding the ventral nerve cord, so a typical
+brain-circuit recording lights up against a brain-shaped outline rather than a speck of a whole-
+CNS hull. If the source metadata ever lacks a usable region field, the script ships the whole-CNS
+hull instead and records `region: "whole-CNS"` in the asset; registration is exact either way.
+
+Regenerate the asset (dev-time, needs network on a cold cache; not run in CI — its output is
+committed, like the fixture soma CSV):
+
+```sh
+uv run python scripts/build_brain_outline.py               # writes viz/brain_outline.js (brain region)
+uv run python scripts/build_brain_outline.py --region whole-cns   # whole-CNS silhouette instead
+```
+
 ### Viewer (`viz/`, no build step)
 
 Open `viz/viewer.html` directly in a browser (no server, no npm) and pick a recorded file with
@@ -688,12 +713,23 @@ the file picker (works from `file://`). Three panels share one play/pause + scru
 with speed presets **0.25× / 0.5× / 1× / 2× / 4×** (0.25× for slow, detailed inspection).
 Pressing **Play** at the end restarts from the beginning.
 
-- **Anatomical brain map** — neurons as dots at their projected soma positions, role-coloured,
-  with a **front / side / top-down** view-preset selector (plain terms, never axis names;
-  **top-down** default) and an anatomical-vs-computed label. Each neuron renders **~2px at
-  rest** and **"beats"** — pulsing to ~9px on activation and easing back to rest over ~0.2s —
-  so activation reads as a visible beat, not just a colour change. While paused or scrubbing,
-  a neuron's size reflects *that frame's* activation exactly (no lingering animation).
+- **Anatomical brain map (MRI-style heatmap)** — an fMRI/MRI-style activation heatmap over a
+  **static, spatially registered MaleCNS brain outline**, not per-neuron dots. Each active
+  region "lights up": per neuron an additive **kernel-density splat** (a soft radial Gaussian)
+  is accumulated, weighted by that neuron's activation at the current frame, then normalized and
+  mapped through a **"hot" colormap** (black → red → orange → yellow → white). Because a pruned
+  slice only covers part of the brain, **only the regions the circuit actually uses light up**
+  against the full outline — itself informative, not a bug. Controls:
+  - a **front / side / top-down** view-preset selector (plain terms, never axis names;
+    **top-down** default) — the outline and heatmap project consistently onto the selected plane;
+  - an **intensity** toggle: **per-frame** (default; auto-normalizes each frame for punchy
+    "lights-up" contrast) vs **global** (a fixed scale across the whole recording, so frame-to-
+    frame brightness is comparable);
+  - an anatomical-vs-computed label. The outline comes from the committed static asset
+    `viz/brain_outline.js` and is registered to the soma coordinate frame **by construction**
+    (same voxel space as the neuron positions). If the asset is absent, or a recording's
+    positions are **computed (not anatomical)**, the panel degrades gracefully to auto-fit splats
+    with no outline — no crash.
 - **Activation heatmap** — neurons × time, rows ordered sensory → interneuron → motor.
 - **Flight panel** — the 4 action traces plus a genuinely **3D, orbitable flight scene**:
   a floor grid, **start** (green) / **gates** (one ring per gate, radius = aperture, with the
