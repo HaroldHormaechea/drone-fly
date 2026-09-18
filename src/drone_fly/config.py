@@ -39,6 +39,11 @@ class ConfigError(ValueError):
 
 # --- Run name + per-run output layout (AC2/AC3) -------------------------------------------
 
+#: Root directory (relative to CWD) that holds every per-run ``training/<name>/`` tree. The
+#: single source of truth for this literal so consumers (e.g. ``drone-fly clean``) can wipe
+#: the tree without re-hardcoding the path.
+TRAINING_ROOT = "training"
+
 #: Allowed characters in a run ``name``. Excludes path separators and whitespace so a name
 #: can never escape ``training/`` or collide across differently-named runs.
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -79,7 +84,7 @@ class RunLayout:
 def run_layout(name: str) -> RunLayout:
     """Return the ``training/<name>/{checkpoints,logs,recordings}/`` layout for ``name`` (AC2)."""
     name = validate_run_name(name)
-    base = os.path.join("training", name)
+    base = os.path.join(TRAINING_ROOT, name)
     return RunLayout(
         name=name,
         checkpoints=os.path.join(base, "checkpoints"),

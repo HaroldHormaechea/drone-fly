@@ -383,3 +383,79 @@ def test_env_config_enables_requested_axes() -> None:
 def test_prune_default_prune_k_matches_source() -> None:
     """Guard the imported default the CLI/config rely on stays the single source of truth."""
     assert DEFAULT_PRUNE_K == 2
+
+
+# --------------------------------------------------------------------------- #
+# clean — parser surface + CWD-relative dispatch (UC-10: AC1/AC2/AC7/AC8)
+# --------------------------------------------------------------------------- #
+
+
+def _build_clean_tree(root: Path) -> None:
+    """Seed a chdir'd project with a couple of training outputs plus a protected file."""
+    (root / "artifacts" / "models").mkdir(parents=True)
+    (root / "artifacts" / "models" / "ppo_100_steps.zip").write_bytes(b"x")
+    (root / "training" / "myrun").mkdir(parents=True)
+    (root / "training" / "myrun" / "final.zip").write_bytes(b"x")
+    (root / "src").mkdir()
+    (root / "src" / "keep.py").write_bytes(b"x")  # must always survive
+
+
+def test_parser_accepts_clean_flags() -> None:
+    """The clean subparser takes --yes / --force / --dry-run / --include-prunes (AC1/AC4/AC8)."""
+    args = build_parser().parse_args(["clean", "--yes", "--force", "--dry-run", "--include-prunes"])
+    assert args.command == "clean"
+    assert args.yes is True and args.force is True
+    assert args.dry_run is True and args.include_prunes is True
+
+
+def test_clean_no_flags_defaults_all_false() -> None:
+    args = build_parser().parse_args(["clean"])
+    assert (args.yes, args.force, args.dry_run, args.include_prunes) == (
+        False,
+        False,
+        False,
+        False,
+    )
+
+
+def test_clean_dry_run_default_deletes_nothing(tmp_path, monkeypatch, capsys) -> None:
+    """`clean` with no flags is a dry-run: exit 0, nothing deleted, output lists targets (AC1)."""
+    monkeypatch.chdir(tmp_path)
+    _build_clean_tree(tmp_path)
+
+    assert main(["clean"]) == 0
+    # Files untouched.
+    assert (tmp_path / "artifacts" / "models" / "ppo_100_steps.zip").is_file()
+    assert (tmp_path / "training" / "myrun" / "final.zip").is_file()
+    out = capsys.readouterr().out
+    assert "would remove" in out.lower()
+
+
+def test_clean_yes_deletes(tmp_path, monkeypatch) -> None:
+    """`clean --yes` removes training outputs and exits 0, preserving source (AC2)."""
+    monkeypatch.chdir(tmp_path)
+    _build_clean_tree(tmp_path)
+
+    assert main(["clean", "--yes"]) == 0
+    assert not (tmp_path / "artifacts" / "models" / "ppo_100_steps.zip").exists()
+    assert not (tmp_path / "training" / "myrun").exists()
+    # Root dir + protected source survive.
+    assert (tmp_path / "artifacts" / "models").is_dir()
+    assert (tmp_path / "src" / "keep.py").is_file()
+
+
+def test_clean_dry_run_wins_over_yes(tmp_path, monkeypatch) -> None:
+    """`--yes --dry-run` resolves safely: dry-run wins, nothing is deleted (AC8)."""
+    monkeypatch.chdir(tmp_path)
+    _build_clean_tree(tmp_path)
+
+    assert main(["clean", "--yes", "--dry-run"]) == 0
+    assert (tmp_path / "artifacts" / "models" / "ppo_100_steps.zip").is_file()
+    assert (tmp_path / "training" / "myrun" / "final.zip").is_file()
+
+
+def test_clean_nothing_to_clean_exits_zero(tmp_path, monkeypatch, capsys) -> None:
+    """An empty tree is graceful: exit 0 and a 'nothing to clean' summary (AC7)."""
+    monkeypatch.chdir(tmp_path)
+    assert main(["clean", "--yes"]) == 0
+    assert "nothing to clean" in capsys.readouterr().out
