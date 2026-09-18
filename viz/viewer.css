@@ -67,6 +67,18 @@ canvas { width: 100%; height: auto; background: #0a0c17; border-radius: 8px; dis
 .dot.motor { background: var(--motor); }
 .dot.fallback { background: var(--fallback); }
 
+/* MRI/fMRI "hot" intensity ramp for the anatomical heatmap legend (UC-12): mirrors the
+ * black→red→orange→yellow→white colormap in viewer.js (hotColormap). */
+.intensity-ramp {
+  display: inline-block;
+  width: 96px;
+  height: 10px;
+  border-radius: 3px;
+  vertical-align: middle;
+  margin: 0 4px;
+  background: linear-gradient(90deg, #000 0%, #f00 38%, #ff8000 56%, #ff0 75%, #fff 100%);
+}
+
 .pos-source { font-size: 12px; padding: 3px 8px; border-radius: 5px; font-weight: 600; }
 .pos-source.anatomical { background: #204a26; color: var(--anatomical); }
 .pos-source.computed { background: #4a3512; color: var(--computed); }

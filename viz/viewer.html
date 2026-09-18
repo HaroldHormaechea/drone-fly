@@ -51,14 +51,21 @@
                 <option value="top" selected>top-down</option>
               </select>
             </label>
+            <label class="axes">
+              intensity
+              <select id="map-norm-select">
+                <option value="per-frame" selected>per-frame</option>
+                <option value="global">global</option>
+              </select>
+            </label>
           </div>
         </div>
         <canvas id="brain-canvas" width="440" height="440"></canvas>
         <div class="legend">
-          <span class="dot sensory"></span> sensory
-          <span class="dot interneuron"></span> interneuron
-          <span class="dot motor"></span> motor
-          <span class="dot fallback"></span> fallback-placed (no soma)
+          activation intensity
+          <span class="intensity-ramp" aria-hidden="true"></span>
+          low <span class="hint">→</span> high · summed activation of neurons whose somas fall
+          there, over a static registered brain outline
         </div>
       </section>
 
@@ -105,6 +112,7 @@
     </p>
   </footer>
 
+  <script src="brain_outline.js"></script>
   <script src="viewer.js"></script>
 </body>
 </html>

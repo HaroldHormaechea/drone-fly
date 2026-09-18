@@ -2,9 +2,15 @@
 /* drone-fly activation playback viewer — vanilla JS, no build step.
  * Loads a recorded episode file (plain JSON or gzip) picked from disk (FileReader /
  * DecompressionStream, so it works from file:// with no server) and renders three panels
- * synced on one timeline: an anatomical top-down brain map (with a per-neuron activation
- * "beat"), a neurons×time heatmap, and a flight panel (4 action traces + an orbitable 3D
- * flight scene). See use-cases/05 & 06 and the recorder schema. */
+ * synced on one timeline: an anatomical brain map rendered as an MRI/fMRI-style activation
+ * heatmap over a static registered brain outline (UC-12), a neurons×time heatmap, and a
+ * flight panel (4 action traces + an orbitable 3D flight scene). See use-cases/05, 06 & 12
+ * and the recorder schema.
+ *
+ * The anatomical panel consumes the committed static asset `brain_outline.js` (global
+ * `BRAIN_OUTLINE`, loaded via a classic <script> immediately before this file). It is
+ * optional: if absent the panel degrades to auto-fit splats with no outline (never a
+ * ReferenceError). Regenerate the asset with scripts/build_brain_outline.py. */
 
 const ROLE_COLORS = {
   sensory: [79, 195, 247],
@@ -20,16 +26,16 @@ const MAP_VIEW_PRESETS = { front: "xy", side: "yz", top: "xz" };
 const ACTION_COLORS = ["#ffd54f", "#4fc3f7", "#81c784", "#ff8a65"];
 const SUPPORTED_SCHEMA = 1;
 
-// ---- neuron "beat" (AC6) --------------------------------------------------------------
-// Brain-map neurons render small at rest and pulse when active: radius = 2px at rest, ~9px
-// at full activation (r_inst = 2 + 7·act/255). During continuous playback a per-neuron
-// envelope adds a fast attack + exponential release toward rest (real-time, ~0.2s), floored
-// at the instantaneous radius. When paused/scrubbing we draw the instantaneous radius for
-// the current frame (no stale decay) so a frame's size always reflects that frame.
-const BEAT_REST = 2; // px radius at rest
-const BEAT_PEAK = 9; // px radius at full activation
-const BEAT_SPAN = BEAT_PEAK - BEAT_REST; // 7
-const BEAT_RELEASE_TAU = 0.06; // s; exponential release ~= back to rest over ~0.2s
+// ---- anatomical brain-map heatmap (UC-12) ---------------------------------------------
+// The panel is an MRI/fMRI-style activation heatmap: per active neuron an additive
+// kernel-density Gaussian splat is stamped (weighted by that neuron's activation) into a
+// float accumulation buffer, the buffer is normalized and mapped through a "hot" colormap
+// (black→red→orange→yellow→white), then drawn under a static registered brain outline.
+// Per-neuron screen positions are precomputed once per view (not per frame — see MAP_SS).
+const MAP_SS = 2; // accumulation-buffer downscale (softness + ~4× fewer stamp writes)
+const MAP_KERNEL_R = 7; // Gaussian splat radius, in downscaled buffer pixels
+const MAP_KERNEL_SIGMA = MAP_KERNEL_R / 2.4;
+const MAP_MIN_WEIGHT = 2 / 255; // skip near-silent neurons (perf; sub-uint8-step activation)
 
 // ---- 3D flight panel constants --------------------------------------------------------
 // World frame (confirmed from env/config.py + adapter): z UP, +x FORWARD, +y = LEFT,
@@ -88,7 +94,8 @@ const state = {
   speed: 1,
   rowOrder: null, // neuron indices ordered sensory->inter->motor (heatmap rows)
   heatmap: null, // offscreen canvas (n_frames x n_neurons)
-  beat: null, // per-neuron pulse envelope radii (AC6); Float32Array or null
+  mapNorm: "frame", // brain-map intensity normalization: "frame" (per-frame) | "global" (AC5)
+  mapCache: null, // per-view brain-map cache (screen positions, transform, global peak) — see ensureMapCache
   lastTs: 0,
   acc: 0,
 };
@@ -143,7 +150,9 @@ function loadDocument(doc, name) {
   state.playing = false;
   state.rowOrder = computeRowOrder(doc.meta.roles);
   state.heatmap = buildHeatmap(doc, state.rowOrder);
-  state.beat = new Float32Array(nNeurons).fill(BEAT_REST);
+  state.mapCache = null; // rebuilt lazily by ensureMapCache() on the next brain-map draw
+  const normSel = el("map-norm-select");
+  state.mapNorm = normSel && normSel.value === "global" ? "global" : "frame";
 
   renderMetaBar(doc, name);
   renderPositionSource(doc.meta.positions);
@@ -283,60 +292,211 @@ function bounds(pts) {
   return { minX, minY, maxX, maxY };
 }
 
+// MRI/fMRI "hot" colormap: t∈[0,1] → [r,g,b] (black→red→orange→yellow→white). Orange is the
+// natural blend where the red plateau overlaps the rising green channel.
+function hotColormap(t) {
+  const r = clamp01(t / 0.375);
+  const g = clamp01((t - 0.375) / 0.375);
+  const b = clamp01((t - 0.75) / 0.25);
+  return [Math.round(255 * r), Math.round(255 * g), Math.round(255 * b)];
+}
+function clamp01(v) {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+// Precomputed Gaussian splat kernel (built once — constants are fixed). Each active neuron
+// stamps this kernel, weighted by its activation, additively into the accumulation buffer.
+const MAP_KERNEL = (() => {
+  const R = MAP_KERNEL_R, size = 2 * R + 1, s2 = 2 * MAP_KERNEL_SIGMA * MAP_KERNEL_SIGMA;
+  const data = new Float32Array(size * size);
+  for (let dy = -R; dy <= R; dy++) {
+    for (let dx = -R; dx <= R; dx++) {
+      data[(dy + R) * size + (dx + R)] = Math.exp(-(dx * dx + dy * dy) / s2);
+    }
+  }
+  return { R, size, data };
+})();
+
+// Reused offscreen for the downscaled colorized heatmap (upscaled with smoothing on blit).
+let _mapOffscreen = null;
+function mapOffscreen(w, h) {
+  if (!_mapOffscreen) _mapOffscreen = document.createElement("canvas");
+  if (_mapOffscreen.width !== w || _mapOffscreen.height !== h) {
+    _mapOffscreen.width = w;
+    _mapOffscreen.height = h;
+  }
+  return _mapOffscreen;
+}
+
+// Fixed voxel→canvas transform: UNIFORM scale (preserve aspect) + centering + the same
+// `H - y` Y-flip the splats use, so the outline polygon and the activation splats co-register
+// exactly (they share this transform). Replaces the old per-recording non-uniform stretch-fit.
+function makeTransform(W, H, pad, uMin, uMax, vMin, vMax) {
+  const extU = uMax - uMin || 1, extV = vMax - vMin || 1;
+  const s = Math.min((W - 2 * pad) / extU, (H - 2 * pad) / extV);
+  const offX = (W - extU * s) / 2, offY = (H - extV * s) / 2;
+  return { s, pt: (u, v) => [offX + (u - uMin) * s, H - offY - (v - vMin) * s] };
+}
+
+// Build (once per view) the brain-map cache: per-neuron accumulation-buffer positions, the
+// active transform, the registered outline polygon (fixed mode only), and the exact global
+// normalization peak. Rebuilt when the view plane or canvas size changes.
+function ensureMapCache(W, H, pad) {
+  const viewKey = el("map-view-select").value;
+  const c = state.mapCache;
+  if (c && c.viewKey === viewKey && c.W === W && c.H === H) return c;
+
+  const pos = state.data.meta.positions;
+  const plane = MAP_VIEW_PRESETS[viewKey] || "xz";
+  const [a0, a1] = PROJECTIONS[plane] || PROJECTIONS.xz;
+  const pts = projectedPoints();
+  const anatomical = /^anatomical/i.test(pos.source || "");
+  const hasAny = pts.some(Boolean);
+  // ⟨C1⟩ Missing-asset guard: `typeof` on an undeclared identifier never throws. Without the
+  // asset (or for non-anatomical/legacy recordings) we degrade to auto-fit splats, no outline.
+  const outline = typeof BRAIN_OUTLINE !== "undefined" ? BRAIN_OUTLINE : null;
+  const fixed = anatomical && hasAny && outline != null;
+
+  let tf, poly = null;
+  if (fixed) {
+    const mn = outline.bbox3d.min, mx = outline.bbox3d.max;
+    tf = makeTransform(W, H, pad, mn[a0], mx[a0], mn[a1], mx[a1]);
+    const pl = outline.planes && outline.planes[viewKey];
+    if (pl && pl.polygon) poly = pl.polygon.map(([u, v]) => tf.pt(u, v));
+  } else {
+    const b = bounds(pts); // AC8 graceful degradation: fit the splats to whatever points exist
+    tf = makeTransform(W, H, pad, b.minX, b.maxX, b.minY, b.maxY);
+  }
+
+  const bw = Math.max(1, Math.ceil(W / MAP_SS)), bh = Math.max(1, Math.ceil(H / MAP_SS));
+  const sx = new Int32Array(pts.length), sy = new Int32Array(pts.length);
+  const valid = new Uint8Array(pts.length);
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    if (!p) continue; // null coords3d on a non-default plane don't contribute there (as today)
+    const xy = tf.pt(p[0], p[1]);
+    sx[i] = Math.round(xy[0] / MAP_SS);
+    sy[i] = Math.round(xy[1] / MAP_SS);
+    valid[i] = 1;
+  }
+
+  const cache = {
+    viewKey, W, H, plane, tf, poly, fixed, bw, bh, sx, sy, valid,
+    buf: new Float32Array(bw * bh),
+    img: el("brain-canvas").getContext("2d").createImageData(bw, bh),
+    globalPeak: 0,
+  };
+  cache.globalPeak = computeGlobalPeak(cache); // ⟨C3⟩ exact global max, one-time per view
+  state.mapCache = cache;
+  return cache;
+}
+
+// Zero the accumulation buffer and stamp every active neuron's weighted Gaussian into it for
+// one frame's activations. Returns the frame's peak intensity (for per-frame normalization).
+function stampFrame(cache, act) {
+  const { buf, bw, bh, sx, sy, valid } = cache;
+  buf.fill(0);
+  const R = MAP_KERNEL.R, size = MAP_KERNEL.size, kd = MAP_KERNEL.data;
+  let peak = 0;
+  for (let i = 0; i < valid.length; i++) {
+    if (!valid[i]) continue;
+    const w = act[i] / 255;
+    if (w < MAP_MIN_WEIGHT) continue; // perf: skip near-silent neurons
+    const cx = sx[i], cy = sy[i];
+    for (let dy = -R; dy <= R; dy++) {
+      const py = cy + dy;
+      if (py < 0 || py >= bh) continue;
+      const krow = (dy + R) * size + R;
+      const brow = py * bw;
+      for (let dx = -R; dx <= R; dx++) {
+        const px = cx + dx;
+        if (px < 0 || px >= bw) continue;
+        const val = buf[brow + px] + w * kd[krow + dx];
+        buf[brow + px] = val;
+        if (val > peak) peak = val;
+      }
+    }
+  }
+  return peak;
+}
+
+// ⟨C3⟩ Exact global normalization peak: replay every frame's accumulation once and track the
+// true maximum. One-time per view/canvas-size; O(nFrames × neurons × kernel). Warns (does not
+// approximate or clip) for very large recordings.
+function computeGlobalPeak(cache) {
+  const frames = state.data.frames.activations;
+  const nF = frames.length;
+  if (nF * cache.valid.length > 4000000) {
+    console.warn(
+      `brain-map global-norm pre-pass: ${nF} frames × ${cache.valid.length} neurons — may be slow`,
+    );
+  }
+  let peak = 0;
+  for (let f = 0; f < nF; f++) {
+    const p = stampFrame(cache, frames[f]);
+    if (p > peak) peak = p;
+  }
+  return peak;
+}
+
+// Anatomical panel (UC-12): an MRI/fMRI-style activation heatmap over a static registered
+// brain outline. No per-neuron dots. Region intensity = summed activation of the neurons whose
+// soma coordinates fall there, drawn as additive kernel-density splats (AC2), normalized either
+// per-frame or against the fixed global peak (AC5), mapped through a "hot" colormap, and drawn
+// under the outline polygon (AC4). Degrades to auto-fit splats with no outline for non-anatomical
+// or legacy recordings (AC8).
 function drawBrainMap() {
   const canvas = el("brain-canvas");
   const ctx = canvas.getContext("2d");
   const W = canvas.width, H = canvas.height, pad = 18;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = "source-over";
   ctx.clearRect(0, 0, W, H);
-  const doc = state.data;
-  const pts = projectedPoints();
-  const b = bounds(pts);
-  const sx = (W - 2 * pad) / (b.maxX - b.minX || 1);
-  const sy = (H - 2 * pad) / (b.maxY - b.minY || 1);
-  const act = doc.frames.activations[state.frame];
-  const roles = doc.meta.roles;
-  const hasPos = doc.meta.positions.has_position;
-  // Beat (AC6): during continuous playback use the per-neuron envelope (fast attack +
-  // real-time release); when paused/scrubbing use the instantaneous radius for this frame.
-  const usingEnvelope = state.playing && state.beat;
-  for (let i = 0; i < pts.length; i++) {
-    const p = pts[i];
-    if (!p) continue;
-    const x = pad + (p[0] - b.minX) * sx;
-    const y = H - pad - (p[1] - b.minY) * sy; // flip Y so +axis points up
-    const brightness = act[i] / 255;
-    const rInst = BEAT_REST + BEAT_SPAN * brightness;
-    const radius = usingEnvelope ? state.beat[i] : rInst;
-    const color = hasPos[i] ? (ROLE_COLORS[roles[i]] || FALLBACK_COLOR) : FALLBACK_COLOR;
-    const alpha = 0.18 + 0.82 * brightness;
+  if (!state.data) return;
+
+  const cache = ensureMapCache(W, H, pad);
+  const act = state.data.frames.activations[state.frame];
+  const frameMax = stampFrame(cache, act);
+  // AC5 normalization: per-frame uses this frame's own peak (punchy "lights up" contrast);
+  // global uses the fixed cross-frame peak (frame-to-frame comparable). Clamped to [0,1].
+  const norm = state.mapNorm === "global" ? cache.globalPeak : frameMax;
+  const inv = norm > 1e-9 ? 1 / norm : 0;
+  const buf = cache.buf, img = cache.img, data = img.data;
+  for (let j = 0; j < buf.length; j++) {
+    const p = j * 4;
+    const t = clamp01(buf[j] * inv);
+    if (t <= 0) {
+      data[p] = data[p + 1] = data[p + 2] = data[p + 3] = 0;
+      continue;
+    }
+    const rgb = hotColormap(t);
+    data[p] = rgb[0];
+    data[p + 1] = rgb[1];
+    data[p + 2] = rgb[2];
+    data[p + 3] = Math.round(255 * clamp01(t * 1.25)); // soft alpha ramp near the low end
+  }
+
+  // Blit the downscaled colorized buffer up to the canvas with smoothing (MRI-style softness),
+  // composited additively ("lighter") over the near-black panel — the heatmap is a sum of
+  // additive kernel-density splats.
+  const off = mapOffscreen(cache.bw, cache.bh);
+  off.getContext("2d").putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.globalCompositeOperation = "lighter";
+  ctx.drawImage(off, 0, 0, cache.bw, cache.bh, 0, 0, W, H);
+  ctx.globalCompositeOperation = "source-over";
+
+  // Static registered brain outline on top (AC4): faint fill + stroke. Fixed mode only.
+  if (cache.poly && cache.poly.length > 1) {
     ctx.beginPath();
-    ctx.fillStyle = `rgba(${color[0]},${color[1]},${color[2]},${alpha.toFixed(3)})`;
-    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.moveTo(cache.poly[0][0], cache.poly[0][1]);
+    for (let i = 1; i < cache.poly.length; i++) ctx.lineTo(cache.poly[i][0], cache.poly[i][1]);
+    ctx.closePath();
+    ctx.fillStyle = "rgba(120,140,190,0.05)";
     ctx.fill();
-  }
-}
-
-// Evolve the per-neuron beat envelope by `dtReal` seconds of real (wall-clock) time. Fast
-// attack + exponential release toward rest, floored at each neuron's instantaneous radius so
-// the current frame's activation is never under-drawn (AC6). Called once per rAF while playing.
-function updateBeat(dtReal) {
-  if (!state.beat || !state.data) return;
-  const act = state.data.frames.activations[state.frame];
-  const decay = Math.exp(-Math.max(0, dtReal) / BEAT_RELEASE_TAU);
-  for (let i = 0; i < state.beat.length; i++) {
-    const rInst = BEAT_REST + BEAT_SPAN * (act[i] / 255);
-    const released = BEAT_REST + (state.beat[i] - BEAT_REST) * decay;
-    state.beat[i] = Math.max(released, rInst);
-  }
-}
-
-// Seed the envelope to the current frame's instantaneous radii (called when playback starts)
-// so the first animated frames don't inherit a stale pulse from a previous run.
-function seedBeat() {
-  if (!state.beat || !state.data) return;
-  const act = state.data.frames.activations[state.frame];
-  for (let i = 0; i < state.beat.length; i++) {
-    state.beat[i] = BEAT_REST + BEAT_SPAN * (act[i] / 255);
+    ctx.strokeStyle = "rgba(150,170,220,0.55)";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
   }
 }
 
@@ -754,7 +914,6 @@ el("play-btn").addEventListener("click", () => {
     }
     state.lastTs = 0;
     state.acc = 0;
-    seedBeat();
     requestAnimationFrame(tick);
   }
 });
@@ -770,7 +929,19 @@ el("speed-select").addEventListener("change", (ev) => {
   state.speed = parseFloat(ev.target.value) || 1;
 });
 
-el("map-view-select").addEventListener("change", () => drawBrainMap());
+// Changing the view plane invalidates the per-view cache (screen positions, outline polygon,
+// global peak all depend on the plane), so drop it and let drawBrainMap rebuild.
+el("map-view-select").addEventListener("change", () => {
+  state.mapCache = null;
+  drawBrainMap();
+});
+
+// Intensity normalization toggle (AC5): per-frame vs fixed global scale. The global peak is
+// already cached per view, so switching just re-normalizes the current frame — no rebuild.
+el("map-norm-select").addEventListener("change", (ev) => {
+  state.mapNorm = ev.target.value === "global" ? "global" : "frame";
+  drawBrainMap();
+});
 
 // View presets (AC13): change the 3D camera angle; the camera stays freely orbitable after.
 el("view-select").addEventListener("change", (ev) => {
@@ -796,10 +967,9 @@ function tick(ts) {
     }
     frameChanged = true;
   }
-  // Evolve the beat envelope in REAL time every rAF (decoupled from the frame accumulator),
-  // then redraw: a full sync when the frame advanced, else just the animating brain map.
-  updateBeat(elapsed);
+  // ⟨C2⟩ With the beat gone, the brain-map splats only change when the frame advances, so
+  // redraw the panels only on a frame change — no re-splatting thousands of gaussians 60×/s
+  // while idle. (`elapsed` still drives the frame accumulator above.)
   if (frameChanged) renderAll();
-  else drawBrainMap();
   if (state.playing) requestAnimationFrame(tick);
 }
