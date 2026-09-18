@@ -165,7 +165,7 @@ def test_evaluate_config_routes_prune_keys(tmp_path, monkeypatch) -> None:
 
 @pytest.fixture
 def trained_checkpoint(connectome, tmp_path):
-    """A tiny hermetic smoke-trained checkpoint on the full fixture (300 neurons)."""
+    """A tiny hermetic smoke-trained checkpoint on the full fixture (322 neurons)."""
     cfg = TrainConfig(
         models_dir=str(tmp_path / "models"),
         logs_dir=str(tmp_path / "logs"),
@@ -194,14 +194,14 @@ def test_evaluate_record_writes_files(trained_checkpoint, tmp_path) -> None:
         record=True,
         record_every=2,
         record_dir=str(rec_dir),
-        connectome_path=FIXTURE_DIR,  # unpruned -> 300, aligns with the actor
+        connectome_path=FIXTURE_DIR,  # unpruned -> 322, aligns with the actor
     )
     names = sorted(p.name for p in rec_dir.glob("episode_*.json"))
     assert names == ["episode_0.json", "episode_2.json"]
 
 
 def test_evaluate_record_raises_on_connectome_mismatch(trained_checkpoint, tmp_path) -> None:
-    """Re-loading a pruned (245-neuron) connectome against the 300-neuron actor must raise."""
+    """Re-loading a pruned (247-neuron) connectome against the 322-neuron actor must raise."""
     final, stats = trained_checkpoint
     with pytest.raises(ValueError, match="alignment|neuron"):
         evaluate_checkpoint(
@@ -213,5 +213,5 @@ def test_evaluate_record_raises_on_connectome_mismatch(trained_checkpoint, tmp_p
             record=True,
             record_dir=str(tmp_path / "rec"),
             connectome_path=FIXTURE_DIR,
-            prune=True,  # 300 -> 245 neurons, no longer matches the checkpoint's actor
+            prune=True,  # 322 -> 247 neurons, no longer matches the checkpoint's actor
         )

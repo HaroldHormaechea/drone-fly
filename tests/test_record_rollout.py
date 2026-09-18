@@ -114,7 +114,7 @@ def test_recorder_actor_misalignment_raises(
     """A recorder built from a different graph than the actor is rejected up front."""
     from drone_fly.record.rollout import record_rollout
 
-    actor = _actor(connectome)  # 300 neurons
+    actor = _actor(connectome)  # 322 neurons
     recorder = ActivationRecorder(synthetic_connectome, tmp_path, backend="simple")  # 50
     env = _short_env()
     with pytest.raises(ValueError, match="aligned|neurons"):

@@ -36,6 +36,7 @@ def _craft(
     superclass=None,
     neuron_class=None,
     subclass=None,
+    cell_type=None,
 ) -> ConnectomeData:
     """A tiny deterministic connectome carrying exactly the label columns given."""
     matrix = sp.random(n, n, density=0.3, format="csr", dtype=np.float32, random_state=0)
@@ -46,6 +47,7 @@ def _craft(
         superclass=None if superclass is None else np.asarray(superclass, dtype=object),
         neuron_class=None if neuron_class is None else np.asarray(neuron_class, dtype=object),
         subclass=None if subclass is None else np.asarray(subclass, dtype=object),
+        cell_type=None if cell_type is None else np.asarray(cell_type, dtype=object),
     )
 
 
@@ -122,10 +124,39 @@ def test_motion_is_flagged_approximate_and_matches_substring() -> None:
 
 
 def test_hunger_is_flagged_approximate() -> None:
-    data = _craft(3, subclass=["feeding-related", "x", "npf-neuron"])
+    # UC-17: hunger is bound over ``cell_type`` (where IPC/Hugin/NPF/insulin/DILP are labelled),
+    # NOT ``subclass``. Craft the feeding population via cell_type tokens.
+    data = _craft(4, cell_type=["IPC", "unrelated", "Hugin-RG", "NPFL1-I"])
     sel = select_modality(data, "hunger")
     assert sel.approximate is True
-    assert sel.indices.tolist() == [0, 2]
+    assert sel.indices.tolist() == [0, 2, 3]
+
+
+def test_hunger_ignores_subclass_now() -> None:
+    """UC-17: the old ``subclass`` tokens no longer bind hunger — only ``cell_type`` does.
+
+    A connectome whose feeding names live only in ``subclass`` (the pre-UC-17 layout) now has an
+    absent hunger population, because the rule reads ``cell_type``.
+    """
+    data = _craft(3, cell_type=["x", "y", "z"], subclass=["feeding-related", "x", "npf-neuron"])
+    with pytest.raises(ModalityAbsentError):
+        select_modality(data, "hunger")
+
+
+def test_hunger_resolves_on_regenerated_fixture(connectome: ConnectomeData) -> None:
+    """UC-17 AC4/AC7: hunger resolves to the 22-neuron feeding population on the regenerated
+    fixture (IPC×16 + Hugin-RG×4 + NPFL1-I×2), flagged approximate. Independently re-derived
+    against the committed fixture's ``cell_type`` column."""
+    sel = select_modality(connectome, "hunger")
+    assert sel.approximate is True
+    assert sel.indices.size == 22
+    cell_type = np.asarray(connectome.cell_type)
+    tokens = ("ipc", "hugin", "npf", "insulin", "dilp")
+    for i in sel.indices.tolist():
+        assert any(t in str(cell_type[i]).lower() for t in tokens)
+    # Sorted, unique, in range.
+    assert np.array_equal(sel.indices, np.unique(sel.indices))
+    assert sel.indices.max() < connectome.neuron_count
 
 
 # --- fail-loud cases on REAL data (AC6) ------------------------------------------------

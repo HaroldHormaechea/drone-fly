@@ -15,11 +15,14 @@ Verified fixture reduction (path-inclusion rule), asserted by AC7:
 ======  =========  =======
 k       neurons    edges
 ======  =========  =======
-full    300        8288
+full    322        8413
 0       45         549
 1       135        3950
-2       245        7494
+2       247        7525
 ======  =========  =======
+
+(UC-17 regenerated the fixture with a 22-neuron hunger quota: full grew 300→322 / 8288→8413;
+only the k=2 tier shifted, 245→247 / 7494→7525. k=0 and k=1 are unchanged.)
 """
 
 from __future__ import annotations
@@ -51,7 +54,7 @@ from drone_fly.controller.populations import (
 FIXTURE_PRUNE_SCALE = {
     0: (45, 549),
     1: (135, 3950),
-    2: (245, 7494),
+    2: (247, 7525),
 }
 
 # A neutral (neither sensory nor motor) superclass label used to pad toy graphs.
@@ -318,8 +321,8 @@ def test_ac7_logs_input_to_pruned_counts(connectome, caplog) -> None:
     with caplog.at_level(logging.INFO, logger="drone_fly.connectome.prune"):
         prune_to_subcircuit(connectome, k=0)
     msgs = " ".join(r.getMessage() for r in caplog.records)
-    assert "300" in msgs and "45" in msgs  # input -> pruned neuron counts
-    assert "8288" in msgs and "549" in msgs  # input -> pruned edge counts
+    assert "322" in msgs and "45" in msgs  # input -> pruned neuron counts
+    assert "8413" in msgs and "549" in msgs  # input -> pruned edge counts
 
 
 # --------------------------------------------------------------------------- #
@@ -345,9 +348,9 @@ def test_ac8_train_with_prune_smoke(connectome, tmp_path) -> None:
 
 def test_ac8_default_is_backcompatible(connectome) -> None:
     """Default (no prune) leaves the connectome full — UC-01/02/03 behaviour unchanged."""
-    # The pruning entry point is strictly opt-in; the fixture itself is untouched at 300/8288.
-    assert connectome.neuron_count == 300
-    assert connectome.edge_count == 8288
+    # The pruning entry point is strictly opt-in; the fixture itself is untouched at 322/8413.
+    assert connectome.neuron_count == 322
+    assert connectome.edge_count == 8413
 
 
 def test_ac8_prune_is_noop_under_resume(connectome, tmp_path, caplog) -> None:

@@ -13,7 +13,7 @@ from torch import nn
 from drone_fly.connectome.loader import ConnectomeData
 from drone_fly.controller import ConnectomePolicy, SparseConnectomeLayer
 
-# The committed fixture density is ~0.092 (8288 / 300**2). A dense MLP would be 1.0.
+# The committed fixture density is ~0.081 (8413 / 322**2). A dense MLP would be 1.0.
 # Assert well below this documented threshold to prove it is genuinely sparse.
 SPARSITY_THRESHOLD = 0.5
 

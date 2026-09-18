@@ -344,3 +344,178 @@ def test_base_adapter_reconfigure_is_a_silent_no_op() -> None:
     )
     # State is unaffected — the base class stores nothing.
     np.testing.assert_array_equal(ad.reset().position, np.zeros(3))
+
+
+# ===========================================================================
+# UC-17 — battery drain + thrust-impact (AC1/AC2/AC3/AC5/AC6)
+# ===========================================================================
+from drone_fly.adapter.simple import GRAVITY  # noqa: E402
+
+
+def _battery_adapter(cfg) -> SimpleDroneAdapter:
+    """A hermetic adapter with the given BatteryConfig (or None for disabled)."""
+    return SimpleDroneAdapter(
+        np.array([0.0, 0.0, 1.0]), floor_z=0.0, ceiling_z=2.5, dt=0.05, battery=cfg
+    )
+
+
+LEVEL_FULL_THROTTLE = np.array([1.0, 0.0, 0.0, 0.0])
+
+
+# --- AC1: drain is monotone non-increasing; higher throttle drains strictly faster --------
+def test_battery_resets_to_full_charge() -> None:
+    from drone_fly.env.config import BatteryConfig
+
+    ad = _battery_adapter(BatteryConfig(enabled=True))
+    st = ad.reset(seed=0)
+    assert st.battery == 1.0
+
+
+def test_battery_drains_monotone_non_increasing() -> None:
+    """AC1: enabled → the battery is monotone non-increasing each step and clamped ≥ 0."""
+    from drone_fly.env.config import BatteryConfig
+
+    ad = _battery_adapter(BatteryConfig(enabled=True))
+    ad.reset(seed=0)
+    charges = []
+    for _ in range(30):
+        st = ad.step(np.array([0.5, 0.0, 0.0, 0.0]))
+        charges.append(st.battery)
+    assert all(y <= x for x, y in zip(charges, charges[1:], strict=False))
+    assert charges[-1] < charges[0]  # it genuinely dropped
+    assert all(c >= 0.0 for c in charges)
+
+
+def test_battery_drain_matches_documented_rate() -> None:
+    """AC1: the first-step drop equals (idle_rate + throttle_rate*throttle) * dt exactly."""
+    from drone_fly.env.config import BatteryConfig
+
+    cfg = BatteryConfig(enabled=True)
+    ad = _battery_adapter(cfg)
+    ad.reset(seed=0)
+    throttle = 0.7
+    st = ad.step(np.array([throttle, 0.0, 0.0, 0.0]))
+    expected_drop = (cfg.idle_rate + cfg.throttle_rate * throttle) * 0.05
+    assert st.battery == pytest.approx(1.0 - expected_drop)
+
+
+def test_higher_throttle_drains_strictly_faster() -> None:
+    """AC1: over equal steps, a higher-throttle trajectory drains strictly more charge."""
+    from drone_fly.env.config import BatteryConfig
+
+    high = _battery_adapter(BatteryConfig(enabled=True))
+    low = _battery_adapter(BatteryConfig(enabled=True))
+    high.reset(seed=0)
+    low.reset(seed=0)
+    for _ in range(20):
+        sh = high.step(np.array([1.0, 0.0, 0.0, 0.0]))
+        sl = low.step(np.array([0.0, 0.0, 0.0, 0.0]))
+    assert sh.battery < sl.battery
+
+
+# --- AC2: achievable vertical acceleration is strictly lower at low battery ----------------
+def _vertical_accel_first_step(ad: SimpleDroneAdapter, battery: float) -> float:
+    """Vertical acceleration on the first step from rest at a fixed start-of-step charge."""
+    ad.reset(seed=0)
+    ad._battery = battery  # set start-of-step charge directly (private test hook)
+    st = ad.step(LEVEL_FULL_THROTTLE)
+    # From rest with level attitude and zero drag, vz = accel_z * dt.
+    return st.velocity[2] / 0.05
+
+
+def test_lower_battery_gives_lower_vertical_accel() -> None:
+    """AC2: holding action/dynamics fixed, vertical accel is strictly lower at low charge."""
+    from drone_fly.env.config import BatteryConfig
+
+    ad = _battery_adapter(BatteryConfig(enabled=True))
+    accel_full = _vertical_accel_first_step(ad, battery=1.0)
+    accel_low = _vertical_accel_first_step(ad, battery=0.02)
+    assert accel_low < accel_full
+
+
+# --- AC3: soft depletion — an empty battery cannot hover and sinks to a floor crash --------
+def test_empty_battery_cannot_hover_and_crashes_to_floor() -> None:
+    """AC3 (adapter-level soft depletion): with an empty battery even full throttle produces a
+    ceiling below hover, so the drone sinks and eventually flags a floor collision — no new
+    hard-terminate branch, just the existing crash path."""
+    from drone_fly.env.config import BatteryConfig
+
+    ad = _battery_adapter(BatteryConfig(enabled=True))
+    ad.reset(seed=0)
+    ad._battery = 0.0  # fully depleted at start of every step (idle drain keeps it there)
+    crashed = False
+    for _ in range(400):
+        st = ad.step(LEVEL_FULL_THROTTLE)
+        ad._battery = 0.0  # keep it pinned empty for a deterministic soft-crash
+        if st.collided:
+            crashed = True
+            assert st.position[2] == pytest.approx(0.0)  # sank to the FLOOR, not the ceiling
+            break
+    assert crashed, "an empty battery must be unable to hover and sink to a floor crash"
+
+
+# --- AC5: off-by-default byte-identity + no extra RNG consumption --------------------------
+def test_battery_disabled_reports_full_charge_always() -> None:
+    """AC5: disabled (or no battery) → state.battery stays 1.0 and is never drained."""
+    from drone_fly.env.config import BatteryConfig
+
+    for cfg in (None, BatteryConfig(enabled=False)):
+        ad = _battery_adapter(cfg)
+        ad.reset(seed=0)
+        for _ in range(50):
+            st = ad.step(np.array([0.9, 0.1, -0.1, 0.05]))
+        assert st.battery == 1.0
+
+
+def test_battery_disabled_is_bit_identical_to_no_battery() -> None:
+    """AC5: a BatteryConfig(enabled=False) adapter is bit-identical to a no-battery adapter over a
+    fixed-seed episode — the disabled path never reads a battery, drains, or draws np_random."""
+    from drone_fly.env.config import BatteryConfig
+
+    rng = np.random.default_rng(11)
+    actions = [rng.uniform([0, -1, -1, -1], [1, 1, 1, 1]) for _ in range(60)]
+
+    plain = _battery_adapter(None)
+    disabled = _battery_adapter(BatteryConfig(enabled=False))
+    plain.reset(seed=5)
+    disabled.reset(seed=5)
+    for act in actions:
+        sp_, sd = plain.step(act), disabled.step(act)
+        np.testing.assert_array_equal(sp_.position, sd.position)
+        np.testing.assert_array_equal(sp_.velocity, sd.velocity)
+        np.testing.assert_array_equal(sp_.attitude, sd.attitude)
+
+
+def test_battery_disabled_thrust_is_exactly_throttle_times_max_thrust() -> None:
+    """AC5/AC6: on the disabled path the effective thrust is EXACTLY throttle * _max_thrust — the
+    enabled ceiling_factor never multiplies in (disabled skips the battery branch entirely)."""
+    plain = _battery_adapter(None)
+    plain.reset(seed=0)
+    st = plain.step(LEVEL_FULL_THROTTLE)
+    accel_z = st.velocity[2] / 0.05
+    # thrust_acc = throttle * _max_thrust / mass ; vz = (thrust_acc - GRAVITY) * dt at rest, level.
+    expected_accel = 1.0 * plain._max_thrust / plain._mass - GRAVITY
+    assert accel_z == pytest.approx(expected_accel)
+
+
+# --- AC6: battery composes with UC-08 thrust_factor via a documented product order ---------
+def test_battery_is_third_multiplicative_factor_after_uc08_thrust_factor() -> None:
+    """AC6: effective_max_thrust == (base * thrust_factor) * ceiling_factor(battery). UC-08 sets
+    _max_thrust = base * thrust_factor via reconfigure; battery is the THIRD factor on top."""
+    from drone_fly.env.config import BatteryConfig
+
+    cfg = BatteryConfig(enabled=True)
+    ad = _battery_adapter(cfg)
+    # UC-08 thrust_factor=0.8 folds into max_thrust (base * 0.8).
+    thrust_factor = 0.8
+    base_max_thrust = 2.0 * ad._mass * GRAVITY  # BASE_MAX_THRUST (TWR 2)
+    ad.reconfigure(dynamics=DynamicsParams(max_thrust=base_max_thrust * thrust_factor))
+    ad.reset(seed=0)
+    battery = 0.1
+    ad._battery = battery
+    st = ad.step(LEVEL_FULL_THROTTLE)  # throttle 1.0, level attitude
+    # Recover the effective ceiling that acted this step from the vertical accel.
+    accel_z = st.velocity[2] / 0.05
+    effective_max_thrust = (accel_z + GRAVITY) * ad._mass / 1.0
+    expected = (base_max_thrust * thrust_factor) * cfg.ceiling_factor(battery)
+    assert effective_max_thrust == pytest.approx(expected)

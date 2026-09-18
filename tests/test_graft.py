@@ -22,6 +22,7 @@ import torch
 from drone_fly.connectome.loader import ConnectomeData
 from drone_fly.controller.actor import ConnectomeActorNetwork
 from drone_fly.controller.obs_schema import (
+    BATTERY_HUNGER_V3,
     MIGRATED_SCHEMA_V1,
     OBSTACLE_VISION_V2,
     ObsBlock,
@@ -185,3 +186,81 @@ def test_graft_to_obstacle_vision_v2_nonzero_obstacle_input_changes_action(
     old_obs = torch.randn(MIGRATED_SCHEMA_V1.total_width)
     new_obs = torch.cat([old_obs, torch.ones(_OBSTACLE_WIDTH)])
     assert not torch.equal(orig(old_obs), grafted(new_obs))
+
+
+# --- UC-17 AC4: grafting obstacle_vision_v2 → battery_hunger_v3 warm-starts identically ----
+_BATTERY_WIDTH = BATTERY_HUNGER_V3.total_width - OBSTACLE_VISION_V2.total_width  # 1
+
+
+def _orig_actor_v2(connectome: ConnectomeData) -> ConnectomeActorNetwork:
+    """An actor trained under obstacle_vision_v2 (the immediate v3 predecessor)."""
+    torch.manual_seed(0)
+    actor = ConnectomeActorNetwork(connectome, obs_schema=OBSTACLE_VISION_V2)
+    with torch.no_grad():
+        for p in actor.parameters():
+            p.add_(0.05 * torch.randn_like(p))
+    return actor
+
+
+def test_graft_to_battery_hunger_v3_zero_inits_the_battery_block(
+    connectome: ConnectomeData,
+) -> None:
+    """AC4: grafting obstacle_vision_v2 → battery_hunger_v3 zero-inits the battery block (w+b)."""
+    orig = _orig_actor_v2(connectome)
+    grafted = graft_actor(orig, connectome, BATTERY_HUNGER_V3)
+    battery_proj = grafted.block_projections[len(OBSTACLE_VISION_V2.blocks)]
+    assert torch.count_nonzero(battery_proj.weight) == 0
+    assert torch.count_nonzero(battery_proj.bias) == 0
+
+
+def test_graft_to_battery_hunger_v3_arbitrary_battery_value_is_bit_identical(
+    connectome: ConnectomeData,
+) -> None:
+    """AC4 (load-bearing): with the battery block zero-init, feeding an ARBITRARY battery value
+    (not just the baseline 0) leaves the grafted actor's action bit-identical to the original —
+    the zeroed projection nullifies whatever the battery dim carries."""
+    orig = _orig_actor_v2(connectome)
+    grafted = graft_actor(orig, connectome, BATTERY_HUNGER_V3)
+
+    old_obs = torch.randn(OBSTACLE_VISION_V2.total_width)  # 24-d
+    orig_action = orig(old_obs)
+    # Sweep a range of battery-dim values — every one must reproduce the original action.
+    for value in (-3.0, -1.0, 0.0, 0.5, 1.0, 7.5):
+        new_obs = torch.cat([old_obs, torch.full((_BATTERY_WIDTH,), value)])
+        assert torch.equal(orig_action, grafted(new_obs)), f"battery value {value} broke parity"
+
+    # Batched parity with a non-baseline battery value too.
+    old_batch = torch.randn(5, OBSTACLE_VISION_V2.total_width)
+    new_batch = torch.cat([old_batch, torch.full((5, _BATTERY_WIDTH), 0.9)], dim=1)
+    assert torch.equal(orig(old_batch), grafted(new_batch))
+
+
+def test_graft_to_battery_hunger_v3_nonzero_projection_changes_action(
+    connectome: ConnectomeData,
+) -> None:
+    """Negative control: once the battery projection is NOT zero, a non-baseline battery input
+    changes the action — proving the parity above is a real consequence of the zero-init."""
+    orig = _orig_actor_v2(connectome)
+    grafted = graft_actor(orig, connectome, BATTERY_HUNGER_V3)
+    battery_i = len(OBSTACLE_VISION_V2.blocks)
+    with torch.no_grad():
+        grafted.block_projections[battery_i].weight.fill_(0.4)
+        grafted.block_projections[battery_i].bias.fill_(0.2)
+
+    old_obs = torch.randn(OBSTACLE_VISION_V2.total_width)
+    new_obs = torch.cat([old_obs, torch.full((_BATTERY_WIDTH,), 0.8)])
+    assert not torch.equal(orig(old_obs), grafted(new_obs))
+
+
+def test_existing_parameters_unchanged_grafting_to_battery_hunger_v3(
+    connectome: ConnectomeData,
+) -> None:
+    """AC4: every pre-existing v2 parameter is byte-unchanged by the v3 graft."""
+    orig = _orig_actor_v2(connectome)
+    grafted = graft_actor(orig, connectome, BATTERY_HUNGER_V3)
+    for i in range(len(OBSTACLE_VISION_V2.blocks)):
+        assert torch.equal(grafted.block_projections[i].weight, orig.block_projections[i].weight)
+        assert torch.equal(grafted.block_projections[i].bias, orig.block_projections[i].bias)
+    assert torch.equal(grafted.readout.weight, orig.readout.weight)
+    assert torch.equal(grafted.readout.bias, orig.readout.bias)
+    assert torch.equal(grafted.layer.edge_weight, orig.layer.edge_weight)

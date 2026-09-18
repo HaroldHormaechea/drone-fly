@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from drone_fly.adapter.base import DroneState
 from drone_fly.adapter.simple import SimpleDroneAdapter
@@ -911,3 +912,78 @@ def test_real_adapter_docking_smoke_run_completes_finitely() -> None:
             break
     assert ended is True
     assert steps <= 25
+
+
+# =====================================================================================
+# UC-17 — battery observation block + soft-depletion termination (AC3/AC4/AC5)
+# =====================================================================================
+from drone_fly.env.config import BatteryConfig  # noqa: E402
+
+
+def test_battery_off_by_default_obs_width_unchanged() -> None:
+    """AC5: EnvConfig() has battery off → observation stays the locked 12-d contract."""
+    env = make_env(EnvConfig(), adapter="simple")
+    assert env.observation_space.shape == (OBS_DIM,) == (12,)
+
+
+def test_battery_enabled_appends_exactly_one_dim() -> None:
+    """AC4: enabling battery appends EXACTLY one observation dim (the width-1 battery block)."""
+    off = make_env(EnvConfig(), adapter="simple")
+    on = make_env(EnvConfig(battery=BatteryConfig(enabled=True)), adapter="simple")
+    assert on.observation_space.shape[0] == off.observation_space.shape[0] + 1
+
+
+def test_battery_block_is_the_last_obs_dim_and_encodes_depletion() -> None:
+    """AC4: the battery dim is appended LAST and carries depletion = 1 - charge (0 at full)."""
+    env = make_env(EnvConfig(battery=BatteryConfig(enabled=True)), adapter="simple")
+    obs, _info = env.reset(seed=0)
+    # At reset the battery is full → depletion 0.0 in the last dim (matches the zero-init graft
+    # baseline so a warm-started actor sees its trained baseline).
+    assert obs[-1] == pytest.approx(0.0)
+    # After a throttle step the battery drains → the last dim rises above 0 (depletion grows).
+    obs2, *_ = env.step(np.array([0.8, 0.0, 0.0, 0.0], dtype=np.float32))
+    assert obs2[-1] > 0.0
+
+
+def test_full_battery_hunger_v3_width_and_block_order() -> None:
+    """AC4: with obstacle-vision AND battery enabled the env emits 25 dims in block order
+    (vision, proprioception, obstacle_vision, battery) — matching ``battery_hunger_v3``."""
+    from drone_fly.controller.obs_schema import BATTERY_HUNGER_V3
+
+    cfg = EnvConfig(
+        course=default_obstacle_course(),
+        obstacle_vision=ObstacleVisionConfig(enabled=True),
+        battery=BatteryConfig(enabled=True),
+    )
+    env = make_env(cfg, adapter="simple")
+    assert env.observation_space.shape == (25,)
+    assert env.obs_width == BATTERY_HUNGER_V3.total_width == 25
+    obs, _info = env.reset(seed=0)
+    # Battery dim is strictly last; at reset it is full-charge depletion (0.0).
+    assert obs.shape == (25,)
+    assert obs[-1] == pytest.approx(0.0)
+
+
+def test_battery_depletion_triggers_soft_crash_termination() -> None:
+    """AC3: a drained battery cannot hover → the drone sinks to the floor and the episode
+    terminates via the EXISTING crash path (terminated AND info['collided'], NOT a success, NOT a
+    timeout). Uses a fast idle drain so depletion is reached deterministically within the budget."""
+    cfg = EnvConfig(
+        # Fast idle drain empties the battery in a few steps; no throttle term needed.
+        battery=BatteryConfig(enabled=True, idle_rate=10.0, throttle_rate=0.0),
+    )
+    env = make_env(cfg, adapter="simple")
+    env.reset(seed=0)
+    terminated = truncated = False
+    info: dict = {}
+    for _ in range(cfg.episode.max_steps + cfg.episode.steps_per_gate * 3):
+        # Full throttle: with an empty battery the ceiling is below hover, so it still sinks.
+        _obs, _reward, terminated, truncated, info = env.step(
+            np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        )
+        if terminated or truncated:
+            break
+    assert terminated is True, "an empty battery must end the episode via the crash path"
+    assert truncated is False, "the soft crash terminates before the timeout, not by truncation"
+    assert info["collided"] is True, "the soft depletion is reported as a (crash) collision"
+    assert info.get("is_success") is False, "sinking on an empty battery is not a course success"

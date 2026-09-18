@@ -26,7 +26,7 @@ from drone_fly.controller import (
     sensory_neuron_indices,
 )
 
-N = 300  # fixture neuron count
+N = 322  # fixture neuron count
 
 
 def test_contract_constants() -> None:

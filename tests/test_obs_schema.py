@@ -14,6 +14,7 @@ import pytest
 
 from drone_fly.controller.encoding import OBS_DIM
 from drone_fly.controller.obs_schema import (
+    BATTERY_HUNGER_V3,
     MIGRATED_SCHEMA_V1,
     NAMED_SCHEMAS,
     OBSTACLE_VISION_V2,
@@ -170,3 +171,44 @@ def test_obstacle_vision_v2_registered_and_resolvable() -> None:
 def test_obstacle_vision_v2_round_trips() -> None:
     """The v2 schema serialises + deserialises unchanged (rides inside a checkpoint)."""
     assert ObsSchema.from_dict(OBSTACLE_VISION_V2.to_dict()) == OBSTACLE_VISION_V2
+
+
+# --- UC-17 AC4: the battery-("hunger") v3 schema ---------------------------------------
+def test_battery_hunger_v3_extends_obstacle_vision_v2() -> None:
+    """AC4: v3 is v2 (the last-merged schema) PLUS an appended width-1 battery block → extends is
+    True. This is the graft precondition: only an *append* zero-inits cleanly."""
+    assert BATTERY_HUNGER_V3.extends(OBSTACLE_VISION_V2) is True
+    # The leading blocks are byte-identical to obstacle_vision_v2.
+    assert BATTERY_HUNGER_V3.blocks[: len(OBSTACLE_VISION_V2.blocks)] == OBSTACLE_VISION_V2.blocks
+
+
+def test_battery_hunger_v3_layout_and_version() -> None:
+    """AC4: v3 = v2 (24) + battery(1) = 25; version bumped to 3; battery bound to hunger."""
+    assert BATTERY_HUNGER_V3.version == 3
+    assert BATTERY_HUNGER_V3.total_width == 25
+    assert OBSTACLE_VISION_V2.total_width == 24  # predecessor unchanged
+    names = [b.name for b in BATTERY_HUNGER_V3.blocks]
+    assert names == ["vision", "proprioception", "obstacle_vision", "battery"]
+    battery_block = BATTERY_HUNGER_V3.blocks[-1]
+    assert battery_block.name == "battery"
+    assert battery_block.width == 1
+    assert battery_block.population == "hunger"
+
+
+def test_battery_hunger_v3_registered_and_resolvable() -> None:
+    """AC4: the schema is selectable by name via the registry / ``resolve_schema``."""
+    assert NAMED_SCHEMAS["battery_hunger_v3"] is BATTERY_HUNGER_V3
+    assert resolve_schema("battery_hunger_v3") is BATTERY_HUNGER_V3
+
+
+def test_battery_hunger_v3_round_trips() -> None:
+    """The v3 schema serialises + deserialises unchanged (rides inside a checkpoint)."""
+    assert ObsSchema.from_dict(BATTERY_HUNGER_V3.to_dict()) == BATTERY_HUNGER_V3
+
+
+def test_battery_hunger_v3_does_not_extend_migrated_v1_directly() -> None:
+    """AC4: v3 extends its immediate predecessor v2, but is NOT a direct append onto migrated_v1
+    (the obstacle_vision block sits between them) — the chain is v1 → v2 → v3."""
+    assert BATTERY_HUNGER_V3.extends(MIGRATED_SCHEMA_V1) is True  # still a prefix superset
+    # But v2 is the tightest predecessor: v3 = v2 + exactly one appended block.
+    assert len(BATTERY_HUNGER_V3.blocks) == len(OBSTACLE_VISION_V2.blocks) + 1

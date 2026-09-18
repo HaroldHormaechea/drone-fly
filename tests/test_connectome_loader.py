@@ -190,6 +190,76 @@ def test_class_subclass_save_load_round_trips_column_for_column(tmp_path: Path) 
     np.testing.assert_array_equal(np.asarray(reloaded.neuron_ids), original.neuron_ids)
 
 
+def test_cell_type_exposed_on_regenerated_fixture(connectome) -> None:
+    """UC-17: the loader exposes the ``cell_type`` column (where hunger/feeding neurons are
+    labelled). Independently checked against the committed fixture."""
+    assert connectome.cell_type is not None
+    ct = np.asarray(connectome.cell_type)
+    assert ct.shape[0] == connectome.neuron_count
+    # The hunger quota's labels are present.
+    labels = {str(x) for x in ct.tolist()}
+    assert {"IPC", "Hugin-RG", "NPFL1-I"} <= labels
+
+
+def test_cell_type_save_load_round_trips_column_for_column(tmp_path: Path) -> None:
+    """UC-17: save_connectome writes ``cell_type`` back explicitly; load reproduces it (else the
+    ``hunger`` binding would stop resolving on a pruned graft graph)."""
+    from drone_fly.connectome import save_connectome
+    from drone_fly.connectome.loader import ConnectomeData
+
+    n = 8
+    matrix = sp.random(n, n, density=0.3, format="csr", dtype=np.float32, random_state=1)
+    cell_type = np.array(["IPC", "Hugin-RG", "NPFL1-I", "x", "y", "z", "IPC", "w"], dtype=object)
+    original = ConnectomeData(
+        adjacency=matrix,
+        neuron_ids=np.arange(2000, 2000 + n, dtype=np.int64),
+        source="crafted",
+        superclass=np.array(["visual_projection"] * n, dtype=object),
+        neuron_class=np.array(["olfactory"] * n, dtype=object),
+        subclass=np.array(["ORN"] * n, dtype=object),
+        cell_type=cell_type,
+    )
+    save_connectome(original, tmp_path)
+    reloaded = load_connectome(tmp_path)
+
+    assert reloaded.cell_type is not None
+    np.testing.assert_array_equal(np.asarray(reloaded.cell_type), cell_type)
+
+
+@pytest.mark.xfail(
+    reason=(
+        "UC-17 production bug (reported to team-lead): slice_connectome() re-aligns "
+        "superclass/sign/top_nt/neuron_class/subclass to the pruned rows but OMITS cell_type, so "
+        "prune_to_subcircuit() drops cell_type and hunger stops resolving on the pruned graft "
+        "graph. Contradicts the plan's challenger-fold #3. Fix: add "
+        "sliced_cell_type = None if data.cell_type is None else np.asarray(data.cell_type)[kept] "
+        "and pass cell_type=sliced_cell_type into the returned ConnectomeData in prune.py."
+    ),
+    strict=True,
+)
+def test_prune_save_reload_preserves_cell_type_and_hunger(connectome, tmp_path: Path) -> None:
+    """UC-17 (challenger fold): prune→save→reload must keep ``cell_type`` so ``hunger`` still
+    resolves on the pruned graft graph. This is the load-bearing round-trip for the graft path.
+
+    Currently xfails because ``slice_connectome`` drops ``cell_type`` (see the xfail reason);
+    it will pass once the one-line propagation is added to ``prune.py``."""
+    from drone_fly.connectome import prune_to_subcircuit, save_connectome
+    from drone_fly.controller.modality import select_modality
+
+    pruned = prune_to_subcircuit(connectome, k=2)
+    assert pruned.cell_type is not None
+    save_connectome(pruned, tmp_path)
+    reloaded = load_connectome(tmp_path)
+
+    assert reloaded.cell_type is not None
+    np.testing.assert_array_equal(np.asarray(reloaded.cell_type), np.asarray(pruned.cell_type))
+    # hunger resolves identically before and after the round-trip (does not vanish).
+    before = select_modality(pruned, "hunger").indices
+    after = select_modality(reloaded, "hunger").indices
+    np.testing.assert_array_equal(before, after)
+    assert after.size > 0
+
+
 def test_malecns_full_scale_constant_defined_and_positive() -> None:
     assert MALECNS_V1_EXPECTED_SCALE.neuron_count > 0
     assert MALECNS_V1_EXPECTED_SCALE.edge_count > 0
