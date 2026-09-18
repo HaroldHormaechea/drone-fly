@@ -27,5 +27,5 @@ Statuses:
 | 15 | [use-cases/15-obstacles-vision-avoidance.md](use-cases/15-obstacles-vision-avoidance.md) | Obstacles in the course + vision sense (detection & avoidance) | done | 2026-09-18 |
 | 16 | [use-cases/16-landing-takeoff-pad-docking.md](use-cases/16-landing-takeoff-pad-docking.md) | Controlled landing + takeoff (pad docking) foundation | done | 2026-09-18 |
 | 17 | [use-cases/17-battery-drain-thrust-sense.md](use-cases/17-battery-drain-thrust-sense.md) | Battery drain + thrust impact + battery ("hunger") observation block | done | 2026-09-18 |
-| 18 | [use-cases/18-recharge-pads.md](use-cases/18-recharge-pads.md) | Recharge pads (dock-to-recharge, energy-constrained course variation) | in-progress | 2026-09-18 |
+| 18 | [use-cases/18-recharge-pads.md](use-cases/18-recharge-pads.md) | Recharge pads (dock-to-recharge, energy-constrained course variation) | done | 2026-09-18 |
 | 19 | [use-cases/19-damage-repair-pads.md](use-cases/19-damage-repair-pads.md) | Damage/integrity + repair pads + proprioceptive(damage) observation block | pending | 2026-09-18 |

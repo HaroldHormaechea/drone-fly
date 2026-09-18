@@ -24,9 +24,11 @@ from drone_fly.env.config import (
     CourseConfig,
     DockConfig,
     EnvConfig,
+    EpisodeConfig,
     GateSpec,
     ObstacleSpec,
     PadSpec,
+    RandomizationConfig,
     default_obstacle_course,
     default_pad_course,
     single_gate_course,
@@ -273,3 +275,107 @@ def test_ceiling_factor_linear_ramp_below_knee() -> None:
     mid = b.knee / 2.0
     expected = b.empty_factor + (1.0 - b.empty_factor) * (mid / b.knee)
     assert b.ceiling_factor(mid) == pytest.approx(expected)
+
+
+# =====================================================================================
+# UC-18 — recharge pads: new config fields + off-by-default byte-identity (AC1/AC3/AC5)
+# =====================================================================================
+# --- PadSpec.rechargeable — a recharge tag, appended LAST, default False (AC1/AC5) ---------
+def test_pad_spec_rechargeable_defaults_false() -> None:
+    """AC1/AC5: a plain pad is not a recharge pad — the flag defaults ``False``."""
+    assert PadSpec(center=(0.0, 0.0), radius=0.5).rechargeable is False
+
+
+def test_pad_spec_rechargeable_is_the_last_field() -> None:
+    """AC5: ``rechargeable`` is appended after ``radius`` so every UC-16/17 positional
+    ``PadSpec(center, radius)`` call is unshifted (byte-identity)."""
+    fields = [f.name for f in dataclasses.fields(PadSpec)]
+    assert fields[-1] == "rechargeable"
+    assert fields.index("radius") == fields.index("rechargeable") - 1
+
+
+def test_pad_spec_positional_ctor_is_unshifted_and_byte_identical() -> None:
+    """AC5: a positional two-arg PadSpec equals the explicit non-recharge pad (bit-for-bit)."""
+    assert PadSpec((1.5, -2.0), 0.5) == PadSpec(center=(1.5, -2.0), radius=0.5, rechargeable=False)
+
+
+def test_pad_spec_can_be_tagged_rechargeable() -> None:
+    """AC1: the flag is settable and does not perturb the geometry fields."""
+    pad = PadSpec(center=(2.0, 0.0), radius=0.5, rechargeable=True)
+    assert pad.rechargeable is True
+    assert pad.center == (2.0, 0.0)
+    assert pad.radius == 0.5
+
+
+# --- BatteryConfig.recharge_rate — appended LAST, net-positive default (AC1) ---------------
+def test_battery_config_recharge_rate_default() -> None:
+    """AC1: the documented default recharge rate (fraction of full charge per second)."""
+    assert BatteryConfig().recharge_rate == 0.5
+
+
+def test_battery_config_recharge_rate_is_the_last_field() -> None:
+    """UC-18: ``recharge_rate`` is appended last so ``BatteryConfig()`` — and therefore
+    ``EnvConfig()`` — stays byte-identical to UC-17."""
+    fields = [f.name for f in dataclasses.fields(BatteryConfig)]
+    assert fields[-1] == "recharge_rate"
+
+
+def test_recharge_rate_satisfies_the_net_positive_invariant() -> None:
+    """AC1 (documented invariant): the default recharge rate strictly exceeds the maximum docked
+    drain (``idle_rate + throttle_rate``), so a docked step nets a gain and the pad actually
+    fills — otherwise it could never refill."""
+    b = BatteryConfig()
+    assert b.recharge_rate > b.idle_rate + b.throttle_rate
+
+
+# --- EpisodeConfig.recharge_step_allowance — appended LAST, default 400 --------------------
+def test_episode_config_recharge_step_allowance_default() -> None:
+    assert EpisodeConfig().recharge_step_allowance == 400
+
+
+def test_episode_config_recharge_step_allowance_is_the_last_field() -> None:
+    """UC-18: appended last so ``EpisodeConfig()`` stays byte-identical to UC-09."""
+    fields = [f.name for f in dataclasses.fields(EpisodeConfig)]
+    assert fields[-1] == "recharge_step_allowance"
+
+
+# --- RandomizationConfig recharge axis — off/neutral defaults, appended LAST (AC3/AC5) -----
+def test_randomization_config_recharge_axis_defaults() -> None:
+    """AC5: the recharge axis is off by default with neutral energy-model constants."""
+    r = RandomizationConfig()
+    assert r.enable_recharge is False
+    assert r.recharge_nominal_speed == 2.0
+    assert r.recharge_nominal_throttle == 0.5
+    assert r.recharge_pad_radius == 0.5
+    assert r.recharge_energy_margin == 1.5
+
+
+def test_randomization_recharge_fields_appended_last_in_order() -> None:
+    """AC5: the five recharge fields are appended after the UC-15 obstacle fields (field-order
+    compatibility with UC-15/16/17 positional/keyword construction)."""
+    fields = [f.name for f in dataclasses.fields(RandomizationConfig)]
+    assert fields[-5:] == [
+        "enable_recharge",
+        "recharge_nominal_speed",
+        "recharge_nominal_throttle",
+        "recharge_pad_radius",
+        "recharge_energy_margin",
+    ]
+    # obstacle_clearance (the last UC-15 field) still precedes the recharge block.
+    assert fields.index("obstacle_clearance") < fields.index("enable_recharge")
+
+
+def test_energy_margin_is_conservative() -> None:
+    """AC4 safety direction: the margin is > 1 so the guard over-estimates path energy (it never
+    under-provisions recharge pads)."""
+    assert RandomizationConfig().recharge_energy_margin > 1.0
+
+
+# --- Off-by-default byte-identity of the whole config (AC5) --------------------------------
+def test_default_env_config_is_stable_under_uc18_fields() -> None:
+    """AC5: with every UC-18 field at its default, ``EnvConfig()`` equality (a frozen-dataclass
+    proxy for byte-identity) still holds — the new fields perturb nothing by default."""
+    assert EnvConfig() == EnvConfig()
+    assert EnvConfig().battery == BatteryConfig()
+    assert EnvConfig().episode == EpisodeConfig()
+    assert EnvConfig().course.pads == ()

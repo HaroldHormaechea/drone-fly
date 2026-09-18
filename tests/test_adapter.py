@@ -519,3 +519,103 @@ def test_battery_is_third_multiplicative_factor_after_uc08_thrust_factor() -> No
     effective_max_thrust = (accel_z + GRAVITY) * ad._mass / 1.0
     expected = (base_max_thrust * thrust_factor) * cfg.ceiling_factor(battery)
     assert effective_max_thrust == pytest.approx(expected)
+
+
+# ===========================================================================
+# UC-18 — recharge primitive: clamp at 1.0 + net-positive over a docked step (AC1)
+# ===========================================================================
+def test_recharge_adds_charge_and_returns_new_value() -> None:
+    """AC1: ``recharge`` adds the increment and returns the resulting charge."""
+    from drone_fly.env.config import BatteryConfig
+
+    ad = _battery_adapter(BatteryConfig(enabled=True))
+    ad.reset(seed=0)
+    ad._battery = 0.4
+    out = ad.recharge(0.25)
+    assert out == pytest.approx(0.65)
+    assert ad._battery == pytest.approx(0.65)
+
+
+def test_recharge_clamps_at_full_charge() -> None:
+    """AC1: charge clamps at ``1.0`` — a full battery cannot overcharge past the ceiling."""
+    from drone_fly.env.config import BatteryConfig
+
+    ad = _battery_adapter(BatteryConfig(enabled=True))
+    ad.reset(seed=0)
+    ad._battery = 0.9
+    assert ad.recharge(0.5) == 1.0  # 0.9 + 0.5 would be 1.4 → clamped
+    assert ad._battery == 1.0
+    # Recharging an already-full battery is a no-op (still clamped at 1.0).
+    assert ad.recharge(0.3) == 1.0
+
+
+def test_recharge_floors_a_negative_increment_at_zero() -> None:
+    """AC1: a negative ``delta`` can never *drain* through the recharge path (floored at 0)."""
+    from drone_fly.env.config import BatteryConfig
+
+    ad = _battery_adapter(BatteryConfig(enabled=True))
+    ad.reset(seed=0)
+    ad._battery = 0.5
+    assert ad.recharge(-0.3) == 0.5  # unchanged
+    assert ad._battery == 0.5
+
+
+def test_docked_step_nets_a_gain_under_the_net_positive_invariant() -> None:
+    """AC1: mirroring the env's docked step (adapter drains, then ``recharge(recharge_rate*dt)``
+    tops up), a docked step is a strict *gain* when ``recharge_rate > docked drain`` — so the pad
+    actually fills instead of leaking away."""
+    from drone_fly.env.config import BatteryConfig
+
+    cfg = BatteryConfig(enabled=True)
+    ad = _battery_adapter(cfg)
+    ad.reset(seed=0)
+    ad._battery = 0.5
+    before = ad._battery
+    # The env sequence on a docked step: adapter.step drains, then env calls recharge(rate*dt).
+    ad.step(np.array([0.5, 0.0, 0.0, 0.0]))  # applies this step's drain
+    after = ad.recharge(cfg.recharge_rate * 0.05)
+    assert after > before  # net-positive: the docked step gained charge
+    # And the gain equals recharge_rate*dt minus the (idle + throttle*rate)*dt drain.
+    drain = (cfg.idle_rate + cfg.throttle_rate * 0.5) * 0.05
+    expected = before - drain + cfg.recharge_rate * 0.05
+    assert after == pytest.approx(expected)
+
+
+def test_recharge_safe_on_the_disabled_path() -> None:
+    """``recharge`` is safe to call even with battery disabled (``_battery`` stays a plain float);
+    the env only calls it when enabled, but the primitive never raises."""
+    ad = _battery_adapter(None)
+    ad.reset(seed=0)
+    assert ad.recharge(0.1) == 1.0  # already full → clamped, no error
+
+
+@pytest.mark.parametrize(
+    ("idle_rate", "throttle_rate", "recharge_rate", "throttle"),
+    [
+        (0.005, 0.01, 0.5, 1.0),  # defaults, full throttle
+        (0.08, 0.05, 0.9, 0.5),  # the UC-18 tuned-drain fixture
+        (0.2, 0.3, 0.6, 1.0),  # aggressive drain, still net-positive
+    ],
+)
+def test_net_positive_invariant_holds_across_drain_configs(
+    idle_rate, throttle_rate, recharge_rate, throttle
+) -> None:
+    """AC1 (general net-positive invariant): whenever ``recharge_rate > idle_rate + throttle_rate``
+    the battery STRICTLY rises over a docked step (adapter drains, env tops up by recharge_rate*dt)
+    for any throttle — so a recharge pad always fills, never leaks, across drain configs."""
+    from drone_fly.env.config import BatteryConfig
+
+    cfg = BatteryConfig(
+        enabled=True,
+        idle_rate=idle_rate,
+        throttle_rate=throttle_rate,
+        recharge_rate=recharge_rate,
+    )
+    assert cfg.recharge_rate > cfg.idle_rate + cfg.throttle_rate  # invariant precondition
+    ad = _battery_adapter(cfg)
+    ad.reset(seed=0)
+    ad._battery = 0.5
+    before = ad._battery
+    ad.step(np.array([throttle, 0.0, 0.0, 0.0]))  # this docked step's drain
+    after = ad.recharge(cfg.recharge_rate * 0.05)  # env's per-step top-up
+    assert after > before  # strictly rose despite the drain
