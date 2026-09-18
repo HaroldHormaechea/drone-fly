@@ -122,6 +122,21 @@ finish. The randomizer (under the course-randomize axis) samples solvability-gua
 and the 3D viewer draws them as wireframe cylinders. See `default_obstacle_course()` for the
 fixed manually-placed default set.
 
+### Recharge pads (UC-18)
+A landing pad tagged `rechargeable` is a **recharge pad**: while the drone is *fully docked* on
+it (the UC-16 docked state — a slow, upright, over-pad floor contact; hovering does **not**
+count), the battery refills toward `1.0` at `BatteryConfig.recharge_rate` per second (clamped at
+full). The rate exceeds the docked drain, so a dwell nets a gain. This reuses UC-17's battery
+observation block — **no new observation dim, so checkpoints are not invalidated**. To make a
+recharge worth the detour without a shaping reward, recharge is a **course-variation axis**
+(`RandomizationConfig.enable_recharge`): when a sampled (or fallback) course's modelled flight
+energy exceeds one charge, the randomizer places recharge pads so the finish is reachable *with*
+a landing-and-recharge, and the solvability guard guarantees every induced leg fits one charge;
+courses that fit one charge get none. A per-rechargeable-pad step-budget allowance
+(`EpisodeConfig.recharge_step_allowance`) keeps a legitimate recharge detour within the timeout.
+Off by default (no recharge pads ⇒ byte-identical behaviour). The energy model is a conservative
+generation-and-guard heuristic; it only guarantees model-level reachability.
+
 ### Visualization & recording
 Enable recording in a train/evaluate config with `record: true` (tune cadence via `record_every`);
 frames land in that run's `training/<name>/recordings/`. Open `viz/viewer.html` in a browser

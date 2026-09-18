@@ -195,7 +195,11 @@ class RaceEnv(gym.Env):
         # determinism / byte-identity, AC7). When enabled the sampler draws off the env's
         # seeded RNG, so a seed reproduces the same course *and* dynamics stream (AC4).
         if rcfg.enable_course:
-            self._course = sample_course(self.np_random, rcfg, self.config.course)
+            # UC-18: forward the battery config so an energy-constrained sampled course gets a
+            # reachable recharge-pad cover (no-op when the recharge axis is off → byte-identical).
+            self._course = sample_course(
+                self.np_random, rcfg, self.config.course, battery=self.config.battery
+            )
         else:
             self._course = self.config.course
 
