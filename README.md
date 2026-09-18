@@ -10,12 +10,12 @@ Terse path from clone to a trained policy. Each step links to its full write-up 
 
 1. **Install** — `git clone <repo> && cd drone-fly && uv sync --extra dev`. See [Requirements](#requirements).
 2. **Provision a connectome** — point at the committed fixture (`tests/fixtures`, works offline), or download the full MaleCNS matrix into `data/connectome`. See [Provisioning connectome data](#provisioning-connectome-data-required-before-training).
-3. *(Optional)* **Prune once, reuse** — `uv run drone-fly prune --connectome data/connectome --out data/pruned` writes a reusable sensory→motor slice. See [Subcircuit pruning](#subcircuit-pruning-uc-04).
-4. **Train** — `uv run drone-fly train --connectome <dir> --timesteps 1000000` (use `data/pruned` for the pruned slice, or add `--prune` to prune on the fly). See [Flight training](#flight-training-uc-03).
-5. **Resume** — `uv run drone-fly train --resume` (bare flag → newest checkpoint in the default models dir), or point it at a directory (`--resume artifacts/models`) or an exact checkpoint (`--resume artifacts/models/ppo_racer_<steps>_steps.zip`).
-6. **Evaluate** — `uv run drone-fly evaluate --checkpoint artifacts/models/ppo_racer_final.zip --vecnormalize artifacts/models/vecnormalize.pkl --episodes 20`.
+3. *(Optional)* **Prune once, reuse** — `uv run drone-fly prune --config configs/prune/k2.yaml` writes a reusable sensory→motor slice. See [Subcircuit pruning](#subcircuit-pruning-uc-04).
+4. **Train** — `uv run drone-fly train --config configs/train/example.yaml` (edit the YAML's `name`, `connectome`, and `timesteps`). All settings — including the run name and connectome — live in the config; see [Run configuration](#run-configuration---config). Outputs land under `training/<name>/`.
+5. **Resume** — set `resume: auto` (or `resume: latest`) in the train config; re-running then continues from the newest checkpoint under `training/<name>/checkpoints/` (see [Resume](#run-configuration---config)).
+6. **Evaluate** — `uv run drone-fly evaluate --config configs/evaluate/example.yaml` (point its `checkpoint` at `training/<name>/checkpoints/ppo_racer_final.zip`).
 
-> Hermetic sanity check (no network, seconds): `uv run drone-fly smoke-train --connectome tests/fixtures`.
+> Hermetic sanity check (no network, seconds): `uv run drone-fly smoke-train --connectome tests/fixtures`. `smoke-train` keeps its small flag surface; the four settings-heavy commands (`train` / `evaluate` / `prune` / `prune-trained`) are config-driven.
 
 ## What it does
 
@@ -112,8 +112,10 @@ it via `cp .env.example .env` then edit `NEUPRINT_TOKEN` when that path is imple
 
 ### Provisioning connectome data (required before training)
 
-Every `train` / `smoke-train` / `evaluate` command needs a `--connectome <dir>` — a directory that
-holds **one** SciPy-sparse `.npz` connectivity matrix plus a sidecar CSV. **Important naming rule:**
+Every run needs a connectome — for `train` / `evaluate` / `prune` / `prune-trained` this is the
+config's `connectome:` key; for `smoke-train` it is the `--connectome` flag. It points at a
+directory that holds **one** SciPy-sparse `.npz` connectivity matrix plus a sidecar CSV.
+**Important naming rule:**
 the loader looks for the CSV named after the matrix stem — a matrix `foo.npz` must sit next to
 `foo_meta.csv` in the same directory. If the names don't match, the loader can't find the metadata.
 
@@ -124,7 +126,8 @@ MaleCNS slice already ships in the repo under `tests/fixtures/` (`mcns_fixture.n
 `mcns_fixture_meta.csv`). It's small but real, and training works against it immediately:
 
 ```sh
-uv run drone-fly train --connectome tests/fixtures --timesteps 1000000
+# configs/train/example.yaml already sets `connectome: tests/fixtures` — runs as-is.
+uv run drone-fly train --config configs/train/example.yaml
 ```
 
 **Option B — download a fuller MaleCNS matrix.** Pull the canonical whole-brain MaleCNS
@@ -138,22 +141,100 @@ curl -L "$BASE/mcns_inprop_all_neuron.npz" -o data/connectome/mcns_inprop_all_ne
 # note the rename: the source is mcns_all_neuron_meta.csv, saved as <npz-stem>_meta.csv
 curl -L "$BASE/mcns_all_neuron_meta.csv"   -o data/connectome/mcns_inprop_all_neuron_meta.csv
 
-uv run drone-fly train --connectome data/connectome --timesteps 1000000
+# In a train config, set `connectome: data/connectome` (and a real `timesteps`), then:
+uv run drone-fly train --config configs/train/example.yaml
 ```
 
 `data/connectome/` is the default location (`DRONE_FLY_CONNECTOME_DIR`, else `data/connectome`), so
-once those two files are there you may omit `--connectome` entirely. `data/` contents are
+once those two files are there you may omit the config's `connectome:` key entirely. `data/` contents are
 gitignored — the download stays local. (The dataset is CC-BY; cite MaleCNS / `connectome_data_prep`.)
 
 **Option C — regenerate the committed slice.** `uv run python scripts/build_test_fixture.py`
 downloads the same source and writes a deterministic slice to `tests/fixtures/` (dev-time only,
 needs network; provenance recorded in `tests/fixtures/FIXTURE_PROVENANCE.md`).
 
+## Run configuration (`--config`)
+
+The four settings-heavy commands take **all** of their settings from a single YAML file passed
+with `--config <path>`; there are no per-setting flags on them any more (UC-11):
+
+```sh
+uv run drone-fly train         --config configs/train/example.yaml
+uv run drone-fly evaluate      --config configs/evaluate/example.yaml
+uv run drone-fly prune         --config configs/prune/k2.yaml
+uv run drone-fly prune-trained --config configs/prune-trained/example.yaml
+```
+
+`smoke-train` (a CI/correctness helper) and `fetch-connectome` (a stub) keep their small flag
+surface and are **not** config-driven.
+
+**Shipped example configs** (under `configs/`, committed so the documented runs work as-is):
+
+| File | Command | Runs as-is? |
+|---|---|---|
+| `configs/train/example.yaml` | `train` | ✅ smoke-sized run against `tests/fixtures` on the numpy backend |
+| `configs/prune/k0.yaml`, `k1.yaml`, `k2.yaml` | `prune` | ✅ the k0 / k1 / k2 slices of `tests/fixtures` → `artifacts/pruned/` |
+| `configs/evaluate/example.yaml` | `evaluate` | needs a real `checkpoint` (edit the path first) |
+| `configs/prune-trained/example.yaml` | `prune-trained` | needs a real `checkpoint` (edit the path first) |
+
+### Per-run output layout (`training/<name>/`)
+
+A `train` config carries a **required `name`**, and all of that run's outputs go under
+`training/<name>/`, split so differently-named runs never collide:
+
+| Path | Contents |
+|---|---|
+| `training/<name>/checkpoints/` | step `ppo_racer_<steps>_steps.zip` + matching `..._vecnormalize_<steps>_steps.pkl`, `ppo_racer_final.zip`, and the canonical `vecnormalize.pkl`. **This is your trained agent.** |
+| `training/<name>/logs/` | the learning curve: `progress.csv` + TensorBoard `events.out.tfevents.*` |
+| `training/<name>/recordings/` | UC-05 activation playback files (when `record: true`) |
+
+`name` must be non-empty and use only `[A-Za-z0-9._-]` (no path separators, no `.`/`..`) — there
+is **no** flat `artifacts/models` fallback. `training/**` is gitignored. For `evaluate` /
+`prune-trained`, `name` is optional; when set together with `record: true` (and no explicit
+`record_dir`), recordings are routed to `training/<name>/recordings/` too.
+
+> **Cleaning up runs.** Deleting a run is just removing its `training/<name>/` folder. The
+> `clean` command (UC-10, not yet built) will target this layout; until it lands, delete the
+> folder by hand.
+
+### Config schemas
+
+Every key maps 1:1 to a former flag, and an **omitted key falls back to that flag's existing
+default** — so a config reproduces exactly the run the old flags would have. Unknown keys,
+missing required keys, wrong types, and malformed YAML all fail with a clear one-line error and
+exit code `2` (never a stack trace).
+
+**`train`** — `name` **(required)**; optional: `connectome`, `adapter` (`auto`|`simple`|`pybullet`,
+default `auto`), `device` (`cpu`|`cuda`|`mps`), `timesteps`, `n_envs` (≥ 1), `resume`, `prune`,
+`prune_k`, `record`, `record_every`, `record_dir`, `randomize`, `randomize_dynamics`.
+
+**`evaluate`** — `checkpoint` **(required)**; optional: `vecnormalize`, `episodes`, `seed`
+(default 0), `device`, `adapter` (default `auto`), `connectome`, `record`, `record_every`,
+`record_dir`, `randomize`, `randomize_dynamics`, `name`, `prune`, `prune_k`.
+
+**`prune`** — `connectome` **(required)**, `out` **(required)**; optional: `prune_k`, `prune_rule`.
+
+**`prune-trained`** — `checkpoint` **(required)**, `out` **(required)**; optional: `connectome`,
+`vecnormalize`, `prune`, `prune_k`, `metric` (`mean_abs`|`active_fraction`), `threshold`,
+`threshold_mode` (`absolute`|`percentile`), `episodes`, `eps`, `finetune_steps`, `adapter`
+(**default `simple`**, not `auto`), `device`, `seed`, `randomize`, `randomize_dynamics`, `name`.
+
+### Resume (config-driven)
+
+The train config's `resume:` key replaces the old `--resume` flag:
+
+| `resume:` value | Behaviour |
+|---|---|
+| omitted / `null` | fresh run |
+| `auto` | continue from the newest checkpoint under `training/<name>/checkpoints/` if one exists, else start fresh — **no error** (the idempotent bootstrap `scripts/train.sh` relies on) |
+| `latest` | continue from the newest checkpoint; **hard error** if none exists (never a silent fresh start) |
+| `<path/to/ckpt.zip>` | resume that exact checkpoint |
+
 ## Flight training (UC-03)
 
 UC-03 delivers the first real flight task: a **start → gate → finish** course, a connectome-seeded
 PPO policy, checkpoint/resume, evaluation, and a one-command bootstrap. Everything is driven
-through the `drone-fly` CLI (or `python -m drone_fly.cli`).
+through the `drone-fly` CLI.
 
 ### The two simulator backends
 
@@ -164,8 +245,9 @@ The environment talks to the drone through a **sim-agnostic adapter** with two b
 | `SimpleDroneAdapter` | pure numpy, **no pybullet** | a fixed point-mass model | CI, `smoke-train`, every default test — fully hermetic |
 | `PyBulletAdapter` | `gym-pybullet-drones` (guarded/lazy) | real rigid-body quadrotor | the owner's dev-time **mastery** run |
 
-`--adapter auto` (default) uses PyBullet if it is importable, else the numpy model, and **logs
-loudly which backend is active**. `smoke-train` always forces `simple`.
+`adapter: auto` (the default for `train`/`evaluate`) uses PyBullet if it is importable, else the
+numpy model, and **logs loudly which backend is active**. `smoke-train` always forces `simple`.
+(Note: `prune-trained`'s adapter default is `simple`, not `auto`.)
 
 > **`SimpleDroneAdapter` is not mastery physics.** The ≥ 80% completion bar (below) is defined
 > against real PyBullet dynamics. The numpy model exists only so the env + policy + PPO loop are
@@ -176,57 +258,53 @@ loudly which backend is active**. `smoke-train` always forces `simple`.
 ```sh
 # Hermetic correctness run — a handful of steps on the numpy backend, no pybullet.
 # This is exactly what CI runs; it proves the loop wires together and stays finite.
+# (smoke-train keeps its flags; it is not config-driven.)
 uv run drone-fly smoke-train --connectome tests/fixtures
 
 # Full mastery training (owner's machine). Auto-detects the device; resumable.
-# --connectome points at a provisioned connectome dir — see "Provisioning connectome
-# data" above. `tests/fixtures` works out of the box; swap in data/connectome for the
-# fuller matrix.
-uv run drone-fly train --connectome tests/fixtures --timesteps 1000000
+# Everything — the run name, connectome, timesteps, device, resume policy — lives in the
+# config. Edit configs/train/example.yaml (or copy it): set `name`, point `connectome:` at a
+# provisioned dir (`tests/fixtures` works out of the box; swap in data/connectome for the
+# fuller matrix), and raise `timesteps` for a real run.
+uv run drone-fly train --config configs/train/example.yaml
 
-# Raise rollout parallelism to use more CPU cores (default is 1 env unless --n-envs is passed).
-uv run drone-fly train --connectome tests/fixtures --timesteps 1000000 --n-envs 4
+# Resume policy is expressed in the config, not on the command line: set `resume: auto`
+# (continue-or-fresh, no error) or `resume: latest` (require an existing checkpoint), or point
+# `resume:` at an exact .zip. See "Resume (config-driven)" above.
 
-# Resume an interrupted run from a checkpoint (step counter continues, not restarts).
-# Bare --resume auto-picks the newest checkpoint in the default models dir; you can also
-# pass a directory (newest checkpoint inside it) or an exact .zip. If a directory/bare form
-# finds no checkpoint it errors out loudly rather than silently training from scratch.
-uv run drone-fly train --resume
-uv run drone-fly train --resume artifacts/models
-uv run drone-fly train --resume artifacts/models/ppo_racer_120000_steps.zip
-
-# Evaluate a checkpoint over 20 episodes: completion rate + mean start→gate→finish time.
-uv run drone-fly evaluate \
-  --checkpoint artifacts/models/ppo_racer_final.zip \
-  --vecnormalize artifacts/models/vecnormalize.pkl --episodes 20
+# Evaluate a checkpoint over N episodes: completion rate + mean start→gate→finish time.
+# Set `checkpoint:` (and optionally `vecnormalize:`, `episodes:`) in the evaluate config.
+uv run drone-fly evaluate --config configs/evaluate/example.yaml
 ```
 
-`--n-envs N` overrides `TrainConfig.n_envs` (parallel PPO rollout environments) for a single
-`train` run: raise it to spread rollout collection across more CPU cores / increase throughput.
-It defaults to **1** and omitting the flag is byte-identical to today's behaviour; it is also safe
-with `--resume` (Stable-Baselines3 rebuilds the rollout buffer to match the new env count).
+The config's `n_envs` (≥ 1) overrides `TrainConfig.n_envs` (parallel PPO rollout environments)
+for a single `train` run: raise it to spread rollout collection across more CPU cores / increase
+throughput. It defaults to **1** and omitting the key is byte-identical to today's behaviour; it
+is also safe with a resume (Stable-Baselines3 rebuilds the rollout buffer to match the new env
+count).
 
 ### Where training output is stored (and how to move it without git)
 
-All output lands under an **`artifacts/` folder created in the directory you run the command from**
-— i.e. `<repo>/artifacts/` when you launch from the repo root (as `scripts/train.sh` does). Nothing
-is written anywhere else, and **`artifacts/` is gitignored**, so it is never committed or synced —
-the only copy of your trained model is whatever is on that disk until *you* copy it.
+All output lands under a **`training/<name>/` folder created in the directory you run the command
+from** — i.e. `<repo>/training/<name>/` when you launch from the repo root (as `scripts/train.sh`
+does), where `<name>` is the required `name:` from the train config. Nothing is written anywhere
+else, and **`training/` is gitignored**, so it is never committed or synced — the only copy of your
+trained model is whatever is on that disk until *you* copy it. (See
+[Per-run output layout](#per-run-output-layout-trainingname) for the full breakdown.)
 
 | Path | Contents |
 |---|---|
-| `<repo>/artifacts/models/` | Checkpoints `ppo_racer_<steps>_steps.zip` (every N steps), the matching `ppo_racer_vecnormalize_<steps>_steps.pkl`, and the canonical `vecnormalize.pkl`. **This is your trained agent.** |
-| `<repo>/artifacts/logs/` | The learning curve: `progress.csv` (open in any spreadsheet) and TensorBoard `events.out.tfevents.*`. |
+| `<repo>/training/<name>/checkpoints/` | Checkpoints `ppo_racer_<steps>_steps.zip` (every N steps), the matching `ppo_racer_vecnormalize_<steps>_steps.pkl`, and the canonical `vecnormalize.pkl`. **This is your trained agent.** |
+| `<repo>/training/<name>/logs/` | The learning curve: `progress.csv` (open in any spreadsheet) and TensorBoard `events.out.tfevents.*`. |
 
-To **back up or move** a run to another machine, just copy the whole `artifacts/` folder (Finder
-drag-and-drop, or `cp -R artifacts /somewhere/`, or a USB drive) — no git needed. To resume later,
-put `artifacts/models/` back in the repo root and run `drone-fly train --resume` (bare flag →
-newest checkpoint in the default models dir), or pass a directory / exact `.zip`
-(`--resume artifacts/models/ppo_racer_<steps>_steps.zip`) — or just re-run
-`scripts/train.sh`, which auto-resumes from the latest checkpoint. To evaluate a model you moved,
-pass its `--checkpoint` and `--vecnormalize` paths explicitly. An interrupted run loses at most the
-steps since the last checkpoint (default every 25,000 steps — tune `checkpoint_freq` in
-`src/drone_fly/train/config.py`).
+To **back up or move** a run to another machine, just copy the whole `training/<name>/` folder
+(Finder drag-and-drop, or `cp -R training/<name> /somewhere/`, or a USB drive) — no git needed. To
+resume later, put `training/<name>/` back in the repo root and run `drone-fly train` with the same
+config using `resume: auto` (or `resume: latest`), or point the config's `resume:` at an exact
+`.zip` — or just re-run `scripts/train.sh`, which auto-resumes via `resume: auto`. To evaluate a
+model you moved, set its `checkpoint:` and `vecnormalize:` paths in the evaluate config. An
+interrupted run loses at most the steps since the last checkpoint (default every 25,000 steps —
+tune `checkpoint_freq` in `src/drone_fly/train/config.py`).
 
 ### Mastery bar (a goal, not a CI gate)
 
@@ -243,26 +321,31 @@ when zero completed); `completed_count` and `n_episodes` are always shown.
 
 ### Device auto-detection (Apple Silicon)
 
-`train`/`evaluate` auto-select a torch device, or take an explicit `--device {cpu,cuda,mps}`.
+`train`/`evaluate` auto-select a torch device, or take an explicit `device:` (`cpu`|`cuda`|`mps`)
+config key.
 
-- Explicit `--device` always wins. `--device mps` also sets `PYTORCH_ENABLE_MPS_FALLBACK=1`.
+- An explicit `device:` always wins. `device: mps` also sets `PYTORCH_ENABLE_MPS_FALLBACK=1`.
 - Otherwise: CUDA if available → `cuda`; **MPS is never auto-selected** → `cpu`; else `cpu`.
 
 > **Apple-Silicon note.** MPS is opt-in, not automatic. PyTorch's MPS backend has incomplete
 > sparse-tensor support and the connectome substrate propagates sparsely; PyBullet physics is
 > CPU-bound and the policy net is tiny — so **CPU is the sane default on an M4**. Opt into MPS with
-> `--device mps` (which enables the CPU fallback for unsupported ops).
+> `device: mps` in the config (which enables the CPU fallback for unsupported ops).
 
 ### Simulator bootstrap (one command)
 
 `scripts/train.sh` creates a virtualenv, installs the project + the pinned simulator, verifies
-`import pybullet`, and launches (or resumes) training. It is **idempotent** — re-running resumes
-from the latest checkpoint:
+`import pybullet`, and launches training with a YAML config. Idempotent resume comes from the
+config's `resume: auto` (continue-or-fresh) — re-running the same config continues from the latest
+checkpoint under `training/<name>/checkpoints/`, with no bash-side checkpoint probing:
 
 ```sh
-./scripts/train.sh                 # bootstrap + train/resume
-./scripts/train.sh --device mps    # extra args pass through to `drone-fly train`
+./scripts/train.sh                              # uses configs/train/example.yaml
+./scripts/train.sh configs/train/my-run.yaml    # first arg = the config to run
 ```
+
+Device, timesteps, and every other setting live in the config (set `device: mps` there for Apple
+Silicon).
 
 The simulator is pinned to an **exact commit** (never floating `main`):
 `gym-pybullet-drones @ 7ebad1e` (v2.2.0, the gymnasium-native line matching our gymnasium/SB3
@@ -281,7 +364,7 @@ eyeballed). What was verified here vs. deferred to the owner's macOS M4:
 | `pybullet` build from source (Python 3.12) | ⚠️ Fails here (expected) | v2.2.0 pulls `pybullet==3.2.7`, which has no 3.12 wheel → source build → **`No such file or directory: 'c++'`**. The sandbox has **no C/C++ toolchain** (`gcc`/`g++`/`cc` all absent). On macOS with Xcode CLT this builds. |
 | `gym-pybullet-drones @ v1.0.0` install | ⚠️ Needs a workaround | Default install fails: setuptools flat-layout *"Multiple top-level packages discovered"* (repo ships `ros2/`, `experiments/`, … beside `gym_pybullet_drones/`). Workaround verified: clone the ref, add a `setup.cfg` constraining `packages.find` to `gym_pybullet_drones*`. Also, v1.0.0 imports **legacy `gym`**, not gymnasium — which is why we pin **v2.2.0** instead. |
 | `gym-pybullet-drones @ v2.2.0` (the pin) | ⚠️ Deferred to macOS | Clean src-layout, poetry build, **gymnasium-native**, aligned gymnasium 1.3 / SB3 2.9 pins. Its only blocker here is the pybullet 3.2.7 source build above (no compiler); it is expected to install on the owner's M4 (Xcode CLT + Python 3.12). |
-| Full end-to-end training loop | ✅ Verified (numpy backend) | `smoke-train` + `train` + `--resume` (step counter advances) + `evaluate` all run green on `SimpleDroneAdapter`, hermetically, under `--extra dev`. |
+| Full end-to-end training loop | ✅ Verified (numpy backend) | `smoke-train` + `train` + resume (step counter advances) + `evaluate` all run green on `SimpleDroneAdapter`, hermetically, under `--extra dev`. |
 
 Bottom line: the **pin resolves**, `pybullet` itself installs and imports from a wheel, and the
 whole training/eval loop is verified on the hermetic backend. The only step that cannot complete
@@ -340,35 +423,39 @@ top-degree slice — it is the actual control circuit.
   `superclass` column, a missing sensory/motor population, `k < 0`, an unknown rule, or a degenerate
   (empty) result all raise a clear error.
 
-**Usage** (opt-in; omitting `--prune` leaves UC-01/02/03 behaviour byte-identical):
+**Usage** (opt-in; omitting `prune` leaves UC-01/02/03 behaviour byte-identical):
+
+```yaml
+# In a train config: prune the loaded connectome on the fly before building the policy.
+connectome: data/connectome
+prune: true
+prune_k: 0        # tightest corridor (omit for the default k=2)
+```
 
 ```sh
-# Train on the pruned subcircuit of the full matrix (owner's machine — measures the real reduction).
-drone-fly train --connectome data/connectome --prune            # default k=2
-drone-fly train --connectome data/connectome --prune --prune-k 0  # tightest corridor
-
-# Same flags on the hermetic smoke run.
+# Same idea on the hermetic smoke run (smoke-train keeps its flags).
 drone-fly smoke-train --connectome tests/fixtures --prune
 ```
 
-`--prune` is a **no-op on `--resume`** (skipped with a warning): a checkpoint already serialises its
-own connectome graph, so re-pruning would desync it. There is no `--prune` flag on `evaluate` for
-the same reason — the pruned graph is carried inside the checkpoint.
+`prune: true` is a **no-op on a resume** (skipped with a warning): a checkpoint already serialises
+its own connectome graph, so re-pruning would desync it. `evaluate` rebuilds the pruned graph only
+when it needs the connectome for recording (`prune`/`prune_k` must match training) — the pruned
+graph is otherwise carried inside the checkpoint.
 
 ### Prune once, reuse (the `prune` export command)
 
 Pruning the full 25M-edge matrix is a one-time cost you don't want to pay on every `train` run. The
 `prune` subcommand runs the pruning once and **writes the pruned connectome to disk** in the same
 on-disk format the loader reads, so you can point `train`/`smoke-train` at the saved slice with no
-`--prune` flag and no recompute:
+re-pruning (`prune: false` / no `--prune`) and no recompute:
 
 ```sh
-# Prune the full matrix once and save the reusable slice.
-drone-fly prune --connectome data/connectome --out data/pruned            # default rule + k=2
-drone-fly prune --connectome data/connectome --out data/pruned0 --prune-k 0  # tighter slice
+# Prune the full matrix once and save the reusable slice. The shipped configs/prune/{k0,k1,k2}.yaml
+# prune tests/fixtures; copy one and set `connectome: data/connectome`, `out: data/pruned`.
+drone-fly prune --config configs/prune/k2.yaml    # default rule + k=2 (k0.yaml = tighter slice)
 
-# Reuse it directly — no --prune, no re-pruning.
-drone-fly train --connectome data/pruned --timesteps 1000000
+# Reuse it directly — in a train config, set `connectome: data/pruned` (no prune, no re-pruning):
+drone-fly train --config configs/train/example.yaml
 ```
 
 The output directory gets `connectome_pruned.npz` + `connectome_pruned_meta.csv` (carrying the
@@ -394,8 +481,10 @@ under `tests/fixtures/`, measured by the tests):
 > **measure** the real reduction, provision the full matrix (see
 > [Provisioning connectome data](#provisioning-connectome-data)) and run:
 >
-> ```sh
-> drone-fly train --connectome <full-matrix-dir> --prune
+> ```yaml
+> # train config
+> connectome: <full-matrix-dir>
+> prune: true
 > ```
 >
 > The prune step logs the exact input→pruned neuron and edge counts.
@@ -415,18 +504,18 @@ subcommand); omitting it leaves UC-01…UC-06 byte-identical.
 **The distribution caveat — read this first.** "Never activates" is only meaningful relative to an
 input distribution. With no domain randomization, a trained policy memorizes one path, and measuring
 on that path prunes the circuit down to that path — compressing the fly brain into a lookup table for
-one trajectory. So measure over a **varied** distribution (`--randomize` / `--randomize-dynamics`,
+one trajectory. So measure over a **varied** distribution (`randomize` / `randomize_dynamics`,
 UC-08). When neither axis is enabled the step **loudly warns** that the produced circuit is
 **course-specific** (a demonstration of *this* run's used sub-network, not a general fly circuit) and
 records that in the report and the slice provenance. In hermetic CI (fixed course) the warning always
 fires by design.
 
 **Importance metric.** Default `mean_abs` = per-neuron mean `|activation|` over all measured frames;
-the secondary `active_fraction` (fraction of frames above `--eps`) is always reported too. Both are
+the secondary `active_fraction` (fraction of frames above `eps`) is always reported too. Both are
 cheap magnitude statistics; a gradient/ablation metric would be more faithful but costlier and is
 left as a documented future option. Pruning aggressiveness is always judged by **completion-rate
-after**, never the proxy alone. `--threshold` (default `1e-3`, absolute, calibrated against the
-`tanh`-bounded `[-1, 1]` activation range) sets the cut; `--threshold-mode percentile` interprets it
+after**, never the proxy alone. `threshold` (default `1e-3`, absolute, calibrated against the
+`tanh`-bounded `[-1, 1]` activation range) sets the cut; `threshold_mode: percentile` interprets it
 as "drop the least-active X%" instead.
 
 **What it guarantees.** The sensory (`visual_projection`) and motor (`descending_neuron`) endpoints
@@ -439,25 +528,38 @@ still reachable from the sensory set on the pruned graph (partial ⇒ warn + `di
 the report; zero ⇒ hard error). The input checkpoint and connectome are never mutated, and a fixed
 `(seed, metric, threshold, episodes)` yields a deterministic pruned graph.
 
-**Usage** (opt-in; the checkpoint does **not** store the connectome, so pass the SAME
-`--connectome`/`--prune`/`--prune-k` used at training time):
+**Usage** (opt-in; the checkpoint does **not** store the connectome, so set the SAME
+`connectome`/`prune`/`prune_k` used at training time). Start from
+`configs/prune-trained/example.yaml`:
 
-```sh
-# Measure over 20 randomized episodes, drop dead interneurons, fine-tune, and save the minimal circuit.
-drone-fly prune-trained \
-  --checkpoint artifacts/models/ppo_racer_final.zip \
-  --connectome data/pruned \
-  --vecnormalize artifacts/models/vecnormalize.pkl \
-  --metric mean_abs --threshold 1e-3 --episodes 20 \
-  --finetune-steps 50000 --randomize \
-  --out artifacts/minimal_circuit
-
-# Hermetic demonstration on the fixture (fires the course-specific warning by design):
-drone-fly prune-trained --checkpoint <ckpt> --connectome tests/fixtures --prune \
-  --episodes 3 --finetune-steps 0 --out /tmp/uc07_demo
+```yaml
+# Measure over 20 randomized episodes, drop dead interneurons, fine-tune, save the minimal circuit.
+checkpoint: training/baseline/checkpoints/ppo_racer_final.zip
+connectome: data/pruned
+vecnormalize: training/baseline/checkpoints/vecnormalize.pkl
+metric: mean_abs
+threshold: 0.001
+episodes: 20
+finetune_steps: 50000
+randomize: true
+out: artifacts/minimal_circuit
 ```
 
-The `--out` directory gets: `pruned_model.zip` (the fine-tuned smaller checkpoint), its
+```yaml
+# Hermetic demonstration on the fixture (fires the course-specific warning by design):
+checkpoint: <ckpt>
+connectome: tests/fixtures
+prune: true
+episodes: 3
+finetune_steps: 0
+out: /tmp/uc07_demo
+```
+
+```sh
+drone-fly prune-trained --config configs/prune-trained/example.yaml
+```
+
+The `out` directory gets: `pruned_model.zip` (the fine-tuned smaller checkpoint), its
 `vecnormalize.pkl`, `connectome_pruned.npz` + `_meta.csv` (the pruned slice — round-trips through
 `load_connectome`, loadable by the UC-05/UC-06 viewer), a `PRUNE_TRAINED_PROVENANCE.md` note, and a
 `PRUNE_TRAINED_REPORT.md` reporting neurons/edges before→after, the metric summary, the
@@ -478,28 +580,38 @@ Make the connectome controller *observable*: record what the fly "brain" is doin
 flies, then play it back in a dependency-free browser viewer. Recording is **opt-in and off
 by default** — with it off, train/eval numerics are byte-identical to UC-01…UC-04.
 
-### Recording (flags)
+### Recording (config keys)
 
 Recording attaches to the **evaluate** path (the tested, deterministic primary) and, best-effort,
 to **train** (capture the brain mid-learning). It captures, for every Nth episode, the per-frame
 neuron-activation vector over the pruned graph, the 4 control channels (throttle/roll/pitch/yaw),
 the drone trajectory, and the episode outcome:
 
-```sh
-# Record every 5th eval episode. IMPORTANT: pass the SAME --connectome/--prune/--prune-k you
+```yaml
+# evaluate config — record every 5th episode. IMPORTANT: set the SAME connectome/prune/prune_k you
 # trained with — the checkpoint does NOT store neuron_ids / superclass / soma positions, so the
 # recorder re-loads the connectome and hard-asserts len(neuron_ids) == the actor's neuron count.
-uv run drone-fly evaluate --checkpoint artifacts/models/ppo_racer_final.zip \
-  --vecnormalize artifacts/models/vecnormalize.pkl \
-  --connectome data/pruned --record --record-every 5
-
-# Training-time capture (documented best-effort; eval is the tested path):
-uv run drone-fly train --connectome data/full --prune --record --record-every 50
+checkpoint: training/baseline/checkpoints/ppo_racer_final.zip
+vecnormalize: training/baseline/checkpoints/vecnormalize.pkl
+connectome: data/pruned
+record: true
+record_every: 5
+name: baseline          # optional — routes recordings to training/baseline/recordings/
 ```
 
-Flags: `--record` (enable), `--record-every N` (cadence, default 1), `--record-dir <dir>`
-(default `artifacts/activations/`). Each recorded episode is written to its own self-contained
-file `artifacts/activations/episode_<n>.json`. Activations are `tanh`-bounded to `[-1, 1]` and
+```yaml
+# train config — training-time capture (documented best-effort; eval is the tested path):
+name: baseline
+connectome: data/full
+prune: true
+record: true
+record_every: 50
+```
+
+Keys: `record: true` (enable), `record_every: N` (cadence, default 1), `record_dir: <dir>`
+(override; defaults to `training/<name>/recordings/` for a train run, or when `evaluate` sets a
+`name` with `record: true`, else `artifacts/activations/`). Each recorded episode is written to its
+own self-contained file `episode_<n>.json`. Activations are `tanh`-bounded to `[-1, 1]` and
 stored **quantised to `uint8`** (with `activation_scale`/`activation_offset` in the metadata for
 exact dequantisation) — roughly 4× smaller than float32; the recorder logs each file's path and
 size. Best paired with the **UC-04 pruned slice** (a few thousand neurons is legible; the full
@@ -605,28 +717,32 @@ replayed path, not flying ability. UC-08 makes the task **vary per episode**, so
 earn reward is to actually fly to wherever the waypoints are. Two independent, **off-by-default**
 axes:
 
-- **Course randomization (`--randomize`)** — the primary anti-memorization axis. Each `reset()`
+- **Course randomization (`randomize`)** — the primary anti-memorization axis. Each `reset()`
   samples a new **number of gates** (default range `[1, 10]`, UC-09), a start, and per-gate 3D
   centre + aperture within configured ranges. The observation already carries the *relative*
   next-waypoint pose and the geometry/reward are course-parameterized (the per-gate bonus is
   normalized by gate count, so total gate reward stays comparable as N varies), so no observation-
   or reward-shape change is needed — only *which* course flows in per episode.
-- **Dynamics randomization (`--randomize-dynamics`)** — a secondary robustness / sim-to-sim axis.
+- **Dynamics randomization (`randomize_dynamics`)** — a secondary robustness / sim-to-sim axis.
   Each `reset()` samples per-episode mass, drag, thrust response, body-rate limit, and control
   latency. Mass and thrust are **independent** knobs (`thrust_acc = throttle · max_thrust / mass`),
   so a heavier drone genuinely flies differently rather than silently cancelling out.
 
-Either axis can be enabled with the other off; both default off, so an unflagged `train` /
-`evaluate` is **byte-identical to UC-03** (a disabled axis makes no RNG draw, so it can't even
+Either axis can be enabled with the other off; both default off, so a `train` / `evaluate` config
+that omits them is **byte-identical to UC-03** (a disabled axis makes no RNG draw, so it can't even
 perturb the seeded stream).
 
-```sh
-# Train on randomized courses (the honest, anti-memorization setup)
-uv run drone-fly train --randomize
-# Add dynamics randomization for robustness
-uv run drone-fly train --randomize --randomize-dynamics
-# Evaluate over N DIFFERENT sampled courses (seeded -> the eval set is reproducible)
-uv run drone-fly evaluate --checkpoint artifacts/models/ppo_racer_final.zip --randomize
+```yaml
+# train config — randomized courses (the honest, anti-memorization setup)
+name: randomized
+randomize: true
+randomize_dynamics: true   # optional: add dynamics randomization for robustness
+```
+
+```yaml
+# evaluate config — evaluate over N DIFFERENT sampled courses (seeded -> reproducible eval set)
+checkpoint: training/randomized/checkpoints/ppo_racer_final.zip
+randomize: true
 ```
 
 **Ranges are a difficulty knob.** The per-parameter ranges live as documented, tunable constants in
@@ -647,13 +763,13 @@ course** that is solvable-by-construction for every N — so sampling is determi
 loop forever.
 
 **Seeded and reproducible.** A given seed reproduces the same course *and* dynamics stream (the draw
-order is pinned: course then dynamics). `evaluate --randomize` runs over N different sampled courses
-that are themselves reproducible for a fixed seed, so two checkpoints are compared on the *same*
-course set.
+order is pinned: course then dynamics). An `evaluate` config with `randomize: true` runs over N
+different sampled courses that are themselves reproducible for a fixed seed, so two checkpoints are
+compared on the *same* course set.
 
 > **The honest-metric drop (read this).** The moment you switch to randomized training, the
 > "100% / 1.00s" fixed-course figure **will fall** — because it was a memorized single path. This is
-> the *point*, not a regression. `evaluate --randomize` reports a *distinct* number (tagged
+> the *point*, not a regression. `evaluate` with `randomize: true` reports a *distinct* number (tagged
 > `mode=randomized` in the summary and `randomized=True` on `EvalMetrics`); that lower-but-honest
 > completion rate over randomized courses is the **real baseline**. Do not read the drop as a step
 > backward.
@@ -679,14 +795,17 @@ src/drone_fly/
   record/       UC-05 activation recording: recorder, rollout driver, soma-coordinate provisioning
   train/        PPO training loop, checkpoint/resume, device auto-detect
   evaluate/     run a trained agent, report completion rate + mean time
-  cli/          command-line entry points (train, evaluate, smoke-train, prune)
+  config.py     YAML --config loading + per-command schema validation + run-layout helpers
+  cli/          command-line entry points (train, evaluate, prune, prune-trained, smoke-train)
 viz/            dependency-free static activation-playback viewer (HTML/JS/CSS, no build step)
-scripts/        dev-time utilities (build_test_fixture.py, fetch_soma_positions.py)
+configs/        example/reference YAML run-configs (train/, prune/, evaluate/, prune-trained/)
+scripts/        dev-time utilities (build_test_fixture.py, fetch_soma_positions.py) + train.sh bootstrap
 tests/          pytest suite (import + connectome-plumbing tests)
 tests/fixtures/ committed small real-MaleCNS subgraph used by the offline tests
 docs/adr/       architecture decision records
 data/           runtime connectome cache (gitignored contents)
-artifacts/      model checkpoints, TensorBoard logs, eval outputs, activation recordings (gitignored contents)
+training/       per-run output: training/<name>/{checkpoints,logs,recordings}/ (gitignored contents)
+artifacts/      pruned connectome slices + other byproducts (gitignored contents)
 ```
 
 See `PROJECT_BRIEF.md` for the full project definition and the reasoning behind the scope
