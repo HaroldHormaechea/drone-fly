@@ -42,6 +42,13 @@ class ConnectomeFeaturesExtractor(BaseFeaturesExtractor):
         crucially, because they live in ``features_extractor_kwargs`` they are pickled into
         the checkpoint, so ``PPO.load`` (which passes no connectome) rebuilds the actor with
         the *same* pinned neurons rather than re-selecting a possibly-misaligned sub-pop.
+    obs_schema:
+        Optional :class:`~drone_fly.controller.obs_schema.ObsSchema` (UC-13). ``None`` (default)
+        keeps the legacy single-projection actor. When supplied it is forwarded to
+        :class:`ConnectomeActorNetwork` and — like the pinned indices — lives in
+        ``features_extractor_kwargs``, so it is pickled into the checkpoint and ``PPO.load``
+        rebuilds the actor under the same block schema (AC3). The observation space width must
+        equal ``obs_schema.total_width`` (the migrated v1 schema is 12, unchanged from Box(12)).
     """
 
     def __init__(
@@ -55,6 +62,7 @@ class ConnectomeFeaturesExtractor(BaseFeaturesExtractor):
         sensory_size: int = SENSORY_POP_SIZE,
         sensory_index=None,
         motor_index=None,
+        obs_schema=None,
     ) -> None:
         super().__init__(observation_space, features_dim=ACTION_DIM)
         self.actor = ConnectomeActorNetwork(
@@ -65,6 +73,7 @@ class ConnectomeFeaturesExtractor(BaseFeaturesExtractor):
             sensory_size=sensory_size,
             sensory_index=sensory_index,
             motor_index=motor_index,
+            obs_schema=obs_schema,
         )
 
     def forward(self, observations: torch.Tensor) -> torch.Tensor:

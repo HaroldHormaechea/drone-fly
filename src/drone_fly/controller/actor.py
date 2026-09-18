@@ -31,16 +31,24 @@ from drone_fly.controller.encoding import (
     OBS_DIM,
     THROTTLE_INDEX,
 )
+from drone_fly.controller.modality import select_modality
+from drone_fly.controller.obs_schema import ObsSchema
 from drone_fly.controller.policy import DEFAULT_N_STEPS, SparseConnectomeLayer
 from drone_fly.controller.populations import (
     MOTOR_POP_SIZE,
     SENSORY_POP_SIZE,
+    select_motor_population,
     select_populations,
 )
 
 #: Selection-mode tag reported when the sensory/motor sub-populations are supplied by
 #: neuron identity (UC-07 activation pruning) rather than chosen by :func:`select_populations`.
 PINNED = "pinned"
+
+#: ``sensory_mode`` value reported when the actor runs the UC-13 block-schema path: sensory
+#: input is split across per-block projections bound to biological modality populations
+#: instead of a single ``visual_projection`` sub-population.
+SCHEMA = "schema"
 
 
 class ConnectomeActorNetwork(nn.Module):
@@ -66,6 +74,19 @@ class ConnectomeActorNetwork(nn.Module):
     different sub-population on the pruned graph). Both must be supplied together; when they
     are, ``sensory_mode`` / ``motor_mode`` report :data:`PINNED`. Default ``None`` on both
     keeps the current :func:`select_populations` path, byte-identical to UC-01..06.
+
+    Block-schema observations (UC-13)
+    ---------------------------------
+    ``obs_schema`` is an optional :class:`~drone_fly.controller.obs_schema.ObsSchema`. Default
+    ``None`` keeps the legacy single-projection path exactly (byte-identical to UC-01..12). When
+    supplied, the observation is split into the schema's ordered blocks; each block gets its own
+    ``Linear(block.width -> |bound population|)`` scattered into the population resolved by
+    :func:`~drone_fly.controller.modality.select_modality` (which **raises** if the population is
+    absent from this graph — AC6). ``sensory_mode`` then reports :data:`SCHEMA`; the motor
+    readout and the connectome graph are unchanged. ``sensory_index`` cannot be combined with
+    ``obs_schema`` (block populations replace the single pinned sensory population); ``motor_index``
+    may still pin the motor population. Widening a schema-trained actor is done by
+    :func:`~drone_fly.controller.obs_schema.graft_actor`, not the constructor.
     """
 
     def __init__(
@@ -78,9 +99,23 @@ class ConnectomeActorNetwork(nn.Module):
         sensory_size: int = SENSORY_POP_SIZE,
         sensory_index=None,
         motor_index=None,
+        obs_schema: ObsSchema | None = None,
     ) -> None:
         super().__init__()
         self.n_neurons = data.neuron_count
+        self.obs_schema = obs_schema
+
+        if obs_schema is not None:
+            self._init_schema_mode(
+                data,
+                obs_schema,
+                n_steps=n_steps,
+                propagation_mode=propagation_mode,
+                motor_size=motor_size,
+                motor_index=motor_index,
+                sensory_index=sensory_index,
+            )
+            return
 
         if sensory_index is not None or motor_index is not None:
             # Pinned path (UC-07): the caller fixes both sub-populations by neuron identity.
@@ -138,6 +173,71 @@ class ConnectomeActorNetwork(nn.Module):
             )
         return idx
 
+    def _init_schema_mode(
+        self,
+        data: ConnectomeData,
+        obs_schema: ObsSchema,
+        *,
+        n_steps: int,
+        propagation_mode: str,
+        motor_size: int,
+        motor_index,
+        sensory_index,
+    ) -> None:
+        """Build the UC-13 block-schema path: per-block projections into bound populations.
+
+        Sensory input is split across the schema's blocks; each block scatters through its own
+        ``Linear`` into the modality population resolved on ``data`` (raising if absent — AC6).
+        The motor readout (pinned or biological) and the connectome graph are unchanged. A single
+        pinned ``sensory_index`` is meaningless here (populations come from the blocks), so it is
+        rejected rather than silently ignored.
+        """
+        if sensory_index is not None:
+            raise ValueError(
+                "sensory_index cannot be combined with obs_schema: in schema mode the sensory "
+                "populations come from the per-block modality bindings, not a single pinned set."
+            )
+
+        # Motor population: pin by identity, or select biologically (same as the legacy path).
+        if motor_index is not None:
+            motor_idx = self._validate_pinned(motor_index, "motor_index")
+            self.motor_mode = PINNED
+        else:
+            motor_idx, self.motor_mode = select_motor_population(data, size=motor_size)
+        self.register_buffer("motor_index", torch.as_tensor(motor_idx, dtype=torch.long))
+        self.motor_size = int(motor_idx.shape[0])
+        self.sensory_mode = SCHEMA
+
+        # See the legacy path for the sink contract; identical semantics here.
+        self.sink = None
+
+        self.layer = SparseConnectomeLayer(
+            data.adjacency,
+            sign=data.sign,
+            n_steps=n_steps,
+            propagation_mode=propagation_mode,
+        )
+
+        # One input projection per block, each bound to its modality population. Population
+        # index arrays are fixed topology -> registered buffers (so they ride in the checkpoint
+        # and move with the module). ``_block_index_attrs`` records the buffer names in block
+        # order for the forward pass; it is rebuilt by __init__ on reload, so it need not persist.
+        self.block_projections = nn.ModuleList()
+        self._block_index_attrs: list[str] = []
+        block_sizes: list[int] = []
+        for i, block in enumerate(obs_schema.blocks):
+            selection = select_modality(data, block.population)  # raises if absent (AC6)
+            idx = torch.as_tensor(selection.indices, dtype=torch.long)
+            attr = f"block_index_{i}"
+            self.register_buffer(attr, idx)
+            self._block_index_attrs.append(attr)
+            self.block_projections.append(nn.Linear(block.width, int(idx.shape[0])))
+            block_sizes.append(int(idx.shape[0]))
+
+        self.readout = nn.Linear(self.motor_size, ACTION_DIM)
+        # Total sensory neurons touched across blocks (introspection only; blocks may overlap).
+        self.sensory_size = int(sum(block_sizes))
+
     def _squash(self, raw: torch.Tensor) -> torch.Tensor:
         """Apply the locked per-channel squashing, preserving ``ACTION_LAYOUT``.
 
@@ -161,14 +261,34 @@ class ConnectomeActorNetwork(nn.Module):
             raise ValueError(
                 f"obs must be 1-D (OBS_DIM,) or 2-D (B, OBS_DIM); got shape {tuple(obs.shape)}."
             )
-        if x.shape[-1] != OBS_DIM:
-            raise ValueError(f"obs last dim ({x.shape[-1]}) must equal OBS_DIM ({OBS_DIM}).")
-
         batch = x.shape[0]
-        projected = self.input_projection(x)  # (B, |sensory|)
-        state = torch.zeros(batch, self.n_neurons, dtype=torch.float32, device=x.device)
-        # Scatter the projection into the sensory neurons (out-of-place -> autograd-safe).
-        state = state.index_add(1, self.sensory_index, projected)
+        if self.obs_schema is None:
+            # Legacy single-projection path (byte-identical to UC-01..12): the OBS_DIM / Box(12)
+            # contract governs here (AC7).
+            if x.shape[-1] != OBS_DIM:
+                raise ValueError(f"obs last dim ({x.shape[-1]}) must equal OBS_DIM ({OBS_DIM}).")
+            projected = self.input_projection(x)  # (B, |sensory|)
+            state = torch.zeros(batch, self.n_neurons, dtype=torch.float32, device=x.device)
+            # Scatter the projection into the sensory neurons (out-of-place -> autograd-safe).
+            state = state.index_add(1, self.sensory_index, projected)
+        else:
+            # Block-schema path (UC-13): the schema's total width governs (not OBS_DIM). Each
+            # block scatters its own projection into its bound population; overlapping blocks
+            # accumulate additively via index_add (out-of-place -> autograd-safe).
+            total_width = self.obs_schema.total_width
+            if x.shape[-1] != total_width:
+                raise ValueError(
+                    f"obs last dim ({x.shape[-1]}) must equal the schema total width "
+                    f"({total_width})."
+                )
+            state = torch.zeros(batch, self.n_neurons, dtype=torch.float32, device=x.device)
+            offset = 0
+            for i, block in enumerate(self.obs_schema.blocks):
+                segment = x[:, offset : offset + block.width]
+                projected = self.block_projections[i](segment)
+                index = getattr(self, self._block_index_attrs[i])
+                state = state.index_add(1, index, projected)
+                offset += block.width
 
         propagated = self.layer(state)  # (B, N) — never returned as output
         if self.sink is not None:

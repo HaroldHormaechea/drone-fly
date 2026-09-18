@@ -6,8 +6,8 @@ even though only the directed ``visual_projection`` (sensory) → ``descending_n
 (motor) subcircuit drives the 4 control outputs. This module reduces a loaded
 :class:`~drone_fly.connectome.loader.ConnectomeData` to that subcircuit with a
 deterministic, **direction-aware** rule, returning a new (smaller) ``ConnectomeData``
-whose meta (``neuron_ids`` / ``superclass`` / ``sign`` / ``top_nt``) is re-aligned to
-the pruned matrix rows. The input is never mutated.
+whose meta (``neuron_ids`` / ``superclass`` / ``neuron_class`` / ``subclass`` / ``sign`` /
+``top_nt``) is re-aligned to the pruned matrix rows. The input is never mutated.
 
 Direction convention
 --------------------
@@ -138,8 +138,9 @@ def slice_connectome(
     pruning (:func:`prune_to_subcircuit`) and UC-07's post-training activation pruning
     (:mod:`drone_fly.prune_trained`). Given a 1-D array of retained neuron indices, it keeps
     only the intra-retained edges (``adjacency[kept][:, kept]``) and re-aligns every
-    per-neuron meta array (``neuron_ids`` / ``superclass`` / ``sign`` / ``top_nt``) to the
-    pruned matrix rows, remapping indices to ``0..M-1``. Per-edge signs are preserved because
+    per-neuron meta array (``neuron_ids`` / ``superclass`` / ``neuron_class`` / ``subclass`` /
+    ``sign`` / ``top_nt``) to the pruned matrix rows, remapping indices to ``0..M-1``. Per-edge
+    signs are preserved because
     :class:`~drone_fly.controller.policy.SparseConnectomeLayer` rebuilds the sign mask from
     the presynaptic (column) neuron's sign, and ``sign[kept]`` carries every retained
     neuron's sign. **The input ``data`` is never mutated** — a fresh :class:`ConnectomeData`
@@ -161,6 +162,8 @@ def slice_connectome(
     sliced_superclass = None if data.superclass is None else np.asarray(data.superclass)[kept]
     sliced_sign = None if data.sign is None else np.asarray(data.sign)[kept]
     sliced_top_nt = None if data.top_nt is None else np.asarray(data.top_nt)[kept]
+    sliced_neuron_class = None if data.neuron_class is None else np.asarray(data.neuron_class)[kept]
+    sliced_subclass = None if data.subclass is None else np.asarray(data.subclass)[kept]
     return ConnectomeData(
         adjacency=sliced_adj,
         neuron_ids=sliced_ids,
@@ -168,6 +171,8 @@ def slice_connectome(
         superclass=sliced_superclass,
         sign=sliced_sign,
         top_nt=sliced_top_nt,
+        neuron_class=sliced_neuron_class,
+        subclass=sliced_subclass,
     )
 
 
@@ -181,8 +186,9 @@ def prune_to_subcircuit(
 
     Retains the neurons and edges on the directed ``visual_projection`` → ``descending_neuron``
     pathway under the path-slack rule (see the module docstring), re-aligning
-    ``neuron_ids`` / ``superclass`` / ``sign`` / ``top_nt`` to the pruned matrix rows and
-    remapping indices to ``0..M-1``. **The input ``data`` is never mutated** — a fresh
+    ``neuron_ids`` / ``superclass`` / ``neuron_class`` / ``subclass`` / ``sign`` / ``top_nt``
+    to the pruned matrix rows and remapping indices to ``0..M-1``. **The input ``data`` is
+    never mutated** — a fresh
     ``ConnectomeData`` is returned (AC1).
 
     Parameters

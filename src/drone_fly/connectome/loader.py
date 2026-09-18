@@ -97,6 +97,21 @@ class ConnectomeData:
         neurotransmitter (``"gaba"``, ``"acetylcholine"``, ...), aligned to the matrix
         row order, or ``None`` when absent. Retained for provenance/traceability; the
         E/I contract is carried by :pyattr:`sign`.
+    neuron_class:
+        Optional length-``N`` array of per-neuron MaleCNS ``class`` labels (e.g.
+        ``"mechanosensory_proprioceptive"``, ``"olfactory"``, ``"gustatory"``), aligned to
+        the matrix row order. Finer-grained than :pyattr:`superclass`, this is what lets
+        population selection resolve *sensory modalities* rather than only the coarse
+        superclass buckets (UC-13, consumed by :mod:`drone_fly.controller.modality`). The
+        attribute is named ``neuron_class`` (not ``class``) because ``class`` is a Python
+        reserved word; it is read from / written back to the ``class`` CSV column. ``None``
+        when the metadata lacks a ``class`` column (older/reduced fixtures) — documented
+        degrade, never fabricated.
+    subclass:
+        Optional length-``N`` array of per-neuron MaleCNS ``subclass`` labels (e.g.
+        ``"campaniform sensilla"``, ``"haltere"``), aligned to the matrix row order, or
+        ``None`` when the metadata lacks a ``subclass`` column. Finer still than
+        :pyattr:`neuron_class`; the approximate (curated-name-list) modalities read it.
     """
 
     adjacency: sp.csr_matrix
@@ -105,6 +120,8 @@ class ConnectomeData:
     superclass: np.ndarray | None = None
     sign: np.ndarray | None = None
     top_nt: np.ndarray | None = None
+    neuron_class: np.ndarray | None = None
+    subclass: np.ndarray | None = None
 
     @property
     def neuron_count(self) -> int:
@@ -195,10 +212,19 @@ def _load_neuron_ids(meta_path: Path | None, n: int) -> np.ndarray:
     return ids
 
 
-#: Optional per-neuron metadata columns surfaced onto :class:`ConnectomeData`. Each maps
-#: a ``*_meta.csv`` column name to the ``ConnectomeData`` attribute it populates. Absent
-#: columns leave the attribute ``None`` (documented degrade — never fabricated).
-_OPTIONAL_META_COLUMNS = ("superclass", "sign", "top_nt")
+#: Optional per-neuron metadata columns surfaced onto :class:`ConnectomeData`, mapping each
+#: ``*_meta.csv`` **column name** to the ``ConnectomeData`` **attribute name** it populates.
+#: The two differ only for ``class`` -> ``neuron_class`` (``class`` is a Python reserved
+#: word). Absent columns leave the attribute ``None`` (documented degrade — never
+#: fabricated). :func:`save_connectome` inverts this map to write attributes back under
+#: their original CSV column names, so a load/save round-trips column-for-column.
+_OPTIONAL_META_COLUMNS: dict[str, str] = {
+    "superclass": "superclass",
+    "class": "neuron_class",
+    "subclass": "subclass",
+    "sign": "sign",
+    "top_nt": "top_nt",
+}
 
 
 def _load_neuron_attrs(meta_path: Path | None, n: int) -> dict[str, np.ndarray | None]:
@@ -210,20 +236,20 @@ def _load_neuron_attrs(meta_path: Path | None, n: int) -> dict[str, np.ndarray |
     downstream E/I mask is exactly ``+1`` / ``-1``. A column whose length disagrees with
     the matrix dimension is treated as absent (``None``) rather than silently misaligned.
     """
-    attrs: dict[str, np.ndarray | None] = dict.fromkeys(_OPTIONAL_META_COLUMNS, None)
+    attrs: dict[str, np.ndarray | None] = dict.fromkeys(_OPTIONAL_META_COLUMNS.values(), None)
     if meta_path is None:
         return attrs
 
     meta = pd.read_csv(meta_path)
     if "idx" in meta.columns:
         meta = meta.sort_values("idx")
-    for column in _OPTIONAL_META_COLUMNS:
+    for column, attr in _OPTIONAL_META_COLUMNS.items():
         if column not in meta.columns:
             continue
         values = meta[column].to_numpy()
         if len(values) != n:
             continue
-        attrs[column] = values.astype(np.int8) if column == "sign" else values
+        attrs[attr] = values.astype(np.int8) if column == "sign" else values
     return attrs
 
 
@@ -269,6 +295,8 @@ def load_connectome(path: str | os.PathLike[str] | None = None) -> ConnectomeDat
         superclass=attrs["superclass"],
         sign=attrs["sign"],
         top_nt=attrs["top_nt"],
+        neuron_class=attrs["neuron_class"],
+        subclass=attrs["subclass"],
     )
 
 
@@ -288,8 +316,10 @@ def save_connectome(
 
     Produces ``<out_dir>/<stem>.npz`` (the CSR ``float32`` adjacency) plus the sidecar
     ``<out_dir>/<stem>_meta.csv`` carrying ``idx`` (contiguous ``0..N-1``), ``bodyid``
-    (from :pyattr:`ConnectomeData.neuron_ids`), and whichever of ``superclass`` / ``top_nt``
-    / ``sign`` are present — the same columns the loader consumes. The pair round-trips:
+    (from :pyattr:`ConnectomeData.neuron_ids`), and whichever of ``superclass`` / ``class``
+    / ``subclass`` / ``top_nt`` / ``sign`` are present — the same columns the loader consumes
+    (``neuron_class`` is written back under its original ``class`` column name). The pair
+    round-trips:
     ``load_connectome(out_dir)`` reproduces an equivalent :class:`ConnectomeData` (same
     neuron/edge counts, meta aligned). Deterministic — identical input yields byte-identical
     files. Returns the ``(npz_path, meta_path)`` written.
@@ -321,6 +351,10 @@ def save_connectome(
     }
     if data.superclass is not None:
         columns["superclass"] = np.asarray(data.superclass)
+    if data.neuron_class is not None:
+        columns["class"] = np.asarray(data.neuron_class)
+    if data.subclass is not None:
+        columns["subclass"] = np.asarray(data.subclass)
     if data.top_nt is not None:
         columns["top_nt"] = np.asarray(data.top_nt)
     if data.sign is not None:

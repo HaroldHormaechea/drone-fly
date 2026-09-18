@@ -229,10 +229,12 @@ class TrainRunConfig:
     record_dir: str | None
     randomize: bool
     randomize_dynamics: bool
+    schema: str | None
 
     @classmethod
     def from_mapping(cls, mapping: Any) -> TrainRunConfig:
         from drone_fly.connectome.prune import DEFAULT_PRUNE_K
+        from drone_fly.controller.obs_schema import NAMED_SCHEMAS
 
         specs = [
             _Spec("name", (str,), required=True),
@@ -249,6 +251,10 @@ class TrainRunConfig:
             _Spec("record_dir", (str,)),
             _Spec("randomize", (bool,), default=False),
             _Spec("randomize_dynamics", (bool,), default=False),
+            # UC-13: opt into a named block observation schema. Omitted / null -> None -> the
+            # legacy single-projection run (AC7 parity). Choices come from obs_schema so the
+            # valid names are never re-declared here.
+            _Spec("schema", (str,), choices=tuple(sorted(NAMED_SCHEMAS))),
         ]
         resolved = _validate("train", mapping, specs)
         resolved["name"] = validate_run_name(resolved["name"])
