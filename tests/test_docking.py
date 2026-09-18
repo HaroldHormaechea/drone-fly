@@ -285,3 +285,35 @@ def test_pad_under_returns_the_rechargeable_pad_with_its_flag() -> None:
     found = pad_under((0.0, 0.0, 0.0), (_RECHARGE_PAD,))
     assert found is _RECHARGE_PAD
     assert found.rechargeable is True
+
+
+# =====================================================================================
+# UC-19 — the ``repairable`` flag does NOT alter the dock geometry (AC4)
+# =====================================================================================
+# A repair pad is a UC-16 docking pad tagged ``repairable``; like ``rechargeable`` the flag
+# re-classifies what a dock *does* (restore integrity vs. not), never *whether* a floor contact
+# docks. The dock predicate is geometry-only and ignores the flag.
+_REPAIR_PAD = PadSpec(center=(0.0, 0.0), radius=0.5, repairable=True)
+
+
+def test_repair_pad_docks_like_a_plain_pad() -> None:
+    """AC4: a slow, upright, over-pad floor contact docks on a ``repairable`` pad exactly as on a
+    plain pad — the dock predicate is geometry-only and ignores the flag."""
+    prev, curr = (0.0, 0.0, _MAX_DESCENT * _DT), (0.0, 0.0, 0.0)
+    assert _dock(prev, curr, pads=(_REPAIR_PAD,)) is True
+    assert _dock(prev, curr, pads=(_REPAIR_PAD,)) == _dock(prev, curr, pads=(_PAD,))
+
+
+def test_repair_pad_fast_landing_still_re_crashes() -> None:
+    """AC4: the flag does not relax the descent gate — a too-fast landing on a repair pad is still a
+    crash, exactly as on a plain pad."""
+    prev, curr = (0.0, 0.0, (_MAX_DESCENT + 1.0) * _DT), (0.0, 0.0, 0.0)
+    assert _dock(prev, curr, pads=(_REPAIR_PAD,)) is False
+
+
+def test_pad_under_returns_the_repairable_pad_with_its_flag() -> None:
+    """AC4: ``pad_under`` returns the pad object (flag intact) so the env can read
+    ``pad.repairable`` to decide whether to restore integrity."""
+    found = pad_under((0.0, 0.0, 0.0), (_REPAIR_PAD,))
+    assert found is _REPAIR_PAD
+    assert found.repairable is True

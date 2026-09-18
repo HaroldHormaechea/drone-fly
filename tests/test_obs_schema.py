@@ -15,6 +15,7 @@ import pytest
 from drone_fly.controller.encoding import OBS_DIM
 from drone_fly.controller.obs_schema import (
     BATTERY_HUNGER_V3,
+    DAMAGE_PROPRIOCEPTION_V4,
     MIGRATED_SCHEMA_V1,
     NAMED_SCHEMAS,
     OBSTACLE_VISION_V2,
@@ -212,3 +213,57 @@ def test_battery_hunger_v3_does_not_extend_migrated_v1_directly() -> None:
     assert BATTERY_HUNGER_V3.extends(MIGRATED_SCHEMA_V1) is True  # still a prefix superset
     # But v2 is the tightest predecessor: v3 = v2 + exactly one appended block.
     assert len(BATTERY_HUNGER_V3.blocks) == len(OBSTACLE_VISION_V2.blocks) + 1
+
+
+# =====================================================================================
+# UC-19 — damage_proprioception_v4: v3 + a width-1 damage block bound to proprioceptive (AC5)
+# =====================================================================================
+def test_damage_proprioception_v4_extends_battery_hunger_v3() -> None:
+    """AC5: v4 is v3 (the last-merged schema) PLUS an appended width-1 damage block → extends is
+    True. This is the graft precondition: only an *append* zero-inits cleanly."""
+    assert DAMAGE_PROPRIOCEPTION_V4.extends(BATTERY_HUNGER_V3) is True
+    # The leading blocks are byte-identical to battery_hunger_v3.
+    assert (
+        DAMAGE_PROPRIOCEPTION_V4.blocks[: len(BATTERY_HUNGER_V3.blocks)] == BATTERY_HUNGER_V3.blocks
+    )
+
+
+def test_damage_proprioception_v4_layout_and_version() -> None:
+    """AC5: v4 = v3 (25) + damage(1) = 26; version bumped to 4; damage bound to proprioceptive."""
+    assert DAMAGE_PROPRIOCEPTION_V4.version == 4
+    assert DAMAGE_PROPRIOCEPTION_V4.total_width == 26
+    assert BATTERY_HUNGER_V3.total_width == 25  # predecessor unchanged
+    names = [b.name for b in DAMAGE_PROPRIOCEPTION_V4.blocks]
+    assert names == ["vision", "proprioception", "obstacle_vision", "battery", "damage"]
+    damage_block = DAMAGE_PROPRIOCEPTION_V4.blocks[-1]
+    assert damage_block.name == "damage"
+    assert damage_block.width == 1
+    assert damage_block.population == "proprioceptive"
+
+
+def test_damage_proprioception_v4_has_two_proprioceptive_blocks() -> None:
+    """AC6: v4 carries TWO blocks bound to ``proprioceptive`` — the UC-13 self-motion
+    ``proprioception`` block and the new ``damage`` block — which coexist because the actor
+    scatters blocks additively (index_add). This pins the second-block-on-same-population layout."""
+    prop_blocks = [b for b in DAMAGE_PROPRIOCEPTION_V4.blocks if b.population == "proprioceptive"]
+    assert {b.name for b in prop_blocks} == {"proprioception", "damage"}
+
+
+def test_damage_proprioception_v4_registered_and_resolvable() -> None:
+    """AC5: the schema is selectable by name via the registry / ``resolve_schema``."""
+    assert NAMED_SCHEMAS["damage_proprioception_v4"] is DAMAGE_PROPRIOCEPTION_V4
+    assert resolve_schema("damage_proprioception_v4") is DAMAGE_PROPRIOCEPTION_V4
+
+
+def test_damage_proprioception_v4_round_trips() -> None:
+    """The v4 schema serialises + deserialises unchanged (rides inside a checkpoint)."""
+    assert ObsSchema.from_dict(DAMAGE_PROPRIOCEPTION_V4.to_dict()) == DAMAGE_PROPRIOCEPTION_V4
+
+
+def test_damage_proprioception_v4_is_v3_plus_exactly_one_block() -> None:
+    """AC5: v4 extends v3 by exactly one appended block — v3 is the tightest predecessor."""
+    assert DAMAGE_PROPRIOCEPTION_V4.extends(BATTERY_HUNGER_V3) is True
+    assert len(DAMAGE_PROPRIOCEPTION_V4.blocks) == len(BATTERY_HUNGER_V3.blocks) + 1
+    # Still a prefix-superset of every earlier schema in the chain.
+    assert DAMAGE_PROPRIOCEPTION_V4.extends(OBSTACLE_VISION_V2) is True
+    assert DAMAGE_PROPRIOCEPTION_V4.extends(MIGRATED_SCHEMA_V1) is True

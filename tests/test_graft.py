@@ -23,6 +23,7 @@ from drone_fly.connectome.loader import ConnectomeData
 from drone_fly.controller.actor import ConnectomeActorNetwork
 from drone_fly.controller.obs_schema import (
     BATTERY_HUNGER_V3,
+    DAMAGE_PROPRIOCEPTION_V4,
     MIGRATED_SCHEMA_V1,
     OBSTACLE_VISION_V2,
     ObsBlock,
@@ -259,6 +260,90 @@ def test_existing_parameters_unchanged_grafting_to_battery_hunger_v3(
     orig = _orig_actor_v2(connectome)
     grafted = graft_actor(orig, connectome, BATTERY_HUNGER_V3)
     for i in range(len(OBSTACLE_VISION_V2.blocks)):
+        assert torch.equal(grafted.block_projections[i].weight, orig.block_projections[i].weight)
+        assert torch.equal(grafted.block_projections[i].bias, orig.block_projections[i].bias)
+    assert torch.equal(grafted.readout.weight, orig.readout.weight)
+    assert torch.equal(grafted.readout.bias, orig.readout.bias)
+    assert torch.equal(grafted.layer.edge_weight, orig.layer.edge_weight)
+
+
+# --- UC-19 AC5: grafting battery_hunger_v3 → damage_proprioception_v4 warm-starts identically -
+_DAMAGE_WIDTH = DAMAGE_PROPRIOCEPTION_V4.total_width - BATTERY_HUNGER_V3.total_width  # 1
+
+
+def _orig_actor_v3(connectome: ConnectomeData) -> ConnectomeActorNetwork:
+    """An actor trained under battery_hunger_v3 (the immediate v4 predecessor)."""
+    torch.manual_seed(0)
+    actor = ConnectomeActorNetwork(connectome, obs_schema=BATTERY_HUNGER_V3)
+    with torch.no_grad():
+        for p in actor.parameters():
+            p.add_(0.05 * torch.randn_like(p))
+    return actor
+
+
+def test_graft_to_damage_proprioception_v4_zero_inits_the_damage_block(
+    connectome: ConnectomeData,
+) -> None:
+    """AC5: grafting battery_hunger_v3 → damage_proprioception_v4 zero-inits the damage block
+    (weight AND bias). The damage block binds to ``proprioceptive`` — the SAME population the
+    UC-13 ``proprioception`` block uses — so this also exercises grafting a *second* block onto an
+    already-bound population."""
+    orig = _orig_actor_v3(connectome)
+    grafted = graft_actor(orig, connectome, DAMAGE_PROPRIOCEPTION_V4)
+    damage_proj = grafted.block_projections[len(BATTERY_HUNGER_V3.blocks)]
+    assert torch.count_nonzero(damage_proj.weight) == 0
+    assert torch.count_nonzero(damage_proj.bias) == 0
+
+
+def test_graft_to_damage_proprioception_v4_arbitrary_damage_value_is_bit_identical(
+    connectome: ConnectomeData,
+) -> None:
+    """AC5 (load-bearing): with the damage block zero-init, feeding an ARBITRARY damage value
+    (the env encodes ``1 - integrity``; 0 == pristine baseline) leaves the grafted actor's action
+    bit-identical to the original — the zeroed projection nullifies whatever the damage dim carries
+    (single + batched)."""
+    orig = _orig_actor_v3(connectome)
+    grafted = graft_actor(orig, connectome, DAMAGE_PROPRIOCEPTION_V4)
+
+    old_obs = torch.randn(BATTERY_HUNGER_V3.total_width)  # 25-d
+    orig_action = orig(old_obs)
+    for value in (0.0, 0.25, 0.5, 1.0):  # 1-integrity ∈ [0,1], plus out-of-range robustness
+        new_obs = torch.cat([old_obs, torch.full((_DAMAGE_WIDTH,), value)])
+        assert torch.equal(orig_action, grafted(new_obs)), f"damage value {value} broke parity"
+
+    # Batched parity with a non-baseline damage value too.
+    old_batch = torch.randn(6, BATTERY_HUNGER_V3.total_width)
+    new_batch = torch.cat([old_batch, torch.full((6, _DAMAGE_WIDTH), 0.7)], dim=1)
+    assert torch.equal(orig(old_batch), grafted(new_batch))
+
+
+def test_graft_to_damage_proprioception_v4_nonzero_projection_changes_action(
+    connectome: ConnectomeData,
+) -> None:
+    """Negative control: once the damage projection is NOT zero, a non-baseline damage input
+    changes the action — proving the parity above is a real consequence of the zero-init, not that
+    the damage block (or the shared proprioceptive population) is inert."""
+    orig = _orig_actor_v3(connectome)
+    grafted = graft_actor(orig, connectome, DAMAGE_PROPRIOCEPTION_V4)
+    damage_i = len(BATTERY_HUNGER_V3.blocks)
+    with torch.no_grad():
+        grafted.block_projections[damage_i].weight.fill_(0.4)
+        grafted.block_projections[damage_i].bias.fill_(0.2)
+
+    old_obs = torch.randn(BATTERY_HUNGER_V3.total_width)
+    new_obs = torch.cat([old_obs, torch.full((_DAMAGE_WIDTH,), 0.8)])
+    assert not torch.equal(orig(old_obs), grafted(new_obs))
+
+
+def test_existing_parameters_unchanged_grafting_to_damage_proprioception_v4(
+    connectome: ConnectomeData,
+) -> None:
+    """AC5: every pre-existing v3 parameter is byte-unchanged by the v4 graft (a warm start, not a
+    restart) — including the UC-13 ``proprioception`` projection that shares the damage block's
+    population."""
+    orig = _orig_actor_v3(connectome)
+    grafted = graft_actor(orig, connectome, DAMAGE_PROPRIOCEPTION_V4)
+    for i in range(len(BATTERY_HUNGER_V3.blocks)):
         assert torch.equal(grafted.block_projections[i].weight, orig.block_projections[i].weight)
         assert torch.equal(grafted.block_projections[i].bias, orig.block_projections[i].bias)
     assert torch.equal(grafted.readout.weight, orig.readout.weight)

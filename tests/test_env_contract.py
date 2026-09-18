@@ -20,6 +20,7 @@ from drone_fly.controller.encoding import ACTION_DIM, OBS_DIM
 from drone_fly.env import EnvConfig, make_env
 from drone_fly.env.config import (
     CourseConfig,
+    DamageConfig,
     DockConfig,
     EpisodeConfig,
     GateSpec,
@@ -28,8 +29,10 @@ from drone_fly.env.config import (
     RandomizationConfig,
     default_obstacle_course,
     default_pad_course,
+    default_repair_course,
     single_gate_course,
     single_pad_course,
+    single_repair_pad_course,
 )
 from drone_fly.env.randomization import is_course_solvable
 
@@ -1248,3 +1251,479 @@ def test_rechargeable_pad_extends_the_step_budget() -> None:
     base_budget = episode.max_steps + episode.steps_per_gate * (1 - 1)  # N=1 course
     assert without._max_steps == base_budget  # plain pad → no extra budget
     assert with_recharge._max_steps == base_budget + episode.recharge_step_allowance
+
+
+# ===========================================================================
+# UC-19 — damage/integrity + repair pads (AC1/AC2/AC4/AC7)
+# ===========================================================================
+class _DamageDockScriptedAdapter:
+    """A scripted-position dock adapter that carries a REAL numpy INTEGRITY ledger (UC-19).
+
+    The exact counterpart of :class:`_BatteryDockScriptedAdapter` for integrity: positions /
+    contact / attitude are replayed frame by frame (so the env's obstacle-contact and dock
+    classifiers are driven deterministically), but integrity is a genuine ``SimpleDroneAdapter`` —
+    the SAME numpy ``damage`` (clamp-at-0) / ``repair`` (clamp-at-1) arithmetic the flight adapter
+    uses. The env calls :meth:`damage` on each UC-15 obstacle-contact edge event and :meth:`repair`
+    on each docked step over a ``repairable`` pad — exactly as in real flight — so integrity is a
+    *measured* claim about the numpy ledger, not a stub.
+    """
+
+    backend = "scripted"
+
+    def __init__(
+        self,
+        positions,
+        collided_flags,
+        damage_cfg,
+        *,
+        dt=0.05,
+        floor_z=0.0,
+        ceiling_z=2.5,
+        start_position=(0.0, 0.0, 1.0),
+        attitudes=None,
+    ):
+        self._positions = [np.asarray(p, dtype=np.float64) for p in positions]
+        self._collided = list(collided_flags)
+        if attitudes is None:
+            attitudes = [(0.0, 0.0, 0.0)] * len(positions)
+        self._attitudes = [np.asarray(a, dtype=np.float64) for a in attitudes]
+        self._i = 0
+        # A real numpy adapter used ONLY as the integrity ledger (its integrated position is
+        # ignored — positions are scripted). This is the numpy sim doing the damage/repair math.
+        self._ledger = SimpleDroneAdapter(
+            np.asarray(start_position, dtype=np.float64),
+            floor_z=floor_z,
+            ceiling_z=ceiling_z,
+            dt=dt,
+            damage=damage_cfg,
+        )
+
+    def _state(self, idx) -> DroneState:
+        j = min(idx, len(self._positions) - 1)
+        return DroneState(
+            position=self._positions[j].copy(),
+            velocity=np.zeros(3),
+            attitude=self._attitudes[j].copy(),
+            angular_velocity=np.zeros(3),
+            collided=bool(self._collided[j]),
+            integrity=self._ledger._integrity,
+        )
+
+    def reset(self, seed=None) -> DroneState:
+        self._i = 0
+        self._ledger.reset(seed=seed)
+        return self._state(0)
+
+    def step(self, action) -> DroneState:
+        self._i += 1
+        self._ledger.step(action)  # genuine numpy step for this frame
+        return self._state(self._i)
+
+    def damage(self, amount: float) -> float:
+        return self._ledger.damage(amount)
+
+    def repair(self, delta: float) -> float:
+        return self._ledger.repair(delta)
+
+    def close(self) -> None:  # pragma: no cover - trivial
+        pass
+
+
+# A tuned fixture: 0.3 integrity shed per contact; repair_rate 4.0 → +0.20 per docked step (dt=.05).
+_DMG_CFG = DamageConfig(enabled=True, damage_per_contact=0.3, repair_rate=4.0)
+
+
+def _damage_course(repairable: bool) -> CourseConfig:
+    """A one-gate course with ONE on-path pillar (the damage source) at (2,0) and ONE floor pad at
+    (4,0); ``repairable`` toggles that pad's flag."""
+    return CourseConfig(
+        start_position=(0.0, 0.0, 1.0),
+        gates=(GateSpec(center=(6.0, 0.0, 1.0), aperture=0.6),),
+        finish_x=8.0,
+        floor_z=0.0,
+        ceiling_z=2.5,
+        obstacles=(ObstacleSpec(center=(2.0, 0.0), radius=0.5, height=2.5),),
+        pads=(PadSpec(center=(4.0, 0.0), radius=0.6, repairable=repairable),),
+    )
+
+
+# Scripted trajectory: fly into the pillar (contact begins, sustained overlap) → exit → descend to
+# the pad → dwell (repair) → take off. Contact is True only on the docked frames (7..10).
+_DMG_POSITIONS = [
+    (0.0, 0.0, 1.0),  # 0 spawn (reset)
+    (1.0, 0.0, 1.0),  # 1 fly (airborne, no obstacle)
+    (2.0, 0.0, 1.0),  # 2 enter the pillar — obstacle-contact edge fires (1 decrement)
+    (2.3, 0.0, 1.0),  # 3 still overlapping (NO new edge — continuous overlap)
+    (3.0, 0.0, 1.0),  # 4 exit the pillar (contact clears)
+    (4.0, 0.0, 0.3),  # 5 airborne OVER the pad (no contact → AC4: no repair while hovering)
+    (4.0, 0.0, 0.02),  # 6 slow final approach, still airborne
+    (4.0, 0.0, 0.0),  # 7 DOCK — floor contact, descent 0.4<0.5, upright, over pad → repair
+    (4.0, 0.0, 0.0),  # 8 dwell (repair)
+    (4.0, 0.0, 0.0),  # 9 dwell
+    (4.0, 0.0, 0.0),  # 10 dwell
+    (4.0, 0.0, 0.3),  # 11 take off (airborne again)
+]
+_DMG_CONTACT = [False] * 7 + [True] * 4 + [False]
+_DMG_DOCK_FRAMES = range(7, 11)  # step indices where the drone is docked on the pad
+
+
+def _run_damage_trajectory(repairable: bool):
+    """Replay the scripted trajectory on the integrity-ledger adapter; return per-step integrity
+    (decoded from the width-1 damage obs = ``1 - integrity``), obstacle-contact edges, and dock
+    flags."""
+    env = _env_with(
+        _DamageDockScriptedAdapter(_DMG_POSITIONS, _DMG_CONTACT, _DMG_CFG),
+        EnvConfig(course=_damage_course(repairable), damage=_DMG_CFG),
+    )
+    obs, _info = env.reset(seed=0)
+    integrity = [1.0 - float(obs[-1])]
+    contacts = [False]
+    docked = [False]
+    for _i in range(1, len(_DMG_POSITIONS)):
+        obs, _r, terminated, truncated, info = env.step(HOVER)
+        integrity.append(1.0 - float(obs[-1]))
+        contacts.append(bool(info["obstacle_contact"]))
+        docked.append(bool(info["docked"]))
+        if terminated or truncated:
+            break
+    return integrity, contacts, docked
+
+
+# --- AC2: damage accrues from the UC-15 obstacle-contact edge event; clamps ≥ 0 ------------
+def test_damage_accrues_on_obstacle_contact_edge_trigger() -> None:
+    """AC2: integrity drops by ``damage_per_contact`` on the step the obstacle contact BEGINS, and
+    a sustained overlap decrements ONCE (edge-triggered, not per overlapping frame)."""
+    integrity, contacts, _docked = _run_damage_trajectory(repairable=True)
+    # Exactly one edge over the sustained pillar overlap (frames 2..4).
+    assert sum(1 for c in contacts if c) == 1
+    edge_frame = contacts.index(True)
+    assert integrity[edge_frame - 1] == pytest.approx(1.0)  # pristine right up to the contact
+    assert integrity[edge_frame] == pytest.approx(1.0 - _DMG_CFG.damage_per_contact)
+    # The overlapping-but-no-new-edge frames do not shed further integrity.
+    assert integrity[edge_frame + 1] == pytest.approx(integrity[edge_frame])
+
+
+def test_n_distinct_contacts_give_n_decrements() -> None:
+    """AC2: N distinct obstacle contacts → N decrements (two separated pillars, path exits contact
+    between them so each re-enters as a fresh edge)."""
+    cfg = DamageConfig(enabled=True, damage_per_contact=0.2)
+    course = CourseConfig(
+        start_position=(0.0, 0.0, 1.0),
+        gates=(GateSpec(center=(8.0, 0.0, 1.0), aperture=0.6),),
+        finish_x=10.0,
+        floor_z=0.0,
+        ceiling_z=2.5,
+        obstacles=(
+            ObstacleSpec(center=(2.0, 0.0), radius=0.3, height=2.5),
+            ObstacleSpec(center=(4.0, 0.0), radius=0.3, height=2.5),
+        ),
+    )
+    positions = [
+        (0.0, 0.0, 1.0),
+        (1.0, 0.0, 1.0),
+        (2.0, 0.0, 1.0),  # enter pillar 1 → edge 1
+        (2.6, 0.0, 1.0),  # exit pillar 1
+        (3.4, 0.0, 1.0),  # gap (contact clears)
+        (4.0, 0.0, 1.0),  # enter pillar 2 → edge 2
+        (4.6, 0.0, 1.0),  # exit pillar 2
+    ]
+    env = _env_with(
+        _DamageDockScriptedAdapter(positions, [False] * len(positions), cfg),
+        EnvConfig(course=course, damage=cfg),
+    )
+    obs, _ = env.reset(seed=0)
+    integrity = [1.0 - float(obs[-1])]
+    edges = 0
+    for _ in range(1, len(positions)):
+        obs, _r, _t, _tr, info = env.step(HOVER)
+        integrity.append(1.0 - float(obs[-1]))
+        edges += int(info["obstacle_contact"])
+    assert edges == 2  # two distinct contacts
+    assert integrity[-1] == pytest.approx(1.0 - 2 * cfg.damage_per_contact)  # two decrements
+
+
+def test_damage_clamps_at_zero_over_many_contacts() -> None:
+    """AC2: integrity clamps at 0.0 — repeated contacts never push it negative (measured on the
+    numpy ledger via the same repeated-contact course)."""
+    cfg = DamageConfig(enabled=True, damage_per_contact=0.4)
+    course = CourseConfig(
+        start_position=(0.0, 0.0, 1.0),
+        gates=(GateSpec(center=(12.0, 0.0, 1.0), aperture=0.6),),
+        finish_x=14.0,
+        floor_z=0.0,
+        ceiling_z=2.5,
+        obstacles=tuple(
+            ObstacleSpec(center=(2.0 + 2.0 * k, 0.0), radius=0.3, height=2.5) for k in range(4)
+        ),
+    )
+    positions = [(0.0, 0.0, 1.0)]
+    for k in range(4):  # enter/exit each of the four pillars
+        positions += [
+            (2.0 + 2.0 * k, 0.0, 1.0),
+            (2.6 + 2.0 * k, 0.0, 1.0),
+            (3.4 + 2.0 * k, 0.0, 1.0),
+        ]
+    env = _env_with(
+        _DamageDockScriptedAdapter(positions, [False] * len(positions), cfg),
+        EnvConfig(course=course, damage=cfg),
+    )
+    obs, _ = env.reset(seed=0)
+    integrity = [1.0 - float(obs[-1])]
+    for _ in range(1, len(positions)):
+        obs, _r, _t, _tr, _info = env.step(HOVER)
+        integrity.append(1.0 - float(obs[-1]))
+    # 4 contacts * 0.4 = 1.6 nominal loss, but integrity floors at 0.0.
+    assert min(integrity) == pytest.approx(0.0)
+    assert all(v >= -1e-9 for v in integrity)
+
+
+# --- AC4: repair accrues ONLY while docked on a repairable pad; clamps at 1.0 --------------
+def test_repair_accrues_only_while_docked_on_a_repairable_pad() -> None:
+    """AC4: integrity is shed at the pillar, then RISES across the docked dwell on a repairable pad
+    (each docked step nets a gain), toward 1.0."""
+    integrity, _contacts, docked = _run_damage_trajectory(repairable=True)
+    edge_frame = 2
+    docked_lo = min(_DMG_DOCK_FRAMES)
+    # Damaged before docking; every docked frame is flagged docked.
+    assert integrity[edge_frame] < 1.0
+    assert all(docked[i] for i in _DMG_DOCK_FRAMES)
+    # Integrity strictly rises on the first docked step versus the pre-dock (damaged) level.
+    assert integrity[docked_lo] > integrity[docked_lo - 1]
+
+
+def test_repair_clamps_at_full_integrity_over_a_long_dwell() -> None:
+    """AC4: a sustained dwell restores integrity toward 1.0 and never exceeds it (clamp)."""
+    integrity, _contacts, _docked = _run_damage_trajectory(repairable=True)
+    assert max(integrity) <= 1.0 + 1e-9
+    # The dwell actually reached (clamped at) full integrity on this tuned fixture.
+    assert max(integrity[i] for i in _DMG_DOCK_FRAMES) == pytest.approx(1.0)
+
+
+def test_non_repair_pad_never_restores_even_while_docked() -> None:
+    """AC4: docking on a plain (non-repair) pad never restores — integrity is monotone
+    non-increasing across the whole trajectory (damage-only, exactly as if the pad were absent)."""
+    integrity, _contacts, docked = _run_damage_trajectory(repairable=False)
+    assert all(docked[i] for i in _DMG_DOCK_FRAMES)  # it still docks (the flag ≠ dock geometry)
+    assert all(y <= x + 1e-12 for x, y in zip(integrity, integrity[1:], strict=False))
+
+
+def test_hover_over_repair_pad_does_not_restore() -> None:
+    """AC4: full landing required — frames 5,6 are airborne directly over the repair pad (no floor
+    contact ⇒ not docked), so integrity does NOT rise while hovering; only the dwell repairs."""
+    integrity, _contacts, docked = _run_damage_trajectory(repairable=True)
+    assert docked[5] is False and docked[6] is False
+    # Hovering over the pad keeps integrity at the post-damage level (no repair in the air).
+    assert integrity[5] == pytest.approx(integrity[4])
+    assert integrity[6] == pytest.approx(integrity[5])
+
+
+# --- AC2: damage is reward-neutral and never terminates ------------------------------------
+def test_damage_never_terminates_and_is_reward_neutral() -> None:
+    """AC2: integrity is a sensory/handicap signal — it feeds NEITHER termination NOR the reward.
+
+    Two envs replay the identical scripted flight through the pillar; one has damage enabled (so a
+    contact sheds integrity), the other disabled. The reward at the contact step is identical (the
+    UC-15 obstacle penalty is unchanged; the integrity loss adds nothing), and neither run
+    terminates on the contact."""
+
+    def stream(damage_enabled: bool):
+        cfg = DamageConfig(enabled=damage_enabled, damage_per_contact=0.3)
+        env = _env_with(
+            _DamageDockScriptedAdapter(_DMG_POSITIONS, _DMG_CONTACT, cfg),
+            EnvConfig(course=_damage_course(False), damage=cfg),
+        )
+        env.reset(seed=0)
+        rewards, terms = [], []
+        for _ in range(1, len(_DMG_POSITIONS)):
+            _obs, r, terminated, _t, _info = env.step(HOVER)
+            rewards.append(r)
+            terms.append(terminated)
+            if terminated:
+                break
+        return rewards, terms
+
+    r_on, t_on = stream(True)
+    r_off, t_off = stream(False)
+    assert r_on == r_off, "integrity loss must not perturb the reward stream"
+    assert not any(t_on), "an obstacle contact (damage) must never terminate the episode"
+    assert not any(t_off)
+
+
+# --- AC1: off-by-default byte-identity (a repair pad is inert when damage disabled) --------
+def test_repairable_flag_is_inert_when_damage_disabled() -> None:
+    """AC1: with damage DISABLED the whole damage/repair path is gated off, so a course carrying a
+    repairable pad + an obstacle is byte-identical (obs / reward / termination / RNG) to the same
+    course whose pad is plain — and the observation stays the locked 12-d contract (no damage
+    block)."""
+
+    def stream(repairable: bool):
+        env = make_env(EnvConfig(course=_damage_course(repairable)), adapter="simple")
+        rng = np.random.default_rng(4)
+        actions = [rng.uniform([0, -1, -1, -1], [1, 1, 1, 1]) for _ in range(40)]
+        obs, _ = env.reset(seed=0)
+        trace = [obs.copy()]
+        rewards, terms, truncs = [], [], []
+        for a in actions:
+            obs, r, terminated, truncated, _info = env.step(np.asarray(a, dtype=np.float32))
+            trace.append(obs.copy())
+            rewards.append(r)
+            terms.append(terminated)
+            truncs.append(truncated)
+            if terminated or truncated:
+                break
+        return np.array(trace), rewards, terms, truncs, env.np_random.bit_generator.state
+
+    on = stream(repairable=True)
+    off = stream(repairable=False)
+    assert on[0].shape[1] == OBS_DIM  # still the locked 12-d observation (damage off)
+    np.testing.assert_array_equal(on[0], off[0])  # observation stream
+    assert on[1] == off[1]  # reward stream
+    assert on[2] == off[2] and on[3] == off[3]  # termination / truncation streams
+    assert on[4] == off[4]  # identical RNG consumption (the flag draws nothing)
+
+
+def test_repairable_pad_extends_the_step_budget() -> None:
+    """UC-19 (step-budget allowance): the env grants ``repair_step_allowance`` extra steps per
+    repairable pad on the active course (so a legitimate repair detour still finishes in time), and
+    grants NONE when the pad is plain (byte-identical budget). Independent of the recharge
+    allowance."""
+    with_repair = make_env(
+        EnvConfig(course=_damage_course(True), damage=_DMG_CFG), adapter="simple"
+    )
+    without = make_env(EnvConfig(course=_damage_course(False), damage=_DMG_CFG), adapter="simple")
+    with_repair.reset(seed=0)
+    without.reset(seed=0)
+    episode = EpisodeConfig()
+    base_budget = episode.max_steps + episode.steps_per_gate * (1 - 1)  # N=1 course
+    assert without._max_steps == base_budget  # plain pad → no extra budget
+    assert with_repair._max_steps == base_budget + episode.repair_step_allowance
+
+
+# ===========================================================================
+# UC-19 AC7 (top risk) — repair is LOAD-BEARING for an agility maneuver, and the
+# repair-necessity course-variation axis (damage-heavy vs light).
+# ===========================================================================
+# The two-sided property lives in AGILITY (short-window / rapid-reversal) maneuvers: a degraded
+# ``max_body_rate`` builds attitude more slowly, so in a short window it reaches LESS laterally.
+# Sustained single-direction tilt saturates at the attitude limit and hides the difference, so the
+# test scripts an open-loop AGILITY swing on the REAL numpy adapter and measures lateral reach. The
+# "gate" is a documented lateral-reach threshold that a pristine (or repaired) drone clears and a
+# degraded one misses — so REPAIR (what a pad does) is exactly what turns a miss into a pass.
+_AC7_SWING = np.array([0.5, 1.0, 0.0, 0.0])  # hover throttle, full roll stick
+_AC7_SWING_STEPS = 6  # short window (before the tilt saturates, where authority matters most)
+_AC7_LATERAL_GATE = 0.15  # metres — sits strictly between the degraded and pristine reaches
+
+
+def _agility_reach(mode: str) -> float:
+    """Lateral reach (|y| after a short scripted roll swing) on the REAL numpy adapter, with
+    integrity driven ONLY through the env-facing ``damage`` / ``repair`` hooks (as the env does)."""
+    cfg = DamageConfig(enabled=True)  # DEFAULT tuning band (the plan's empirical claim)
+    ad = SimpleDroneAdapter(
+        np.array([0.0, 0.0, 5.0]), floor_z=0.0, ceiling_z=100.0, dt=0.05, damage=cfg
+    )
+    ad.reset(seed=0)
+    if mode in ("degraded", "repaired"):
+        for _ in range(3):  # three default contacts drive integrity to the 0.0 floor
+            ad.damage(cfg.damage_per_contact)
+    if mode == "repaired":
+        for _ in range(500):  # a long pad dwell restores integrity to full
+            ad.repair(cfg.repair_rate * 0.05)
+    st = None
+    for _ in range(_AC7_SWING_STEPS):
+        st = ad.step(_AC7_SWING)
+    return abs(float(st.position[1]))
+
+
+def test_ac7_repair_is_load_bearing_for_an_agility_gate() -> None:
+    """AC7 (load-bearing, two-sided, EMPIRICAL): under the DEFAULT ``DamageConfig`` a short agility
+    swing clears a fixed lateral gate when PRISTINE, MISSES it when fully DEGRADED, and clears it
+    again after a repair dwell. So repair is load-bearing: it is exactly what restores the maneuver.
+    Measured on the real numpy adapter (open-loop scripted actions), integrity driven only through
+    the env's ``damage`` / ``repair`` hooks.
+
+    If this band ever collapses (no gate separates the two sides), that is an escalation trigger —
+    NOT a silent weakening of the assert.
+    """
+    pristine = _agility_reach("pristine")
+    degraded = _agility_reach("degraded")
+    repaired = _agility_reach("repaired")
+    # The band exists and is wide (the plan's ~3.6× measurement).
+    assert pristine > degraded
+    assert pristine / max(degraded, 1e-9) > 3.0
+    # The gate is load-bearing: pristine/repaired clear it, degraded misses it.
+    assert degraded < _AC7_LATERAL_GATE < pristine
+    assert repaired > _AC7_LATERAL_GATE
+    # Repair fully restores the maneuver (a full dwell returns to the pristine reach).
+    assert repaired == pytest.approx(pristine)
+
+
+def test_ac7_default_repair_course_damage_is_real_and_pad_restores() -> None:
+    """AC7 (env integration on the exact fixture): on ``default_repair_course()`` with damage
+    ENABLED, a real obstacle contact sheds integrity (damage is real on this course) and a dwell on
+    the mid-corridor **repair** pad restores it — the pad is load-bearing in the env, not just at
+    the adapter level. Explicit ``EnvConfig(damage=DamageConfig(enabled=True), course=...)``."""
+    cfg = DamageConfig(enabled=True, repair_rate=4.0)  # default per-contact loss; brisk repair
+    positions = [
+        (0.0, 0.0, 1.0),
+        (1.0, 0.0, 1.0),
+        (1.5, 0.0, 1.0),  # enter the first on-corridor pillar → damage
+        (2.2, 0.0, 1.0),  # exit
+        (3.0, 0.0, 0.3),  # descend toward the repair pad at (3.0, 0)
+        (3.0, 0.0, 0.02),  # slow approach (airborne)
+        (3.0, 0.0, 0.0),  # DOCK on the repair pad
+        (3.0, 0.0, 0.0),  # dwell
+        (3.0, 0.0, 0.0),  # dwell
+        (3.0, 0.0, 0.0),  # dwell
+        (3.0, 0.0, 0.0),  # dwell
+    ]
+    contact = [False] * 6 + [True] * 5
+    env = _env_with(
+        _DamageDockScriptedAdapter(positions, contact, cfg),
+        EnvConfig(course=default_repair_course(), damage=cfg),
+    )
+    obs, _ = env.reset(seed=0)
+    integrity = [1.0 - float(obs[-1])]
+    for _ in range(1, len(positions)):
+        obs, _r, term, trunc, _info = env.step(HOVER)
+        integrity.append(1.0 - float(obs[-1]))
+        if term or trunc:
+            break
+    assert min(integrity) < 1.0, "damage must be real on default_repair_course()"
+    assert integrity[-1] > min(integrity), "the repair pad must restore integrity"
+    assert integrity[-1] == pytest.approx(1.0)  # the dwell fully recovered
+
+
+def test_ac7_light_course_completable_without_repair() -> None:
+    """AC7 (the other side of the axis): a light course with NO damage source is completable without
+    ever repairing — integrity stays pinned at 1.0 and the drone crosses the finish. Damage is
+    ENABLED (mechanics are gated by ``damage.enabled``, not by the course), so this proves the
+    course-variation axis: repair-necessity depends on obstacle density, not on the flag."""
+    cfg = DamageConfig(enabled=True)
+    course = single_repair_pad_course(
+        pad_center=(0.0, 0.0), gate_center=(3.0, 0.0, 1.0), finish_x=6.0
+    )
+    positions = [
+        (0.0, 0.0, 1.0),
+        (1.0, 0.0, 1.0),
+        (2.0, 0.0, 1.0),
+        (3.0, 0.0, 1.0),  # pass the gate
+        (4.0, 0.0, 1.0),
+        (5.0, 0.0, 1.0),
+        (6.1, 0.0, 1.0),  # cross the finish plane
+    ]
+    env = _env_with(
+        _DamageDockScriptedAdapter(positions, [False] * len(positions), cfg),
+        EnvConfig(course=course, damage=cfg),
+    )
+    obs, _ = env.reset(seed=0)
+    integrity = [1.0 - float(obs[-1])]
+    completed = False
+    for _ in range(1, len(positions)):
+        obs, _r, terminated, truncated, info = env.step(HOVER)
+        integrity.append(1.0 - float(obs[-1]))
+        if info.get("completed"):
+            completed = True
+        if terminated or truncated:
+            break
+    assert completed is True, "a light (no-obstacle) course completes without any repair"
+    assert all(v == pytest.approx(1.0) for v in integrity), "no damage source ⇒ integrity stays 1.0"

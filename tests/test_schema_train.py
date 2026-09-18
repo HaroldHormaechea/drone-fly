@@ -134,6 +134,49 @@ def test_battery_hunger_v3_smoke_trains_finitely_on_the_obstacle_course(
         assert np.isfinite(p.detach().cpu().numpy()).all()
 
 
+def test_damage_proprioception_v4_smoke_trains_finitely_on_the_repair_course(
+    connectome: ConnectomeData, tmp_path
+) -> None:
+    """UC-19 AC8: a smoke-train under ``damage_proprioception_v4`` on ``default_repair_course()``
+    completes a finite PPO update end-to-end (hermetic, numpy backend).
+
+    Proves the whole damage path wires together: the ``_reconcile_damage(_reconcile_battery(...))``
+    chain forces BOTH damage and battery physics + their width-1 obs dims on (v4 carries both
+    blocks), the proprioceptive population resolves, the 26-d env passes the ``env.obs_width ==
+    total_width`` assertion, the v4 schema-mode actor (two proprioceptive blocks) + PPO +
+    checkpointing run on the damage-heavy repair course, and no NaN/Inf blow-up occurs.
+    """
+    from drone_fly.controller.obs_schema import DAMAGE_PROPRIOCEPTION_V4
+    from drone_fly.env.config import EnvConfig, default_repair_course
+    from drone_fly.train.config import TrainConfig
+    from drone_fly.train.loop import smoke_train
+
+    cfg = TrainConfig(
+        models_dir=str(tmp_path / "models"),
+        logs_dir=str(tmp_path / "logs"),
+        checkpoint_freq=64,
+        n_envs=1,
+        n_steps=64,
+        batch_size=32,
+        seed=0,
+    )
+    model = smoke_train(
+        connectome=connectome,
+        cfg=cfg,
+        timesteps=128,
+        obs_schema=DAMAGE_PROPRIOCEPTION_V4,
+        env_config=EnvConfig(course=default_repair_course()),
+    )
+    assert model.num_timesteps == 128
+    actor = model.policy.features_extractor.actor
+    assert actor.obs_schema == DAMAGE_PROPRIOCEPTION_V4
+    assert actor.sensory_mode == "schema"
+    # The env genuinely emitted the 26-d damage-proprioception observation (obs_width == 26).
+    assert model.env.observation_space.shape == (DAMAGE_PROPRIOCEPTION_V4.total_width,) == (26,)
+    for p in actor.parameters():
+        assert np.isfinite(p.detach().cpu().numpy()).all()
+
+
 def test_default_course_energy_budget_keeps_battery_above_knee() -> None:
     """UC-17 AC7 (controller-free energy budget): the default course is completable WITHOUT
     recharge — even the worst case (full throttle every step for the entire step budget) leaves
