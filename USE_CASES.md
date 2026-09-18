@@ -20,6 +20,6 @@ Statuses:
 | 08 | [use-cases/08-domain-randomization.md](use-cases/08-domain-randomization.md) | Domain randomization — per-episode course + optional dynamics | done | 2026-09-17 |
 | 09 | [use-cases/09-configurable-gate-count.md](use-cases/09-configurable-gate-count.md) | Configurable number of gates (N free-3D waypoints) | done | 2026-09-17 |
 | 10 | [use-cases/10-clean-training-data.md](use-cases/10-clean-training-data.md) | Clean all training data & models (start-from-scratch) | pending | 2026-09-18 |
-| 11 | [use-cases/11-yaml-config-and-run-layout.md](use-cases/11-yaml-config-and-run-layout.md) | YAML --config for the CLIs + per-run output layout | in-progress | 2026-09-18 |
+| 11 | [use-cases/11-yaml-config-and-run-layout.md](use-cases/11-yaml-config-and-run-layout.md) | YAML --config for the CLIs + per-run output layout | done | 2026-09-18 |
 | 12 | [use-cases/12-mri-brain-heatmap.md](use-cases/12-mri-brain-heatmap.md) | MRI-style full-brain activation heatmap | pending | 2026-09-18 |
 | 13 | [use-cases/13-modality-mapped-populations.md](use-cases/13-modality-mapped-populations.md) | Modality-mapped neuron populations + graft-ready observation schema | pending | 2026-09-18 |
