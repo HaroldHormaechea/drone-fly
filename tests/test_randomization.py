@@ -31,7 +31,13 @@ import dataclasses
 import numpy as np
 
 from drone_fly.adapter.simple import SimpleDroneAdapter
-from drone_fly.env.config import CourseConfig, DynamicsParams, GateSpec, RandomizationConfig
+from drone_fly.env.config import (
+    CourseConfig,
+    DynamicsParams,
+    GateSpec,
+    ObstacleSpec,
+    RandomizationConfig,
+)
 from drone_fly.env.randomization import (
     _fallback_course,
     is_course_solvable,
@@ -405,3 +411,163 @@ def test_drag_factor_alone_perturbs_the_trajectory() -> None:
     a.reconfigure(dynamics=DynamicsParams(drag=0.15))
     b.reconfigure(dynamics=DynamicsParams(drag=0.30))
     assert not np.array_equal(_rollout_positions(a, actions), _rollout_positions(b, actions))
+
+
+# =====================================================================================
+# UC-15 AC3 — obstacle solvability guard: no anchor inside a pillar + polyline clearance
+# =====================================================================================
+def _finish_point(course: CourseConfig) -> tuple[float, float]:
+    """The finish anchor's (x, y): finish_x at the last gate's lateral y (see current_target)."""
+    return (course.finish_x, course.gates[-1].center[1])
+
+
+def test_obstacle_on_a_gate_center_is_unsolvable() -> None:
+    """A pillar swallowing a gate centre makes the course unflyable (AC3)."""
+    base = CourseConfig()  # default 3-gate course
+    g1 = base.gates[1]
+    blocked = dataclasses.replace(
+        base, obstacles=(ObstacleSpec(center=(g1.center[0], g1.center[1]), radius=0.4, height=2.5),)
+    )
+    assert is_course_solvable(blocked, RandomizationConfig()) is False
+
+
+def test_obstacle_on_the_start_is_unsolvable() -> None:
+    """A pillar on the spawn point is unflyable (AC3)."""
+    base = CourseConfig()
+    sx, sy, _ = base.start_position
+    blocked = dataclasses.replace(
+        base, obstacles=(ObstacleSpec(center=(sx, sy), radius=0.4, height=2.5),)
+    )
+    assert is_course_solvable(blocked, RandomizationConfig()) is False
+
+
+def test_obstacle_on_the_finish_is_unsolvable() -> None:
+    """A pillar on the finish anchor is unflyable (AC3)."""
+    base = CourseConfig()
+    blocked = dataclasses.replace(
+        base, obstacles=(ObstacleSpec(center=_finish_point(base), radius=0.4, height=2.5),)
+    )
+    assert is_course_solvable(blocked, RandomizationConfig()) is False
+
+
+def test_obstacle_on_the_polyline_fails_clearance() -> None:
+    """A pillar sitting on a start→gate segment (not on an anchor) fails polyline clearance (AC3).
+
+    The start (0,0,1)→g0 (2.5,0,1) segment runs along y=0; a pillar centred at (1.25, 0) with
+    the segment inside its z-band violates the ``radius + obstacle_clearance`` margin even
+    though it covers no gate/start/finish *anchor* — this is the ≥1-collision-free-path guard.
+    """
+    base = CourseConfig()
+    on_line = dataclasses.replace(
+        base, obstacles=(ObstacleSpec(center=(1.25, 0.0), radius=0.3, height=2.5),)
+    )
+    assert is_course_solvable(on_line, RandomizationConfig()) is False
+
+
+def test_off_corridor_obstacle_is_solvable() -> None:
+    """A pillar well off the corridor clears every anchor and the polyline → solvable (AC3)."""
+    base = CourseConfig()
+    off = dataclasses.replace(
+        base, obstacles=(ObstacleSpec(center=(3.25, 1.5), radius=0.3, height=2.5),)
+    )
+    assert is_course_solvable(off, RandomizationConfig()) is True
+
+
+def test_obstacle_below_the_polyline_z_band_does_not_block() -> None:
+    """A short pillar whose band is entirely below the flight polyline never blocks it (AC3).
+
+    The polyline flies at z≈1; a pillar of height 0.5 (band [0, 0.5]) sitting on the line is
+    passed entirely above, so the segment's z-range does not overlap the band → solvable.
+    """
+    base = CourseConfig()
+    short = dataclasses.replace(
+        base, obstacles=(ObstacleSpec(center=(1.25, 0.0), radius=0.3, height=0.5),)
+    )
+    assert is_course_solvable(short, RandomizationConfig()) is True
+
+
+# =====================================================================================
+# UC-15 AC3 — obstacle SAMPLING: presence rate, solvability, obstacle-free fallback
+# =====================================================================================
+def test_enabled_obstacle_axis_produces_pillars_at_a_healthy_rate() -> None:
+    """With the obstacle axis on, off-corridor placement clears the guard on the vast majority.
+
+    The lateral off-corridor bias means sampled pillars almost always survive the solvability
+    reject-resample, so obstacles are present at a healthy rate (not rare) (AC3).
+    """
+    rcfg = RandomizationConfig(enable_course=True, enable_obstacles=True)
+    base = CourseConfig()
+    rng = np.random.default_rng(0)
+    courses = [sample_course(rng, rcfg, base) for _ in range(300)]
+    with_obstacles = sum(1 for c in courses if c.obstacles)
+    assert with_obstacles > 250, f"obstacles too rare when enabled: {with_obstacles}/300"
+    # And every sampled obstacle course is still flyable.
+    for c in courses:
+        assert is_course_solvable(c, rcfg)
+
+
+def test_sampled_obstacle_counts_respect_the_configured_range() -> None:
+    """Drawn pillar counts stay within ``obstacle_count_range`` (AC3)."""
+    rcfg = RandomizationConfig(
+        enable_course=True, enable_obstacles=True, obstacle_count_range=(1, 3)
+    )
+    base = CourseConfig()
+    rng = np.random.default_rng(1)
+    counts = {len(sample_course(rng, rcfg, base).obstacles) for _ in range(300)}
+    assert counts <= {1, 2, 3}
+    assert max(counts) >= 1  # at least some courses carry pillars
+
+
+def test_fallback_course_is_obstacle_free_even_with_obstacle_axis_on() -> None:
+    """On resample exhaustion the zero-RNG fallback carries NO obstacles (AC3).
+
+    Pathological gate ranges force every candidate to be rejected; the deterministic fallback
+    is solvable-by-construction and obstacle-free, so it can never be unflyable.
+    """
+    rcfg = RandomizationConfig(
+        enable_course=True,
+        enable_obstacles=True,
+        num_gates_range=(3, 3),
+        gate_center_z_range=(9.0, 9.0),  # always above the ceiling corridor → always rejected
+        max_resample_attempts=10,
+    )
+    base = CourseConfig()
+    result = sample_course(np.random.default_rng(1), rcfg, base)
+    assert result.obstacles == ()
+    assert result == _fallback_course(3, base, rcfg)
+    assert is_course_solvable(result, rcfg) is True
+
+
+# =====================================================================================
+# UC-15 — a disabled obstacle axis draws ZERO rng → leaves the course stream unperturbed
+# =====================================================================================
+def test_disabled_obstacle_axis_never_produces_obstacles() -> None:
+    """With ``enable_obstacles=False`` no course ever carries pillars (default off)."""
+    rcfg = RandomizationConfig(enable_course=True, enable_obstacles=False)
+    base = CourseConfig()
+    rng = np.random.default_rng(3)
+    assert all(sample_course(rng, rcfg, base).obstacles == () for _ in range(200))
+
+
+def test_disabled_obstacle_axis_leaves_the_gate_stream_unperturbed() -> None:
+    """A disabled obstacle axis consumes NO rng, so obstacle *config* cannot shift the stream.
+
+    Two configs differ only in their (unused) obstacle ranges, both with the axis OFF. Because
+    a disabled axis draws nothing, the same seed yields a byte-identical course sequence — the
+    UC-08/09 stream is untouched (the pinned draw-order / zero-draw guarantee).
+    """
+    base = CourseConfig()
+    plain = RandomizationConfig(enable_course=True, enable_obstacles=False)
+    fat = RandomizationConfig(
+        enable_course=True,
+        enable_obstacles=False,
+        obstacle_count_range=(3, 3),
+        obstacle_radius_range=(0.9, 0.9),
+        obstacle_height_range=(2.5, 2.5),
+    )
+
+    def sequence(rcfg: RandomizationConfig, seed: int = 5, k: int = 8) -> list[CourseConfig]:
+        rng = np.random.default_rng(seed)
+        return [sample_course(rng, rcfg, base) for _ in range(k)]
+
+    assert sequence(plain) == sequence(fat)

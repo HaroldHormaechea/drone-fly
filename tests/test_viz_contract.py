@@ -45,7 +45,7 @@ import numpy as np
 import pytest
 
 from drone_fly.connectome.loader import ConnectomeData
-from drone_fly.env.config import CourseConfig
+from drone_fly.env.config import CourseConfig, ObstacleSpec
 from drone_fly.record.recorder import ActivationRecorder
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -261,6 +261,53 @@ def test_viewer_js_reads_n_gate_array_with_legacy_fallback() -> None:
     assert "target_gate" in js
     # A distinct colour/style for the current target gate vs the others.
     assert "gateTarget" in js, "viewer.js must style the current target gate distinctly"
+
+
+# --- UC-15 AC7: the viewer reads + draws obstacle pillars, degrading gracefully ---------
+@pytest.fixture
+def recorded_doc_with_obstacles(connectome: ConnectomeData, tmp_path: Path) -> dict:
+    """A recorded episode whose course carries obstacle pillars (``meta.course.obstacles``)."""
+    course = CourseConfig(
+        obstacles=(
+            ObstacleSpec(center=(3.25, 1.5), radius=0.3, height=2.5),
+            ObstacleSpec(center=(4.75, -1.6), radius=0.4, height=2.0),
+        )
+    )
+    return _record(connectome, tmp_path / "act_obs", course=course)
+
+
+def test_recorded_file_carries_obstacle_geometry(recorded_doc_with_obstacles: dict) -> None:
+    """AC7: an obstacle-carrying recording documents each pillar the viewer draws."""
+    course = recorded_doc_with_obstacles["meta"]["course"]
+    assert isinstance(course["obstacles"], list)
+    assert len(course["obstacles"]) == 2
+    for pillar in course["obstacles"]:
+        assert set(pillar) >= {"center", "radius", "height"}
+        assert len(pillar["center"]) == 2  # (x, y) axis; floor-anchored height gives the z-extent
+
+
+def test_recorded_file_without_obstacles_omits_field(recorded_doc_with_course: dict) -> None:
+    """AC7 back-compat: a course without pillars omits ``obstacles`` (viewer draws none)."""
+    assert "obstacles" not in recorded_doc_with_course["meta"]["course"]
+
+
+def test_viewer_js_draws_obstacle_pillars_with_graceful_degradation() -> None:
+    """AC7: viewer.js has ``drawObstacles`` reading ``course.obstacles`` with an absent-field guard.
+
+    Static assertion (CI is headless): the viewer defines an obstacle draw routine, reads the
+    additive ``course.obstacles`` array, and guards it (``|| []``) so a recording without the
+    field draws nothing rather than throwing.
+    """
+    js = (_VIZ / "viewer.js").read_text()
+    assert "drawObstacles" in js, "viewer.js must define an obstacle draw routine"
+    assert "obstacles" in js, "viewer.js must read the additive course.obstacles array"
+    # Graceful degradation: the obstacle list is guarded so a field-absent file draws nothing.
+    normalised = re.sub(r"\s+", "", js)
+    assert "course.obstacles)||[]" in normalised or "obstacles||[]" in normalised, (
+        "viewer.js must guard obstacles with `|| []` for graceful degradation"
+    )
+    # drawObstacles is actually invoked from the render path.
+    assert "drawObstacles()" in js
 
 
 def test_viewer_js_anatomical_dots_and_beat_removed() -> None:

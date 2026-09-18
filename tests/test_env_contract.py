@@ -21,7 +21,10 @@ from drone_fly.env.config import (
     CourseConfig,
     EpisodeConfig,
     GateSpec,
+    ObstacleSpec,
+    ObstacleVisionConfig,
     RandomizationConfig,
+    default_obstacle_course,
     single_gate_course,
 )
 from drone_fly.env.randomization import is_course_solvable
@@ -502,3 +505,143 @@ def test_dynamics_toggle_does_not_shift_the_per_seed_sampled_course() -> None:
 
     for seed in (0, 1, 2, 7, 13):
         assert first_course(False, seed) == first_course(True, seed)
+
+
+# ===========================================================================
+# UC-15 — obstacle vision widens the obs; contact penalises but never terminates
+# ===========================================================================
+def test_obstacle_vision_widens_observation_to_24d() -> None:
+    """AC4: enabling the obstacle-vision block emits a 24-d obs (12 base + 4*k, k=3)."""
+    cfg = EnvConfig(
+        course=default_obstacle_course(),
+        obstacle_vision=ObstacleVisionConfig(enabled=True, k=3),
+    )
+    env = make_env(cfg, adapter="simple")
+    assert env.observation_space.shape == (OBS_DIM + 12,)
+    assert env.observation_space.shape == (24,)
+    assert env.obs_width == 24
+    obs, _ = env.reset(seed=0)
+    assert obs.shape == (24,)
+    assert np.isfinite(obs).all()  # the obstacle block is inside the nan_to_num sanitation
+
+
+def test_obs_width_tracks_k() -> None:
+    """AC4: ``obs_width`` == OBS_DIM + 4*k for the configured k."""
+    for k in (1, 2, 5):
+        env = make_env(
+            EnvConfig(obstacle_vision=ObstacleVisionConfig(enabled=True, k=k)), adapter="simple"
+        )
+        assert env.obs_width == OBS_DIM + 4 * k
+
+
+def test_legacy_env_stays_12d_when_obstacle_vision_disabled() -> None:
+    """AC4/back-compat: the default env (obstacle vision off) is the locked 12-d contract."""
+    env = make_env(EnvConfig(), adapter="simple")
+    assert env.observation_space.shape == (OBS_DIM,) == (12,)
+    assert env.obs_width == 12
+    # Even a course that HAS obstacles stays 12-d while the vision block is off.
+    course = CourseConfig(obstacles=(ObstacleSpec(center=(3.0, 1.5), radius=0.3, height=2.5),))
+    env2 = make_env(EnvConfig(course=course), adapter="simple")
+    assert env2.obs_width == 12
+
+
+# A single-gate course with one pillar sitting on the flight path at x=4, y=0.
+_PILLAR_ON_PATH = CourseConfig(
+    start_position=(0.0, 0.0, 1.0),
+    gates=(GateSpec(center=(2.5, 0.0, 1.0), aperture=0.6),),
+    finish_x=7.0,
+    obstacles=(ObstacleSpec(center=(4.0, 0.0), radius=0.5, height=2.5),),
+)
+# start → g0 → into the pillar → still inside → out toward finish → cross finish.
+_GRAZE_PATH = [
+    (0.0, 0.0, 1.0),
+    (2.5, 0.0, 1.0),  # g0
+    (4.0, 0.0, 1.0),  # contact begins (inside the pillar)
+    (4.2, 0.0, 1.0),  # still overlapping
+    (6.9, 0.0, 1.0),
+    (7.1, 0.0, 1.0),  # finish
+]
+
+
+def test_obstacle_contact_penalises_but_does_not_terminate() -> None:
+    """AC2/AC9: contact raises the penalty flag and NEVER sets ``terminated``.
+
+    The scripted walk flies through a pillar (no floor/ceiling collision), so the only
+    possible terminations are the finish crossing; the contact steps themselves stay live.
+    """
+    env = _env_with(_ScriptedAdapter(_GRAZE_PATH), EnvConfig(course=_PILLAR_ON_PATH))
+    env.reset()
+    contact_step = None
+    terminated_before_finish = False
+    for i in range(len(_GRAZE_PATH)):
+        _obs, reward, terminated, _trunc, info = env.step(HOVER)
+        if info["obstacle_contact"]:
+            contact_step = i
+            # The contact step subtracted the severe penalty and did NOT terminate.
+            assert terminated is False
+            # The severe -50 penalty dominates the small progress/time terms → strongly negative.
+            assert reward < -40
+        if info["completed"]:
+            break
+        if terminated:
+            terminated_before_finish = True
+    assert contact_step is not None, "the scripted fly-through must register a contact"
+    assert terminated_before_finish is False
+
+
+def test_glancing_contact_still_completes_the_course() -> None:
+    """AC9: a drone that grazes a pillar can recover aerially and still finish (terminated)."""
+    env = _env_with(_ScriptedAdapter(_GRAZE_PATH), EnvConfig(course=_PILLAR_ON_PATH))
+    env.reset()
+    saw_contact = False
+    completed = False
+    for _ in range(len(_GRAZE_PATH)):
+        _obs, _r, terminated, _trunc, info = env.step(HOVER)
+        saw_contact = saw_contact or info["obstacle_contact"]
+        if terminated:
+            completed = info["completed"]
+            break
+    assert saw_contact is True
+    assert completed is True  # grazing a pillar did not stop the course from completing
+
+
+def test_obstacle_contact_is_edge_triggered_once_per_contact() -> None:
+    """AC2: a sustained overlap raises the flag ONCE (edge-triggered), not every step.
+
+    The scripted path enters the pillar and stays overlapping for several steps; only the
+    first overlapping step is flagged (so the penalty can't stack unboundedly per frame).
+    """
+    env = _env_with(_ScriptedAdapter(_GRAZE_PATH), EnvConfig(course=_PILLAR_ON_PATH))
+    env.reset()
+    flags = []
+    for _ in range(len(_GRAZE_PATH)):
+        _obs, _r, terminated, _trunc, info = env.step(HOVER)
+        flags.append(info["obstacle_contact"])
+        if terminated:
+            break
+    assert sum(1 for f in flags if f) == 1, f"expected exactly one edge-trigger, got {flags}"
+
+
+def test_prev_contact_edge_state_resets_each_episode() -> None:
+    """The edge-trigger state is reset on ``reset()`` so a new episode re-fires on contact."""
+    env = _env_with(_ScriptedAdapter(_GRAZE_PATH), EnvConfig(course=_PILLAR_ON_PATH))
+    for _ in range(2):
+        env.reset()  # rewinds the scripted replay (adapter.reset sets the index to 0)
+        fired = False
+        for _ in range(len(_GRAZE_PATH)):
+            _obs, _r, terminated, _trunc, info = env.step(HOVER)
+            fired = fired or info["obstacle_contact"]
+            if terminated:
+                break
+        assert fired is True
+
+
+def test_no_obstacle_course_never_flags_contact() -> None:
+    """A course with no pillars never raises ``obstacle_contact`` (back-compat)."""
+    env = _env_with(_ScriptedAdapter(_THREE_GATE_PATH))
+    env.reset()
+    for _ in range(len(_THREE_GATE_PATH)):
+        _obs, _r, terminated, _trunc, info = env.step(HOVER)
+        assert info["obstacle_contact"] is False
+        if terminated:
+            break
