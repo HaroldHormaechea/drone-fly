@@ -215,6 +215,20 @@ def test_train_defaults_match_existing_flag_defaults() -> None:
     assert cfg.record_dir is None
     assert cfg.randomize is False
     assert cfg.randomize_dynamics is False
+    # UC-13: no schema key -> None -> legacy single-projection run (AC7 parity).
+    assert cfg.schema is None
+
+
+def test_train_schema_key_accepts_registered_name() -> None:
+    """The validated `schema` key (UC-13) accepts a registered obs-schema name."""
+    cfg = TrainRunConfig.from_mapping({"name": "x", "schema": "migrated_v1"})
+    assert cfg.schema == "migrated_v1"
+
+
+def test_train_schema_key_rejects_unknown_name() -> None:
+    """An unregistered schema name is a choice error (names come from obs_schema)."""
+    with pytest.raises(ConfigError, match="schema"):
+        TrainRunConfig.from_mapping({"name": "x", "schema": "not_a_schema"})
 
 
 def test_evaluate_defaults_match_existing_flag_defaults() -> None:

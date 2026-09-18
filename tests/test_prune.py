@@ -15,10 +15,10 @@ Verified fixture reduction (path-inclusion rule), asserted by AC7:
 ======  =========  =======
 k       neurons    edges
 ======  =========  =======
-full    300        10600
-0       59         751
-1       175        5988
-2       274        10070
+full    300        8288
+0       45         549
+1       135        3950
+2       245        7494
 ======  =========  =======
 """
 
@@ -49,9 +49,9 @@ from drone_fly.controller.populations import (
 # Expected fixture reduction under the path-inclusion rule (AC7). Independently
 # reproduced against the committed fixture (see module docstring).
 FIXTURE_PRUNE_SCALE = {
-    0: (59, 751),
-    1: (175, 5988),
-    2: (274, 10070),
+    0: (45, 549),
+    1: (135, 3950),
+    2: (245, 7494),
 }
 
 # A neutral (neither sensory nor motor) superclass label used to pad toy graphs.
@@ -264,9 +264,12 @@ def test_ac4_population_selection_still_works_on_pruned(connectome) -> None:
     (motor_idx, motor_mode), (sensory_idx, sensory_mode) = select_populations(pruned)
     assert motor_mode == "biological"
     assert sensory_mode == "biological"
-    # Capped population sizes (MOTOR_POP_SIZE=16, SENSORY_POP_SIZE=32) on the fixture.
+    # Population sizes on the fixture: motor caps at MOTOR_POP_SIZE=16 (16 descending
+    # neurons survive the k=0 prune), sensory is capped by availability — the UC-13
+    # fixture carries 25 visual_projection neurons (< SENSORY_POP_SIZE=32), all of which
+    # survive the k=0 corridor.
     assert motor_idx.size == 16
-    assert sensory_idx.size == 32
+    assert sensory_idx.size == 25
     # Sets are disjoint.
     assert set(motor_idx.tolist()).isdisjoint(sensory_idx.tolist())
 
@@ -315,8 +318,8 @@ def test_ac7_logs_input_to_pruned_counts(connectome, caplog) -> None:
     with caplog.at_level(logging.INFO, logger="drone_fly.connectome.prune"):
         prune_to_subcircuit(connectome, k=0)
     msgs = " ".join(r.getMessage() for r in caplog.records)
-    assert "300" in msgs and "59" in msgs  # input -> pruned neuron counts
-    assert "10600" in msgs and "751" in msgs  # input -> pruned edge counts
+    assert "300" in msgs and "45" in msgs  # input -> pruned neuron counts
+    assert "8288" in msgs and "549" in msgs  # input -> pruned edge counts
 
 
 # --------------------------------------------------------------------------- #
@@ -342,9 +345,9 @@ def test_ac8_train_with_prune_smoke(connectome, tmp_path) -> None:
 
 def test_ac8_default_is_backcompatible(connectome) -> None:
     """Default (no prune) leaves the connectome full — UC-01/02/03 behaviour unchanged."""
-    # The pruning entry point is strictly opt-in; the fixture itself is untouched at 300/10600.
+    # The pruning entry point is strictly opt-in; the fixture itself is untouched at 300/8288.
     assert connectome.neuron_count == 300
-    assert connectome.edge_count == 10600
+    assert connectome.edge_count == 8288
 
 
 def test_ac8_prune_is_noop_under_resume(connectome, tmp_path, caplog) -> None:
@@ -430,7 +433,7 @@ def test_ac9_unknown_rule_errors(connectome) -> None:
 def test_ac10_prune_is_offline(connectome, no_network) -> None:
     """Pruning performs no network I/O (runs with sockets disabled)."""
     pruned = prune_to_subcircuit(connectome, k=0)
-    assert pruned.neuron_count == 59
+    assert pruned.neuron_count == 45
     assert pruned.neuron_count < connectome.neuron_count
 
 
@@ -448,8 +451,8 @@ def test_ac11_export_roundtrip(connectome, tmp_path) -> None:
     assert meta_path.name == "connectome_pruned_meta.csv"
 
     reloaded = load_connectome(tmp_path)
-    assert reloaded.neuron_count == 59
-    assert reloaded.edge_count == 751
+    assert reloaded.neuron_count == 45
+    assert reloaded.edge_count == 549
     assert np.array_equal(np.asarray(reloaded.neuron_ids), np.asarray(pruned.neuron_ids))
     assert np.array_equal(np.asarray(reloaded.superclass), np.asarray(pruned.superclass))
     assert np.array_equal(np.asarray(reloaded.sign), np.asarray(pruned.sign))
@@ -473,7 +476,8 @@ def test_ac11_exported_slice_is_reusable_meta_present(connectome, tmp_path) -> N
     reloaded = load_connectome(tmp_path)
     (motor_idx, motor_mode), (sensory_idx, sensory_mode) = select_populations(reloaded)
     assert motor_mode == "biological" and sensory_mode == "biological"
-    assert motor_idx.size == 16 and sensory_idx.size == 32
+    # 16 descending + 25 visual_projection survive the k=0 corridor (see AC4 test above).
+    assert motor_idx.size == 16 and sensory_idx.size == 25
 
 
 # --------------------------------------------------------------------------- #

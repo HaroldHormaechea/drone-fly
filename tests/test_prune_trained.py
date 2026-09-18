@@ -70,7 +70,7 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures"
 # UC-04's independently-reproduced fixture reduction under the structural path-inclusion rule
 # (see tests/test_prune.py). Locked here so the slice_connectome extraction that UC-04 now calls
 # has not changed UC-04 behaviour (AC8).
-UC04_FIXTURE_PRUNE_SCALE = {0: (59, 751), 1: (175, 5988), 2: (274, 10070)}
+UC04_FIXTURE_PRUNE_SCALE = {0: (45, 549), 1: (135, 3950), 2: (245, 7494)}
 
 
 # --------------------------------------------------------------------------- #
