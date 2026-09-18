@@ -105,11 +105,16 @@ observation to 24-d and makes the env emit the egocentric obstacle encoding (and
 randomization is on, sample pillars). `battery_hunger_v3` (UC-17) extends `obstacle_vision_v2`
 with a width-1 *battery* block bound to the approximate `hunger` (internal-state / feeding)
 population; setting it widens the observation to 25-d, turns on the battery drain + thrust-impact
-model, and makes the env emit the battery dim (encoded as depletion = 1 − charge). Omitting
-`schema` keeps the legacy single-projection behaviour. **Note:** a block schema changes the
-input→sensory wiring, so checkpoints trained under a different wiring do not carry over — a fresh
-train is required. A checkpoint can be *grafted* one step up the chain (`migrated_v1` →
-`obstacle_vision_v2` → `battery_hunger_v3`; the appended block is zero-initialised → identical
+model, and makes the env emit the battery dim (encoded as depletion = 1 − charge).
+`damage_proprioception_v4` (UC-19) extends `battery_hunger_v3` with a width-1 *damage* block bound
+to the `proprioceptive` population (a **second** proprioceptive block alongside `migrated_v1`'s
+self-motion one — they coexist because the actor scatters blocks additively); setting it widens the
+observation to 26-d, turns on the integrity damage + control-authority model, and makes the env
+emit the damage dim (encoded as `1 − integrity`, so pristine = 0). Omitting `schema` keeps the
+legacy single-projection behaviour. **Note:** a block schema changes the input→sensory wiring, so
+checkpoints trained under a different wiring do not carry over — a fresh train is required. A
+checkpoint can be *grafted* one step up the chain (`migrated_v1` → `obstacle_vision_v2` →
+`battery_hunger_v3` → `damage_proprioception_v4`; the appended block is zero-initialised → identical
 actions until fine-tuned), but VecNormalize obs-stats are tied to the old width and do **not**
 carry to the wider observation, so fresh normalisation stats are part of that retrain.
 
@@ -136,6 +141,26 @@ courses that fit one charge get none. A per-rechargeable-pad step-budget allowan
 (`EpisodeConfig.recharge_step_allowance`) keeps a legitimate recharge detour within the timeout.
 Off by default (no recharge pads ⇒ byte-identical behaviour). The energy model is a conservative
 generation-and-guard heuristic; it only guarantees model-level reachability.
+
+### Damage & repair pads (UC-19)
+With `DamageConfig.enabled` (turned on for you by the `damage_proprioception_v4` schema — see
+above), the drone carries a scalar **integrity** `∈ [0, 1]` (`1.0` pristine). Each **UC-15
+obstacle-contact edge event** sheds `damage_per_contact` integrity (once per contact, clamped ≥ 0);
+floor/ceiling crashes are unaffected and still terminate. Damage degrades **control authority**
+only — the effective `max_body_rate` is scaled by a linear `authority_factor(integrity)` floored at
+`min_authority` — so a damaged drone is *sluggish but flyable* (a recoverable handicap); `max_thrust`
+/ mass / drag are untouched, and integrity feeds **neither** termination **nor** reward. A landing
+pad tagged `repairable` is a **repair pad**: while the drone is *fully docked* on it (the UC-16
+docked state; hovering does **not** count), integrity is restored toward `1.0` at
+`DamageConfig.repair_rate` per second (clamped at full) — the exact mirror of a recharge pad. A
+per-repairable-pad step-budget allowance (`EpisodeConfig.repair_step_allowance`) keeps a legitimate
+repair detour within the timeout. Whether repair is *needed* to finish is a **course-variation**
+axis (agility-heavy courses become uncompletable once authority is degraded; `default_repair_course()`
+is the damage-heavy fixture). Everything is **off by default** — at `integrity == 1.0` the enabled
+path is byte-identical to the disabled one (the `min_authority < max_body_rate` invariant guarantees
+it), and with no repairable pads/damage config an `EnvConfig()` is unchanged. Enabling the schema
+adds the 26th observation dim, so **pre-UC-19 checkpoints are invalidated** (retrain, or graft one
+step from `battery_hunger_v3` as above).
 
 ### Visualization & recording
 Enable recording in a train/evaluate config with `record: true` (tune cadence via `record_every`);

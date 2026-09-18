@@ -165,14 +165,35 @@ BATTERY_HUNGER_V3 = ObsSchema(
     version=3,
 )
 
+#: The v4 damage-("proprioception") schema (UC-19 AC5). ``battery_hunger_v3``'s four blocks PLUS an
+#: appended width-1 ``damage`` block bound to the ``proprioceptive`` population — a **second**
+#: proprioceptive block alongside the UC-13 self-motion ``proprioception`` block. The two coexist
+#: because the actor scatters every block additively (``index_add``), so overlapping the same
+#: population is safe (UC-19 AC6). Because it only *appends*,
+#: ``DAMAGE_PROPRIOCEPTION_V4.extends(BATTERY_HUNGER_V3)`` is ``True`` — a ``battery_hunger_v3``
+#: checkpoint grafts to it with the damage block zero-initialised (weight AND bias), so the grafted
+#: actor's action on old inputs (damage dim at its baseline) is bit-identical (AC5). The env encodes
+#: the damage dim as **1 - integrity**, so the zeroed graft input (0) equals the trained pristine
+#: baseline. Total width is ``26``; re-binding the input→sensory wiring invalidates pre-UC-19
+#: checkpoints (a fresh v4 retrain is required, exactly as UC-13/15/17 — surfaced in the PR).
+DAMAGE_PROPRIOCEPTION_V4 = ObsSchema(
+    blocks=(
+        *BATTERY_HUNGER_V3.blocks,
+        ObsBlock(name="damage", width=1, population="proprioceptive"),
+    ),
+    version=4,
+)
+
 #: Named schemas selectable by string (e.g. from a YAML run-config's ``schema`` key). The CLI
 #: default is *no* schema (``None`` → legacy single-projection path); naming ``"migrated_v1"``
 #: opts into the migrated block schema, ``"obstacle_vision_v2"`` into the obstacle-vision one,
-#: ``"battery_hunger_v3"`` into the battery-("hunger") one.
+#: ``"battery_hunger_v3"`` into the battery-("hunger") one, ``"damage_proprioception_v4"`` into the
+#: damage-("proprioception") one.
 NAMED_SCHEMAS: dict[str, ObsSchema] = {
     "migrated_v1": MIGRATED_SCHEMA_V1,
     "obstacle_vision_v2": OBSTACLE_VISION_V2,
     "battery_hunger_v3": BATTERY_HUNGER_V3,
+    "damage_proprioception_v4": DAMAGE_PROPRIOCEPTION_V4,
 }
 
 

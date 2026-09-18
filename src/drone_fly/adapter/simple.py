@@ -84,6 +84,7 @@ class SimpleDroneAdapter(DroneAdapter):
         ceiling_z: float,
         dt: float,
         battery=None,
+        damage=None,
     ) -> None:
         self._start = np.asarray(start_position, dtype=np.float64).reshape(3).copy()
         self._floor_z = float(floor_z)
@@ -110,6 +111,17 @@ class SimpleDroneAdapter(DroneAdapter):
         self._battery_cfg = battery
         self._battery_enabled = battery is not None and bool(battery.enabled)
         self._battery = 1.0
+        # Integrity damage + control-authority impact (UC-19). ``damage`` is a ``DamageConfig``
+        # (duck-typed: only its ``enabled``/``min_authority`` fields + ``authority_factor`` method
+        # are read — no import, so the adapter stays below ``env.config`` in the layering) or
+        # ``None``. Disabled ⇒ the step path never reads or mutates ``_integrity`` and the body
+        # rate stays exactly ``* _max_body_rate`` (byte-identity, AC3). ``_integrity`` resets to
+        # full. Damage/repair are NOT applied here — the env calls :meth:`damage`/:meth:`repair`
+        # from its step (mirroring the recharge idiom), so this adapter only *reads* integrity to
+        # scale the body rate and *mutates* it through those two hooks.
+        self._damage_cfg = damage
+        self._damage_enabled = damage is not None and bool(damage.enabled)
+        self._integrity = 1.0
 
     def reconfigure(self, *, start=None, dynamics=None) -> None:
         """Apply a new spawn and/or dynamics for the next episode (UC-08 AC5, AC7).
@@ -143,6 +155,30 @@ class SimpleDroneAdapter(DroneAdapter):
         self._battery = min(1.0, self._battery + max(0.0, float(delta)))
         return self._battery
 
+    def damage(self, amount: float) -> float:
+        """Subtract ``amount`` from integrity, clamped at ``0.0``; return the new integrity (UC-19).
+
+        Symmetric to :meth:`recharge`: geometry-agnostic — the env decides *whether* to call this
+        (a UC-15 obstacle-contact edge event) and passes ``damage_per_contact``; the adapter only
+        applies the decrement. ``amount`` is floored at ``0`` so a negative value can never *heal*
+        through this path, and the result is clamped ``≥ 0`` (integrity cannot go negative). Safe to
+        call on the damage-disabled path too (``_integrity`` stays a plain float), though the env
+        only calls it when damage physics are enabled.
+        """
+        self._integrity = max(0.0, self._integrity - max(0.0, float(amount)))
+        return self._integrity
+
+    def repair(self, delta: float) -> float:
+        """Add ``delta`` to integrity, clamped at ``1.0``; return the new integrity (UC-19).
+
+        Symmetric to :meth:`recharge`: the env decides *whether* to call this (docked on a
+        ``repairable`` pad) and passes the per-step increment ``repair_rate * dt``; the adapter
+        only applies it. ``delta`` is floored at ``0`` so a negative value can never *damage*
+        through this path, and the result is clamped ``≤ 1.0`` (a pristine drone cannot overheal).
+        """
+        self._integrity = min(1.0, self._integrity + max(0.0, float(delta)))
+        return self._integrity
+
     def _state(self, collided: bool) -> DroneState:
         return DroneState(
             position=self._position.copy(),
@@ -153,6 +189,9 @@ class SimpleDroneAdapter(DroneAdapter):
             # UC-17: normalized charge. Stays ``1.0`` on the disabled path (never drained), so a
             # battery-off episode reports a full charge and is byte-identical to pre-UC-17.
             battery=self._battery,
+            # UC-19: normalized integrity. Stays ``1.0`` on the disabled path (never mutated), so a
+            # damage-off episode reports full integrity and is byte-identical to pre-UC-19.
+            integrity=self._integrity,
         )
 
     def reset(self, seed: int | None = None) -> DroneState:
@@ -164,6 +203,8 @@ class SimpleDroneAdapter(DroneAdapter):
         self._angular_velocity = np.zeros(3, dtype=np.float64)
         # UC-17: reset battery to full. Harmless when disabled (never read/drained thereafter).
         self._battery = 1.0
+        # UC-19: reset integrity to full. Harmless when disabled (never read/mutated thereafter).
+        self._integrity = 1.0
         # Prime the control-latency buffer with warm-up hover actions so real commands are
         # delayed by exactly ``_latency`` steps. Empty (and never touched) when latency == 0.
         self._action_queue = deque()
@@ -183,8 +224,25 @@ class SimpleDroneAdapter(DroneAdapter):
             a = self._action_queue.popleft()
         throttle, roll_cmd, pitch_cmd, yaw_cmd = a
 
+        # UC-19 damage control-authority impact (AC3). DISABLED: the effective body rate is EXACTLY
+        # ``_max_body_rate`` — no integrity read, no new branch value — so a fixed-seed episode is
+        # bit-identical to pre-UC-19. ENABLED: the effective ceiling is scaled by
+        # ``authority_factor`` of the **start-of-step** integrity (integrity is mutated only by the
+        # env's :meth:`damage`/:meth:`repair` hooks, which run *after* this step returns), floored
+        # at ``min_authority``. At ``integrity == 1.0`` the factor is exactly 1.0, so the effective
+        # rate is ``max(min_authority, _max_body_rate)`` == ``_max_body_rate`` **given the
+        # documented invariant ``min_authority < _max_body_rate``** — i.e. the full-integrity
+        # enabled path is byte-identical to the disabled path. ONLY ``max_body_rate`` is degraded
+        # here; thrust / mass / drag below are untouched, so a damaged drone stays flyable (AC3).
+        if self._damage_enabled:
+            effective_max_body_rate = max(
+                self._damage_cfg.min_authority,
+                self._max_body_rate * self._damage_cfg.authority_factor(self._integrity),
+            )
+        else:
+            effective_max_body_rate = self._max_body_rate
         # First-order attitude response to normalised body-rate commands.
-        rates = np.array([roll_cmd, pitch_cmd, yaw_cmd], dtype=np.float64) * self._max_body_rate
+        rates = np.array([roll_cmd, pitch_cmd, yaw_cmd], dtype=np.float64) * effective_max_body_rate
         self._angular_velocity = rates
         self._attitude = self._attitude + rates * self._dt
         # Clamp roll/pitch so the thrust projection stays physical; wrap yaw to [-pi, pi].

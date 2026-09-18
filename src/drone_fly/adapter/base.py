@@ -66,6 +66,12 @@ class DroneState:
         a default of ``1.0`` so every pre-UC-17 construction (and the battery-disabled path) is
         byte-identical: a ``DroneState`` built without ``battery`` reads as a full charge, which
         is exactly the baseline the trained policy saw before batteries existed.
+    integrity:
+        Normalized structural integrity ``∈ [0, 1]`` (UC-19). ``1.0`` = pristine. Appended
+        **last** (after ``battery``) with a default of ``1.0`` so every pre-UC-19 construction
+        (and the damage-disabled path) is byte-identical: a ``DroneState`` built without
+        ``integrity`` reads as fully intact, exactly the baseline the trained policy saw before
+        damage existed. The env encodes the damage obs dim as ``1.0 - integrity`` (pristine == 0).
     """
 
     position: np.ndarray
@@ -74,6 +80,7 @@ class DroneState:
     angular_velocity: np.ndarray
     collided: bool
     battery: float = 1.0
+    integrity: float = 1.0
 
 
 def sanitize_action(action: np.ndarray) -> np.ndarray:
@@ -130,6 +137,30 @@ class DroneAdapter(abc.ABC):
         ``recharge_rate * dt``. A backend that does not model a battery (e.g. the pybullet
         backend, which always reports a full charge) may ignore ``delta`` and return ``1.0`` — the
         default. The numpy backend overrides this to mutate its normalized charge (clamped ≤ 1.0).
+        """
+        return 1.0
+
+    def damage(self, amount: float) -> float:  # noqa: B027 - optional hook
+        """Subtract ``amount`` from integrity, clamped at ``0.0``; return the new integrity (UC-19).
+
+        The racing env calls this once per **UC-15 obstacle-contact edge event** (and only while
+        damage physics are enabled), passing ``damage_per_contact``. Geometry-agnostic by design:
+        the adapter knows *how much* integrity to shed, never *whether* a contact warrants it — the
+        env decides that (edge-triggered obstacle contact) and calls this. A backend that does not
+        model integrity (e.g. the pybullet backend, which always reports full integrity) may ignore
+        ``amount`` and return ``1.0`` — the default. The numpy backend overrides this to mutate its
+        normalized integrity (clamped ≥ 0.0). Mirrors :meth:`recharge`.
+        """
+        return 1.0
+
+    def repair(self, delta: float) -> float:  # noqa: B027 - optional hook
+        """Add ``delta`` to integrity, clamped at ``1.0``; return the new integrity (UC-19).
+
+        The racing env calls this once per step while the drone is docked on a ``repairable`` pad
+        (and damage physics are enabled), passing the per-step increment ``repair_rate * dt``. A
+        backend that does not model integrity may ignore ``delta`` and return ``1.0`` — the default.
+        The numpy backend overrides this to mutate its normalized integrity (clamped ≤ 1.0). Mirrors
+        :meth:`recharge`.
         """
         return 1.0
 

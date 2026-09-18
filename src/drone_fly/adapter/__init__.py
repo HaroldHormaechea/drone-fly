@@ -38,6 +38,7 @@ def make_adapter(
     ceiling_z: float,
     dt: float,
     battery=None,
+    damage=None,
 ) -> DroneAdapter:
     """Construct a drone adapter for ``backend`` and log which physics is active.
 
@@ -52,6 +53,11 @@ def make_adapter(
     pre-UC-17). The hermetic :class:`SimpleDroneAdapter` implements the model; the pybullet
     backend accepts it for signature parity but ignores it (the battery model is only asserted on
     the numpy backend).
+
+    ``damage`` (UC-19): an optional ``DamageConfig`` forwarded to the backend to enable the
+    integrity damage + control-authority model (symmetric to ``battery``). ``None`` (default) means
+    no damage (byte-identical to pre-UC-19). Only the numpy backend implements it; the pybullet
+    backend accepts it for signature parity and ignores it (the model is asserted on numpy only).
     """
     if backend not in ADAPTER_CHOICES:
         raise ValueError(f"adapter must be one of {ADAPTER_CHOICES}, got {backend!r}.")
@@ -66,12 +72,22 @@ def make_adapter(
 
         logger.info("Using PyBullet backend (mastery physics).")
         return PyBulletAdapter(
-            start_position, floor_z=floor_z, ceiling_z=ceiling_z, dt=dt, battery=battery
+            start_position,
+            floor_z=floor_z,
+            ceiling_z=ceiling_z,
+            dt=dt,
+            battery=battery,
+            damage=damage,
         )
 
     logger.info("Using SimpleDroneAdapter backend (pure-numpy; hermetic, NOT mastery physics).")
     return SimpleDroneAdapter(
-        start_position, floor_z=floor_z, ceiling_z=ceiling_z, dt=dt, battery=battery
+        start_position,
+        floor_z=floor_z,
+        ceiling_z=ceiling_z,
+        dt=dt,
+        battery=battery,
+        damage=damage,
     )
 
 
