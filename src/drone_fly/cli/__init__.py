@@ -17,6 +17,13 @@ historical flag surface — they are CI/dev helpers, not the four settings-heavy
 Per-run output layout: a ``train`` config's required ``name`` routes all of that run's
 outputs under ``training/<name>/{checkpoints,logs,recordings}/`` (see
 :mod:`drone_fly.config`), so differently-named runs never collide.
+
+The ``clean`` command wipes those training *outputs* to start from scratch. Like every other
+command it operates **relative to the current working directory** (its target roots are the
+same CWD-relative locations the other stages write to), so run it from the project root. It
+is a **dry-run by default** — it lists what would be removed and deletes nothing — which also
+protects against an accidental wrong-CWD invocation; an explicit ``--yes``/``--force`` is
+required to delete (and ``--dry-run`` always wins over them). It takes no YAML config.
 """
 
 from __future__ import annotations
@@ -140,6 +147,34 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", required=True, help="Path to the prune-trained YAML config (see README)."
     )
 
+    clean_p = sub.add_parser(
+        "clean",
+        help="Wipe training outputs (checkpoints, logs, activations, training/<name>/) so a "
+        "run can start from scratch. Dry-run by default; pass --yes to actually delete.",
+    )
+    clean_p.add_argument(
+        "--yes",
+        action="store_true",
+        help="Actually delete the training outputs (without this, or without --force, the "
+        "command only lists what would be removed).",
+    )
+    clean_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Alias for --yes; either flag triggers deletion.",
+    )
+    clean_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List what would be removed and delete nothing. Wins over --yes/--force.",
+    )
+    clean_p.add_argument(
+        "--include-prunes",
+        action="store_true",
+        help="Also remove the prepared prune slices (pruned* under artifacts/ and data/). "
+        "Without this, prune slices and all other inputs are preserved.",
+    )
+
     sub.add_parser("fetch-connectome", help="[stub] Provision connectome data (see README).")
     return parser
 
@@ -173,6 +208,9 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "prune-trained":
             return _run_prune_trained(args.config)
+
+        if args.command == "clean":
+            return _run_clean(args)
 
         if args.command == "fetch-connectome":
             print(
@@ -350,6 +388,29 @@ def _run_prune_trained(config_path: str) -> int:
             "WARNING: course-specific circuit (no domain randomization) — not a general minimal "
             "fly flight circuit. Re-run with randomize enabled for a robust result."
         )
+    return 0
+
+
+def _run_clean(args: argparse.Namespace) -> int:
+    """Wipe training outputs relative to the CWD (dry-run unless --yes/--force) (UC-10).
+
+    Effective delete = ``(--yes or --force) and not --dry-run`` — ``--dry-run`` always wins
+    (AC8). Prints every target path, then a one-line summary, and always returns 0 (there is
+    no config to fail on and a missing output tree is not an error — AC1/AC2/AC7).
+    """
+    from pathlib import Path
+
+    from drone_fly.clean import clean
+
+    delete = (args.yes or args.force) and not args.dry_run
+    report = clean(Path.cwd(), delete=delete, include_prunes=args.include_prunes)
+
+    verb = "would remove" if report.dry_run else "removed"
+    for rel in report.relative_paths():
+        print(f"{verb}: {rel}")
+    if report.dry_run and report.paths:
+        print("Dry-run: nothing was deleted. Re-run with --yes (or --force) to delete.")
+    print(report.summary())
     return 0
 
 

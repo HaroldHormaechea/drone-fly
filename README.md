@@ -193,9 +193,14 @@ is **no** flat `artifacts/models` fallback. `training/**` is gitignored. For `ev
 `prune-trained`, `name` is optional; when set together with `record: true` (and no explicit
 `record_dir`), recordings are routed to `training/<name>/recordings/` too.
 
-> **Cleaning up runs.** Deleting a run is just removing its `training/<name>/` folder. The
-> `clean` command (UC-10, not yet built) will target this layout; until it lands, delete the
-> folder by hand.
+> **Cleaning up runs (`clean`, UC-10).** To start from scratch, wipe the training *outputs*
+> with `uv run drone-fly clean`. It is a **dry-run by default** — it lists what would be
+> removed and deletes nothing; pass `--yes` (or `--force`) to actually delete. It removes the
+> children of `artifacts/models/`, `artifacts/logs/`, `artifacts/activations/`, and every
+> `training/<name>/` run folder (the directories themselves and any `.gitkeep` are kept), and
+> never touches source, use cases, the brief, or the connectome under `data/`. Add
+> `--include-prunes` to also clear the prepared prune slices (`pruned*` under `artifacts/` and
+> `data/`). It operates relative to the current directory, so run it from the project root.
 
 ### Config schemas
 
