@@ -7,6 +7,7 @@ lives in ``test_train_resume.py``; this only guards the command surface.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,68 @@ def test_parser_train_flags() -> None:
 def test_parser_evaluate_requires_checkpoint() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["evaluate"])  # --checkpoint is required
+
+
+# --------------------------------------------------------------------------- #
+# --resume — nargs="?" bare-flag / directory / explicit-.zip parsing
+# --------------------------------------------------------------------------- #
+def test_parser_resume_bare_flag_is_latest_sentinel() -> None:
+    """Bare `--resume` (no value) parses to the "latest" sentinel (const)."""
+    args = build_parser().parse_args(["train", "--resume"])
+    assert args.resume == "latest"
+
+
+def test_parser_resume_directory_value_parses() -> None:
+    """`--resume <dir>` carries the directory string through unchanged."""
+    args = build_parser().parse_args(["train", "--resume", "some/models/dir"])
+    assert args.resume == "some/models/dir"
+
+
+def test_parser_resume_explicit_zip_still_parses() -> None:
+    """`--resume x.zip` still parses to the exact path (byte-identical to before)."""
+    args = build_parser().parse_args(["train", "--resume", "x.zip"])
+    assert args.resume == "x.zip"
+
+
+def test_parser_resume_omitted_is_none() -> None:
+    """Omitting `--resume` leaves it None (a fresh run)."""
+    args = build_parser().parse_args(["train"])
+    assert args.resume is None
+
+
+# --------------------------------------------------------------------------- #
+# --record-every without --record — the silent-no-op warning
+# --------------------------------------------------------------------------- #
+def test_warn_record_every_without_record_fires(caplog) -> None:
+    """`--record-every` passed WITHOUT `--record` logs a warning (it would be a silent no-op)."""
+    from drone_fly.cli import _warn_record_every_without_record
+
+    args = build_parser().parse_args(["train", "--record-every", "5"])
+    with caplog.at_level(logging.WARNING, logger="drone_fly.cli"):
+        _warn_record_every_without_record(args)
+    assert any(
+        "--record-every" in r.getMessage() and "no effect" in r.getMessage() for r in caplog.records
+    ), "expected a warning about --record-every without --record"
+
+
+def test_no_warn_record_every_with_record(caplog) -> None:
+    """When `--record` IS present, no --record-every warning is emitted."""
+    from drone_fly.cli import _warn_record_every_without_record
+
+    args = build_parser().parse_args(["train", "--record", "--record-every", "5"])
+    with caplog.at_level(logging.WARNING, logger="drone_fly.cli"):
+        _warn_record_every_without_record(args)
+    assert not any("--record-every" in r.getMessage() for r in caplog.records)
+
+
+def test_no_warn_record_every_when_absent(caplog) -> None:
+    """No warning when neither --record nor --record-every is given (the common case)."""
+    from drone_fly.cli import _warn_record_every_without_record
+
+    args = build_parser().parse_args(["train"])
+    with caplog.at_level(logging.WARNING, logger="drone_fly.cli"):
+        _warn_record_every_without_record(args)
+    assert not any("--record-every" in r.getMessage() for r in caplog.records)
 
 
 def test_smoke_train_dispatch(tmp_path, monkeypatch) -> None:
