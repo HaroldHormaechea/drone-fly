@@ -16,10 +16,12 @@ from drone_fly.controller.encoding import OBS_DIM
 from drone_fly.controller.obs_schema import (
     MIGRATED_SCHEMA_V1,
     NAMED_SCHEMAS,
+    OBSTACLE_VISION_V2,
     ObsBlock,
     ObsSchema,
     resolve_schema,
 )
+from drone_fly.env.obstacles import OBSTACLE_FEATURES_PER, OBSTACLE_VISION_K
 
 
 def _schema(*blocks: ObsBlock, version: int = 1) -> ObsSchema:
@@ -134,3 +136,37 @@ def test_resolve_schema_named() -> None:
 def test_resolve_schema_unknown_raises() -> None:
     with pytest.raises(ValueError, match="Unknown obs schema"):
         resolve_schema("does_not_exist")
+
+
+# --- UC-15 AC4: the obstacle-vision v2 schema ------------------------------------------
+def test_obstacle_vision_v2_extends_migrated_v1() -> None:
+    """AC4: ``obstacle_vision_v2`` is ``migrated_v1`` PLUS an appended block → extends is True.
+
+    This is the load-bearing graft precondition: only an *append* zero-inits cleanly.
+    """
+    assert OBSTACLE_VISION_V2.extends(MIGRATED_SCHEMA_V1) is True
+    # The leading blocks are byte-identical to migrated_v1 (name, width, population).
+    assert OBSTACLE_VISION_V2.blocks[: len(MIGRATED_SCHEMA_V1.blocks)] == MIGRATED_SCHEMA_V1.blocks
+
+
+def test_obstacle_vision_v2_layout_and_version() -> None:
+    """AC4: v2 = vision(3) + proprioception(9) + obstacle_vision(12) = 24; version bumped to 2."""
+    assert OBSTACLE_VISION_V2.version == 2
+    assert OBSTACLE_VISION_V2.total_width == 24
+    names = [b.name for b in OBSTACLE_VISION_V2.blocks]
+    assert names == ["vision", "proprioception", "obstacle_vision"]
+    obstacle_block = OBSTACLE_VISION_V2.blocks[-1]
+    # The obstacle block is 4*K wide and bound to the same `vision` population (visual_projection).
+    assert obstacle_block.width == OBSTACLE_FEATURES_PER * OBSTACLE_VISION_K == 12
+    assert obstacle_block.population == "vision"
+
+
+def test_obstacle_vision_v2_registered_and_resolvable() -> None:
+    """AC4: the schema is selectable by name via the registry / ``resolve_schema``."""
+    assert NAMED_SCHEMAS["obstacle_vision_v2"] is OBSTACLE_VISION_V2
+    assert resolve_schema("obstacle_vision_v2") is OBSTACLE_VISION_V2
+
+
+def test_obstacle_vision_v2_round_trips() -> None:
+    """The v2 schema serialises + deserialises unchanged (rides inside a checkpoint)."""
+    assert ObsSchema.from_dict(OBSTACLE_VISION_V2.to_dict()) == OBSTACLE_VISION_V2

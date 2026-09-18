@@ -39,8 +39,10 @@ from drone_fly.env.config import (
     CourseConfig,
     DynamicsParams,
     GateSpec,
+    ObstacleSpec,
     RandomizationConfig,
 )
+from drone_fly.env.obstacles import point_in_cylinder
 
 
 def is_course_solvable(course: CourseConfig, rcfg: RandomizationConfig) -> bool:
@@ -95,7 +97,53 @@ def is_course_solvable(course: CourseConfig, rcfg: RandomizationConfig) -> bool:
     if course.finish_x - float(gates[-1].center[0]) < rcfg.min_gate_finish_gap:
         return False
 
+    # -- obstacle solvability (UC-15 AC3) -----------------------------------------------
+    # A course with pillars is flyable iff (a) no start / gate centre / finish sits inside a
+    # pillar, and (b) the start→gates→finish polyline clears every pillar horizontally by at
+    # least ``radius + obstacle_clearance`` wherever the segment's z-range overlaps the pillar
+    # band. (b) constructively guarantees ≥1 collision-free path exists. Pillars are checked
+    # regardless of ``enable_obstacles`` — the flag governs *sampling*, not what makes a
+    # given course (which already carries obstacles) solvable.
+    obstacles = getattr(course, "obstacles", ())
+    if obstacles:
+        floor_z = course.floor_z
+        last = gates[-1]
+        finish_pt = np.asarray([course.finish_x, last.center[1], last.center[2]], dtype=np.float64)
+        anchors = [course.start, *(g.position for g in gates), finish_pt]
+        for obstacle in obstacles:
+            # (a) no anchor may lie inside the pillar.
+            for pt in anchors:
+                if point_in_cylinder(pt, obstacle, floor_z):
+                    return False
+            # (b) polyline clearance within the pillar's z-band.
+            axis = np.asarray(
+                [float(obstacle.center[0]), float(obstacle.center[1])], dtype=np.float64
+            )
+            clearance = float(obstacle.radius) + rcfg.obstacle_clearance
+            top = floor_z + float(obstacle.height)
+            for a, b in zip(anchors[:-1], anchors[1:], strict=True):
+                z_lo = min(float(a[2]), float(b[2]))
+                z_hi = max(float(a[2]), float(b[2]))
+                if z_hi < floor_z or z_lo > top:
+                    continue  # segment passes entirely above/below the pillar band
+                if _segment_axis_distance_2d(a, b, axis) < clearance:
+                    return False
+
     return True
+
+
+def _segment_axis_distance_2d(a: np.ndarray, b: np.ndarray, axis: np.ndarray) -> float:
+    """Horizontal (x, y) distance from a pillar ``axis`` to the segment ``a→b`` (UC-15 AC3)."""
+    p = np.asarray(a, dtype=np.float64)[:2]
+    q = np.asarray(b, dtype=np.float64)[:2]
+    seg = q - p
+    seg_len_sq = float(seg @ seg)
+    if seg_len_sq <= 1e-18:
+        return float(np.linalg.norm(axis - p))
+    t = float((axis - p) @ seg / seg_len_sq)
+    t = min(1.0, max(0.0, t))
+    closest = p + t * seg
+    return float(np.linalg.norm(axis - closest))
 
 
 def _draw_num_gates(rng: np.random.Generator, rcfg: RandomizationConfig) -> int:
@@ -116,9 +164,12 @@ def sample_course(
     Arena bounds (``floor_z`` / ``ceiling_z``) are **not** randomized — they are copied from
     ``base_course``. Draw order is pinned per attempt: ``num_gates`` first, then the start,
     then a forward incremental-x walk over the gates (per-gate gap, y, z, aperture), then the
-    finish gap. RNG consumption is fixed given N, so a seed is reproducible. Solvability is
-    tested and failures resample up to ``rcfg.max_resample_attempts``; on exhaustion a
-    deterministic zero-RNG :func:`_fallback_course` (solvable-by-construction) is returned.
+    finish gap, then — **only when ``rcfg.enable_obstacles``** — the obstacle draws (UC-15).
+    Pinning the obstacle draws *last* means a disabled obstacle axis consumes zero RNG and so
+    never perturbs the UC-08/09 course stream. RNG consumption is fixed given N (and the drawn
+    obstacle count), so a seed is reproducible. Solvability is tested and failures resample up
+    to ``rcfg.max_resample_attempts``; on exhaustion a deterministic zero-RNG
+    :func:`_fallback_course` (solvable-by-construction, **no obstacles**) is returned.
     """
     n = _draw_num_gates(rng, rcfg)
 
@@ -139,18 +190,60 @@ def sample_course(
 
         finish_x = x + float(rng.uniform(*rcfg.finish_gap_range))
 
+        # Obstacle draws come LAST and only when enabled (pinned order → disabled axis makes no
+        # draw and never perturbs the gate/dynamics stream). Placement is biased off the corridor
+        # so the draws actually clear the solvability guard; the whole candidate (gates + pillars)
+        # is then reject-resampled together.
+        obstacles: tuple[ObstacleSpec, ...] = ()
+        if rcfg.enable_obstacles:
+            obstacles = _sample_obstacles(rng, rcfg, tuple(gates))
+
         candidate = CourseConfig(
             start_position=(start_x, start_y, start_z),
             gates=tuple(gates),
             finish_x=finish_x,
             floor_z=base_course.floor_z,
             ceiling_z=base_course.ceiling_z,
+            obstacles=obstacles,
         )
         if is_course_solvable(candidate, rcfg):
             return candidate
 
     # Hard cap hit: deterministic, zero-RNG fallback (solvable-by-construction for this N).
     return _fallback_course(n, base_course, rcfg)
+
+
+def _sample_obstacles(
+    rng: np.random.Generator,
+    rcfg: RandomizationConfig,
+    gates: tuple[GateSpec, ...],
+) -> tuple[ObstacleSpec, ...]:
+    """Draw pillars biased **off** the corridor (UC-15 AC3); reject-resampling handles misses.
+
+    Draw order per pillar is pinned: count first, then for each pillar its anchor gate, lateral
+    side, |y|-offset, radius, and height. Each pillar is placed at a random gate's ``(x, y)``
+    shifted laterally by ``obstacle_lateral_offset_range`` (well outside the gate corridor), so
+    most draws clear the solvability guard; the ones that don't are rejected with the whole
+    course by :func:`sample_course`. Consumes a fixed number of draws given the count, so a seed
+    stays reproducible.
+    """
+    lo, hi = rcfg.obstacle_count_range
+    lo = max(0, int(lo))
+    hi = max(lo, int(hi))
+    count = int(rng.integers(lo, hi + 1))
+
+    obstacles: list[ObstacleSpec] = []
+    for _ in range(count):
+        gate = gates[int(rng.integers(0, len(gates)))]
+        gx, gy = float(gate.center[0]), float(gate.center[1])
+        side = 1.0 if rng.random() < 0.5 else -1.0
+        offset = float(rng.uniform(*rcfg.obstacle_lateral_offset_range))
+        radius = float(rng.uniform(*rcfg.obstacle_radius_range))
+        height = float(rng.uniform(*rcfg.obstacle_height_range))
+        obstacles.append(
+            ObstacleSpec(center=(gx, gy + side * offset), radius=radius, height=height)
+        )
+    return tuple(obstacles)
 
 
 def _fallback_course(

@@ -132,10 +132,28 @@ MIGRATED_SCHEMA_V1 = ObsSchema(
     version=1,
 )
 
+#: The v2 obstacle-vision schema (UC-15 AC4). ``migrated_v1``'s two blocks PLUS an appended
+#: ``obstacle_vision`` block of width ``12 == 4 * OBSTACLE_VISION_K`` bound to the ``vision``
+#: modality (the same ``visual_projection`` population the target-relative block uses). Because
+#: it only *appends*, ``OBSTACLE_VISION_V2.extends(MIGRATED_SCHEMA_V1)`` is ``True`` — a
+#: ``migrated_v1`` checkpoint grafts to it with the obstacle block zero-initialised (AC6). Total
+#: width is ``24``; re-binding the input→sensory wiring invalidates pre-UC-15 checkpoints (a
+#: fresh v2 retrain is required, exactly as UC-13 — surfaced in the PR).
+OBSTACLE_VISION_V2 = ObsSchema(
+    blocks=(
+        *MIGRATED_SCHEMA_V1.blocks,
+        ObsBlock(name="obstacle_vision", width=12, population="vision"),
+    ),
+    version=2,
+)
+
 #: Named schemas selectable by string (e.g. from a YAML run-config's ``schema`` key). The CLI
 #: default is *no* schema (``None`` → legacy single-projection path); naming ``"migrated_v1"``
-#: opts into the block schema above.
-NAMED_SCHEMAS: dict[str, ObsSchema] = {"migrated_v1": MIGRATED_SCHEMA_V1}
+#: opts into the migrated block schema, ``"obstacle_vision_v2"`` into the obstacle-vision one.
+NAMED_SCHEMAS: dict[str, ObsSchema] = {
+    "migrated_v1": MIGRATED_SCHEMA_V1,
+    "obstacle_vision_v2": OBSTACLE_VISION_V2,
+}
 
 
 def resolve_schema(name: str | None) -> ObsSchema | None:

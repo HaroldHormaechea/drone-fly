@@ -71,6 +71,37 @@ def _make_logger(logs_dir: str):
     return configure(logs_dir, ["stdout", "csv", "tensorboard"])
 
 
+def _reconcile_obstacle_vision(env_config, obs_schema):
+    """Make the env's obstacle-vision block agree with ``obs_schema`` (UC-15 width coupling).
+
+    The obs schema is **authoritative** for the observation width. If it carries an
+    ``obstacle_vision`` block, the env must emit that block: this returns an ``EnvConfig`` whose
+    :class:`~drone_fly.env.config.ObstacleVisionConfig` is enabled with ``k`` derived
+    **name-based** — ``block.width // OBSTACLE_FEATURES_PER`` — never by arithmetic on the
+    schema's ``total_width`` (which mixes in the unrelated base blocks). When course
+    randomization is already on, obstacle randomization is switched on too, so a randomized
+    obstacle-vision run actually sees pillars. When ``obs_schema`` is ``None`` or has no such
+    block, ``env_config`` is returned unchanged (byte-identical to pre-UC-15).
+    """
+    if obs_schema is None:
+        return env_config
+    block = next((b for b in obs_schema.blocks if b.name == "obstacle_vision"), None)
+    if block is None:
+        return env_config
+
+    from dataclasses import replace
+
+    from drone_fly.env.config import EnvConfig, ObstacleVisionConfig
+    from drone_fly.env.obstacles import OBSTACLE_FEATURES_PER
+
+    k = int(block.width) // OBSTACLE_FEATURES_PER
+    base = env_config or EnvConfig()
+    updates = {"obstacle_vision": ObstacleVisionConfig(enabled=True, k=k)}
+    if base.randomization.enable_course and not base.randomization.enable_obstacles:
+        updates["randomization"] = replace(base.randomization, enable_obstacles=True)
+    return replace(base, **updates)
+
+
 def find_latest_checkpoint(models_dir: str) -> str | None:
     """Return the newest ``*_steps.zip`` checkpoint in ``models_dir`` (AC7 idempotent resume).
 
@@ -253,6 +284,11 @@ def train(
                 resume,
             )
 
+    # UC-15: the obs schema is authoritative for the observation width — if it carries an
+    # obstacle-vision block, widen the env to emit it (k derived name-based) and, when course
+    # randomization is on, enable obstacle randomization. A no-op when there is no such block.
+    env_config = _reconcile_obstacle_vision(env_config, obs_schema)
+
     venv = build_vec_env(
         config=env_config,
         adapter=adapter,
@@ -261,6 +297,18 @@ def train(
         training=True,
         vecnormalize_path=stats_path,
     )
+
+    # UC-15 fail-loud env↔schema width coupling: the env's observation width MUST equal the
+    # schema's total width, else the schema-mode actor's block scatter would silently mismatch
+    # the observation. Names both widths so a drift is diagnosable at once.
+    if obs_schema is not None:
+        env_obs_width = int(venv.get_attr("obs_width")[0])
+        if env_obs_width != obs_schema.total_width:
+            raise ValueError(
+                f"env.obs_width ({env_obs_width}) != obs_schema.total_width "
+                f"({obs_schema.total_width}); the obstacle-vision env block and the obs schema "
+                f"are out of sync (UC-15 width coupling)."
+            )
 
     if resuming:
         logger.info("Resuming from checkpoint %s (reset_num_timesteps=False).", resume)
@@ -339,6 +387,7 @@ def smoke_train(
     prune: bool = False,
     prune_k: int = DEFAULT_PRUNE_K,
     obs_schema=None,
+    env_config: EnvConfig | None = None,
 ):
     """A few-step training run on the pure-numpy backend (AC9, CI).
 
@@ -347,6 +396,10 @@ def smoke_train(
     ``prune_k`` (UC-04) are threaded through so the pruned subcircuit can be smoke-tested
     end-to-end. ``obs_schema`` (UC-13) is likewise threaded through so the migrated block schema
     can be smoke-trained on the fixture — a finite completed update proves trainability (AC4).
+    ``env_config`` (UC-15) lets a smoke run target a specific course — e.g.
+    ``EnvConfig(course=default_obstacle_course())`` under ``obstacle_vision_v2`` — so the
+    obstacle env + schema/graft path get an end-to-end finite-update proof (AC8). ``None`` keeps
+    the fixed default course (byte-identical to prior smoke runs).
     """
     cfg = cfg or TrainConfig()
     steps = timesteps if timesteps is not None else cfg.smoke_timesteps
@@ -357,6 +410,7 @@ def smoke_train(
         cfg,
         connectome=connectome,
         connectome_path=connectome_path,
+        env_config=env_config,
         adapter="simple",
         device="cpu",
         total_timesteps=steps,

@@ -11,3 +11,6 @@ commands:
   - pytest
   - ruff
   - mypy
+  # UC-15: the dependency-free viewer (viz/viewer.js) is syntax-checked with `node --check`
+  # (developer gate + QA's viz-contract checks). Node runs no project runtime — check only.
+  - node

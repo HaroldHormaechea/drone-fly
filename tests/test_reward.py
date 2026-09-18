@@ -154,3 +154,101 @@ def test_completion_bonus_is_not_normalised_by_n() -> None:
         with_bonus = _step(completed=True, num_gates=n)
         without = _step(completed=False, num_gates=n)
         assert with_bonus - without == CFG.completion_bonus
+
+
+# --- UC-15 AC2/AC9: the severe, tunable, non-terminating obstacle penalty ------------
+def test_obstacle_penalty_subtracted_iff_contact_flag() -> None:
+    """``obstacle_contact=True`` subtracts exactly ``obstacle_penalty``; False does not (AC2)."""
+    hit = compute_reward(
+        dist_to_target_prev=0.0,
+        dist_to_target_curr=0.0,
+        event=None,
+        collided=False,
+        completed=False,
+        cfg=CFG,
+        obstacle_contact=True,
+    )
+    no_hit = compute_reward(
+        dist_to_target_prev=0.0,
+        dist_to_target_curr=0.0,
+        event=None,
+        collided=False,
+        completed=False,
+        cfg=CFG,
+        obstacle_contact=False,
+    )
+    assert no_hit - hit == CFG.obstacle_penalty
+    assert hit == -CFG.time_penalty - CFG.obstacle_penalty
+
+
+def test_obstacle_penalty_defaults_to_no_contact() -> None:
+    """The ``obstacle_contact`` param defaults to ``False`` — pre-UC-15 callers unchanged."""
+    default_call = compute_reward(
+        dist_to_target_prev=1.0,
+        dist_to_target_curr=1.0,
+        event=None,
+        collided=False,
+        completed=False,
+        cfg=CFG,
+    )
+    explicit_no = compute_reward(
+        dist_to_target_prev=1.0,
+        dist_to_target_curr=1.0,
+        event=None,
+        collided=False,
+        completed=False,
+        cfg=CFG,
+        obstacle_contact=False,
+    )
+    assert default_call == explicit_no
+
+
+def test_obstacle_penalty_magnitude_is_tunable() -> None:
+    """The penalty magnitude is read from the config — a documented, tunable constant (AC9)."""
+    for magnitude in (10.0, 50.0, 250.0):
+        cfg = RewardConfig(obstacle_penalty=magnitude)
+        hit = compute_reward(
+            dist_to_target_prev=0.0,
+            dist_to_target_curr=0.0,
+            event=None,
+            collided=False,
+            completed=False,
+            cfg=cfg,
+            obstacle_contact=True,
+        )
+        assert hit == -cfg.time_penalty - magnitude
+
+
+def test_obstacle_penalty_default_is_severe_but_below_terminal_collision() -> None:
+    """Sized well above one normalised gate bonus (severe) yet below the terminal penalty (AC9)."""
+    assert CFG.obstacle_penalty > CFG.gate_bonus  # severe vs a single gate reward
+    assert CFG.obstacle_penalty < CFG.collision_penalty  # but not a terminal crash
+
+
+def test_obstacle_contact_does_not_grant_or_block_completion_bonus() -> None:
+    """Obstacle contact is a pure additive penalty — a completing step still earns the bonus.
+
+    A glancing contact on the completing step penalises but does not cancel the completion
+    bonus, so the drone can graze a pillar and still be rewarded for finishing (AC9).
+    """
+    completed_clean = compute_reward(
+        dist_to_target_prev=1.0,
+        dist_to_target_curr=0.0,
+        event="finish",
+        collided=False,
+        completed=True,
+        cfg=CFG,
+        obstacle_contact=False,
+    )
+    completed_grazing = compute_reward(
+        dist_to_target_prev=1.0,
+        dist_to_target_curr=0.0,
+        event="finish",
+        collided=False,
+        completed=True,
+        cfg=CFG,
+        obstacle_contact=True,
+    )
+    assert completed_clean - completed_grazing == CFG.obstacle_penalty
+    # Even after the severe penalty a completion still nets strongly positive.
+    assert completed_grazing > 0

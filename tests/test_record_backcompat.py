@@ -29,7 +29,7 @@ import torch
 from drone_fly.connectome.loader import ConnectomeData
 from drone_fly.controller.actor import ConnectomeActorNetwork
 from drone_fly.controller.encoding import ACTION_DIM, OBS_DIM
-from drone_fly.env.config import CourseConfig
+from drone_fly.env.config import CourseConfig, ObstacleSpec
 from drone_fly.record.recorder import ActivationRecorder
 
 
@@ -197,3 +197,37 @@ def test_n_gate_recording_stays_schema_valid(connectome: ConnectomeData, tmp_pat
     assert len(doc["frames"]["target_gate"]) == doc["meta"]["n_frames"]
     # The pre-UC-09 frame tracks are all still there.
     assert {"activations", "actions", "drone_position"} <= set(doc["frames"])
+
+
+def test_obstacle_recording_is_additive_and_field_absent_loads(
+    connectome: ConnectomeData, tmp_path: Path
+) -> None:
+    """UC-15 AC7: an obstacle course adds only ``course.obstacles``; a field-absent file loads.
+
+    The obstacle array is purely additive: a course WITH pillars carries the extra key while
+    every pre-UC-15 field is untouched, and a course WITHOUT pillars omits the key entirely —
+    so an obstacle-free / older recording still loads and the viewer degrades gracefully.
+    """
+    n = connectome.neuron_count
+
+    def record(course: CourseConfig) -> dict:
+        rec = ActivationRecorder(
+            connectome, tmp_path / "act", backend="simple", dt=0.05, course=course
+        )
+        rec.start_episode(0, seed=0)
+        for f in range(2):
+            rec.sink(np.linspace(-1.0, 1.0, n, dtype=np.float32) * (f + 1) / 2)
+            rec.capture_frame(np.zeros(ACTION_DIM), np.array([float(f), 0.0, 1.0]))
+        path = rec.finish_episode(completed=True, completion_time=0.1, total_reward=1.0, steps=2)
+        return json.loads(path.read_text())
+
+    with_pillars = record(
+        CourseConfig(obstacles=(ObstacleSpec(center=(3.25, 1.5), radius=0.3, height=2.5),))
+    )["meta"]["course"]
+    without = record(CourseConfig())["meta"]["course"]
+
+    # WITH pillars: the additive obstacles array is present; every pre-UC-15 field remains.
+    assert len(with_pillars["obstacles"]) == 1
+    assert {"start", "gates", "finish", "floor_z", "ceiling_z"} <= set(with_pillars)
+    # WITHOUT pillars: the key is absent (field-absent files load; viewer omits the pillars).
+    assert "obstacles" not in without

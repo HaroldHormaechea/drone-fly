@@ -62,6 +62,7 @@ const COURSE_COLORS = {
   gateTarget: "#4fc3f7",
   finish: "#ff5252",
   drone: "#ffffff",
+  obstacle: "#ba68c8", // UC-15: floor-anchored pillar wireframes (purple, distinct from gates)
 };
 
 // tiny vec3 helpers (plain arrays, no deps)
@@ -565,13 +566,27 @@ function buildFlightScene(doc) {
   // `course.gates: [...]`; pre-UC-09 files carry a singular `course.gate`.
   const gates = courseGates(course);
 
+  // Obstacle pillars (UC-15), or [] when the recording has no `obstacles` field (graceful
+  // degradation — older files + no-obstacle runs draw no pillars).
+  const obstacles = (course && course.obstacles) || [];
+
   // Anchor points that must always be inside the display extent — every gate centre plus
-  // start and finish, so the floor/finish plane always contain the whole course.
+  // start and finish (and every pillar's footprint extents), so the floor/finish plane always
+  // contain the whole course.
   const anchors = path.slice();
   if (course) {
     if (course.start) anchors.push(course.start);
     for (const g of gates) {
       if (g && g.center) anchors.push(g.center);
+    }
+    // Pillar bounding extents so the floor/bbox always contains every obstacle.
+    const fz = course.floor_z != null ? course.floor_z : 0;
+    for (const o of obstacles) {
+      if (!o || !o.center) continue;
+      const r = o.radius || 0;
+      const top = fz + (o.height || 0);
+      anchors.push([o.center[0] - r, o.center[1] - r, fz]);
+      anchors.push([o.center[0] + r, o.center[1] + r, top]);
     }
     if (course.finish && course.finish.x != null) {
       // finish anchor: use the LAST gate's lateral centre at the finish x so x-extent reaches
@@ -604,7 +619,7 @@ function buildFlightScene(doc) {
   const radius =
     0.5 * v3.len([bb.max[0] - bb.min[0], bb.max[1] - bb.min[1], bb.max[2] - bb.min[2]]) || 1;
 
-  return { path, course, gates, bb, center, radius, floorZ, ceilZ };
+  return { path, course, gates, obstacles, bb, center, radius, floorZ, ceilZ };
 }
 
 // Normalise a meta.course into an array of gate specs (UC-09 AC7). New recordings carry
@@ -780,6 +795,53 @@ function createFlight3D(canvas) {
     }
   }
 
+  // Stroke a projected 3D polyline in one colour (breaks the path where a vertex is behind
+  // the camera). Used for the obstacle wireframe ellipses.
+  function strokeProjected(points, style, width) {
+    ctx.strokeStyle = style;
+    ctx.lineWidth = width || 1;
+    ctx.beginPath();
+    let started = false;
+    for (const p of points) {
+      const s = project(p);
+      if (!s) { started = false; continue; }
+      if (!started) { ctx.moveTo(s.x, s.y); started = true; } else ctx.lineTo(s.x, s.y);
+    }
+    ctx.stroke();
+  }
+
+  // UC-15: draw each obstacle as a floor-anchored wireframe cylinder — a bottom ellipse at
+  // floor_z, a top ellipse at floor_z + height, and a few vertical edges between them. Guarded
+  // by `scene.obstacles || []` so a recording without the field draws nothing (graceful
+  // degradation, matching the finish/gate markers).
+  function drawObstacles() {
+    const obstacles = scene.obstacles || [];
+    if (!obstacles.length) return;
+    const fz = scene.floorZ;
+    const SEG = 32;
+    const EDGES = 8;
+    for (const o of obstacles) {
+      if (!o || !o.center) continue;
+      const cx = o.center[0], cy = o.center[1];
+      const r = o.radius || 0;
+      const top = fz + (o.height || 0);
+      const bottom = [], upper = [];
+      for (let i = 0; i <= SEG; i++) {
+        const a = (i / SEG) * Math.PI * 2;
+        const px = cx + r * Math.cos(a), py = cy + r * Math.sin(a);
+        bottom.push([px, py, fz]);
+        upper.push([px, py, top]);
+      }
+      strokeProjected(bottom, COURSE_COLORS.obstacle, 1.5);
+      strokeProjected(upper, COURSE_COLORS.obstacle, 1.5);
+      for (let i = 0; i < EDGES; i++) {
+        const a = (i / EDGES) * Math.PI * 2;
+        const px = cx + r * Math.cos(a), py = cy + r * Math.sin(a);
+        line([px, py, fz], [px, py, top], COURSE_COLORS.obstacle, 1);
+      }
+    }
+  }
+
   function drawTrajectory() {
     const path = scene.path;
     if (!path.length) return;
@@ -817,6 +879,7 @@ function createFlight3D(canvas) {
     ctx.clearRect(0, 0, cssW, cssH);
     drawFloorGrid();
     drawMarkers();
+    drawObstacles();
     drawTrajectory();
   }
 

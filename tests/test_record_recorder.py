@@ -30,7 +30,7 @@ import pytest
 
 from drone_fly.connectome.loader import ConnectomeData
 from drone_fly.controller.encoding import ACTION_DIM
-from drone_fly.env.config import CourseConfig, GateSpec, single_gate_course
+from drone_fly.env.config import CourseConfig, GateSpec, ObstacleSpec, single_gate_course
 from drone_fly.record.recorder import (
     ACTIVATION_OFFSET,
     ACTIVATION_SCALE,
@@ -444,3 +444,40 @@ def test_omitting_target_gate_leaves_track_absent_backcompat(
     assert "target_gate" not in frames
     # The rest of the frames schema is exactly the pre-UC-09 set.
     assert set(frames) == {"activations", "actions", "drone_position"}
+
+
+# ===========================================================================
+# UC-15 AC7 — obstacles stamped additively into meta.course
+# ===========================================================================
+def test_meta_course_stamps_obstacles_additively(
+    connectome: ConnectomeData, tmp_path: Path
+) -> None:
+    """AC7: a course carrying pillars serialises an additive ``obstacles`` array read from config.
+
+    Each pillar is ``{center: [x, y], radius, height}`` (floor-anchored). The pre-UC-15 course
+    fields (start / gates / finish / floor / ceiling / axes) are unchanged — the key is purely
+    additive.
+    """
+    course = CourseConfig(
+        obstacles=(
+            ObstacleSpec(center=(3.25, 1.5), radius=0.3, height=2.5),
+            ObstacleSpec(center=(4.75, -1.6), radius=0.4, height=2.0),
+        )
+    )
+    block = _record_with_course(connectome, tmp_path / "act", course)["meta"]["course"]
+    assert block["obstacles"] == [
+        {"center": [3.25, 1.5], "radius": 0.3, "height": 2.5},
+        {"center": [4.75, -1.6], "radius": 0.4, "height": 2.0},
+    ]
+    # Values are read from the actual config, never hardcoded — a re-tuned pillar flows through.
+    # The rest of the course block is unchanged by the additive key.
+    assert block["start"] == [0.0, 0.0, 1.0]
+    assert len(block["gates"]) == 3
+
+
+def test_meta_course_omits_obstacles_when_course_has_none(
+    connectome: ConnectomeData, tmp_path: Path
+) -> None:
+    """AC7 back-compat: a no-obstacle course emits NO ``obstacles`` key (viewer degrades)."""
+    block = _record_with_course(connectome, tmp_path / "act", CourseConfig())["meta"]["course"]
+    assert "obstacles" not in block
