@@ -15,19 +15,30 @@ assertions on ``viz/*`` and ``README.md`` — never by executing it (AC10). Veri
   modules), load the file via a local file-picker (works from ``file://``), and never fetch
   from the network.
 * **UC-06 AC1-6,9,11,12,13** — ``viewer.js`` carries the 3D orbit projector (floor / markers
-  / trajectory / drone / presets / ``destroy``), the neuron-beat envelope, and the play-at-
-  end restart; the old flat 2D ``path-canvas`` / ``drawPath`` are gone; ``viewer.html``
-  offers a 0.25× speed option and a human-labelled ``view-select`` (front/side/top, top the
-  default). "A right turn looks right" (AC5) is a documented MANUAL browser check.
+  / trajectory / drone / presets / ``destroy``) and the play-at-end restart; the old flat 2D
+  ``path-canvas`` / ``drawPath`` are gone; ``viewer.html`` offers a 0.25× speed option and a
+  human-labelled ``view-select`` (front/side/top, top the default). "A right turn looks right"
+  (AC5) is a documented MANUAL browser check.
+* **UC-12 AC1,2,4,5,7,8** — the anatomical panel is now an MRI-style heatmap over a static,
+  registered brain outline: the per-neuron dot cloud AND the UC-06 neuron beat are removed;
+  the committed ``viz/brain_outline.js`` asset defines ``BRAIN_OUTLINE`` (offline, no URL) and
+  is wired into both ``viewer.html`` (before ``viewer.js``) and ``viewer.js`` (with a
+  missing-asset guard); the render path composites additive kernel-density splats
+  (``globalCompositeOperation="lighter"``) through a "hot" colormap; a ``map-norm-select``
+  toggles per-frame (default) vs global normalization; ``node --check`` parses both JS assets.
+  The visual ACs (AC3 animate, AC4 registration, AC5 contrast change, AC6 per-plane
+  projection) are documented MANUAL browser checks — not automated here.
 * **AC10/AC12** — the README documents the record flags, the artifacts path, viewer usage,
-  the coordinate provisioning, and the UC-06 3D controls / beat / 0.25× / presets;
-  ``.env.example`` documents the token.
+  the coordinate provisioning, and the UC-06 3D flight controls / 0.25× / presets and the
+  UC-12 MRI heatmap + outline asset; ``.env.example`` documents the token.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -252,17 +263,29 @@ def test_viewer_js_reads_n_gate_array_with_legacy_fallback() -> None:
     assert "gateTarget" in js, "viewer.js must style the current target gate distinctly"
 
 
-def test_viewer_js_has_neuron_beat_envelope() -> None:
-    """viewer.js implements the neuron beat: ~2px rest, pulse to ~9px, ~0.2s ease (AC6)."""
+def test_viewer_js_anatomical_dots_and_beat_removed() -> None:
+    """UC-12 AC1: the per-neuron dot cloud AND the UC-06 neuron-beat are gone.
+
+    Supersedes the UC-06 ``test_viewer_js_has_neuron_beat_envelope`` (authorized test
+    evolution — the plan removes dots+beat from the anatomical panel entirely; the heatmap
+    "lights up" is the new beat, and the flight panel never carried one). Static assertion
+    (CI is headless): none of the beat envelope's symbols survive in ``viewer.js``.
+    """
     js = (_VIZ / "viewer.js").read_text()
-    # Rest/peak radius constants (pinned 2 -> 9px) and the instantaneous-radius formula.
-    assert "BEAT_REST" in js
-    assert "BEAT_PEAK" in js
-    assert "2" in js and "9" in js  # rest 2px, peak 9px
-    # Per-frame instantaneous radius (used while paused/scrubbing — no stale animation).
-    assert "rInst" in js or "r_inst" in js
-    # A per-neuron envelope state exists (attack + exponential release toward rest).
-    assert "beat" in js
+    for beat_sym in (
+        "BEAT_REST",
+        "BEAT_PEAK",
+        "BEAT_SPAN",
+        "BEAT_RELEASE_TAU",
+        "seedBeat",
+        "updateBeat",
+    ):
+        assert beat_sym not in js, f"UC-12 removes the neuron beat: {beat_sym!r} must be gone"
+    # The per-neuron beat envelope state and its instantaneous-radius formula are gone too.
+    assert "state.beat" not in js, "state.beat must be removed (no per-neuron beat state)"
+    assert "rInst" not in js and "r_inst" not in js, (
+        "instantaneous beat-radius formula must be gone"
+    )
 
 
 def test_viewer_js_play_at_end_restarts_from_start() -> None:
@@ -360,8 +383,14 @@ def test_readme_documents_recording_and_viewer() -> None:
     assert "soma" in lower  # coordinate provisioning documented
 
 
-def test_readme_documents_uc06_3d_controls_and_beat() -> None:
-    """AC10: the README documents the 3D controls, beat, 0.25×, presets, and meta.course."""
+def test_readme_documents_uc06_3d_controls() -> None:
+    """AC10: the README documents the 3D flight controls, 0.25×, presets, and meta.course.
+
+    UC-12 reconciliation: the anatomical panel no longer has a per-neuron "beat" (dots+beat
+    were removed for the MRI heatmap), so the beat assertion is dropped here — the rewritten
+    README no longer mentions it. The 3D *flight-panel* controls this test pins are untouched
+    by UC-12 and still documented.
+    """
     readme = (_REPO_ROOT / "README.md").read_text()
     lower = readme.lower()
     # 3D controls: drag-to-rotate + wheel-to-zoom (AC1).
@@ -369,8 +398,6 @@ def test_readme_documents_uc06_3d_controls_and_beat() -> None:
     assert "wheel" in lower and "zoom" in lower
     # Human-readable view presets + top-down default (AC13).
     assert "front" in lower and "side" in lower and "top-down" in lower
-    # Neuron beat behaviour (AC6).
-    assert "beat" in lower
     # 0.25× slow-inspection speed (AC12).
     assert "0.25" in readme
     # The recorded course-geometry schema addition (AC8).
@@ -381,3 +408,108 @@ def test_env_example_documents_token() -> None:
     env = (_REPO_ROOT / ".env.example").read_text()
     assert "NEUPRINT_TOKEN" in env
     assert "soma" in env.lower()
+
+
+# --- UC-12: MRI-style full-brain activation heatmap over a static outline ---------------
+# CI is headless (no browser/JS runtime beyond `node --check` syntax), so UC-12 is validated
+# statically: the committed outline asset, its wiring into both HTML and JS, the additive
+# splat + colormap render path, and the per-frame/global normalization control. The visual
+# ACs (AC3 animate / AC4 registration / AC5 contrast change / AC6 per-plane projection) are
+# documented as MANUAL browser checks — see this test's coverage summary — and are NOT
+# claimed as automated coverage here.
+
+
+def test_brain_outline_asset_exists_and_is_offline() -> None:
+    """AC4/AC7: a committed static brain-outline asset ships, defines ``BRAIN_OUTLINE``, and
+    carries no network URL (dependency-free, ``file://``-loadable — no fetch/build step)."""
+    asset = _VIZ / "brain_outline.js"
+    assert asset.is_file(), "missing viz/brain_outline.js (committed static outline asset)"
+    src = asset.read_text()
+    # Declares the global the viewer consumes, via a classic (non-module) const.
+    assert "BRAIN_OUTLINE" in src, "brain_outline.js must define BRAIN_OUTLINE"
+    assert "type=" not in src  # it's pure JS, not markup — no module wiring lives here
+    # No network literal anywhere (AC7): neither bare scheme nor attribution URL.
+    assert "https://" not in src and "http://" not in src, (
+        "brain_outline.js must contain no http(s):// literal (offline, file://-safe)"
+    )
+    # Registered to the soma coordinate frame by construction: voxel-space + per-plane polys.
+    assert "voxel_space" in src
+    assert "planes" in src and "bbox3d" in src
+
+
+def test_brain_outline_referenced_by_html_and_js() -> None:
+    """AC4/AC7: the outline asset is wired into BOTH the page and the viewer.
+
+    ``viewer.html`` loads ``brain_outline.js`` via a classic ``<script>`` placed on the line
+    *immediately before* ``viewer.js`` (so the global exists first); ``viewer.js`` consumes
+    ``BRAIN_OUTLINE``.
+    """
+    html = (_VIZ / "viewer.html").read_text()
+    assert '<script src="brain_outline.js"></script>' in html, (
+        "viewer.html must load brain_outline.js via a classic <script>"
+    )
+    # brain_outline.js must precede viewer.js (the const must be defined before the viewer runs).
+    assert html.index("brain_outline.js") < html.index('src="viewer.js"'), (
+        "brain_outline.js must be loaded before viewer.js"
+    )
+    js = (_VIZ / "viewer.js").read_text()
+    assert "BRAIN_OUTLINE" in js, "viewer.js must consume the BRAIN_OUTLINE global"
+    # AC7/AC8: missing-asset guard — degrade, never a ReferenceError.
+    assert "typeof BRAIN_OUTLINE" in js, (
+        "viewer.js must guard `typeof BRAIN_OUTLINE` (degrade if absent)"
+    )
+
+
+def test_viewer_js_renders_additive_splat_heatmap() -> None:
+    """AC1/AC2: the anatomical panel is an additive kernel-density splat heatmap through a
+    colormap — not a per-neuron dot cloud."""
+    js = (_VIZ / "viewer.js").read_text()
+    # Additive compositing of the splats ("lighter" = source + destination).
+    assert "globalCompositeOperation" in js
+    assert '"lighter"' in js or "'lighter'" in js, "splats must be composited additively (lighter)"
+    # A colormap maps normalized intensity → RGB (MRI/fMRI "hot" ramp).
+    assert re.search(r"[Cc]olormap", js), "viewer.js must map intensity through a colormap"
+
+
+def test_viewer_html_map_norm_select_per_frame_and_global() -> None:
+    """AC5: the anatomical panel offers an intensity-normalization toggle with ``per-frame``
+    and ``global`` options, **per-frame** the default.
+
+    Mirrors the ``map-view-select`` assertion style: anchor on the ``map-norm-select`` element
+    and assert on its option VALUES, not a bare text grep (the panel copy also says "per-frame").
+    """
+    html = (_VIZ / "viewer.html").read_text()
+    body = _extract_select(html, "map-norm-select")
+    opts = _options(body)
+    values = [v for v, _ in opts]
+    assert values == ["per-frame", "global"], f"map-norm-select option values wrong: {values}"
+    # Exactly one default, and it is 'per-frame' (punchy "lights up" contrast on load).
+    selected = [v for v, sel in opts if sel]
+    assert selected == ["per-frame"], f"default normalization must be 'per-frame'; got {selected}"
+
+
+def test_viewer_js_has_normalization_toggle_handler() -> None:
+    """AC5: viewer.js wires the ``map-norm-select`` control to a per-frame/global mode."""
+    js = (_VIZ / "viewer.js").read_text()
+    assert "map-norm-select" in js, "viewer.js must read/handle the map-norm-select control"
+    # State carries the current normalization mode; both modes are represented.
+    assert "mapNorm" in js
+    assert '"global"' in js and '"frame"' in js
+
+
+@pytest.mark.parametrize("asset", ["viewer.js", "brain_outline.js"])
+def test_viewer_assets_pass_node_check(asset: str) -> None:
+    """AC7: the JS assets parse cleanly under ``node --check`` (syntax gate).
+
+    ``node`` is the only JS runtime CI is guaranteed to have; if it is absent the check is
+    skipped rather than silently passing.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available — cannot run `node --check`")
+    result = subprocess.run(
+        [node, "--check", str(_VIZ / asset)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"`node --check {asset}` failed:\n{result.stderr}"
