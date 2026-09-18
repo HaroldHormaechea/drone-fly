@@ -619,3 +619,191 @@ def test_net_positive_invariant_holds_across_drain_configs(
     ad.step(np.array([throttle, 0.0, 0.0, 0.0]))  # this docked step's drain
     after = ad.recharge(cfg.recharge_rate * 0.05)  # env's per-step top-up
     assert after > before  # strictly rose despite the drain
+
+
+# ===========================================================================
+# UC-19 — integrity damage + control-authority impact (AC1/AC3)
+# ===========================================================================
+def _damage_adapter(cfg) -> SimpleDroneAdapter:
+    """A hermetic adapter with the given DamageConfig (or None for disabled)."""
+    return SimpleDroneAdapter(
+        np.array([0.0, 0.0, 1.0]), floor_z=0.0, ceiling_z=2.5, dt=0.05, damage=cfg
+    )
+
+
+# --- integrity ledger: reset / damage (clamp ≥0) / repair (clamp ≤1) -----------------------
+def test_integrity_resets_to_full() -> None:
+    """AC1: integrity resets to ``1.0`` (pristine) on reset."""
+    from drone_fly.env.config import DamageConfig
+
+    ad = _damage_adapter(DamageConfig(enabled=True))
+    st = ad.reset(seed=0)
+    assert st.integrity == 1.0
+    assert ad._integrity == 1.0
+
+
+def test_damage_decrements_and_returns_new_integrity() -> None:
+    """AC2: ``damage`` subtracts the amount and returns the resulting integrity."""
+    from drone_fly.env.config import DamageConfig
+
+    ad = _damage_adapter(DamageConfig(enabled=True))
+    ad.reset(seed=0)
+    ad._integrity = 0.8
+    out = ad.damage(0.3)
+    assert out == pytest.approx(0.5)
+    assert ad._integrity == pytest.approx(0.5)
+
+
+def test_damage_clamps_at_zero() -> None:
+    """AC2: integrity clamps at ``0.0`` — repeated contact cannot push it negative."""
+    from drone_fly.env.config import DamageConfig
+
+    ad = _damage_adapter(DamageConfig(enabled=True))
+    ad.reset(seed=0)
+    ad._integrity = 0.2
+    assert ad.damage(0.5) == 0.0  # 0.2 - 0.5 would be -0.3 → clamped
+    assert ad._integrity == 0.0
+    assert ad.damage(0.1) == 0.0  # already wrecked → stays clamped
+
+
+def test_damage_floors_a_negative_amount_at_zero() -> None:
+    """AC2: a negative ``amount`` can never *heal* through the damage path (floored at 0)."""
+    from drone_fly.env.config import DamageConfig
+
+    ad = _damage_adapter(DamageConfig(enabled=True))
+    ad.reset(seed=0)
+    ad._integrity = 0.5
+    assert ad.damage(-0.3) == 0.5  # unchanged
+    assert ad._integrity == 0.5
+
+
+def test_repair_increments_and_clamps_at_full() -> None:
+    """AC4: ``repair`` adds the delta, returns the new integrity, and clamps at ``1.0``."""
+    from drone_fly.env.config import DamageConfig
+
+    ad = _damage_adapter(DamageConfig(enabled=True))
+    ad.reset(seed=0)
+    ad._integrity = 0.4
+    assert ad.repair(0.25) == pytest.approx(0.65)
+    assert ad._integrity == pytest.approx(0.65)
+    ad._integrity = 0.9
+    assert ad.repair(0.5) == 1.0  # 0.9 + 0.5 would be 1.4 → clamped
+    assert ad.repair(0.3) == 1.0  # already full → no overheal
+
+
+def test_repair_floors_a_negative_delta_at_zero() -> None:
+    """AC4: a negative ``delta`` can never *damage* through the repair path (floored at 0)."""
+    from drone_fly.env.config import DamageConfig
+
+    ad = _damage_adapter(DamageConfig(enabled=True))
+    ad.reset(seed=0)
+    ad._integrity = 0.5
+    assert ad.repair(-0.3) == 0.5
+    assert ad._integrity == 0.5
+
+
+def test_damage_repair_safe_on_the_disabled_path() -> None:
+    """The primitives never raise even with damage disabled (``_integrity`` stays a plain float);
+    the env only calls them when enabled."""
+    ad = _damage_adapter(None)
+    ad.reset(seed=0)
+    assert ad.damage(0.2) == pytest.approx(0.8)
+    assert ad.repair(0.5) == pytest.approx(1.0)
+
+
+# --- AC3: a damaged instance shows a SMALLER attitude / angular-velocity response ----------
+_AGILITY_ACTION = np.array([0.5, 1.0, 0.0, 0.0])  # hover throttle, full roll stick
+
+
+def test_damaged_shows_smaller_attitude_and_angular_response() -> None:
+    """AC3: for a fixed action sequence, a degraded instance builds LESS roll attitude and a
+    smaller angular velocity than a pristine one — the effective ``max_body_rate`` is scaled by
+    ``authority_factor(integrity)`` (integrity is read start-of-step, mutated only via the hooks,
+    so it stays fixed across these steps)."""
+    from drone_fly.env.config import DamageConfig
+
+    pristine = _damage_adapter(DamageConfig(enabled=True))
+    degraded = _damage_adapter(DamageConfig(enabled=True))
+    pristine.reset(seed=0)
+    degraded.reset(seed=0)
+    degraded._integrity = 0.1  # heavily damaged (start-of-step, held: step never mutates it)
+    for _ in range(4):
+        sp = pristine.step(_AGILITY_ACTION)
+        sd = degraded.step(_AGILITY_ACTION)
+    # Roll attitude and roll-rate magnitudes are strictly smaller when degraded.
+    assert abs(sd.attitude[0]) < abs(sp.attitude[0])
+    assert abs(sd.angular_velocity[0]) < abs(sp.angular_velocity[0])
+
+
+def test_degraded_body_rate_is_floored_at_min_authority() -> None:
+    """AC3: at integrity ``0.0`` the effective body rate is exactly ``min_authority`` (the floor),
+    recovered from the first-step roll rate under full stick."""
+    from drone_fly.env.config import DamageConfig
+
+    cfg = DamageConfig(enabled=True)
+    ad = _damage_adapter(cfg)
+    ad.reset(seed=0)
+    ad._integrity = 0.0  # authority_factor(0)=0 → max(min_authority, 0) == min_authority
+    st = ad.step(np.array([0.5, 1.0, 0.0, 0.0]))  # full roll stick
+    # angular_velocity[0] == roll_cmd * effective_max_body_rate == 1.0 * min_authority.
+    assert st.angular_velocity[0] == pytest.approx(cfg.min_authority)
+
+
+# --- AC3: integrity == 1.0 ENABLED path is byte-identical to the DISABLED path -------------
+def test_full_integrity_enabled_is_bit_identical_to_disabled() -> None:
+    """AC3: with ``integrity == 1.0`` and ``min_authority < BASE_MAX_BODY_RATE``, the enabled path
+    (``max(min_authority, max_body_rate * 1.0) == max_body_rate``) is bit-for-bit identical to the
+    disabled path over a fixed action sequence. Hermetic — no dynamics randomization (no
+    ``reconfigure``), same seed."""
+    from drone_fly.env.config import DamageConfig
+
+    rng = np.random.default_rng(19)
+    actions = [rng.uniform([0, -1, -1, -1], [1, 1, 1, 1]) for _ in range(60)]
+
+    enabled = _damage_adapter(DamageConfig(enabled=True))  # integrity stays 1.0 (never damaged)
+    disabled = _damage_adapter(DamageConfig(enabled=False))
+    enabled.reset(seed=7)
+    disabled.reset(seed=7)
+    for act in actions:
+        se, sd = enabled.step(act), disabled.step(act)
+        np.testing.assert_array_equal(se.position, sd.position)
+        np.testing.assert_array_equal(se.velocity, sd.velocity)
+        np.testing.assert_array_equal(se.attitude, sd.attitude)
+        np.testing.assert_array_equal(se.angular_velocity, sd.angular_velocity)
+        assert se.integrity == 1.0  # enabled but pristine reports full integrity
+
+
+def test_disabled_reports_full_integrity_always() -> None:
+    """AC1: disabled (or no damage) → ``state.integrity`` stays 1.0 and is never read/mutated."""
+    from drone_fly.env.config import DamageConfig
+
+    for cfg in (None, DamageConfig(enabled=False)):
+        ad = _damage_adapter(cfg)
+        ad.reset(seed=0)
+        for _ in range(30):
+            st = ad.step(np.array([0.9, 0.5, -0.3, 0.1]))
+        assert st.integrity == 1.0
+
+
+# --- AC3: ONLY control authority is degraded — thrust / mass / drag are untouched ----------
+def test_damage_leaves_thrust_mass_drag_untouched() -> None:
+    """AC3: damage degrades ONLY ``max_body_rate``; ``max_thrust`` / ``mass`` / ``drag`` and the
+    achieved vertical thrust are identical between a pristine and a heavily-degraded instance under
+    a pure-throttle (no-tilt) command — a damaged drone is sluggish-but-flyable, not sinking."""
+    from drone_fly.env.config import DamageConfig
+
+    pristine = _damage_adapter(DamageConfig(enabled=True))
+    degraded = _damage_adapter(DamageConfig(enabled=True))
+    pristine.reset(seed=0)
+    degraded.reset(seed=0)
+    degraded._integrity = 0.05
+    # Knobs are unchanged by damage.
+    assert pristine._max_thrust == degraded._max_thrust
+    assert pristine._mass == degraded._mass
+    assert pristine._drag == degraded._drag
+    # Level full-throttle: no roll/pitch command ⇒ body-rate scaling is irrelevant ⇒ the vertical
+    # response is identical (thrust path is byte-untouched by integrity).
+    sp = pristine.step(np.array([1.0, 0.0, 0.0, 0.0]))
+    sd = degraded.step(np.array([1.0, 0.0, 0.0, 0.0]))
+    assert sd.velocity[2] == pytest.approx(sp.velocity[2])
+    assert sd.position[2] == pytest.approx(sp.position[2])

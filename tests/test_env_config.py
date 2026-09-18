@@ -19,9 +19,11 @@ import dataclasses
 
 import pytest
 
+from drone_fly.adapter.simple import BASE_MAX_BODY_RATE
 from drone_fly.env.config import (
     BatteryConfig,
     CourseConfig,
+    DamageConfig,
     DockConfig,
     EnvConfig,
     EpisodeConfig,
@@ -31,8 +33,10 @@ from drone_fly.env.config import (
     RandomizationConfig,
     default_obstacle_course,
     default_pad_course,
+    default_repair_course,
     single_gate_course,
     single_pad_course,
+    single_repair_pad_course,
 )
 
 
@@ -148,12 +152,14 @@ def test_env_config_has_default_dock() -> None:
     assert EnvConfig().dock == DockConfig()
 
 
-def test_env_config_battery_is_last_field() -> None:
-    """UC-17: ``battery`` is appended after ``dock`` (which is after ``obstacle_vision``), so every
-    UC-15/UC-16 positional/keyword call is unshifted and ``EnvConfig()`` stays byte-identical."""
+def test_env_config_damage_is_last_field() -> None:
+    """UC-19 (retargets the UC-17 last-field test): ``damage`` is appended **after** ``battery``
+    (which is after ``dock`` / ``obstacle_vision``), so every UC-15..18 positional/keyword call is
+    unshifted and ``EnvConfig()`` stays byte-identical. ``battery`` is now second-to-last."""
     fields = [f.name for f in dataclasses.fields(EnvConfig)]
-    assert fields[-1] == "battery"
-    # dock is now second-to-last, still directly after obstacle_vision.
+    assert fields[-1] == "damage"
+    # battery is now second-to-last, still directly after dock (itself after obstacle_vision).
+    assert fields.index("battery") == fields.index("damage") - 1
     assert fields.index("dock") == fields.index("battery") - 1
     assert fields.index("obstacle_vision") == fields.index("dock") - 1
 
@@ -286,11 +292,13 @@ def test_pad_spec_rechargeable_defaults_false() -> None:
     assert PadSpec(center=(0.0, 0.0), radius=0.5).rechargeable is False
 
 
-def test_pad_spec_rechargeable_is_the_last_field() -> None:
-    """AC5: ``rechargeable`` is appended after ``radius`` so every UC-16/17 positional
-    ``PadSpec(center, radius)`` call is unshifted (byte-identity)."""
+def test_pad_spec_repairable_is_the_last_field() -> None:
+    """UC-19 (retargets the UC-18 last-field test): ``repairable`` is appended **after**
+    ``rechargeable`` so every UC-16/17/18 positional ``PadSpec(center, radius[, rechargeable])``
+    call is unshifted (byte-identity). ``rechargeable`` is now second-to-last."""
     fields = [f.name for f in dataclasses.fields(PadSpec)]
-    assert fields[-1] == "rechargeable"
+    assert fields[-1] == "repairable"
+    assert fields.index("rechargeable") == fields.index("repairable") - 1
     assert fields.index("radius") == fields.index("rechargeable") - 1
 
 
@@ -333,10 +341,13 @@ def test_episode_config_recharge_step_allowance_default() -> None:
     assert EpisodeConfig().recharge_step_allowance == 400
 
 
-def test_episode_config_recharge_step_allowance_is_the_last_field() -> None:
-    """UC-18: appended last so ``EpisodeConfig()`` stays byte-identical to UC-09."""
+def test_episode_config_repair_step_allowance_is_the_last_field() -> None:
+    """UC-19 (retargets the UC-18 last-field test): ``repair_step_allowance`` is appended **after**
+    ``recharge_step_allowance`` so ``EpisodeConfig()`` stays byte-identical to UC-09/18.
+    ``recharge_step_allowance`` is now second-to-last."""
     fields = [f.name for f in dataclasses.fields(EpisodeConfig)]
-    assert fields[-1] == "recharge_step_allowance"
+    assert fields[-1] == "repair_step_allowance"
+    assert fields.index("recharge_step_allowance") == fields.index("repair_step_allowance") - 1
 
 
 # --- RandomizationConfig recharge axis — off/neutral defaults, appended LAST (AC3/AC5) -----
@@ -378,4 +389,159 @@ def test_default_env_config_is_stable_under_uc18_fields() -> None:
     assert EnvConfig() == EnvConfig()
     assert EnvConfig().battery == BatteryConfig()
     assert EnvConfig().episode == EpisodeConfig()
+    assert EnvConfig().course.pads == ()
+
+
+# =====================================================================================
+# UC-19 — DamageConfig: off by default, documented tunable knobs + the load-bearing
+# invariant + authority_factor contract (AC1/AC3)
+# =====================================================================================
+# --- PadSpec.repairable — a repair tag, appended LAST, default False, independent (AC1/AC4) -
+def test_pad_spec_repairable_defaults_false() -> None:
+    """AC1/AC4: a plain pad is not a repair pad — the flag defaults ``False``."""
+    assert PadSpec(center=(0.0, 0.0), radius=0.5).repairable is False
+
+
+def test_pad_spec_positional_ctor_unshifted_and_byte_identical_under_repairable() -> None:
+    """AC1: a positional two- or three-arg PadSpec equals the explicit non-repair pad (bit-for-
+    bit) — appending ``repairable`` last unshifts every UC-16/17/18 constructor call."""
+    assert PadSpec((1.5, -2.0), 0.5) == PadSpec(
+        center=(1.5, -2.0), radius=0.5, rechargeable=False, repairable=False
+    )
+    assert PadSpec((1.5, -2.0), 0.5, True) == PadSpec(
+        center=(1.5, -2.0), radius=0.5, rechargeable=True, repairable=False
+    )
+
+
+def test_pad_spec_can_be_tagged_repairable_independently_of_rechargeable() -> None:
+    """AC4: ``repairable`` is settable, does not perturb geometry, and is independent of
+    ``rechargeable`` — a pad may recharge, repair, both, or neither."""
+    pad = PadSpec(center=(2.0, 0.0), radius=0.5, repairable=True)
+    assert pad.repairable is True
+    assert pad.rechargeable is False
+    assert pad.center == (2.0, 0.0) and pad.radius == 0.5
+    both = PadSpec(center=(2.0, 0.0), radius=0.5, rechargeable=True, repairable=True)
+    assert both.rechargeable is True and both.repairable is True
+
+
+# --- DamageConfig — off by default, documented tunable knobs (AC1/AC3) ---------------------
+def test_damage_config_is_off_by_default() -> None:
+    """AC1: damage is disabled by default so ``EnvConfig()`` is byte-identical to UC-18."""
+    assert DamageConfig().enabled is False
+    assert EnvConfig().damage == DamageConfig()
+    assert EnvConfig().damage.enabled is False
+
+
+def test_damage_config_default_knobs() -> None:
+    """Documented tunable defaults (per-contact loss, authority floor, repair rate)."""
+    d = DamageConfig()
+    assert d.damage_per_contact == 0.34
+    assert d.min_authority == 1.0
+    assert d.repair_rate == 0.5
+
+
+def test_damage_config_is_frozen() -> None:
+    d = DamageConfig()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        d.enabled = True  # type: ignore[misc]
+
+
+def test_min_authority_is_strictly_below_base_max_body_rate() -> None:
+    """AC3 (the documented load-bearing invariant): ``min_authority < BASE_MAX_BODY_RATE``. This is
+    what makes the ``integrity == 1.0`` **enabled** path byte-identical to the disabled path — at
+    full integrity ``max(min_authority, max_body_rate * 1.0) == max_body_rate`` ONLY if the floor
+    sits below the base rate. Hard-asserted per the plan (developer seed + challenger fold)."""
+    assert DamageConfig().min_authority < BASE_MAX_BODY_RATE
+    # And strictly positive (a floored-but-flyable handicap, never zero authority).
+    assert DamageConfig().min_authority > 0.0
+
+
+# --- authority_factor — linear, monotone, exactly 1.0 at full integrity (AC3) --------------
+def test_authority_factor_is_exactly_one_at_full_integrity() -> None:
+    """AC3: ``authority_factor(1.0) == 1.0`` **exactly** (not approx) — the invariant the
+    full-integrity byte-identity relies on."""
+    assert DamageConfig().authority_factor(1.0) == 1.0
+
+
+def test_authority_factor_is_monotone_non_decreasing() -> None:
+    """AC3: the factor is monotone non-decreasing in integrity (more damage ⇒ less authority)."""
+    d = DamageConfig()
+    integrities = [i / 50.0 for i in range(51)]  # 0.0 .. 1.0
+    factors = [d.authority_factor(x) for x in integrities]
+    assert all(y >= x for x, y in zip(factors, factors[1:], strict=False))
+    # Strictly lower at low integrity than at full.
+    assert d.authority_factor(0.1) < d.authority_factor(1.0)
+
+
+def test_authority_factor_is_linear_identity_in_range() -> None:
+    """AC3: the documented shape is linear ``f = integrity`` on ``[0, 1]``."""
+    d = DamageConfig()
+    for x in (0.0, 0.25, 0.5, 0.75, 1.0):
+        assert d.authority_factor(x) == pytest.approx(x)
+
+
+def test_authority_factor_clamps_out_of_range_inputs() -> None:
+    """AC3: defensively clamped to ``[0, 1]`` (integrity is already clamped upstream)."""
+    d = DamageConfig()
+    assert d.authority_factor(-0.5) == 0.0
+    assert d.authority_factor(1.5) == 1.0
+    assert isinstance(d.authority_factor(0.5), float)
+
+
+# --- EpisodeConfig.repair_step_allowance — appended LAST, default 400 ----------------------
+def test_episode_config_repair_step_allowance_default() -> None:
+    """UC-19: a documented repair-detour budget, mirroring ``recharge_step_allowance``."""
+    assert EpisodeConfig().repair_step_allowance == 400
+
+
+# --- default_repair_course / single_repair_pad_course — factory shapes (AC7) ---------------
+def test_default_repair_course_has_on_corridor_obstacles_and_one_repair_pad() -> None:
+    """AC7: the damage-heavy default course — on-corridor pillars (the damage source) plus exactly
+    one repairable pad mid-corridor and a plain landing pad near the finish."""
+    course = default_repair_course()
+    assert course.num_gates == 3  # layered onto the standard default geometry
+    assert len(course.obstacles) >= 1  # on-corridor pillars shed integrity
+    repair_pads = [p for p in course.pads if p.repairable]
+    assert len(repair_pads) == 1
+    # The mid-corridor pad is the repair pad; there is also at least one non-repair control pad.
+    assert any(not p.repairable for p in course.pads)
+
+
+def test_default_repair_course_obstacles_sit_on_the_corridor() -> None:
+    """AC7: the pillars sit near ``y ≈ 0`` (on the forward corridor) so a straight run contacts
+    several in a row — unlike the UC-15 off-corridor default obstacles."""
+    course = default_repair_course()
+    assert all(abs(o.center[1]) <= 0.6 for o in course.obstacles)
+
+
+def test_single_repair_pad_course_shape_and_overridable() -> None:
+    """AC7 fixture: a minimal one-gate, one-repair-pad course; obstacles injectable for damage."""
+    course = single_repair_pad_course()
+    assert course.num_gates == 1
+    assert len(course.pads) == 1
+    assert course.pads[0].repairable is True
+    assert course.obstacles == ()  # no damage source unless injected
+    # Injecting obstacles + overriding geometry is honoured.
+    obst = (ObstacleSpec(center=(1.5, 0.0), radius=0.3, height=2.5),)
+    c2 = single_repair_pad_course(pad_center=(2.0, -1.0), pad_radius=0.8, obstacles=obst)
+    assert c2.pads[0].center == (2.0, -1.0) and c2.pads[0].radius == 0.8
+    assert c2.pads[0].repairable is True
+    assert c2.obstacles == obst
+
+
+def test_repair_factories_do_not_disturb_non_repair_factories() -> None:
+    """The UC-15/16 factories stay repair-free (parity)."""
+    assert all(not p.repairable for p in default_pad_course().pads)
+    assert single_gate_course().pads == ()
+    assert default_obstacle_course().pads == ()
+
+
+# --- Off-by-default byte-identity of the whole config under UC-19 fields (AC1/AC8) ----------
+def test_default_env_config_is_stable_under_uc19_fields() -> None:
+    """AC1/AC8: with every UC-19 field at its default, ``EnvConfig()`` equality still holds — the
+    new ``damage`` / ``repairable`` / ``repair_step_allowance`` fields are inert by default."""
+    assert EnvConfig() == EnvConfig()
+    assert EnvConfig().damage == DamageConfig()
+    assert EnvConfig().damage.enabled is False
+    assert EnvConfig().episode.repair_step_allowance == 400
     assert EnvConfig().course.pads == ()

@@ -67,12 +67,24 @@ class PadSpec:
     byte-identical — every existing pad stays a plain (non-recharging) landing pad and the
     recharge path is never taken (AC5). Docking geometry is unchanged: the flag re-classifies
     what a *dock on this pad* does, never whether a floor contact docks.
+
+    ``repairable`` (UC-19 AC4) tags a pad as a **repair pad**: while the drone is in the UC-16
+    *docked* state on it, integrity is restored toward ``1.0`` (applied in the env step, mirroring
+    ``rechargeable``). It is appended **last** (after ``rechargeable``) with a ``False`` default, so
+    a positional ``PadSpec(center, radius)`` or ``PadSpec(center, radius, rechargeable)`` from
+    UC-16/17/18 is unshifted and a default ``PadSpec`` stays byte-identical — every existing pad
+    stays non-repairing and the repair path is never taken (AC1). Like ``rechargeable`` it
+    re-classifies what a *dock on this pad* does, never whether a floor contact docks. The two tags
+    are independent: a pad may recharge, repair, both, or neither.
     """
 
     center: tuple[float, float]
     radius: float
     # UC-18: recharge tag. Appended **last** with a ``False`` default → byte-identical PadSpec.
     rechargeable: bool = False
+    # UC-19: repair tag. Appended **last** (after ``rechargeable``) with a ``False`` default →
+    # byte-identical PadSpec; independent of ``rechargeable``.
+    repairable: bool = False
 
     @property
     def axis_xy(self) -> np.ndarray:
@@ -239,6 +251,78 @@ def single_pad_course(
         floor_z=floor_z,
         ceiling_z=ceiling_z,
         pads=(PadSpec(center=pad_center, radius=pad_radius),),
+    )
+
+
+#: The fixed damage-heavy obstacle set for :func:`default_repair_course` (UC-19 AC7). Unlike the
+#: UC-15 :data:`_DEFAULT_OBSTACLES` (deliberately placed **off** the corridor), these pillars sit
+#: **on** the default start→gates→finish corridor (``y ≈ 0``) so a forward-flying drone contacts
+#: several in a row — the "damage-heavy" side of the AC7 course-variation axis. Obstacle contact
+#: is non-terminating (UC-15), so pillars on the corridor make the course *costlier* (each contact
+#: sheds integrity), never unflyable — hence there is no solvability assertion (a repairable pad,
+#: not obstacle avoidance, is what makes the course completable when damage physics are on).
+_DEFAULT_REPAIR_OBSTACLES: tuple[ObstacleSpec, ...] = (
+    ObstacleSpec(center=(1.5, 0.0), radius=0.3, height=2.5),
+    ObstacleSpec(center=(2.5, 0.0), radius=0.3, height=2.5),
+    ObstacleSpec(center=(3.5, 0.15), radius=0.3, height=2.5),
+    ObstacleSpec(center=(4.5, -0.15), radius=0.3, height=2.5),
+    ObstacleSpec(center=(5.5, -0.5), radius=0.3, height=2.5),
+)
+
+#: The fixed pad set for :func:`default_repair_course` (UC-19 AC7): one **repair** pad mid-corridor
+#: (so a degraded drone can descend, dwell to restore integrity, and climb back out) plus a plain
+#: landing pad near the finish. Only the mid pad carries ``repairable=True``; the finish pad is a
+#: non-repair control, mirroring how UC-18's default pad set mixes recharge and plain pads.
+_DEFAULT_REPAIR_PADS: tuple[PadSpec, ...] = (
+    PadSpec(center=(3.0, 0.0), radius=0.6, repairable=True),
+    PadSpec(center=(6.5, 0.0), radius=0.5),
+)
+
+
+def default_repair_course() -> CourseConfig:
+    """Build the default 3-gate course made **damage-heavy** with a **repair** pad (UC-19 AC7).
+
+    The damage-side fixture for the AC7 course-variation axis: the standard default course plus a
+    row of on-corridor pillars (:data:`_DEFAULT_REPAIR_OBSTACLES`) that shed integrity as the drone
+    flies through, and a mid-corridor **repair** pad (:data:`_DEFAULT_REPAIR_PADS`) it can land on
+    to recover. Whether repair is actually *needed* to finish depends on the caller's
+    :class:`DamageConfig` tuning (``min_authority`` / ``damage_per_contact`` / ``repair_rate``): the
+    mechanics are gated by ``damage.enabled``, not by the course — so the two-sided "fails degraded,
+    completes after repair" property is discharged **empirically** by the tests, not asserted here.
+    Pillars are non-terminating (UC-15), so — like :func:`default_pad_course` — there is no
+    solvability guard to run.
+    """
+    return CourseConfig(obstacles=_DEFAULT_REPAIR_OBSTACLES, pads=_DEFAULT_REPAIR_PADS)
+
+
+def single_repair_pad_course(
+    *,
+    start_position: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    pad_center: tuple[float, float] = (0.0, 0.0),
+    pad_radius: float = 0.5,
+    gate_center: tuple[float, float, float] = (3.0, 0.0, 1.0),
+    gate_aperture: float = 0.6,
+    finish_x: float = 6.0,
+    floor_z: float = 0.0,
+    ceiling_z: float = 2.5,
+    obstacles: tuple[ObstacleSpec, ...] = (),
+) -> CourseConfig:
+    """Build a minimal **one-gate, one-repair-pad** course for hermetic damage/repair tests (UC-19).
+
+    Mirrors :func:`single_pad_course` but tags the single pad ``repairable=True`` and lets the
+    caller inject ``obstacles`` (the UC-15 damage source) so a scripted trajectory can take a
+    number of contacts, then dock on the pad to recover. Everything is a documented, overridable
+    keyword; ``obstacles`` defaults to empty so a bare ``single_repair_pad_course()`` is a plain
+    one-gate course with a lone repair pad and no damage source.
+    """
+    return CourseConfig(
+        start_position=start_position,
+        gates=(GateSpec(center=gate_center, aperture=gate_aperture),),
+        finish_x=finish_x,
+        floor_z=floor_z,
+        ceiling_z=ceiling_z,
+        obstacles=obstacles,
+        pads=(PadSpec(center=pad_center, radius=pad_radius, repairable=True),),
     )
 
 
@@ -429,6 +513,13 @@ class EpisodeConfig:
     # when ≥1 rechargeable pad is present (see racing_env.reset), so a course with no recharge pad
     # keeps the exact UC-09 budget and ``EpisodeConfig()`` stays byte-identical (AC5). Tunable.
     recharge_step_allowance: int = 400
+    # UC-19: extra step budget granted **per repairable pad** on the active course, so a legitimate
+    # repair detour (descend + dwell-to-restore integrity + climb-out) can still finish within the
+    # timeout — the exact symmetry of ``recharge_step_allowance``. Added ONLY when ≥1 repairable pad
+    # is present (see racing_env.reset), so a course with no repair pad keeps the exact UC-09/18
+    # budget and ``EpisodeConfig()`` stays byte-identical (AC1). Appended **last** so field order
+    # stays UC-18-compatible. Tunable.
+    repair_step_allowance: int = 400
 
 
 @dataclass(frozen=True)
@@ -507,6 +598,60 @@ class BatteryConfig:
 
 
 @dataclass(frozen=True)
+class DamageConfig:
+    """Integrity damage + control-authority impact + repair settings (UC-19).
+
+    Mirrors :class:`BatteryConfig` one-for-one, but for a scalar **integrity** ``∈ [0, 1]`` that
+    degrades **control authority** (the effective ``max_body_rate``) rather than the thrust
+    ceiling. A single ``enabled`` flag gates BOTH the adapter-side authority degradation and the
+    env-side width-1 damage observation block (they are coupled exactly as battery physics and its
+    obs block are).
+
+    **Off by default** so ``EnvConfig()`` — and therefore every UC-01..18 caller — is
+    byte-identical: with ``enabled=False`` the adapter never reads or mutates integrity, the body
+    rate stays exactly ``* max_body_rate`` (no new branch taken), and the env emits no damage dim.
+
+    Semantics when ``enabled`` (all documented, tunable constants):
+
+    * The adapter carries a normalized ``integrity ∈ [0, 1]`` reset to ``1.0``. It is **not**
+      drained per-step; instead the env subtracts ``damage_per_contact`` on each **UC-15
+      obstacle-contact edge event** (once per contact, clamped ≥ 0) and adds ``repair_rate * dt``
+      per step while docked on a ``repairable`` pad (clamped ≤ 1).
+    * The effective control authority is scaled by :meth:`authority_factor` of the
+      **start-of-step** integrity, floored at ``min_authority``: ``effective_max_body_rate =
+      max(min_authority, max_body_rate * authority_factor(integrity))`` (AC3). Only the body rate
+      is touched — ``max_thrust`` / ``mass`` / ``drag`` are untouched, so a damaged drone is
+      sluggish-but-flyable (a recoverable handicap), never an unrecoverable altitude loss.
+    * :meth:`authority_factor` is **linear** (``f = integrity``), monotone non-decreasing, and
+      **exactly ``1.0`` at ``integrity == 1.0``**.
+
+    **Load-bearing invariant (documented):** ``min_authority < BASE_MAX_BODY_RATE`` (== 4.0 rad/s,
+    the base full-stick body rate). This is what makes the ``integrity == 1.0`` **enabled** path
+    byte-identical to the disabled path: at full integrity ``authority_factor(1.0) == 1.0`` so the
+    effective rate is ``max(min_authority, max_body_rate)``, which equals ``max_body_rate`` **only
+    if** ``min_authority < max_body_rate``. Default ``1.0 rad/s`` sits well below 4.0 with headroom;
+    any test that raises ``min_authority`` to force an uncompletable-when-degraded course MUST keep
+    it under the (possibly UC-08-scaled) ``max_body_rate`` to preserve full-integrity byte-identity.
+    """
+
+    enabled: bool = False
+    damage_per_contact: float = 0.34  # integrity shed per UC-15 obstacle-contact edge event
+    min_authority: float = 1.0  # rad/s — floor on the degraded body rate (>0, <BASE_MAX_BODY_RATE)
+    repair_rate: float = 0.5  # fraction of full integrity restored per second while docked on pad
+
+    def authority_factor(self, integrity: float) -> float:
+        """Control-authority multiplier for a given normalized ``integrity`` (AC3).
+
+        **Linear** (``f = integrity``): monotone non-decreasing in ``integrity`` and **exactly
+        ``1.0`` at ``integrity == 1.0``** (the invariant the full-integrity byte-identity needs).
+        Defensively clamped to ``[0, 1]`` — integrity is already clamped there upstream, and the
+        clamp preserves both the monotonicity and the ``f(1.0) == 1.0`` guarantee. Returns a plain
+        ``float``.
+        """
+        return float(min(1.0, max(0.0, integrity)))
+
+
+@dataclass(frozen=True)
 class EnvConfig:
     """Bundle of the config groups, so an env is configured by one object."""
 
@@ -525,3 +670,8 @@ class EnvConfig:
     # ``battery.enabled`` is False the adapter never touches a battery and the env emits no
     # battery observation dim.
     battery: BatteryConfig = field(default_factory=BatteryConfig)
+    # Integrity damage + control-authority impact + damage-obs settings (UC-19). Appended **last**
+    # (after ``battery``) with an all-off default, so ``EnvConfig()`` stays byte-identical to UC-18:
+    # when ``damage.enabled`` is False the adapter never touches integrity and the env emits no
+    # damage observation dim.
+    damage: DamageConfig = field(default_factory=DamageConfig)

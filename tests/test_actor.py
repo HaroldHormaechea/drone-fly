@@ -167,3 +167,84 @@ def test_schema_actor_is_trainable(connectome: ConnectomeData) -> None:
         assert proj.weight.grad is not None
     assert net.readout.weight.grad is not None
     assert net.layer.edge_weight.grad is not None
+
+
+# --------------------------------------------------------------------------- #
+# UC-19 (AC5/AC6) — the damage_proprioception_v4 actor: a SECOND proprioceptive
+# block coexists with the UC-13 self-motion block on the shared substrate.
+# --------------------------------------------------------------------------- #
+from drone_fly.connectome.prune import prune_to_subcircuit  # noqa: E402
+from drone_fly.controller.modality import ModalityAbsentError, select_modality  # noqa: E402
+from drone_fly.controller.obs_schema import DAMAGE_PROPRIOCEPTION_V4  # noqa: E402
+
+
+def test_v4_actor_builds_with_two_proprioceptive_blocks(connectome: ConnectomeData) -> None:
+    """AC6: a v4 actor builds — the ``proprioception`` (UC-13) and ``damage`` (UC-19) blocks BOTH
+    bind to the ``proprioceptive`` population and coexist. One projection per block, each into a
+    non-empty population (``select_modality`` raised if the population were absent)."""
+    torch.manual_seed(0)
+    net = ConnectomeActorNetwork(connectome, obs_schema=DAMAGE_PROPRIOCEPTION_V4)
+    assert net.sensory_mode == "schema"
+    assert len(net.block_projections) == len(DAMAGE_PROPRIOCEPTION_V4.blocks) == 5
+    for proj, block in zip(net.block_projections, DAMAGE_PROPRIOCEPTION_V4.blocks, strict=True):
+        assert proj.in_features == block.width
+        assert proj.out_features > 0  # bound population non-empty
+    # select_modality("proprioceptive") on the active slice is genuinely non-empty (AC6).
+    assert select_modality(connectome, "proprioceptive").indices.size > 0
+
+
+def test_v4_actor_maps_obs26_to_action(connectome: ConnectomeData) -> None:
+    """AC5: the v4 actor consumes a 26-d obs → a valid action (single + batched)."""
+    torch.manual_seed(0)
+    net = ConnectomeActorNetwork(connectome, obs_schema=DAMAGE_PROPRIOCEPTION_V4)
+    assert DAMAGE_PROPRIOCEPTION_V4.total_width == 26
+    action = net(torch.zeros(26))
+    assert action.shape == (ACTION_DIM,)
+    _assert_valid_action_row(action)
+    actions = net(torch.randn(4, 26))
+    assert actions.shape == (4, ACTION_DIM)
+
+
+def test_v4_two_proprioceptive_blocks_scatter_into_the_same_neurons(
+    connectome: ConnectomeData,
+) -> None:
+    """AC6: the UC-13 ``proprioception`` block and the UC-19 ``damage`` block resolve to the SAME
+    population index tensor — they overlap the same proprioceptive neurons, and the forward's
+    ``index_add`` accumulates them additively (overlap-safe, not a clobber)."""
+    torch.manual_seed(0)
+    net = ConnectomeActorNetwork(connectome, obs_schema=DAMAGE_PROPRIOCEPTION_V4)
+    names = [b.name for b in DAMAGE_PROPRIOCEPTION_V4.blocks]
+    prop_i = names.index("proprioception")
+    damage_i = names.index("damage")
+    prop_idx = getattr(net, net._block_index_attrs[prop_i])
+    damage_idx = getattr(net, net._block_index_attrs[damage_i])
+    assert torch.equal(prop_idx, damage_idx), "both proprioceptive blocks must share the neurons"
+
+
+def test_v4_damage_block_contributes_additively(connectome: ConnectomeData) -> None:
+    """AC6: with a non-zero damage projection, driving ONLY the damage dim changes the action —
+    the block genuinely scatters onto the shared substrate (additive, not shadowed by the UC-13
+    block). Baseline (damage dim 0) vs a non-zero damage input must differ."""
+    torch.manual_seed(0)
+    net = ConnectomeActorNetwork(connectome, obs_schema=DAMAGE_PROPRIOCEPTION_V4)
+    damage_i = [b.name for b in DAMAGE_PROPRIOCEPTION_V4.blocks].index("damage")
+    with torch.no_grad():
+        net.block_projections[damage_i].weight.fill_(0.5)
+    base = torch.zeros(26)
+    driven = base.clone()
+    driven[-1] = 0.9  # 1 - integrity (a damaged reading) in the last (damage) dim
+    assert not torch.equal(net(base), net(driven))
+
+
+def test_v4_actor_fails_loud_when_proprioceptive_population_pruned_away(
+    connectome: ConnectomeData,
+) -> None:
+    """AC6 (fail-loud): building a v4 actor on a vision→motor slice with NO proprioceptive neurons
+    raises ``ModalityAbsentError`` rather than binding the damage/self-motion block to nothing."""
+    pruned = prune_to_subcircuit(connectome, k=0)
+    import numpy as np
+
+    neuron_class = np.asarray(pruned.neuron_class)
+    assert not (neuron_class == "mechanosensory_proprioceptive").any()  # sanity: really gone
+    with pytest.raises(ModalityAbsentError):
+        ConnectomeActorNetwork(pruned, obs_schema=DAMAGE_PROPRIOCEPTION_V4)

@@ -72,6 +72,11 @@ class RaceEnv(gym.Env):
         # physically coupled). Off by default → no battery param forwarded (byte-identical to
         # UC-16) and the observation width is unchanged.
         self._battery_enabled = bool(self.config.battery.enabled)
+        # Integrity damage + control-authority (UC-19): a single ``damage.enabled`` flag gates BOTH
+        # the adapter-side authority degradation and the env-side width-1 damage observation block
+        # (physically coupled, exactly like battery). Off by default → no damage param forwarded
+        # (byte-identical to UC-18) and the observation width is unchanged.
+        self._damage_enabled = bool(self.config.damage.enabled)
 
         self.adapter = make_adapter(
             adapter,
@@ -80,6 +85,7 @@ class RaceEnv(gym.Env):
             ceiling_z=course.ceiling_z,
             dt=self.config.episode.dt,
             battery=self.config.battery if self._battery_enabled else None,
+            damage=self.config.damage if self._damage_enabled else None,
         )
         self.backend = self.adapter.backend
 
@@ -96,6 +102,11 @@ class RaceEnv(gym.Env):
         # the dim order is (vision, proprioception, obstacle_vision, battery) — matching the
         # ``battery_hunger_v3`` schema's block order.
         if self._battery_enabled:
+            obs_dim += 1
+        # UC-19: the width-1 damage block is appended STRICTLY AFTER the battery block, so the dim
+        # order is (vision, proprioception, obstacle_vision, battery, damage) — matching the
+        # ``damage_proprioception_v4`` schema's block order.
+        if self._damage_enabled:
             obs_dim += 1
 
         self.observation_space = gym.spaces.Box(
@@ -177,6 +188,13 @@ class RaceEnv(gym.Env):
             # coincides with the trained full-charge baseline — the grafted actor's action on old
             # inputs stays bit-identical (documented in obs_schema / graft_actor).
             parts.append(np.array([1.0 - state.battery], dtype=np.float64))
+        if self._damage_enabled:
+            # UC-19 AC5: width-1 damage block, appended AFTER the battery block (so the dim order
+            # matches the schema block order) and BEFORE nan_to_num. Encoded as **1.0 - integrity**
+            # (0 at full integrity), so the zero-init graft input (0) coincides with the trained
+            # pristine baseline — the grafted actor's action on old inputs stays bit-identical
+            # (documented in obs_schema / graft_actor), exactly mirroring the battery encoding.
+            parts.append(np.array([1.0 - state.integrity], dtype=np.float64))
         obs = np.concatenate(parts).astype(np.float32)
         # Belt-and-braces: the env never emits a non-finite observation to the policy.
         return np.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)
@@ -239,6 +257,14 @@ class RaceEnv(gym.Env):
         num_recharge_pads = sum(1 for pad in self._course.pads if pad.rechargeable)
         if num_recharge_pads > 0:
             self._max_steps += episode.recharge_step_allowance * num_recharge_pads
+        # UC-19: symmetric budget for a legitimate **repair** detour (descend + dwell-to-restore +
+        # climb-out). Added ONLY when ≥1 repairable pad is on the active course, so a no-repair
+        # course keeps the exact UC-09/18 budget (byte-identical, AC1). Independent of the recharge
+        # allowance — a pad that both recharges and repairs adds both allowances (both detours may
+        # be needed).
+        num_repair_pads = sum(1 for pad in self._course.pads if pad.repairable)
+        if num_repair_pads > 0:
+            self._max_steps += episode.repair_step_allowance * num_repair_pads
         info = {
             "phase": self._phase_str(),
             "backend": self.backend,
@@ -329,6 +355,32 @@ class RaceEnv(gym.Env):
                 delta = self.config.battery.recharge_rate * self.config.episode.dt
                 new_battery = self.adapter.recharge(delta)
                 state = dataclasses.replace(state, battery=new_battery)
+
+        # UC-19 damage/repair (AC2/AC4), applied in the documented **damage-then-repair** order so a
+        # same-step contact-on-a-pad first sheds then restores integrity, deterministically. Both
+        # mutate the adapter's integrity and overwrite ``state`` via ``dataclasses.replace`` BEFORE
+        # ``_observation`` so the change shows in the SAME step's damage obs dim. Neither feeds
+        # ``crash`` / ``terminated`` nor the reward — integrity is a reward-neutral sensory/handicap
+        # signal (AC2); only floor/ceiling crashes and a valid completion end an episode.
+        if self._damage_enabled:
+            # DAMAGE (AC2): reuse the UC-15 edge-triggered ``obstacle_contact`` (True only on the
+            # step a contact *begins* — once per contact, never per overlapping frame, and never
+            # floor/ceiling). ``obstacle_contact`` is computed above from the same signal that feeds
+            # the obstacle penalty, so damage and penalty fire on exactly the same events.
+            if obstacle_contact:
+                new_integrity = self.adapter.damage(self.config.damage.damage_per_contact)
+                state = dataclasses.replace(state, integrity=new_integrity)
+            # REPAIR (AC4): mirror the UC-18 recharge-on-dock gate — restore only while the UC-16
+            # stateless dock predicate holds (floor contact, slow, upright, over a pad) AND the pad
+            # under the drone is ``repairable``. A mere hover over a repair pad is NOT docked ⇒ no
+            # repair; docking on a non-repair pad ⇒ no repair. ``pad_under`` reuses the exact UC-16
+            # geometry the dock predicate already checked, so the two never disagree on which pad.
+            if docked:
+                pad = pad_under(state.position, course.pads)
+                if pad is not None and pad.repairable:
+                    delta = self.config.damage.repair_rate * self.config.episode.dt
+                    new_integrity = self.adapter.repair(delta)
+                    state = dataclasses.replace(state, integrity=new_integrity)
 
         reward = compute_reward(
             dist_to_target_prev=dist_prev,
