@@ -6,9 +6,15 @@
 # (pybullet + the GitHub-only gym-pybullet-drones, pinned to an exact commit), verifies the
 # native pybullet extension imports, then launches (or RESUMES) PPO training.
 #
-# Idempotent: re-running resumes from the latest checkpoint under artifacts/models/ rather
-# than restarting. A failed sim install stops with an actionable message — never a cryptic
-# mid-training crash.
+# Usage:
+#   ./scripts/train.sh [CONFIG]
+# CONFIG defaults to configs/train/example.yaml. All run settings — including the run name,
+# connectome, timesteps, and resume policy — live in that YAML (UC-11 config-driven CLI).
+#
+# Idempotent: the config's `resume: auto` continues from the latest checkpoint under
+# training/<name>/checkpoints/ if one exists, otherwise starts fresh — so re-running this
+# script resumes rather than restarting, with no bash-side checkpoint probing. A failed sim
+# install stops with an actionable message — never a cryptic mid-training crash.
 #
 # This script targets the owner's macOS Apple-Silicon (M4 Pro) dev machine, which has a
 # C/C++ toolchain (Xcode Command Line Tools). See the README "Simulator bootstrap:
@@ -27,6 +33,9 @@ PYBULLET_DRONES_REF="7ebad1ecabd28a7000add2d05f888aa2e837c2cc"  # v2.2.0
 # Sim needs Python >= 3.12 (gym-pybullet-drones v2.2.0 requires-python ^3.12).
 SIM_PYTHON="${DRONE_FLY_SIM_PYTHON:-3.12}"
 VENV_DIR="${DRONE_FLY_VENV:-.venv-sim}"
+
+# Config-driven run (UC-11): everything the run needs lives in this YAML.
+CONFIG="${1:-configs/train/example.yaml}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -77,23 +86,14 @@ import gym_pybullet_drones  # noqa: F401
 print("sim import OK:", pybullet.getAPIVersion())
 PY
 
-# --- 4. Idempotent resume: continue from the latest checkpoint if one exists. -------------
-MODELS_DIR="${DRONE_FLY_MODELS_DIR:-artifacts/models}"
-RESUME_ARG=()
-LATEST="$("$VENV_DIR/bin/python" - "$MODELS_DIR" <<'PY'
-import sys
-from drone_fly.train.loop import find_latest_checkpoint
-print(find_latest_checkpoint(sys.argv[1]) or "")
-PY
-)"
-if [ -n "$LATEST" ]; then
-  log "Found existing checkpoint: $LATEST — resuming (interrupted runs lose at most the \
-steps since the last checkpoint)."
-  RESUME_ARG=(--resume "$LATEST")
-else
-  log "No checkpoint found — starting a fresh training run."
-fi
+# --- 4. Verify the config exists before launching. ----------------------------------------
+[ -f "$CONFIG" ] || fail "Config file not found: $CONFIG. Pass one as the first argument, or \
+copy configs/train/example.yaml and edit it. Idempotent resume comes from the config's \
+'resume: auto' key (no bash-side checkpoint probing)."
 
-# --- 5. Launch training (device auto-detects cuda->cpu; MPS opt-in via --device mps). -----
-log "Launching training ..."
-exec "$VENV_DIR/bin/python" -m drone_fly.cli train --adapter auto "${RESUME_ARG[@]}" "$@"
+# --- 5. Launch training. ------------------------------------------------------------------
+# All settings (name, connectome, timesteps, device, resume policy, ...) come from the YAML.
+# `resume: auto` in the config gives the idempotent continue-or-fresh behaviour this script
+# used to implement in bash.
+log "Launching training with config: $CONFIG ..."
+exec "$VENV_DIR/bin/drone-fly" train --config "$CONFIG"

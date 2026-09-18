@@ -1,0 +1,36 @@
+# Example `drone-fly train --config` file.
+#
+# Runs as-is against the committed test-fixture connectome on the pure-numpy backend, so it
+# needs no simulator and no provisioned connectome. Outputs land under
+# `training/<name>/{checkpoints,logs,recordings}/`.
+#
+#   drone-fly train --config configs/train/example.yaml
+
+# REQUIRED. All outputs go to training/<name>/. Allowed chars: letters, digits, . _ -
+name: baseline
+
+# Sim backend: auto (pybullet if installed) | simple (numpy, no native deps) | pybullet.
+adapter: simple
+
+# Connectome to seed the policy. The committed fixture keeps this runnable in CI; point it
+# at your provisioned connectome dir (or a pruned slice from `drone-fly prune`) for a real run.
+connectome: tests/fixtures
+
+# Smoke-sized budget so the example finishes quickly. Raise it (e.g. 1_000_000) for a real run.
+timesteps: 2000
+
+# Idempotent resume: continue from the newest checkpoint under training/<name>/checkpoints/
+# if one exists, otherwise start fresh (no error). Use `latest` to REQUIRE an existing
+# checkpoint (hard error if none), or omit / set `null` for an always-fresh run.
+resume: auto
+
+# --- Optional keys (shown with their defaults; delete any you don't need) ---
+# device: cpu            # cpu | cuda | mps; omit for the auto-policy
+# n_envs: 1              # parallel rollout envs (>= 1)
+# prune: false           # reduce to the sensory->motor subcircuit (UC-04) before training
+# prune_k: 2             # corridor slack for prune
+# record: false          # capture per-frame activations for the viz/ viewer (UC-05)
+# record_every: 1        # record every Nth episode (only meaningful with record: true)
+# record_dir: null       # override; defaults to training/<name>/recordings/
+# randomize: false       # randomize the course per episode (UC-08)
+# randomize_dynamics: false  # randomize mass/drag/thrust/latency per episode (UC-08)

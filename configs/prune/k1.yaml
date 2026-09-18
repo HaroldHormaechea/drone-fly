@@ -1,0 +1,7 @@
+# Example `drone-fly prune --config` — k=1 subcircuit slice.
+#
+#   drone-fly prune --config configs/prune/k1.yaml
+
+connectome: tests/fixtures   # REQUIRED: input connectome dir/.npz to prune
+out: artifacts/pruned/k1     # REQUIRED: output dir for the pruned slice (+ provenance)
+prune_k: 1                   # 1 = one hop of path slack around the shortest-path corridor

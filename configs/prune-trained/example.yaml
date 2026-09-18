@@ -1,0 +1,31 @@
+# Example `drone-fly prune-trained --config` file.
+#
+#   drone-fly prune-trained --config configs/prune-trained/example.yaml
+#
+# Post-training activation prune (UC-07): measure per-neuron usage on a trained policy,
+# remove dead interneurons, optionally fine-tune, and save the minimal circuit to `out`.
+# Point `checkpoint` at a real .zip from a training run.
+
+# REQUIRED: the trained checkpoint .zip to prune.
+checkpoint: training/baseline/checkpoints/ppo_racer_final.zip
+# REQUIRED: output dir for the pruned artifacts + report.
+out: artifacts/prune-trained/baseline
+
+# NOTE: prune-trained's adapter default is `simple` (not `auto` like train/evaluate).
+adapter: simple
+
+# --- Optional keys (defaults shown) ---
+# connectome: tests/fixtures  # MUST match the connectome the checkpoint was trained on
+# vecnormalize: null     # VecNormalize stats .pkl used at training time
+# prune: false           # rebuild the UC-04 base graph the checkpoint trained on
+# prune_k: 2             # corridor slack for the base prune
+# metric: mean_abs       # per-neuron importance metric (mean_abs | active_fraction)
+# threshold: 0.001       # interneurons at/below this importance are pruned
+# threshold_mode: absolute   # absolute | percentile
+# episodes: 10           # episodes to measure importance / completion over
+# eps: 0.000001          # activity epsilon for active_fraction
+# finetune_steps: 0      # short PPO continue-training budget after pruning (0 = skip)
+# device: cpu            # cpu | cuda | mps; omit for the auto-policy
+# seed: 0                # measurement / fine-tune seed
+# randomize: false       # randomize the course per episode (UC-08)
+# randomize_dynamics: false  # randomize dynamics per episode (UC-08)

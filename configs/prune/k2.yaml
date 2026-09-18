@@ -1,0 +1,7 @@
+# Example `drone-fly prune --config` — k=2 subcircuit slice (the default corridor width).
+#
+#   drone-fly prune --config configs/prune/k2.yaml
+
+connectome: tests/fixtures   # REQUIRED: input connectome dir/.npz to prune
+out: artifacts/pruned/k2     # REQUIRED: output dir for the pruned slice (+ provenance)
+prune_k: 2                   # 2 = richer neighbourhood (matches DEFAULT_PRUNE_K)
