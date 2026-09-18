@@ -1,9 +1,14 @@
 """CLI stage: thin command-line entry points.
 
-Orchestrates the pipeline stages: fetch-connectome (stub), train, evaluate, prune,
+Orchestrates the pipeline stages: fetch-connectome, train, evaluate, prune,
 prune-trained, smoke-train. Kept thin — argument parsing and wiring only; the real logic
 lives in the stage subpackages (:mod:`drone_fly.train`, :mod:`drone_fly.evaluate`,
 :mod:`drone_fly.prune_trained`).
+
+``fetch-connectome`` provisions the full whole-brain MaleCNS connectome into the default
+location (auto-downloading from the public CC-BY source, then reusing it), and ``prune`` with
+no explicit ``connectome`` does the same on demand before pruning (UC-14). See
+:mod:`drone_fly.connectome.fetch`.
 
 Config-driven surface (UC-11)
 -----------------------------
@@ -175,7 +180,21 @@ def build_parser() -> argparse.ArgumentParser:
         "Without this, prune slices and all other inputs are preserved.",
     )
 
-    sub.add_parser("fetch-connectome", help="[stub] Provision connectome data (see README).")
+    fetch_p = sub.add_parser(
+        "fetch-connectome",
+        help="Download the full MaleCNS connectome into the default location (reused if present).",
+    )
+    fetch_p.add_argument(
+        "--connectome-dir",
+        default=None,
+        help="Destination dir for the full connectome (default: DRONE_FLY_CONNECTOME_DIR, else "
+        "data/connectome).",
+    )
+    fetch_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-download even if the connectome files are already present.",
+    )
     return parser
 
 
@@ -184,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     from drone_fly.config import ConfigError
+    from drone_fly.connectome import ConnectomeDownloadError
 
     try:
         if args.command == "train":
@@ -213,14 +233,13 @@ def main(argv: list[str] | None = None) -> int:
             return _run_clean(args)
 
         if args.command == "fetch-connectome":
-            print(
-                "fetch-connectome is a stub. Provision the cached connectome under "
-                "data/connectome/ (or set DRONE_FLY_CONNECTOME_DIR). See the README "
-                "'Provisioning connectome data' section."
-            )
-            return 0
+            return _run_fetch_connectome(args)
     except ConfigError as e:
         # Clean one-line message, no stack trace (AC6).
+        logging.getLogger("drone_fly.cli").error("%s", e)
+        return 2
+    except ConnectomeDownloadError as e:
+        # Clean one-line message, no stack trace — matches the ConfigError convention (AC7).
         logging.getLogger("drone_fly.cli").error("%s", e)
         return 2
 
@@ -302,6 +321,21 @@ def _run_evaluate(config_path: str) -> int:
     return 0
 
 
+def _run_fetch_connectome(args: argparse.Namespace) -> int:
+    """Provision the full MaleCNS connectome into the default location (UC-14, AC3).
+
+    Independently invokable: downloads the whole-brain matrix + correctly-renamed meta sidecar
+    (reusing an existing copy unless ``--force``) and prints a one-line result. Raises
+    :class:`~drone_fly.connectome.ConnectomeDownloadError` on failure, which :func:`main` maps to a
+    one-line error + exit code 2.
+    """
+    from drone_fly.connectome import ensure_full_connectome
+
+    connectome_dir = ensure_full_connectome(args.connectome_dir, force=args.force)
+    print(f"Full MaleCNS connectome ready at {connectome_dir}/.")
+    return 0
+
+
 def _run_prune_export(config_path: str) -> int:
     """Load a connectome, prune it, and write the reusable pruned slice to ``out`` (AC11).
 
@@ -312,12 +346,32 @@ def _run_prune_export(config_path: str) -> int:
     from pathlib import Path
 
     from drone_fly.config import PruneRunConfig, load_yaml
-    from drone_fly.connectome import load_connectome, prune_to_subcircuit, save_connectome
+    from drone_fly.connectome import (
+        ensure_full_connectome,
+        load_connectome,
+        prune_to_subcircuit,
+        save_connectome,
+    )
 
     cfg = PruneRunConfig.from_mapping(load_yaml(config_path))
 
     logger = logging.getLogger("drone_fly.cli.prune")
-    data = load_connectome(cfg.connectome)
+    if cfg.connectome is None:
+        # UC-14: no explicit connectome -> default to the full MaleCNS matrix, auto-downloaded to
+        # the default location on first run and reused thereafter. Pruning the full ~161k-neuron /
+        # ~25M-edge matrix is far heavier than the fixture (minutes + real memory) — log it so a
+        # long first run is not mistaken for a hang. This runtime/memory note is scoped to this
+        # auto-download branch: an explicit `connectome:` (e.g. the fixture) never triggers it.
+        logger.info(
+            "No explicit connectome set; using the full MaleCNS connectome (auto-downloaded to "
+            "the default location on first run, reused after). Pruning the full matrix (~161k "
+            "neurons / ~25M edges) takes minutes and real memory — this is expected, not a hang."
+        )
+        connectome_dir = ensure_full_connectome()
+        data = load_connectome(connectome_dir)
+    else:
+        # Explicit target (e.g. `connectome: tests/fixtures`): load as-is, no auto-download.
+        data = load_connectome(cfg.connectome)
     before = (data.neuron_count, data.edge_count)
     pruned = prune_to_subcircuit(data, k=cfg.prune_k, rule=cfg.prune_rule)
     npz_path, meta_path = save_connectome(pruned, cfg.out)

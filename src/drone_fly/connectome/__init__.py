@@ -9,6 +9,10 @@ For UC-01 the load path is offline only (a cached matrix on disk); live neuPrint
 fetching is a separate, later concern. See :mod:`drone_fly.connectome.loader`.
 """
 
+from drone_fly.connectome.fetch import (
+    ConnectomeDownloadError,
+    ensure_full_connectome,
+)
 from drone_fly.connectome.loader import (
     CONNECTOME_DIR_ENV,
     DEFAULT_CONNECTOME_DIR,
@@ -35,7 +39,9 @@ __all__ = [
     "FIXTURE_EXPECTED_SCALE",
     "MALECNS_V1_EXPECTED_SCALE",
     "ConnectomeData",
+    "ConnectomeDownloadError",
     "ExpectedScale",
+    "ensure_full_connectome",
     "load_connectome",
     "save_connectome",
     "DEFAULT_PRUNE_K",

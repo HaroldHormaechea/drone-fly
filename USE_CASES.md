@@ -23,4 +23,4 @@ Statuses:
 | 11 | [use-cases/11-yaml-config-and-run-layout.md](use-cases/11-yaml-config-and-run-layout.md) | YAML --config for the CLIs + per-run output layout | done | 2026-09-18 |
 | 12 | [use-cases/12-mri-brain-heatmap.md](use-cases/12-mri-brain-heatmap.md) | MRI-style full-brain activation heatmap | done | 2026-09-18 |
 | 13 | [use-cases/13-modality-mapped-populations.md](use-cases/13-modality-mapped-populations.md) | Modality-mapped neuron populations + graft-ready observation schema | done | 2026-09-18 |
-| 14 | [use-cases/14-default-prune-full-connectome.md](use-cases/14-default-prune-full-connectome.md) | Default prune to the full auto-downloaded MaleCNS connectome | pending | 2026-09-18 |
+| 14 | [use-cases/14-default-prune-full-connectome.md](use-cases/14-default-prune-full-connectome.md) | Default prune to the full auto-downloaded MaleCNS connectome | in-progress | 2026-09-18 |
