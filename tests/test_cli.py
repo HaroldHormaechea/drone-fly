@@ -1,8 +1,20 @@
-"""CLI smoke tests — argparse wiring + hermetic dispatch of the subcommands.
+"""CLI surface tests — the UC-11 ``--config`` command surface + hermetic dispatch.
 
-Thin coverage that the ``drone-fly`` CLI parses each subcommand and that ``smoke-train`` /
-``evaluate`` dispatch end-to-end on the hermetic numpy backend. Real training correctness
-lives in ``test_train_resume.py``; this only guards the command surface.
+The ``train`` / ``evaluate`` / ``prune`` / ``prune-trained`` commands each take a single
+``--config <path.yaml>`` (the previous per-setting flags are gone); ``smoke-train`` and
+``fetch-connectome`` keep their historical small flag surface. This module guards:
+
+* the parser: each of the four config commands requires ``--config`` and rejects the removed
+  flags; ``smoke-train`` keeps its own flags (AC1);
+* dispatch: a config file threads its settings through to the underlying stage function, with
+  ``train`` routing outputs under ``training/<name>/`` (AC2) and a real train run creating that
+  tree on disk (AC2/AC7);
+* the ``resume`` translation helper — null / latest / auto / explicit path (AC5);
+* ConfigError -> a one-line message + exit code 2, never a stack trace (AC6);
+* the record-every-without-record warning + the env-config helper.
+
+Hermetic: dispatch tests monkeypatch the stage functions; the one real run uses
+``adapter="simple"`` on the committed fixture (no pybullet / network).
 """
 
 from __future__ import annotations
@@ -11,135 +23,106 @@ import logging
 from pathlib import Path
 
 import pytest
+import yaml
 
-from drone_fly.cli import build_parser, main
-from drone_fly.connectome import DEFAULT_PRUNE_K, DEFAULT_PRUNE_RULE, load_connectome
+from drone_fly.cli import (
+    _env_config,
+    _resolve_config_resume,
+    _warn_record_every_without_record,
+    build_parser,
+    main,
+)
+from drone_fly.connectome import DEFAULT_PRUNE_K, load_connectome
 from drone_fly.train.loop import CHECKPOINT_PREFIX
 
 FIXTURE_DIR = str(Path(__file__).parent / "fixtures")
 
 
+def _write_config(tmp_path: Path, mapping: dict, name: str = "config.yaml") -> str:
+    """Dump ``mapping`` to a YAML file under ``tmp_path`` and return its path."""
+    p = tmp_path / name
+    p.write_text(yaml.safe_dump(mapping), encoding="utf-8")
+    return str(p)
+
+
+# --------------------------------------------------------------------------- #
+# Parser — the config surface (AC1)
+# --------------------------------------------------------------------------- #
+
+
 def test_parser_requires_a_subcommand() -> None:
-    parser = build_parser()
     with pytest.raises(SystemExit):
-        parser.parse_args([])
+        build_parser().parse_args([])
 
 
-def test_parser_train_flags() -> None:
-    argv = ["train", "--resume", "x.zip", "--device", "cpu"]
-    argv += ["--timesteps", "10", "--adapter", "simple"]
-    args = build_parser().parse_args(argv)
-    assert args.command == "train"
-    assert args.resume == "x.zip"
-    assert args.device == "cpu"
-    assert args.timesteps == 10
-    assert args.adapter == "simple"
+@pytest.mark.parametrize("command", ["train", "evaluate", "prune", "prune-trained"])
+def test_config_commands_accept_config_flag(command: str) -> None:
+    args = build_parser().parse_args([command, "--config", "some.yaml"])
+    assert args.command == command
+    assert args.config == "some.yaml"
 
 
-def test_parser_evaluate_requires_checkpoint() -> None:
+@pytest.mark.parametrize("command", ["train", "evaluate", "prune", "prune-trained"])
+def test_config_commands_require_config_flag(command: str) -> None:
+    """--config is mandatory: omitting it is a clean argparse error (exit 2), not a crash."""
     with pytest.raises(SystemExit):
-        build_parser().parse_args(["evaluate"])  # --checkpoint is required
+        build_parser().parse_args([command])
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["train", "--resume", "x.zip"],
+        ["train", "--timesteps", "10"],
+        ["train", "--n-envs", "4"],
+        ["train", "--randomize"],
+        ["evaluate", "--checkpoint", "c.zip"],
+        ["prune", "--connectome", "in", "--out", "out"],
+        ["prune-trained", "--checkpoint", "c.zip", "--out", "o"],
+    ],
+)
+def test_removed_flags_are_rejected(argv: list[str]) -> None:
+    """The old per-setting flags no longer exist on the four config commands (AC1)."""
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(argv)
 
 
 # --------------------------------------------------------------------------- #
-# --resume — nargs="?" bare-flag / directory / explicit-.zip parsing
+# smoke-train / fetch-connectome keep their historical surface (AC1 exclusion)
 # --------------------------------------------------------------------------- #
-def test_parser_resume_bare_flag_is_latest_sentinel() -> None:
-    """Bare `--resume` (no value) parses to the "latest" sentinel (const)."""
-    args = build_parser().parse_args(["train", "--resume"])
-    assert args.resume == "latest"
 
 
-def test_parser_resume_directory_value_parses() -> None:
-    """`--resume <dir>` carries the directory string through unchanged."""
-    args = build_parser().parse_args(["train", "--resume", "some/models/dir"])
-    assert args.resume == "some/models/dir"
+def test_smoke_train_keeps_its_flags() -> None:
+    args = build_parser().parse_args(
+        [
+            "smoke-train",
+            "--connectome",
+            FIXTURE_DIR,
+            "--timesteps",
+            "128",
+            "--prune",
+            "--prune-k",
+            "1",
+        ]
+    )
+    assert args.command == "smoke-train"
+    assert args.connectome == FIXTURE_DIR
+    assert args.timesteps == 128
+    assert args.prune is True and args.prune_k == 1
 
 
-def test_parser_resume_explicit_zip_still_parses() -> None:
-    """`--resume x.zip` still parses to the exact path (byte-identical to before)."""
-    args = build_parser().parse_args(["train", "--resume", "x.zip"])
-    assert args.resume == "x.zip"
-
-
-def test_parser_resume_omitted_is_none() -> None:
-    """Omitting `--resume` leaves it None (a fresh run)."""
-    args = build_parser().parse_args(["train"])
-    assert args.resume is None
-
-
-# --------------------------------------------------------------------------- #
-# --record-every without --record — the silent-no-op warning
-# --------------------------------------------------------------------------- #
-def test_warn_record_every_without_record_fires(caplog) -> None:
-    """`--record-every` passed WITHOUT `--record` logs a warning (it would be a silent no-op)."""
-    from drone_fly.cli import _warn_record_every_without_record
-
-    args = build_parser().parse_args(["train", "--record-every", "5"])
-    with caplog.at_level(logging.WARNING, logger="drone_fly.cli"):
-        _warn_record_every_without_record(args)
-    assert any(
-        "--record-every" in r.getMessage() and "no effect" in r.getMessage() for r in caplog.records
-    ), "expected a warning about --record-every without --record"
-
-
-def test_no_warn_record_every_with_record(caplog) -> None:
-    """When `--record` IS present, no --record-every warning is emitted."""
-    from drone_fly.cli import _warn_record_every_without_record
-
-    args = build_parser().parse_args(["train", "--record", "--record-every", "5"])
-    with caplog.at_level(logging.WARNING, logger="drone_fly.cli"):
-        _warn_record_every_without_record(args)
-    assert not any("--record-every" in r.getMessage() for r in caplog.records)
-
-
-def test_no_warn_record_every_when_absent(caplog) -> None:
-    """No warning when neither --record nor --record-every is given (the common case)."""
-    from drone_fly.cli import _warn_record_every_without_record
-
-    args = build_parser().parse_args(["train"])
-    with caplog.at_level(logging.WARNING, logger="drone_fly.cli"):
-        _warn_record_every_without_record(args)
-    assert not any("--record-every" in r.getMessage() for r in caplog.records)
+def test_smoke_train_rejects_config_flag() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["smoke-train", "--config", "x.yaml"])
 
 
 def test_smoke_train_dispatch(tmp_path, monkeypatch) -> None:
-    # Run from a temp cwd so artifacts/ lands under tmp, not the repo.
     monkeypatch.chdir(tmp_path)
     rc = main(["smoke-train", "--connectome", FIXTURE_DIR, "--timesteps", "128"])
     assert rc == 0
     models = tmp_path / "artifacts" / "models"
     assert models.is_dir()
     assert any(f.name.startswith(CHECKPOINT_PREFIX) for f in models.iterdir())
-
-
-def test_evaluate_dispatch(tmp_path, monkeypatch, capsys) -> None:
-    monkeypatch.chdir(tmp_path)
-    # First produce a checkpoint hermetically.
-    assert main(["smoke-train", "--connectome", FIXTURE_DIR, "--timesteps", "128"]) == 0
-    models = tmp_path / "artifacts" / "models"
-    ckpt = models / f"{CHECKPOINT_PREFIX}_final.zip"
-    stats = models / "vecnormalize.pkl"
-    assert ckpt.is_file() and stats.is_file()
-
-    rc = main(
-        [
-            "evaluate",
-            "--checkpoint",
-            str(ckpt),
-            "--vecnormalize",
-            str(stats),
-            "--episodes",
-            "2",
-            "--adapter",
-            "simple",
-            "--device",
-            "cpu",
-        ]
-    )
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "completion_rate" in out
 
 
 def test_fetch_connectome_stub(capsys) -> None:
@@ -149,250 +132,254 @@ def test_fetch_connectome_stub(capsys) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# UC-04 — opt-in prune flags on train / smoke-train
+# ConfigError -> exit code 2, no stack trace (AC6)
 # --------------------------------------------------------------------------- #
-def test_parser_train_prune_flags_default_off() -> None:
-    """train exposes --prune (default off) and --prune-k (default DEFAULT_PRUNE_K)."""
-    args = build_parser().parse_args(["train"])
-    assert args.prune is False
-    assert args.prune_k == DEFAULT_PRUNE_K
 
 
-def test_parser_train_prune_flags_parsed() -> None:
-    args = build_parser().parse_args(["train", "--prune", "--prune-k", "3"])
-    assert args.prune is True
-    assert args.prune_k == 3
+def test_missing_config_file_exits_2(tmp_path, caplog) -> None:
+    with caplog.at_level(logging.ERROR, logger="drone_fly.cli"):
+        rc = main(["train", "--config", str(tmp_path / "nope.yaml")])
+    assert rc == 2
+    assert any("not found" in r.getMessage() for r in caplog.records)
 
 
-def test_parser_smoke_train_prune_flags_parsed() -> None:
-    args = build_parser().parse_args(["smoke-train", "--prune", "--prune-k", "1"])
-    assert args.command == "smoke-train"
-    assert args.prune is True
-    assert args.prune_k == 1
+def test_malformed_config_exits_2(tmp_path) -> None:
+    p = tmp_path / "bad.yaml"
+    p.write_text("name: [unclosed\n", encoding="utf-8")
+    assert main(["train", "--config", str(p)]) == 2
+
+
+def test_train_missing_name_exits_2(tmp_path) -> None:
+    """A train config without the required `name` fails cleanly with exit 2 (AC3/AC6)."""
+    cfg = _write_config(tmp_path, {"adapter": "simple"})
+    assert main(["train", "--config", cfg]) == 2
+
+
+def test_train_unknown_key_exits_2(tmp_path) -> None:
+    cfg = _write_config(tmp_path, {"name": "x", "bogus": 1})
+    assert main(["train", "--config", cfg]) == 2
 
 
 # --------------------------------------------------------------------------- #
-# UC-04 (AC11) — the `prune` export subcommand
+# Dispatch — settings thread through to the stage functions (AC1/AC7)
 # --------------------------------------------------------------------------- #
-def test_parser_prune_defaults() -> None:
-    """The prune subcommand parses required/optional args with documented defaults."""
-    args = build_parser().parse_args(["prune", "--connectome", "in", "--out", "out"])
-    assert args.command == "prune"
-    assert args.connectome == "in"
-    assert args.out == "out"
-    assert args.prune_k == DEFAULT_PRUNE_K
-    assert args.prune_rule == DEFAULT_PRUNE_RULE
 
 
-def test_parser_prune_requires_connectome_and_out() -> None:
-    with pytest.raises(SystemExit):
-        build_parser().parse_args(["prune", "--out", "out"])  # missing --connectome
-    with pytest.raises(SystemExit):
-        build_parser().parse_args(["prune", "--connectome", "in"])  # missing --out
+def test_train_dispatch_routes_layout_and_threads_settings(tmp_path, monkeypatch) -> None:
+    """train --config wires TrainConfig(models_dir/logs_dir) under training/<name>/ (AC2/AC7)."""
+    captured: dict = {}
 
+    def fake_train(train_cfg, **kwargs):
+        captured["cfg"] = train_cfg
+        captured.update(kwargs)
+        return None
 
-def test_parser_prune_k_and_rule_parsed() -> None:
-    args = build_parser().parse_args(
-        [
-            "prune",
-            "--connectome",
-            "in",
-            "--out",
-            "out",
-            "--prune-k",
-            "0",
-            "--prune-rule",
-            "path_slack",
-        ]
+    monkeypatch.setattr("drone_fly.train.loop.train", fake_train)
+
+    cfg = _write_config(
+        tmp_path,
+        {
+            "name": "myrun",
+            "adapter": "simple",
+            "connectome": "tests/fixtures",
+            "timesteps": 2000,
+            "n_envs": 4,
+        },
     )
-    assert args.prune_k == 0
-    assert args.prune_rule == "path_slack"
+    assert main(["train", "--config", cfg]) == 0
+    assert captured["cfg"].models_dir == "training/myrun/checkpoints"
+    assert captured["cfg"].logs_dir == "training/myrun/logs"
+    assert captured["adapter"] == "simple"
+    assert captured["connectome_path"] == "tests/fixtures"
+    assert captured["total_timesteps"] == 2000
+    assert captured["n_envs"] == 4
+    # record default: recordings routed under the run layout; record_every coalesced to 1.
+    assert captured["record_dir"] == "training/myrun/recordings"
+    assert captured["record_every"] == 1
 
 
-def test_prune_subcommand_writes_reusable_slice(tmp_path, capsys) -> None:
-    """`prune` writes .npz + _meta.csv + PRUNE_PROVENANCE.md and round-trips (AC11)."""
+def test_train_dispatch_n_envs_defaults_none(tmp_path, monkeypatch) -> None:
+    """Omitting n_envs forwards None (train() then falls back to TrainConfig.n_envs) (AC7)."""
+    captured: dict = {}
+    monkeypatch.setattr("drone_fly.train.loop.train", lambda *a, **k: captured.update(k))
+    cfg = _write_config(tmp_path, {"name": "r", "adapter": "simple"})
+    assert main(["train", "--config", cfg]) == 0
+    assert captured["n_envs"] is None
+
+
+def test_train_explicit_record_dir_overrides_layout(tmp_path, monkeypatch) -> None:
+    captured: dict = {}
+    monkeypatch.setattr("drone_fly.train.loop.train", lambda *a, **k: captured.update(k))
+    cfg = _write_config(
+        tmp_path, {"name": "r", "adapter": "simple", "record": True, "record_dir": "custom/rec"}
+    )
+    assert main(["train", "--config", cfg]) == 0
+    assert captured["record_dir"] == "custom/rec"
+
+
+def test_evaluate_dispatch_threads_settings(tmp_path, monkeypatch, capsys) -> None:
+    captured: dict = {}
+
+    class _FakeMetrics:
+        def summary(self) -> str:
+            return "completion_rate=0.5"
+
+    def fake_eval(checkpoint, **kwargs):
+        captured["checkpoint"] = checkpoint
+        captured.update(kwargs)
+        return _FakeMetrics()
+
+    monkeypatch.setattr("drone_fly.evaluate.evaluator.evaluate_checkpoint", fake_eval)
+
+    cfg = _write_config(
+        tmp_path,
+        {"checkpoint": "c.zip", "adapter": "simple", "episodes": 3, "seed": 7},
+    )
+    assert main(["evaluate", "--config", cfg]) == 0
+    assert captured["checkpoint"] == "c.zip"
+    assert captured["episodes"] == 3
+    assert captured["seed"] == 7
+    assert captured["adapter"] == "simple"
+    assert "completion_rate" in capsys.readouterr().out
+
+
+def test_prune_trained_dispatch_defaults_adapter_simple_and_ignores_name(
+    tmp_path, monkeypatch
+) -> None:
+    """prune-trained defaults adapter='simple'; an optional `name` is accepted but inert."""
+    captured: dict = {}
+
+    class _Report:
+        neurons_before = neurons_after = edges_before = edges_after = 0
+        completion_before = completion_after_prune = completion_after_finetune = 0.0
+        out_dir = "o"
+        course_specific = False
+
+    def fake_pt(**kwargs):
+        captured.update(kwargs)
+        return _Report()
+
+    monkeypatch.setattr("drone_fly.prune_trained.workflow.prune_trained", fake_pt)
+
+    cfg = _write_config(tmp_path, {"checkpoint": "c.zip", "out": "o", "name": "inert"})
+    assert main(["prune-trained", "--config", cfg]) == 0
+    assert captured["adapter"] == "simple"  # AC7 trap
+    assert "name" not in captured  # deviation #2: name is inert, never forwarded
+
+
+def test_prune_dispatch_writes_reusable_slice(tmp_path, capsys) -> None:
+    """A real prune --config run writes the reusable slice + provenance and round-trips (AC1)."""
     out = tmp_path / "pruned"
-    rc = main(["prune", "--connectome", FIXTURE_DIR, "--out", str(out), "--prune-k", "0"])
-    assert rc == 0
-
+    cfg = _write_config(tmp_path, {"connectome": FIXTURE_DIR, "out": str(out), "prune_k": 0})
+    assert main(["prune", "--config", cfg]) == 0
     files = {p.name for p in out.iterdir()}
-    assert "connectome_pruned.npz" in files
-    assert "connectome_pruned_meta.csv" in files
-    assert "PRUNE_PROVENANCE.md" in files
-
-    # Reusable: reloads with the expected pruned scale (k=0 -> 59/751 on the fixture).
+    assert {"connectome_pruned.npz", "connectome_pruned_meta.csv", "PRUNE_PROVENANCE.md"} <= files
     reloaded = load_connectome(out)
-    assert reloaded.neuron_count == 59
-    assert reloaded.edge_count == 751
-
-    out_text = capsys.readouterr().out
-    assert "Pruned connectome written" in out_text
-
-
-def test_prune_subcommand_unknown_rule_errors(tmp_path) -> None:
-    """An unknown --prune-rule surfaces a clear error rather than writing garbage."""
-    out = tmp_path / "pruned"
-    with pytest.raises(ValueError, match="rule|Unknown"):
-        main(["prune", "--connectome", FIXTURE_DIR, "--out", str(out), "--prune-rule", "bogus"])
+    assert reloaded.neuron_count == 59 and reloaded.edge_count == 751
+    assert "Pruned connectome written" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------- #
-# UC-08 (AC6) — opt-in randomization flags on train / evaluate
+# AC2/AC7 — a real train --config run creates the training/<name>/ tree on disk
 # --------------------------------------------------------------------------- #
-def test_parser_train_randomize_flags_default_off() -> None:
-    """train exposes --randomize / --randomize-dynamics, both default off (AC6)."""
-    args = build_parser().parse_args(["train"])
-    assert args.randomize is False
-    assert args.randomize_dynamics is False
 
 
-def test_parser_train_randomize_flags_parsed() -> None:
-    args = build_parser().parse_args(["train", "--randomize", "--randomize-dynamics"])
-    assert args.randomize is True
-    assert args.randomize_dynamics is True
-
-
-def test_parser_evaluate_randomize_flags_default_off() -> None:
-    """evaluate exposes the same two flags, both default off (AC6)."""
-    args = build_parser().parse_args(["evaluate", "--checkpoint", "x.zip"])
-    assert args.randomize is False
-    assert args.randomize_dynamics is False
-
-
-def test_parser_evaluate_randomize_flags_parsed() -> None:
-    args = build_parser().parse_args(
-        ["evaluate", "--checkpoint", "x.zip", "--randomize", "--randomize-dynamics"]
+def test_real_train_config_creates_run_layout(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg = _write_config(
+        tmp_path,
+        {
+            "name": "e2e",
+            "adapter": "simple",
+            "connectome": FIXTURE_DIR,
+            "timesteps": 128,
+            "resume": "auto",  # idempotent bootstrap: no checkpoint yet -> fresh, no error
+        },
     )
-    assert args.randomize is True
-    assert args.randomize_dynamics is True
+    assert main(["train", "--config", cfg]) == 0
+    ckpt_dir = tmp_path / "training" / "e2e" / "checkpoints"
+    assert (tmp_path / "training" / "e2e" / "logs").is_dir()
+    assert (ckpt_dir / f"{CHECKPOINT_PREFIX}_final.zip").is_file()
+    # No flat artifacts/models fallback for a named run (AC3).
+    assert not (tmp_path / "artifacts" / "models").exists()
 
 
-def test_parser_randomize_axes_are_independent() -> None:
-    """Either axis can be enabled with the other off (AC5/AC6)."""
-    course_only = build_parser().parse_args(["train", "--randomize"])
-    assert course_only.randomize is True and course_only.randomize_dynamics is False
-    dyn_only = build_parser().parse_args(["train", "--randomize-dynamics"])
-    assert dyn_only.randomize is False and dyn_only.randomize_dynamics is True
+# --------------------------------------------------------------------------- #
+# AC5 — resume translation helper (null / latest / auto / explicit path)
+# --------------------------------------------------------------------------- #
 
 
-def test_build_env_config_none_when_both_off() -> None:
-    """No flags -> _build_env_config returns None (byte-identical to UC-03) (AC6/AC7)."""
-    from drone_fly.cli import _build_env_config
-
-    args = build_parser().parse_args(["train"])
-    assert _build_env_config(args) is None
+def _seed_checkpoints(directory: Path, steps: list[int]) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    for n in steps:
+        (directory / f"{CHECKPOINT_PREFIX}_{n}_steps.zip").write_bytes(b"")
 
 
-def test_build_env_config_enables_requested_axes() -> None:
-    """The flags flow into an EnvConfig.randomization with the right enable flags (AC6)."""
-    from drone_fly.cli import _build_env_config
+def test_resolve_resume_none_is_none(tmp_path) -> None:
+    assert _resolve_config_resume(None, str(tmp_path)) is None
 
-    course = _build_env_config(build_parser().parse_args(["train", "--randomize"]))
+
+def test_resolve_resume_latest_passes_through(tmp_path) -> None:
+    """'latest' is handed to train() unchanged (train resolves + hard-errors if none)."""
+    assert _resolve_config_resume("latest", str(tmp_path)) == "latest"
+
+
+def test_resolve_resume_auto_picks_newest_when_present(tmp_path) -> None:
+    ckpts = tmp_path / "checkpoints"
+    _seed_checkpoints(ckpts, [64, 256, 128])
+    resolved = _resolve_config_resume("auto", str(ckpts))
+    assert resolved is not None and resolved.endswith(f"{CHECKPOINT_PREFIX}_256_steps.zip")
+
+
+def test_resolve_resume_auto_is_none_when_empty(tmp_path) -> None:
+    """'auto' with no checkpoint yet -> fresh (None), no hard error (train.sh bootstrap)."""
+    assert _resolve_config_resume("auto", str(tmp_path / "empty")) is None
+
+
+def test_resolve_resume_explicit_path_passes_through(tmp_path) -> None:
+    assert _resolve_config_resume("some/x.zip", str(tmp_path)) == "some/x.zip"
+
+
+# --------------------------------------------------------------------------- #
+# record-every-without-record warning + env-config helper
+# --------------------------------------------------------------------------- #
+
+
+def test_warn_record_every_without_record_fires(caplog) -> None:
+    with caplog.at_level(logging.WARNING, logger="drone_fly.cli"):
+        _warn_record_every_without_record(5, False)
+    assert any("no effect" in r.getMessage() for r in caplog.records)
+
+
+def test_no_warn_record_every_with_record(caplog) -> None:
+    with caplog.at_level(logging.WARNING, logger="drone_fly.cli"):
+        _warn_record_every_without_record(5, True)
+    assert not any("no effect" in r.getMessage() for r in caplog.records)
+
+
+def test_no_warn_record_every_when_absent(caplog) -> None:
+    with caplog.at_level(logging.WARNING, logger="drone_fly.cli"):
+        _warn_record_every_without_record(None, False)
+    assert not any("no effect" in r.getMessage() for r in caplog.records)
+
+
+def test_env_config_none_when_both_off() -> None:
+    assert _env_config(False, False) is None
+
+
+def test_env_config_enables_requested_axes() -> None:
+    course = _env_config(True, False)
     assert course is not None
     assert course.randomization.enable_course is True
     assert course.randomization.enable_dynamics is False
 
-    both = _build_env_config(
-        build_parser().parse_args(
-            ["evaluate", "--checkpoint", "x.zip", "--randomize", "--randomize-dynamics"]
-        )
-    )
-    assert both.randomization.enable_course is True
-    assert both.randomization.enable_dynamics is True
+    both = _env_config(True, True)
+    assert both.randomization.enable_course is True and both.randomization.enable_dynamics is True
 
-    dyn = _build_env_config(build_parser().parse_args(["train", "--randomize-dynamics"]))
-    assert dyn.randomization.enable_course is False
-    assert dyn.randomization.enable_dynamics is True
+    dyn = _env_config(False, True)
+    assert dyn.randomization.enable_course is False and dyn.randomization.enable_dynamics is True
 
 
-def test_evaluate_dispatch_with_randomize(tmp_path, monkeypatch, capsys) -> None:
-    """`evaluate --randomize` dispatches end-to-end and reports the randomized metric (AC6/AC8)."""
-    monkeypatch.chdir(tmp_path)
-    assert main(["smoke-train", "--connectome", FIXTURE_DIR, "--timesteps", "128"]) == 0
-    models = tmp_path / "artifacts" / "models"
-    ckpt = models / f"{CHECKPOINT_PREFIX}_final.zip"
-    stats = models / "vecnormalize.pkl"
-    rc = main(
-        [
-            "evaluate",
-            "--checkpoint",
-            str(ckpt),
-            "--vecnormalize",
-            str(stats),
-            "--episodes",
-            "2",
-            "--adapter",
-            "simple",
-            "--device",
-            "cpu",
-            "--randomize",
-        ]
-    )
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "completion_rate" in out
-    assert "randomized" in out  # the honest-metric mode is disclosed
-
-
-# --------------------------------------------------------------------------- #
-# --n-envs — override TrainConfig.n_envs from the train CLI (train parser only)
-# --------------------------------------------------------------------------- #
-def test_parser_train_n_envs_flag() -> None:
-    """`train --n-envs 4` parses to args.n_envs == 4; omitted stays None (unchanged)."""
-    args = build_parser().parse_args(["train", "--n-envs", "4"])
-    assert args.n_envs == 4
-
-    omitted = build_parser().parse_args(["train"])
-    assert omitted.n_envs is None
-
-
-def test_train_dispatch_forwards_n_envs(monkeypatch) -> None:
-    """`main` threads --n-envs into the train() call (patch the call-time import point)."""
-    captured: dict = {}
-
-    def fake_train(*args, **kwargs):
-        captured.update(kwargs)
-        return None
-
-    # main() does `from drone_fly.train.loop import train` at call time, so the live
-    # attribute to patch is drone_fly.train.loop.train — not drone_fly.cli.train.
-    monkeypatch.setattr("drone_fly.train.loop.train", fake_train)
-
-    rc = main(["train", "--n-envs", "4", "--adapter", "simple", "--device", "cpu"])
-    assert rc == 0
-    assert captured["n_envs"] == 4
-
-
-def test_train_dispatch_n_envs_defaults_none(monkeypatch) -> None:
-    """Omitting --n-envs forwards n_envs=None (byte-identical to the unflagged run)."""
-    captured: dict = {}
-
-    def fake_train(*args, **kwargs):
-        captured.update(kwargs)
-        return None
-
-    monkeypatch.setattr("drone_fly.train.loop.train", fake_train)
-
-    rc = main(["train", "--adapter", "simple", "--device", "cpu"])
-    assert rc == 0
-    assert captured["n_envs"] is None
-
-
-def test_train_n_envs_zero_rejected() -> None:
-    """The <1 guard rejects --n-envs 0 with a clean argparse error (exit code 2)."""
-    with pytest.raises(SystemExit) as exc:
-        main(["train", "--n-envs", "0", "--adapter", "simple", "--device", "cpu"])
-    assert exc.value.code == 2
-
-
-def test_train_n_envs_negative_rejected() -> None:
-    """The guard also rejects negative env counts."""
-    with pytest.raises(SystemExit) as exc:
-        main(["train", "--n-envs", "-3", "--adapter", "simple", "--device", "cpu"])
-    assert exc.value.code == 2
-
-
-def test_smoke_train_rejects_n_envs() -> None:
-    """--n-envs is train-parser-only: smoke-train does not accept it."""
-    with pytest.raises(SystemExit):
-        build_parser().parse_args(["smoke-train", "--n-envs", "2"])
+def test_prune_default_prune_k_matches_source() -> None:
+    """Guard the imported default the CLI/config rely on stays the single source of truth."""
+    assert DEFAULT_PRUNE_K == 2
