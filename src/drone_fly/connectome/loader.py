@@ -50,10 +50,11 @@ class ExpectedScale:
 #
 # FIXTURE_EXPECTED_SCALE describes the small, committed, real-MaleCNS subgraph that
 # ships under tests/fixtures/. It is produced deterministically by
-# scripts/build_test_fixture.py (top-degree slice of the canonical MaleCNS matrix),
-# so the counts below are exact and reproducible. Tests assert the loaded fixture
-# matches these numbers exactly (AC1).
-FIXTURE_EXPECTED_SCALE = ExpectedScale(neuron_count=300, edge_count=10600)
+# scripts/build_test_fixture.py — the UC-13 modality-aware slice: a soma-populated
+# top-degree central core UNION a top-degree mechanosensory_proprioceptive afferent
+# quota (see that script + FIXTURE_PROVENANCE.md) — so the counts below are exact and
+# reproducible. Tests assert the loaded fixture matches these numbers exactly (AC1).
+FIXTURE_EXPECTED_SCALE = ExpectedScale(neuron_count=300, edge_count=8288)
 
 # MALECNS_V1_EXPECTED_SCALE describes the full canonical MaleCNS whole-brain matrix
 # (connectome_data_prep: data/maleCNS/mcns_inprop_all_neuron.npz). These counts come
