@@ -308,7 +308,7 @@ def _course_meta(course: CourseConfig) -> dict:
     frame is z-up / +x-forward / right-handed — recorded explicitly via ``forward_axis`` /
     ``up_axis`` so the viewer never has to guess.
     """
-    return {
+    meta = {
         "start": [float(v) for v in course.start_position],
         "gates": [
             {
@@ -328,6 +328,21 @@ def _course_meta(course: CourseConfig) -> dict:
         "forward_axis": "x",
         "up_axis": "z",
     }
+    # UC-15: obstacle pillars stamped **additively** — the key is emitted only when the course
+    # actually has obstacles, so no-obstacle runs and every pre-UC-15 recording stay byte-for-byte
+    # unchanged (the viewer degrades gracefully when the field is absent). Floor-anchored: base at
+    # ``floor_z``, top at ``floor_z + height``.
+    obstacles = getattr(course, "obstacles", ())
+    if obstacles:
+        meta["obstacles"] = [
+            {
+                "center": [float(o.center[0]), float(o.center[1])],
+                "radius": float(o.radius),
+                "height": float(o.height),
+            }
+            for o in obstacles
+        ]
+    return meta
 
 
 def _is_int_like(value: object) -> bool:

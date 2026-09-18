@@ -233,6 +233,17 @@ class RaceEnv(gym.Env):
         # Distance to the (possibly newly-advanced) target, for the progress term.
         dist_curr = self._dist_to_target(state.position)
 
+        # Obstacle contact (UC-15 AC2): swept per-step detection over the step segment (anti-
+        # tunneling), edge-triggered so a sustained overlap is penalised once. NEVER feeds
+        # ``terminated`` — obstacle contact is a reward-only signal; only floor/ceiling/OOB
+        # crashes end an episode, so the drone may recover aerially and still complete (AC9).
+        contact = any(
+            segment_contact(self._prev_pos, state.position, obstacle, course.floor_z)
+            for obstacle in course.obstacles
+        )
+        obstacle_contact = bool(contact and not self._prev_contact)
+        self._prev_contact = contact
+
         reward = compute_reward(
             dist_to_target_prev=dist_prev,
             dist_to_target_curr=dist_curr,
@@ -241,6 +252,7 @@ class RaceEnv(gym.Env):
             completed=completed,
             cfg=self.config.reward,
             num_gates=course.num_gates,
+            obstacle_contact=obstacle_contact,
         )
 
         terminated = bool(completed or state.collided)
@@ -252,6 +264,9 @@ class RaceEnv(gym.Env):
             "event": event,
             "collided": bool(state.collided),
             "completed": bool(completed),
+            # UC-15: True only on the step an obstacle contact *begins* (edge-triggered), i.e.
+            # the step the severe non-terminating obstacle penalty was applied. Additive key.
+            "obstacle_contact": obstacle_contact,
             "steps": self._step_count,
             # Current target gate index (UC-09): 0..N-1 while chasing gates, clamped to N
             # once all gates are passed (targeting the finish). Additive; viewer highlights it.

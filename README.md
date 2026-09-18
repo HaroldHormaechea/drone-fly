@@ -98,10 +98,25 @@ their small flag surfaces.
 ### Observation schema & retraining
 The `schema` train key (UC-13) opts into a named **block observation schema**. `migrated_v1`
 re-binds the 12-d observation into a *vision* block (target-relative → visual neurons) and a
-*proprioception* block (self-motion → the mechanosensory/proprioceptive population). Omitting
-`schema` keeps the legacy single-projection behaviour. **Note:** a block schema changes the
-input→sensory wiring, so checkpoints trained under the old wiring do not carry over — a fresh
-train is required.
+*proprioception* block (self-motion → the mechanosensory/proprioceptive population).
+`obstacle_vision_v2` (UC-15) extends `migrated_v1` with an *obstacle-vision* block (width 12 =
+nearest-3 pillars × 4 features) bound to the same visual population; setting it widens the
+observation to 24-d and makes the env emit the egocentric obstacle encoding (and, when course
+randomization is on, sample pillars). Omitting `schema` keeps the legacy single-projection
+behaviour. **Note:** a block schema changes the input→sensory wiring, so checkpoints trained
+under a different wiring do not carry over — a fresh train is required. A `migrated_v1`
+checkpoint can be *grafted* to `obstacle_vision_v2` (obstacle block zero-initialised → identical
+actions until fine-tuned), but VecNormalize obs-stats are 12-d and do **not** carry to 24-d, so
+fresh normalisation stats are part of that retrain.
+
+### Obstacles (UC-15)
+Courses may carry cylindrical **pillar obstacles** (floor-anchored: `center`, `radius`,
+`height`). A drone↔pillar contact each step applies a severe, **non-terminating** penalty
+(`RewardConfig.obstacle_penalty`, default 50, edge-triggered once per contact) — only
+floor/ceiling/out-of-bounds crashes end an episode, so the drone can recover aerially and still
+finish. The randomizer (under the course-randomize axis) samples solvability-guarded pillars,
+and the 3D viewer draws them as wireframe cylinders. See `default_obstacle_course()` for the
+fixed manually-placed default set.
 
 ### Visualization & recording
 Enable recording in a train/evaluate config with `record: true` (tune cadence via `record_every`);
