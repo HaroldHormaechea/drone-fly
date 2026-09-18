@@ -25,6 +25,7 @@ and noise-free, so a fixed ``seed`` yields a bit-identical episode for a given p
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 
 import gymnasium as gym
@@ -33,7 +34,7 @@ import numpy as np
 from drone_fly.adapter import make_adapter
 from drone_fly.controller.encoding import ACTION_DIM, OBS_DIM
 from drone_fly.env.config import DynamicsParams, EnvConfig
-from drone_fly.env.docking import evaluate_dock
+from drone_fly.env.docking import evaluate_dock, pad_under
 from drone_fly.env.geometry import advance, current_target
 from drone_fly.env.obstacles import (
     OBSTACLE_FEATURES_PER,
@@ -194,7 +195,11 @@ class RaceEnv(gym.Env):
         # determinism / byte-identity, AC7). When enabled the sampler draws off the env's
         # seeded RNG, so a seed reproduces the same course *and* dynamics stream (AC4).
         if rcfg.enable_course:
-            self._course = sample_course(self.np_random, rcfg, self.config.course)
+            # UC-18: forward the battery config so an energy-constrained sampled course gets a
+            # reachable recharge-pad cover (no-op when the recharge axis is off → byte-identical).
+            self._course = sample_course(
+                self.np_random, rcfg, self.config.course, battery=self.config.battery
+            )
         else:
             self._course = self.config.course
 
@@ -227,6 +232,13 @@ class RaceEnv(gym.Env):
         # course gets proportionally more time so it stays completable. N=1 => 400 exactly.
         episode = self.config.episode
         self._max_steps = episode.max_steps + episode.steps_per_gate * (self._course.num_gates - 1)
+        # UC-18: grant extra budget per **rechargeable** pad so a legitimate recharge detour
+        # (descend + dwell-to-full + climb-out) can still finish within the timeout — the UC-16
+        # "dwell consumes the step budget" pitfall. Added ONLY when ≥1 rechargeable pad is on the
+        # active course, so a no-recharge course keeps the exact UC-09 budget (byte-identical, AC5).
+        num_recharge_pads = sum(1 for pad in self._course.pads if pad.rechargeable)
+        if num_recharge_pads > 0:
+            self._max_steps += episode.recharge_step_allowance * num_recharge_pads
         info = {
             "phase": self._phase_str(),
             "backend": self.backend,
@@ -297,6 +309,26 @@ class RaceEnv(gym.Env):
         # across dwell (each docked step re-satisfies the rule) and clears on takeoff (collided
         # goes False ⇒ docked False), giving repeatable dock↔fly within one episode (AC4/AC5).
         self._docked = docked
+
+        # UC-18 recharge (AC1/AC2): while docked on a **rechargeable** pad the battery refills.
+        # Gated on THREE conditions so the pad is load-bearing but never over-reaches:
+        #   * ``self._battery_enabled`` — no battery physics ⇒ nothing to recharge (byte-identical);
+        #   * ``docked`` (the UC-16 stateless dock predicate: floor contact, slow, upright, over a
+        #     pad) — a mere hover over a recharge pad is NOT docked, so it does NOT recharge (AC2);
+        #   * ``pad is not None and pad.rechargeable`` — a plain (non-recharge) pad never refills,
+        #     so docking on it drains-only exactly as UC-16/17 (AC1).
+        # The adapter already applied this step's drain (thrust used the start-of-step charge), so
+        # the increment nets against it: with the documented net-positive invariant
+        # (recharge_rate > docked drain) a docked step is a strict gain. We overwrite ``state`` via
+        # ``dataclasses.replace`` BEFORE ``_observation`` so the refill shows in the SAME step's
+        # battery obs (AC6 step-by-step dwell is observable). ``pad_under`` reuses the exact UC-16
+        # geometry the dock predicate already checked, so the two never disagree on which pad.
+        if self._battery_enabled and docked:
+            pad = pad_under(state.position, course.pads)
+            if pad is not None and pad.rechargeable:
+                delta = self.config.battery.recharge_rate * self.config.episode.dt
+                new_battery = self.adapter.recharge(delta)
+                state = dataclasses.replace(state, battery=new_battery)
 
         reward = compute_reward(
             dist_to_target_prev=dist_prev,

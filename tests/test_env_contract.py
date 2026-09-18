@@ -987,3 +987,264 @@ def test_battery_depletion_triggers_soft_crash_termination() -> None:
     assert truncated is False, "the soft crash terminates before the timeout, not by truncation"
     assert info["collided"] is True, "the soft depletion is reported as a (crash) collision"
     assert info.get("is_success") is False, "sinking on an empty battery is not a course success"
+
+
+# ===========================================================================
+# UC-18 — recharge pads: dock-to-recharge, course-variation, load-bearing (AC1/AC2/AC5/AC6)
+# ===========================================================================
+from drone_fly.env.config import PadSpec  # noqa: E402
+
+
+class _BatteryDockScriptedAdapter:
+    """A scripted-position dock adapter that carries a REAL numpy battery ledger (UC-18 AC6).
+
+    Extends the UC-16 :class:`_DockScriptedAdapter` idea: positions / contact / attitude are
+    replayed frame by frame (so the dock classifier is driven deterministically), but the battery
+    is a genuine :class:`SimpleDroneAdapter` — the SAME numpy drain (applied every ``step``) and
+    ``recharge`` (clamp-at-1.0) arithmetic the flight adapter uses. This lets a hermetic scripted
+    trajectory *measure* the battery in the numpy sim: the env drains on every step and tops up via
+    ``recharge`` only on a docked step over a ``rechargeable`` pad — exactly as in real flight — so
+    "the pad is load-bearing" is a measured claim about the numpy battery ledger, not a stub.
+    """
+
+    backend = "scripted"
+
+    def __init__(
+        self,
+        positions,
+        collided_flags,
+        battery_cfg,
+        *,
+        dt=0.05,
+        floor_z=0.0,
+        ceiling_z=2.5,
+        start_position=(0.0, 0.0, 1.0),
+        attitudes=None,
+    ):
+        self._positions = [np.asarray(p, dtype=np.float64) for p in positions]
+        self._collided = list(collided_flags)
+        if attitudes is None:
+            attitudes = [(0.0, 0.0, 0.0)] * len(positions)
+        self._attitudes = [np.asarray(a, dtype=np.float64) for a in attitudes]
+        self._i = 0
+        # A real numpy adapter, used ONLY as the battery ledger (its integrated position is
+        # ignored — positions are scripted). This is the numpy sim doing the battery arithmetic.
+        self._battery_adapter = SimpleDroneAdapter(
+            np.asarray(start_position, dtype=np.float64),
+            floor_z=floor_z,
+            ceiling_z=ceiling_z,
+            dt=dt,
+            battery=battery_cfg,
+        )
+
+    def _state(self, idx) -> DroneState:
+        j = min(idx, len(self._positions) - 1)
+        return DroneState(
+            position=self._positions[j].copy(),
+            velocity=np.zeros(3),
+            attitude=self._attitudes[j].copy(),
+            angular_velocity=np.zeros(3),
+            collided=bool(self._collided[j]),
+            battery=self._battery_adapter._battery,
+        )
+
+    def reset(self, seed=None) -> DroneState:
+        self._i = 0
+        self._battery_adapter.reset(seed=seed)
+        return self._state(0)
+
+    def step(self, action) -> DroneState:
+        self._i += 1
+        self._battery_adapter.step(action)  # genuine numpy drain for this step
+        return self._state(self._i)
+
+    def recharge(self, delta: float) -> float:
+        return self._battery_adapter.recharge(delta)
+
+    def close(self) -> None:  # pragma: no cover - trivial
+        pass
+
+
+# A tuned, energy-constrained fixture (per the plan's "tuned drain" note). dt=0.05 → drain
+# 0.10/step (idle 2.0, throttle term 0); recharge_rate 8.0 → +0.40 per docked step (net +0.30).
+# The net-positive invariant (8.0 > 2.0) holds with wide margins so the arithmetic is robust.
+_RCHG_BATTERY = BatteryConfig(enabled=True, idle_rate=2.0, throttle_rate=0.0, recharge_rate=8.0)
+
+
+def _recharge_course(rechargeable: bool) -> CourseConfig:
+    """A one-gate course with a single floor pad at (2, 0); ``rechargeable`` toggles the flag."""
+    return CourseConfig(
+        start_position=(0.0, 0.0, 1.0),
+        gates=(GateSpec(center=(4.0, 0.0, 1.0), aperture=0.6),),
+        finish_x=5.0,
+        floor_z=0.0,
+        ceiling_z=2.5,
+        pads=(PadSpec(center=(2.0, 0.0), radius=0.5, rechargeable=rechargeable),),
+    )
+
+
+# Scripted trajectory: fly+drain → slow descent onto the pad → dwell (refill) → take off →
+# pass the gate → cross the finish. Contact is True only on the five docked frames (5..9).
+_RCHG_POSITIONS = [
+    (0.0, 0.0, 1.0),  # 0 spawn (reset)
+    (0.7, 0.0, 1.0),  # 1 fly forward (airborne, drains)
+    (1.4, 0.0, 0.8),  # 2 descend toward the pad
+    (2.0, 0.0, 0.3),  # 3 airborne OVER the pad (no contact → AC2: no refill while hovering)
+    (2.0, 0.0, 0.02),  # 4 slow final approach, still airborne
+    (2.0, 0.0, 0.0),  # 5 DOCK — floor contact, descent 0.4<0.5, upright, over pad
+    (2.0, 0.0, 0.0),  # 6 dwell (refill)
+    (2.0, 0.0, 0.0),  # 7 dwell
+    (2.0, 0.0, 0.0),  # 8 dwell
+    (2.0, 0.0, 0.0),  # 9 dwell
+    (2.0, 0.0, 0.3),  # 10 take off (airborne again)
+    (3.0, 0.0, 0.8),  # 11 fly toward the gate
+    (4.0, 0.0, 1.0),  # 12 pass the gate (segment reaches the gate centre, within aperture)
+    (5.1, 0.0, 1.0),  # 13 cross the finish plane (x 4.0 → 5.1 forward-crosses finish_x=5.0)
+]
+_RCHG_CONTACT = [False] * 5 + [True] * 5 + [False] * 4
+_RCHG_DOCK_FRAMES = range(5, 10)  # step indices where the drone is docked on the pad
+
+
+def _run_recharge_trajectory(rechargeable: bool):
+    """Replay the scripted trajectory on the battery-ledger adapter; return per-step battery
+    charge (decoded from the width-1 battery obs), whether the course completed, and dock flags.
+    """
+    env = _env_with(
+        _BatteryDockScriptedAdapter(_RCHG_POSITIONS, _RCHG_CONTACT, _RCHG_BATTERY),
+        EnvConfig(course=_recharge_course(rechargeable), battery=_RCHG_BATTERY),
+    )
+    obs, _info = env.reset(seed=0)
+    # Battery obs is the last dim, encoded as depletion = 1 - charge.
+    charges = [1.0 - float(obs[-1])]
+    docked = [False]
+    completed = False
+    completed_at = None
+    for i in range(1, len(_RCHG_POSITIONS)):
+        obs, _r, terminated, truncated, info = env.step(HOVER)
+        charges.append(1.0 - float(obs[-1]))
+        docked.append(bool(info["docked"]))
+        if info.get("completed") and completed_at is None:
+            completed = True
+            completed_at = i
+        if terminated or truncated:
+            break
+    return charges, docked, completed, completed_at
+
+
+# --- AC1: recharge accrues ONLY while docked on a rechargeable pad; clamps at 1.0 ---------
+def test_recharge_accrues_only_while_docked_on_a_rechargeable_pad() -> None:
+    """AC1: the battery drains while airborne, then RISES across the docked dwell on a
+    rechargeable pad (each docked step nets a gain), then drains again after take off."""
+    charges, docked, _completed, _at = _run_recharge_trajectory(rechargeable=True)
+    # Airborne approach (frames 1..4): strictly draining.
+    assert charges[4] < charges[1] < charges[0]
+    # Dock (frame 5) refills: the observed charge jumps up versus the pre-dock low.
+    assert charges[5] > charges[4]
+    # Every docked frame is flagged docked and never below the pre-dock charge (net-positive).
+    assert all(docked[i] for i in _RCHG_DOCK_FRAMES)
+    assert min(charges[i] for i in _RCHG_DOCK_FRAMES) >= charges[4]
+    # After take off (frames 10..) the battery drains again (no more refill).
+    assert charges[11] < charges[10]
+
+
+def test_recharge_clamps_at_full_charge_over_a_long_dwell() -> None:
+    """AC1: a sustained dwell tops the battery up toward 1.0 and never exceeds it (clamp)."""
+    charges, _docked, _c, _a = _run_recharge_trajectory(rechargeable=True)
+    assert max(charges) <= 1.0 + 1e-9
+    # The dwell actually reached (clamped at) full charge on this tuned fixture.
+    assert max(charges[i] for i in _RCHG_DOCK_FRAMES) == pytest.approx(1.0)
+
+
+def test_non_rechargeable_pad_never_refills_even_while_docked() -> None:
+    """AC1/AC5: docking on a plain (non-recharge) pad never refills — the battery is monotone
+    non-increasing across the whole trajectory, drain-only exactly as UC-16/17."""
+    charges, docked, _c, _a = _run_recharge_trajectory(rechargeable=False)
+    # It still docks (the flag does not change dock geometry)...
+    assert all(docked[i] for i in _RCHG_DOCK_FRAMES)
+    # ...but the charge only ever falls (no refill on a non-recharge pad).
+    assert all(y <= x + 1e-12 for x, y in zip(charges, charges[1:], strict=False))
+
+
+# --- AC2: hovering over a recharge pad (airborne, not docked) does NOT recharge ------------
+def test_hover_over_recharge_pad_does_not_recharge() -> None:
+    """AC2: full landing required — frames 3 and 4 are airborne directly over the recharge pad
+    (no floor contact ⇒ not docked), so the battery keeps draining; no charge accrues in the air."""
+    charges, docked, _c, _a = _run_recharge_trajectory(rechargeable=True)
+    # Frames 3,4 sit over the pad horizontally but are airborne — not docked, so no refill.
+    assert docked[3] is False and docked[4] is False
+    assert charges[3] < charges[2]  # still draining while hovering over the pad
+    assert charges[4] < charges[3]
+
+
+# --- AC6: the pad is LOAD-BEARING — completes WITH the dwell, dies WITHOUT it -------------
+def test_recharge_pad_is_load_bearing_completes_with_dwell_and_dies_without() -> None:
+    """AC6: on an energy-constrained course the SAME scripted trajectory completes when the pad
+    recharges (battery stays strictly positive to the finish) and would fail without it (the
+    battery is fully depleted well before the finish). Both measured in the numpy battery sim.
+    """
+    # WITH recharge: genuine completion with charge to spare at every frame.
+    charges_on, docked_on, completed_on, at_on = _run_recharge_trajectory(rechargeable=True)
+    assert completed_on is True, "the course must complete when the recharge dwell tops up"
+    assert at_on == len(_RCHG_POSITIONS) - 1  # completed on the final (finish) frame
+    assert min(charges_on) > 0.0, "with recharge the battery never depletes en route"
+
+    # WITHOUT recharge: the battery is fully depleted (0.0) BEFORE the finish frame — a real drone
+    # could not sustain flight the rest of the way (an empty battery cannot hover; see below).
+    charges_off, _docked_off, _completed_off, _at_off = _run_recharge_trajectory(rechargeable=False)
+    finish_frame = len(_RCHG_POSITIONS) - 1
+    depleted_frames = [i for i, c in enumerate(charges_off) if c == pytest.approx(0.0)]
+    assert depleted_frames, "without recharge the battery must fully deplete"
+    assert depleted_frames[0] < finish_frame, "depletion must occur strictly before the finish"
+    # Tie the measured depletion to real inability to fly: an empty battery cannot hover
+    # (ceiling_factor(0) < the 0.5 hover threshold at base TWR 2), so the pad is load-bearing.
+    assert _RCHG_BATTERY.ceiling_factor(0.0) < 0.5
+
+
+# --- AC5: a rechargeable pad is inert when battery physics are disabled (byte-identity) ----
+def test_rechargeable_flag_is_inert_when_battery_disabled() -> None:
+    """AC5: with battery DISABLED the recharge path is gated off entirely, so a course carrying a
+    rechargeable pad is byte-identical (obs / reward / termination / RNG) to the same course whose
+    pad is plain — and the observation stays the locked 12-d contract (no battery block)."""
+
+    def stream(rechargeable: bool):
+        env = make_env(EnvConfig(course=_recharge_course(rechargeable)), adapter="simple")
+        rng = np.random.default_rng(4)
+        actions = [rng.uniform([0, -1, -1, -1], [1, 1, 1, 1]) for _ in range(40)]
+        obs, _ = env.reset(seed=0)
+        trace = [obs.copy()]
+        rewards, terms, truncs = [], [], []
+        for a in actions:
+            obs, r, terminated, truncated, _info = env.step(np.asarray(a, dtype=np.float32))
+            trace.append(obs.copy())
+            rewards.append(r)
+            terms.append(terminated)
+            truncs.append(truncated)
+            if terminated or truncated:
+                break
+        return np.array(trace), rewards, terms, truncs, env.np_random.bit_generator.state
+
+    on = stream(rechargeable=True)
+    off = stream(rechargeable=False)
+    assert on[0].shape[1] == OBS_DIM  # still the locked 12-d observation (battery off)
+    np.testing.assert_array_equal(on[0], off[0])  # observation stream
+    assert on[1] == off[1]  # reward stream
+    assert on[2] == off[2] and on[3] == off[3]  # termination / truncation streams
+    assert on[4] == off[4]  # identical RNG consumption (the flag draws nothing)
+
+
+def test_rechargeable_pad_extends_the_step_budget() -> None:
+    """UC-18 (step-budget allowance): the env grants ``recharge_step_allowance`` extra steps per
+    rechargeable pad on the active course (so a legitimate recharge detour still finishes in time),
+    and grants NONE when the pad is plain (byte-identical budget)."""
+    with_recharge = make_env(
+        EnvConfig(course=_recharge_course(True), battery=_RCHG_BATTERY), adapter="simple"
+    )
+    without = make_env(
+        EnvConfig(course=_recharge_course(False), battery=_RCHG_BATTERY), adapter="simple"
+    )
+    with_recharge.reset(seed=0)
+    without.reset(seed=0)
+    episode = EpisodeConfig()
+    base_budget = episode.max_steps + episode.steps_per_gate * (1 - 1)  # N=1 course
+    assert without._max_steps == base_budget  # plain pad → no extra budget
+    assert with_recharge._max_steps == base_budget + episode.recharge_step_allowance

@@ -59,10 +59,20 @@ class PadSpec:
     floor contact that is horizontally within ``radius`` of a pad (and slow + upright enough —
     see :mod:`drone_fly.env.docking`) is a **dock** rather than a crash. Pure geometry resolves
     this against the numpy adapter's point position, hermetic and offline.
+
+    ``rechargeable`` (UC-18 AC1) tags a pad as a **recharge pad**: while the drone is in the
+    UC-16 *docked* state on it, the battery refills toward ``1.0`` (applied in the env step). It
+    is appended **last** (after ``radius``) with a ``False`` default, so a positional
+    ``PadSpec(center, radius)`` from UC-16/17 is unshifted and a default ``PadSpec`` is
+    byte-identical — every existing pad stays a plain (non-recharging) landing pad and the
+    recharge path is never taken (AC5). Docking geometry is unchanged: the flag re-classifies
+    what a *dock on this pad* does, never whether a floor contact docks.
     """
 
     center: tuple[float, float]
     radius: float
+    # UC-18: recharge tag. Appended **last** with a ``False`` default → byte-identical PadSpec.
+    rechargeable: bool = False
 
     @property
     def axis_xy(self) -> np.ndarray:
@@ -351,6 +361,32 @@ class RandomizationConfig:
     obstacle_lateral_offset_range: tuple[float, float] = (1.0, 1.8)  # |y| offset off a gate
     obstacle_clearance: float = 0.3  # polyline must clear each pillar by radius + this
 
+    # -- recharge axis (UC-18 AC3/AC4) --------------------------------------------------
+    # A **course-variation** axis (NOT a shaping reward): when on, a sampled/fallback course whose
+    # full 3D flight path costs more than one battery charge (under the caller's battery config)
+    # has recharge pads placed on it so the finish is reachable *with* a landing-and-recharge; a
+    # course that fits one charge gets none. Placement is a pure, **zero-RNG** greedy interval
+    # cover over the reference path (see randomization._place_recharge_pads), so a disabled axis —
+    # and every non-constrained course — draws nothing and stays byte-identical (AC5). All fields
+    # appended **last** with off/neutral defaults so field order stays UC-15/16/17-compatible.
+    #
+    # The energy model is a deliberately CONSERVATIVE generation-and-guard HEURISTIC over the
+    # reference polyline (mirroring the UC-15 obstacle-clearance guard); its only hard guarantee is
+    # AC4 model-level reachability. AC3 "unreachable on one charge" and AC6 "pad is load-bearing"
+    # are discharged EMPIRICALLY by measured numpy-sim rollouts in the tests, never by this model.
+    enable_recharge: bool = False
+    # Nominal cruise speed (m/s) the energy model assumes to convert path length → flight time;
+    # a documented lower-bound-on-cruise assumption (slower cruise ⇒ more time ⇒ more drain, so a
+    # conservative low value over-estimates energy — the safe direction for the AC4 guarantee).
+    recharge_nominal_speed: float = 2.0
+    # Nominal throttle the energy model assumes while cruising (hover ≈ 0.5 at base TWR 2).
+    recharge_nominal_throttle: float = 0.5
+    # Horizontal radius of a placed recharge pad (m); matches the default landing-pad radius.
+    recharge_pad_radius: float = 0.5
+    # Safety margin multiplying the modelled path energy (>1 ⇒ conservative: the guard treats a
+    # course as costlier than the bare model says, so it never under-provisions recharge pads).
+    recharge_energy_margin: float = 1.5
+
 
 @dataclass(frozen=True)
 class RewardConfig:
@@ -386,6 +422,13 @@ class EpisodeConfig:
     dt: float = 0.05  # control timestep (s) -> 20 Hz
     max_steps: int = 400  # base/floor timeout for a 1-gate course (400 * 0.05s = 20s)
     steps_per_gate: int = 200  # extra step budget granted per gate beyond the first (UC-09)
+    # UC-18: extra step budget granted **per rechargeable pad** on the active course, so a
+    # legitimate recharge detour (descend + dwell-to-full + climb-out) can still finish within the
+    # timeout — addresses the UC-16 "dwell consumes the step budget" pitfall. 400 ≈ descend +
+    # dwell-to-full (~40 steps at recharge_rate 0.5/s from empty) + climb-out + margin. Added ONLY
+    # when ≥1 rechargeable pad is present (see racing_env.reset), so a course with no recharge pad
+    # keeps the exact UC-09 budget and ``EpisodeConfig()`` stays byte-identical (AC5). Tunable.
+    recharge_step_allowance: int = 400
 
 
 @dataclass(frozen=True)
@@ -434,6 +477,19 @@ class BatteryConfig:
     throttle_rate: float = 0.01  # extra fraction per second at full throttle (∝ throttle)
     knee: float = 0.2  # charge at/above which the thrust ceiling stays ≈ full
     empty_factor: float = 0.3  # ceiling factor at empty charge; < 0.5 ⇒ cannot hover (soft crash)
+    # UC-18: recharge rate while **docked on a recharge pad** — fraction of full charge added per
+    # second (symmetric with the drain rates above; rate-based so a longer dwell refills more and
+    # AC6's step-by-step refill is observable). The env adds ``recharge_rate * dt`` per docked step
+    # and clamps at 1.0 (AC1). Appended **last** with a default, so ``BatteryConfig()`` — and thus
+    # ``EnvConfig()`` — stays byte-identical to UC-17 (the recharge path only runs while docked on a
+    # ``rechargeable`` pad, which requires pads that a default course has none of).
+    #
+    # NET-POSITIVE INVARIANT (documented, load-bearing): ``recharge_rate`` MUST exceed the maximum
+    # docked drain ``idle_rate + throttle_rate * throttle`` so a docked step nets a *gain* and the
+    # pad actually fills — otherwise it would never refill. Default 0.5 ≫ the default max drain
+    # (0.005 + 0.01 = 0.015/s), so it holds with huge headroom; any test that raises the drain
+    # rates to force an energy-constrained course MUST raise ``recharge_rate`` to preserve this.
+    recharge_rate: float = 0.5
 
     def ceiling_factor(self, battery: float) -> float:
         """Thrust-ceiling multiplier for a given normalized ``battery`` charge (AC2/AC6).

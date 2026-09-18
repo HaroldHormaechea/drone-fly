@@ -129,6 +129,20 @@ class SimpleDroneAdapter(DroneAdapter):
             self._max_body_rate = float(dynamics.max_body_rate)
             self._latency = int(dynamics.latency_steps)
 
+    def recharge(self, delta: float) -> float:
+        """Add ``delta`` charge to the battery, clamped at ``1.0``; return the new charge (UC-18).
+
+        Geometry-agnostic by design: the adapter knows *how much* charge to add, never *whether*
+        a recharge is warranted — the env decides that (drone docked on a ``rechargeable`` pad)
+        and calls this with the per-step increment ``recharge_rate * dt``. ``delta`` is floored at
+        ``0`` so a negative increment can never *drain* through this path, and the result is
+        clamped at ``1.0`` (AC1 ceiling — a full battery cannot overcharge). Safe to call on the
+        battery-disabled path too (``_battery`` stays a plain float), though the env only calls it
+        when battery physics are enabled.
+        """
+        self._battery = min(1.0, self._battery + max(0.0, float(delta)))
+        return self._battery
+
     def _state(self, collided: bool) -> DroneState:
         return DroneState(
             position=self._position.copy(),

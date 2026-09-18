@@ -32,14 +32,21 @@ import numpy as np
 
 from drone_fly.adapter.simple import SimpleDroneAdapter
 from drone_fly.env.config import (
+    BatteryConfig,
     CourseConfig,
     DynamicsParams,
     GateSpec,
     ObstacleSpec,
+    PadSpec,
     RandomizationConfig,
 )
 from drone_fly.env.randomization import (
+    _BATTERY_BUDGET,
     _fallback_course,
+    _path_energy,
+    _place_recharge_pads,
+    _recharge_covering_valid,
+    _reference_path,
     is_course_solvable,
     sample_course,
     sample_dynamics,
@@ -571,3 +578,178 @@ def test_disabled_obstacle_axis_leaves_the_gate_stream_unperturbed() -> None:
         return [sample_course(rng, rcfg, base) for _ in range(k)]
 
     assert sequence(plain) == sequence(fat)
+
+
+# =====================================================================================
+# UC-18 — recharge axis: course variation (AC3), reachable covering (AC4), zero-RNG (AC5)
+# =====================================================================================
+# The plan's "tuned drain" fixture: a higher drain so the DEFAULT-range courses split into
+# energy-constrained (need a recharge landing) and one-charge-completable classes. dt cancels in
+# the pure energy model; the net-positive invariant holds (recharge_rate 0.9 > idle+throttle 0.13).
+_TUNED_BATTERY = BatteryConfig(enabled=True, idle_rate=0.08, throttle_rate=0.05, recharge_rate=0.9)
+
+
+def _rechargeable_pads(course: CourseConfig) -> list[PadSpec]:
+    return [p for p in course.pads if p.rechargeable]
+
+
+# --- AC3: both classes (constrained + non-constrained) are produced under tuned drain ------
+def test_recharge_axis_produces_both_course_classes_under_tuned_drain() -> None:
+    """AC3: with the recharge axis on and a tuned drain, sampling across seeds yields BOTH
+    energy-constrained courses (carry recharge pads) AND one-charge-completable courses (none)."""
+    rcfg = RandomizationConfig(enable_course=True, enable_recharge=True)
+    base = CourseConfig()
+    constrained = non_constrained = 0
+    for seed in range(60):
+        course = sample_course(np.random.default_rng(seed), rcfg, base, battery=_TUNED_BATTERY)
+        if _rechargeable_pads(course):
+            constrained += 1
+        else:
+            non_constrained += 1
+    # The plan's fixture splits ~35 / ~25 over seeds 0..59; assert both classes are well-populated
+    # (loose bounds so the test is robust to numpy RNG version drift).
+    assert constrained >= 10, f"expected some energy-constrained courses, got {constrained}"
+    assert non_constrained >= 10, f"expected some one-charge courses, got {non_constrained}"
+
+
+# --- AC4: every sampled course is solvable AND every constrained one carries a valid cover --
+def test_every_tuned_course_is_solvable_and_constrained_ones_are_covered() -> None:
+    """AC4: for every sampled course under the tuned drain, the battery-aware solvability guard
+    passes; a course whose full 3D path exceeds one charge carries ≥1 rechargeable pad whose
+    induced sub-paths each fit one charge, and a within-budget course carries none."""
+    rcfg = RandomizationConfig(enable_course=True, enable_recharge=True)
+    base = CourseConfig()
+    saw_constrained = False
+    for seed in range(60):
+        course = sample_course(np.random.default_rng(seed), rcfg, base, battery=_TUNED_BATTERY)
+        assert is_course_solvable(course, rcfg, battery=_TUNED_BATTERY)
+        total_energy = _path_energy(_reference_path(course), rcfg, _TUNED_BATTERY)
+        rechargeable = _rechargeable_pads(course)
+        if total_energy > _BATTERY_BUDGET:
+            saw_constrained = True
+            assert rechargeable, "an over-budget course MUST carry a recharge cover"
+            # The covering re-verifies: every induced recharge sub-path fits one charge (AC4).
+            assert _recharge_covering_valid(course, rcfg, _TUNED_BATTERY, rechargeable)
+        else:
+            assert not rechargeable, "a within-budget course must carry no recharge pads"
+    assert saw_constrained, "the tuned drain must produce at least one constrained course"
+
+
+def test_constrained_course_induced_subpaths_each_fit_one_charge() -> None:
+    """AC4 (explicit leg check): on a known constrained course, every induced sub-path — start→…→
+    first pad, pad→…→next pad, last pad→…→finish, each with its descend/climb legs — costs
+    ≤ one charge, so the finish is reachable *with* landings."""
+    rcfg = RandomizationConfig(enable_course=True, enable_recharge=True)
+    base = CourseConfig()
+    # Find the first constrained seed deterministically.
+    course = None
+    for seed in range(60):
+        cand = sample_course(np.random.default_rng(seed), rcfg, base, battery=_TUNED_BATTERY)
+        if _rechargeable_pads(cand):
+            course = cand
+            break
+    assert course is not None and _rechargeable_pads(course)
+    # The whole path is over budget (that's WHY it needs pads)...
+    assert _path_energy(_reference_path(course), rcfg, _TUNED_BATTERY) > _BATTERY_BUDGET
+    # ...yet each induced recharge sub-path fits one charge (covering guarantee).
+    assert _recharge_covering_valid(course, rcfg, _TUNED_BATTERY, _rechargeable_pads(course))
+
+
+# --- AC4 (fallback): even the exhaustion fallback honours the covering guarantee ------------
+def test_fallback_under_recharge_carries_a_cover_when_constrained() -> None:
+    """AC4: a large-N fallback whose straight path exceeds one charge gets a recharge cover from
+    the SAME zero-RNG placer, so the exhaustion path never emits a constrained pad-less course."""
+    rcfg = RandomizationConfig(enable_course=True, enable_recharge=True)
+    base = CourseConfig()
+    fb = _fallback_course(10, base, rcfg, battery=_TUNED_BATTERY)
+    assert _path_energy(_reference_path(fb), rcfg, _TUNED_BATTERY) > _BATTERY_BUDGET
+    assert _rechargeable_pads(fb), "a constrained fallback must carry a recharge cover"
+    assert is_course_solvable(fb, rcfg, battery=_TUNED_BATTERY)
+
+
+def test_sample_course_exhaustion_returns_a_covered_fallback() -> None:
+    """AC4: when every sampled candidate is rejected (pathological ranges), the returned fallback
+    is still battery-solvable and — being large-N and constrained — carries a recharge cover."""
+    rcfg = RandomizationConfig(
+        enable_course=True,
+        enable_recharge=True,
+        num_gates_range=(10, 10),
+        gate_center_z_range=(9.0, 9.0),  # far above the corridor → every candidate rejected
+        max_resample_attempts=20,
+    )
+    base = CourseConfig()
+    result = sample_course(np.random.default_rng(1), rcfg, base, battery=_TUNED_BATTERY)
+    expected = _fallback_course(10, base, rcfg, battery=_TUNED_BATTERY)
+    assert result == expected  # the exact zero-RNG fallback
+    assert _rechargeable_pads(result)
+    assert is_course_solvable(result, rcfg, battery=_TUNED_BATTERY)
+
+
+def test_non_constrained_course_gets_no_recharge_pads() -> None:
+    """AC4: a course that fits one charge (a short single-gate course under the tuned drain) is
+    returned with NO recharge pads — the placer adds pads only when they are needed."""
+    rcfg = RandomizationConfig(enable_course=True, enable_recharge=True, num_gates_range=(1, 1))
+    base = CourseConfig()
+    for seed in range(20):
+        course = sample_course(np.random.default_rng(seed), rcfg, base, battery=_TUNED_BATTERY)
+        assert _path_energy(_reference_path(course), rcfg, _TUNED_BATTERY) <= _BATTERY_BUDGET
+        assert not _rechargeable_pads(course)
+
+
+# --- AC5: the recharge axis is zero-RNG — it never perturbs the gate/dynamics stream -------
+def test_disabled_recharge_axis_leaves_the_course_stream_byte_identical() -> None:
+    """AC5: two configs differing ONLY in their (unused) recharge fields, both with the axis OFF,
+    yield a byte-identical course sequence — a disabled recharge axis draws nothing."""
+    base = CourseConfig()
+    plain = RandomizationConfig(enable_course=True, enable_recharge=False)
+    fat = RandomizationConfig(
+        enable_course=True,
+        enable_recharge=False,
+        recharge_nominal_speed=0.5,
+        recharge_energy_margin=9.0,
+        recharge_pad_radius=1.2,
+    )
+
+    def sequence(rcfg: RandomizationConfig, seed: int = 7, k: int = 8) -> list[CourseConfig]:
+        rng = np.random.default_rng(seed)
+        return [sample_course(rng, rcfg, base, battery=_TUNED_BATTERY) for _ in range(k)]
+
+    assert sequence(plain) == sequence(fat)
+
+
+def test_active_recharge_axis_only_appends_pads_never_shifts_the_geometry() -> None:
+    """AC5 (zero-RNG placement): enabling the recharge axis leaves the sampled start / gates /
+    finish / obstacles bit-for-bit identical to the axis-off run for the same seed — the placer
+    consumes no RNG, so it can only APPEND pads to a constrained course, never move a gate."""
+    base = CourseConfig()
+    on = RandomizationConfig(enable_course=True, enable_recharge=True)
+    off = RandomizationConfig(enable_course=True, enable_recharge=False)
+    appended_any = False
+    for seed in range(30):
+        c_on = sample_course(np.random.default_rng(seed), on, base, battery=_TUNED_BATTERY)
+        c_off = sample_course(np.random.default_rng(seed), off, base, battery=_TUNED_BATTERY)
+        assert c_on.gates == c_off.gates
+        assert c_on.start_position == c_off.start_position
+        assert c_on.finish_x == c_off.finish_x
+        assert c_on.obstacles == c_off.obstacles
+        # The axis-off run never carries pads; the axis-on run may append recharge pads.
+        assert c_off.pads == ()
+        if c_on.pads:
+            appended_any = True
+    assert appended_any, "at least one seed should have appended a recharge cover"
+
+
+def test_recharge_placement_is_deterministic_for_a_fixed_seed_and_battery() -> None:
+    """AC5: recharge placement is a pure function of (course, rcfg, battery) — same inputs →
+    identical courses (including the placed pads), and the placer itself is deterministic."""
+    rcfg = RandomizationConfig(enable_course=True, enable_recharge=True)
+    base = CourseConfig()
+    a = sample_course(np.random.default_rng(9), rcfg, base, battery=_TUNED_BATTERY)
+    b = sample_course(np.random.default_rng(9), rcfg, base, battery=_TUNED_BATTERY)
+    assert a == b
+    # The placer is deterministic on a fixed candidate too (zero RNG).
+    off = RandomizationConfig(enable_course=True, enable_recharge=False)
+    candidate = sample_course(np.random.default_rng(9), off, base)
+    assert _place_recharge_pads(candidate, rcfg, _TUNED_BATTERY) == _place_recharge_pads(
+        candidate, rcfg, _TUNED_BATTERY
+    )
