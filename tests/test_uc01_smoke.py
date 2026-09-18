@@ -16,7 +16,7 @@ import torch
 from drone_fly.connectome import load_connectome
 from drone_fly.controller import ACTION_DIM, ConnectomePolicy, run_roundtrip
 
-# Generous ceiling — the real run is sub-second on the 300-neuron fixture. This guards
+# Generous ceiling — the real run is sub-second on the 322-neuron fixture. This guards
 # against an accidental regression that loads the full multi-GB matrix or does N**2 work.
 MAX_SECONDS = 60.0
 

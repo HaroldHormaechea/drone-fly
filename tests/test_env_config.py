@@ -20,6 +20,7 @@ import dataclasses
 import pytest
 
 from drone_fly.env.config import (
+    BatteryConfig,
     CourseConfig,
     DockConfig,
     EnvConfig,
@@ -145,10 +146,13 @@ def test_env_config_has_default_dock() -> None:
     assert EnvConfig().dock == DockConfig()
 
 
-def test_env_config_dock_is_last_field() -> None:
-    """``dock`` is appended after ``obstacle_vision`` so UC-15 positional/keyword calls stand."""
+def test_env_config_battery_is_last_field() -> None:
+    """UC-17: ``battery`` is appended after ``dock`` (which is after ``obstacle_vision``), so every
+    UC-15/UC-16 positional/keyword call is unshifted and ``EnvConfig()`` stays byte-identical."""
     fields = [f.name for f in dataclasses.fields(EnvConfig)]
-    assert fields[-1] == "dock"
+    assert fields[-1] == "battery"
+    # dock is now second-to-last, still directly after obstacle_vision.
+    assert fields.index("dock") == fields.index("battery") - 1
     assert fields.index("obstacle_vision") == fields.index("dock") - 1
 
 
@@ -206,3 +210,66 @@ def test_pad_courses_do_not_disturb_non_pad_factories() -> None:
 def test_gate_spec_still_defaults_unchanged() -> None:
     """Sanity: adding PadSpec did not perturb the neighbouring GateSpec default."""
     assert GateSpec(center=(1.0, 2.0, 3.0)).aperture == 0.6
+
+
+# =====================================================================================
+# BatteryConfig — off by default, documented tunable knobs (UC-17 AC1/AC2/AC3/AC5/AC6)
+# =====================================================================================
+def test_battery_config_is_off_by_default() -> None:
+    """AC5: battery is disabled by default so ``EnvConfig()`` is byte-identical to UC-16."""
+    assert BatteryConfig().enabled is False
+    assert EnvConfig().battery == BatteryConfig()
+    assert EnvConfig().battery.enabled is False
+
+
+def test_battery_config_default_knobs() -> None:
+    """Documented tunable defaults (drain rates, knee, empty_factor)."""
+    b = BatteryConfig()
+    assert b.idle_rate == 0.005
+    assert b.throttle_rate == 0.01
+    assert b.knee == 0.2
+    assert b.empty_factor == 0.3
+
+
+def test_battery_config_is_frozen() -> None:
+    b = BatteryConfig()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        b.enabled = True  # type: ignore[misc]
+
+
+def test_battery_empty_factor_below_hover_threshold() -> None:
+    """AC3: base TWR is 2 → hover needs ceiling_factor >= 0.5; empty_factor < 0.5 makes an empty
+    battery unable to hover (soft depletion via the crash path)."""
+    assert BatteryConfig().empty_factor < 0.5
+
+
+def test_ceiling_factor_full_at_and_above_knee() -> None:
+    """AC2/AC6: ceiling factor is exactly 1.0 at full charge and flat 1.0 at/above the knee."""
+    b = BatteryConfig()
+    assert b.ceiling_factor(1.0) == 1.0
+    assert b.ceiling_factor(b.knee) == 1.0
+    assert b.ceiling_factor(0.5) == 1.0
+
+
+def test_ceiling_factor_empty_equals_empty_factor() -> None:
+    """AC2: at empty charge the ceiling factor is exactly ``empty_factor``."""
+    b = BatteryConfig()
+    assert b.ceiling_factor(0.0) == b.empty_factor
+
+
+def test_ceiling_factor_monotone_nondecreasing() -> None:
+    """AC2: ceiling factor is monotone non-decreasing in charge (lower battery ⇒ lower ceiling)."""
+    b = BatteryConfig()
+    charges = [i / 50.0 for i in range(51)]  # 0.0 .. 1.0
+    factors = [b.ceiling_factor(c) for c in charges]
+    assert all(y >= x for x, y in zip(factors, factors[1:], strict=False))
+    # Strictly lower below the knee than at full.
+    assert b.ceiling_factor(0.1) < b.ceiling_factor(1.0)
+
+
+def test_ceiling_factor_linear_ramp_below_knee() -> None:
+    """Below the knee the factor is a straight line from ``empty_factor`` (0) to 1.0 (knee)."""
+    b = BatteryConfig()
+    mid = b.knee / 2.0
+    expected = b.empty_factor + (1.0 - b.empty_factor) * (mid / b.knee)
+    assert b.ceiling_factor(mid) == pytest.approx(expected)

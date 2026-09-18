@@ -61,6 +61,11 @@ class DroneState:
         Body-frame angular velocity ``[roll_rate, pitch_rate, yaw_rate]`` (rad/s).
     collided:
         ``True`` iff the drone is in contact with the floor or ceiling this step.
+    battery:
+        Normalized battery charge ``∈ [0, 1]`` (UC-17). ``1.0`` = full. Appended **last** with
+        a default of ``1.0`` so every pre-UC-17 construction (and the battery-disabled path) is
+        byte-identical: a ``DroneState`` built without ``battery`` reads as a full charge, which
+        is exactly the baseline the trained policy saw before batteries existed.
     """
 
     position: np.ndarray
@@ -68,6 +73,7 @@ class DroneState:
     attitude: np.ndarray
     angular_velocity: np.ndarray
     collided: bool
+    battery: float = 1.0
 
 
 def sanitize_action(action: np.ndarray) -> np.ndarray:

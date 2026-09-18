@@ -70,7 +70,7 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures"
 # UC-04's independently-reproduced fixture reduction under the structural path-inclusion rule
 # (see tests/test_prune.py). Locked here so the slice_connectome extraction that UC-04 now calls
 # has not changed UC-04 behaviour (AC8).
-UC04_FIXTURE_PRUNE_SCALE = {0: (45, 549), 1: (135, 3950), 2: (245, 7494)}
+UC04_FIXTURE_PRUNE_SCALE = {0: (45, 549), 1: (135, 3950), 2: (247, 7525)}
 
 
 # --------------------------------------------------------------------------- #
@@ -187,7 +187,7 @@ def test_measure_checkpoint_alignment_error(trained_checkpoint, connectome) -> N
     """AC1 — the checkpoint path asserts connectome.neuron_count == actor.n_neurons."""
     env = build_vec_env(adapter="simple", n_envs=1, seed=0, training=False, norm_reward=False)
     model = PPO.load(trained_checkpoint["checkpoint"], env=env, device="cpu")
-    # A smaller (sliced) connectome no longer aligns with the 300-neuron actor.
+    # A smaller (sliced) connectome no longer aligns with the 322-neuron actor.
     endpoints_s, endpoints_m = _endpoint_indices(connectome)
     kept = np.array(sorted(set(endpoints_s.tolist()) | set(endpoints_m.tolist())), dtype=np.int64)
     misaligned = slice_connectome(connectome, kept, source="misaligned")

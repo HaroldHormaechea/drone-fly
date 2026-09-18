@@ -73,7 +73,7 @@ def test_fixture_positions_are_exact_soma_partition(
 
     Real sensory afferents (the ``mechanosensory_proprioceptive`` quota) have no
     brain-volume soma, so coverage is partial by construction. This asserts the exact
-    partition (as strong as, not a relaxation of, the old 300/300 assertion; recorded
+    partition (as strong as, not a relaxation of, the old 322/322 assertion; recorded
     decision #3):
 
     * the number of soma-populated neurons equals the committed sidecar's row count (the

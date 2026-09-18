@@ -83,6 +83,7 @@ class SimpleDroneAdapter(DroneAdapter):
         floor_z: float,
         ceiling_z: float,
         dt: float,
+        battery=None,
     ) -> None:
         self._start = np.asarray(start_position, dtype=np.float64).reshape(3).copy()
         self._floor_z = float(floor_z)
@@ -101,6 +102,14 @@ class SimpleDroneAdapter(DroneAdapter):
         self._velocity = np.zeros(3, dtype=np.float64)
         self._attitude = np.zeros(3, dtype=np.float64)
         self._angular_velocity = np.zeros(3, dtype=np.float64)
+        # Battery drain + thrust-impact (UC-17). ``battery`` is a ``BatteryConfig`` (duck-typed:
+        # only its ``enabled``/``idle_rate``/``throttle_rate`` fields + ``ceiling_factor`` method
+        # are read — no import, so the adapter stays below ``env.config`` in the layering) or
+        # ``None``. Disabled ⇒ the step path never reads or drains ``_battery`` and thrust stays
+        # exactly ``throttle * _max_thrust`` (byte-identity, AC5/AC6). ``_battery`` resets to full.
+        self._battery_cfg = battery
+        self._battery_enabled = battery is not None and bool(battery.enabled)
+        self._battery = 1.0
 
     def reconfigure(self, *, start=None, dynamics=None) -> None:
         """Apply a new spawn and/or dynamics for the next episode (UC-08 AC5, AC7).
@@ -127,6 +136,9 @@ class SimpleDroneAdapter(DroneAdapter):
             attitude=self._attitude.copy(),
             angular_velocity=self._angular_velocity.copy(),
             collided=collided,
+            # UC-17: normalized charge. Stays ``1.0`` on the disabled path (never drained), so a
+            # battery-off episode reports a full charge and is byte-identical to pre-UC-17.
+            battery=self._battery,
         )
 
     def reset(self, seed: int | None = None) -> DroneState:
@@ -136,6 +148,8 @@ class SimpleDroneAdapter(DroneAdapter):
         self._velocity = np.zeros(3, dtype=np.float64)
         self._attitude = np.zeros(3, dtype=np.float64)
         self._angular_velocity = np.zeros(3, dtype=np.float64)
+        # UC-17: reset battery to full. Harmless when disabled (never read/drained thereafter).
+        self._battery = 1.0
         # Prime the control-latency buffer with warm-up hover actions so real commands are
         # delayed by exactly ``_latency`` steps. Empty (and never touched) when latency == 0.
         self._action_queue = deque()
@@ -165,7 +179,20 @@ class SimpleDroneAdapter(DroneAdapter):
         self._attitude[2] = float((self._attitude[2] + np.pi) % (2.0 * np.pi) - np.pi)
 
         roll, pitch, _yaw = self._attitude
-        thrust = throttle * self._max_thrust
+        # UC-17 battery thrust impact (AC2/AC6). DISABLED: thrust is EXACTLY ``throttle *
+        # _max_thrust`` — no battery read, no ``np_random`` draw — so a fixed-seed episode is
+        # bit-identical to pre-UC-17 (AC5). ENABLED: the effective ceiling is scaled by
+        # ``ceiling_factor`` of the **start-of-step** charge, so ``_max_thrust`` (already
+        # ``base * thrust_factor`` from UC-08) times the battery factor makes battery the THIRD
+        # multiplicative factor in the documented product order (AC6). Drain is applied at the
+        # END of the step (below), so this uses the charge as it was on entry.
+        if self._battery_enabled:
+            effective_max_thrust = self._max_thrust * self._battery_cfg.ceiling_factor(
+                self._battery
+            )
+        else:
+            effective_max_thrust = self._max_thrust
+        thrust = throttle * effective_max_thrust
         # thrust_acc = throttle * max_thrust / mass -> mass is a genuine, independent knob
         # (scaling mass alone changes the trajectory; max_thrust is NOT recomputed from mass).
         thrust_acc = thrust / self._mass
@@ -196,5 +223,15 @@ class SimpleDroneAdapter(DroneAdapter):
             self._position[2] = self._ceiling_z
             self._velocity[2] = 0.0
             collided = True
+
+        # UC-17 battery drain (AC1). Applied at END of step so the thrust above used the
+        # start-of-step charge. Monotone non-increasing, clamped ≥ 0; the throttle-proportional
+        # term makes a higher-throttle trajectory drain strictly faster over equal steps. The
+        # warm-up hover actions that fill the latency buffer drain here too (single ledger).
+        if self._battery_enabled:
+            drain = (
+                self._battery_cfg.idle_rate + self._battery_cfg.throttle_rate * float(throttle)
+            ) * self._dt
+            self._battery = max(0.0, self._battery - drain)
 
         return self._state(collided)

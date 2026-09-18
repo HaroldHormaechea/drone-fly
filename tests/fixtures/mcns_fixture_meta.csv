@@ -129,173 +129,195 @@ idx,bodyid,type,cell_type,superclass,class,subclass,top_nt,sign
 127,10719,AVLP079,AVLP079,cb_intrinsic,,,gaba,-1
 128,10735,LoVC18,LoVC18,visual_centrifugal,,,dopamine,1
 129,10753,PPL201,PPL201,cb_intrinsic,DAN,,dopamine,1
-130,10771,LT66,LT66,visual_projection,,,acetylcholine,1
-131,10799,OA-VUMa4,OA-VUMa4,cb_intrinsic,,,octopamine,1
-132,10807,Pm11,Pm11,ol_intrinsic,,,gaba,-1
-133,10809,MeVC2,MeVC2,visual_centrifugal,,,acetylcholine,1
-134,10818,MeVPMe1,MeVPMe1,visual_projection,,,glutamate,-1
-135,10822,DNge047,DNge047,descending_neuron,,xn,unclear,1
-136,10825,OA-AL2i3,OA-AL2i3,visual_centrifugal,,,octopamine,1
-137,10839,Dm17,Dm17,ol_intrinsic,,,glutamate,-1
-138,10843,Cm31a,Cm31a,ol_intrinsic,,,gaba,-1
-139,10845,Dm17,Dm17,ol_intrinsic,,,glutamate,-1
-140,10852,LoVC18,LoVC18,visual_centrifugal,,,dopamine,1
-141,10860,Cm31a,Cm31a,ol_intrinsic,,,gaba,-1
-142,10879,AVLP076,AVLP076,cb_intrinsic,,,gaba,-1
-143,10893,LPi2b,LPi2b,ol_intrinsic,,,gaba,-1
-144,10907,MeVPMe1,MeVPMe1,visual_projection,,,glutamate,-1
-145,10914,LoVC18,LoVC18,visual_centrifugal,,,dopamine,1
-146,10936,LT61b,LT61b,visual_projection,,,acetylcholine,1
-147,10950,Pm11,Pm11,ol_intrinsic,,,gaba,-1
-148,10966,Cm31a,Cm31a,ol_intrinsic,,,gaba,-1
-149,10974,Li31,Li31,ol_intrinsic,,,glutamate,-1
-150,10977,APL,APL,cb_intrinsic,,,gaba,-1
-151,10997,AN06B009,AN06B009,ascending_neuron,,BA,gaba,-1
-152,11005,OA-VUMa4,OA-VUMa4,cb_intrinsic,,,octopamine,1
-153,11027,Pm13,Pm13,ol_intrinsic,,,glutamate,-1
-154,11029,Pm13,Pm13,ol_intrinsic,,,glutamate,-1
-155,11041,LPi21,LPi21,ol_intrinsic,,,gaba,-1
-156,11046,MeVC23,MeVC23,visual_centrifugal,,,glutamate,-1
-157,11059,Cm31a,Cm31a,ol_intrinsic,,,gaba,-1
-158,11079,LoVC22,LoVC22,visual_centrifugal,,,dopamine,1
-159,11085,Li38,Li38,ol_intrinsic,,,gaba,-1
-160,11113,Mi19,Mi19,ol_intrinsic,,,unclear,1
-161,11146,MeVPMe2,MeVPMe2,visual_projection,,,glutamate,-1
-162,11155,OLVC5,OLVC5,visual_centrifugal,,,acetylcholine,1
-163,11160,DNd02,DNd02,descending_neuron,,xl,unclear,1
-164,11188,Dm17,Dm17,ol_intrinsic,,,glutamate,-1
-165,11214,LoVC22,LoVC22,visual_centrifugal,,,dopamine,1
-166,11217,LT58,LT58,ol_intrinsic,,,glutamate,-1
-167,11264,OA-ASM1,OA-ASM1,visual_centrifugal,,,octopamine,1
-168,11303,PLP211,PLP211,cb_intrinsic,,,unclear,1
-169,11312,Dm17,Dm17,ol_intrinsic,,,glutamate,-1
-170,11319,LT42,LT42,visual_centrifugal,,,gaba,-1
-171,11327,PPL101,PPL101,cb_intrinsic,DAN,,dopamine,1
-172,11394,Li16,Li16,ol_intrinsic,,,glutamate,-1
-173,11466,DNge149,DNge149,descending_neuron,,xl,unclear,1
-174,11486,DNd03,DNd03,descending_neuron,,xn,glutamate,-1
-175,11507,PLP211,PLP211,cb_intrinsic,,,unclear,1
-176,11560,PPL201,PPL201,cb_intrinsic,DAN,,dopamine,1
-177,11602,OA-ASM1,OA-ASM1,visual_centrifugal,,,octopamine,1
-178,11608,OA-VUMa2,OA-VUMa2,cb_intrinsic,,,octopamine,1
-179,11689,Li16,Li16,ol_intrinsic,,,glutamate,-1
-180,11693,DNd03,DNd03,descending_neuron,,xn,glutamate,-1
-181,11709,LPi12,LPi12,ol_intrinsic,,,gaba,-1
-182,11734,DPM,DPM,cb_intrinsic,,,dopamine,1
-183,11752,PPL103,PPL103,cb_intrinsic,DAN,,dopamine,1
-184,11806,LoVCLo2,LoVCLo2,visual_centrifugal,,,unclear,1
-185,11900,PPL101,PPL101,cb_intrinsic,DAN,,dopamine,1
-186,11921,OA-VPM4,OA-VPM4,cb_intrinsic,,,octopamine,1
-187,12067,LoVCLo2,LoVCLo2,visual_centrifugal,,,unclear,1
-188,12109,OA-VUMa2,OA-VUMa2,cb_intrinsic,,,octopamine,1
-189,12151,DNge138,DNge138,descending_neuron,,xn,unclear,1
-190,12159,Cm34,Cm34,ol_intrinsic,,,glutamate,-1
-191,12196,Li29,Li29,ol_intrinsic,,,gaba,-1
-192,12253,LT58,LT58,ol_intrinsic,,,glutamate,-1
-193,12505,Li12,Li12,ol_intrinsic,,,glutamate,-1
-194,12513,Cm31b,Cm31b,ol_intrinsic,,,gaba,-1
-195,12569,DPM,DPM,cb_intrinsic,,,dopamine,1
-196,12688,OA-ASM1,OA-ASM1,visual_centrifugal,,,octopamine,1
-197,12987,Li12,Li12,ol_intrinsic,,,glutamate,-1
-198,13079,Pm12,Pm12,ol_intrinsic,,,gaba,-1
-199,13113,Cm29,Cm29,ol_intrinsic,,,gaba,-1
-200,13308,Li29,Li29,ol_intrinsic,,,gaba,-1
-201,13310,LPi12,LPi12,ol_intrinsic,,,gaba,-1
-202,13431,lLN2T_b,lLN2T_b,cb_intrinsic,ALLN,,acetylcholine,1
-203,13447,Cm29,Cm29,ol_intrinsic,,,gaba,-1
-204,13532,LPT23,LPT23,visual_projection,,,acetylcholine,1
-205,13585,DNg34,DNg34,descending_neuron,,xl,unclear,1
-206,13612,Li32,Li32,ol_intrinsic,,,gaba,-1
-207,13797,Li29,Li29,ol_intrinsic,,,gaba,-1
-208,13846,Li29,Li29,ol_intrinsic,,,gaba,-1
-209,13850,Li29,Li29,ol_intrinsic,,,gaba,-1
-210,14182,PPL103,PPL103,cb_intrinsic,DAN,,dopamine,1
-211,14212,CSD,CSD,cb_intrinsic,,,serotonin,1
-212,14225,PPL105,PPL105,cb_intrinsic,DAN,,dopamine,1
-213,14243,lLN2T_b,lLN2T_b,cb_intrinsic,ALLN,,acetylcholine,1
-214,14486,Pm12,Pm12,ol_intrinsic,,,gaba,-1
-215,15042,LoVC22,LoVC22,visual_centrifugal,,,dopamine,1
-216,16076,Li33,Li33,ol_intrinsic,,,acetylcholine,1
-217,16460,lLN2T_b,lLN2T_b,cb_intrinsic,ALLN,,acetylcholine,1
-218,17289,Li29,Li29,ol_intrinsic,,,gaba,-1
-219,17757,AN19B001,AN19B001,ascending_neuron,,BA,acetylcholine,1
-220,20227,ANXXX005,ANXXX005,ascending_neuron,,BA,unclear,1
-221,20418,DNpe053,DNpe053,descending_neuron,,xn,acetylcholine,1
-222,20524,Li16,Li16,ol_intrinsic,,,glutamate,-1
-223,21568,AVLP080,AVLP080,cb_intrinsic,,,gaba,-1
-224,22715,Li16,Li16,ol_intrinsic,,,glutamate,-1
-225,24427,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-226,34432,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-227,35821,Li12,Li12,ol_intrinsic,,,glutamate,-1
-228,39291,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-229,40428,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-230,40877,ANXXX005,ANXXX005,ascending_neuron,,BA,unclear,1
-231,41779,SApp04,SApp04,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-232,42875,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-233,46346,Li29,Li29,ol_intrinsic,,,gaba,-1
-234,47073,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-235,47264,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-236,48696,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-237,51454,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-238,52244,SApp04,SApp04,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-239,53582,SApp04,SApp04,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-240,53920,SApp04,SApp04,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-241,58803,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-242,59592,SApp04,SApp04,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-243,62985,SApp14,SApp14,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-244,63141,SApp04,SApp04,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-245,63701,DNd02,DNd02,descending_neuron,,xl,unclear,1
-246,67052,lLN2T_b,lLN2T_b,cb_intrinsic,ALLN,,acetylcholine,1
-247,67526,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-248,85602,SApp04,SApp04,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-249,101048,SApp,SApp,sensory_ascending,mechanosensory_proprioceptive,haltere,acetylcholine,1
-250,128834,SApp,SApp,sensory_ascending,mechanosensory_proprioceptive,haltere,acetylcholine,1
-251,132009,SApp,SApp,sensory_ascending,mechanosensory_proprioceptive,haltere,acetylcholine,1
-252,136883,SApp,SApp,sensory_ascending,mechanosensory_proprioceptive,haltere,acetylcholine,1
-253,147266,SApp,SApp,sensory_ascending,mechanosensory_proprioceptive,haltere,acetylcholine,1
-254,161212,SApp,SApp,sensory_ascending,mechanosensory_proprioceptive,haltere,acetylcholine,1
-255,286259,OA-ASM1,OA-ASM1,visual_centrifugal,,,octopamine,1
-256,287884,OA-VPM3,OA-VPM3,cb_intrinsic,,,octopamine,1
-257,512326,PPL105,PPL105,cb_intrinsic,DAN,,dopamine,1
-258,513930,MeVPMe2,MeVPMe2,visual_projection,,,glutamate,-1
-259,514407,Li29,Li29,ol_intrinsic,,,gaba,-1
-260,517685,Li12,Li12,ol_intrinsic,,,glutamate,-1
-261,519658,MeVPMe2,MeVPMe2,visual_projection,,,glutamate,-1
-262,523512,AVLP538,AVLP538,cb_intrinsic,,,unclear,1
-263,523591,il3LN6,il3LN6,cb_intrinsic,ALLN,,gaba,-1
-264,523599,LPi2b,LPi2b,ol_intrinsic,,,gaba,-1
-265,524968,DNp32,DNp32,descending_neuron,,xl,unclear,1
-266,529512,PPL106,PPL106,cb_intrinsic,DAN,,dopamine,1
-267,529516,PPL106,PPL106,cb_intrinsic,DAN,,dopamine,1
-268,532255,MeVC23,MeVC23,visual_centrifugal,,,glutamate,-1
-269,536048,DNp27,DNp27,descending_neuron,,xn,acetylcholine,1
-270,537032,LT33,LT33,ol_intrinsic,,,gaba,-1
-271,537899,LoVC18,LoVC18,visual_centrifugal,,,dopamine,1
-272,539413,LT56,LT56,visual_centrifugal,,,glutamate,-1
-273,556286,DNp32,DNp32,descending_neuron,,xl,unclear,1
-274,800012,AN19B001,AN19B001,ascending_neuron,,BA,acetylcholine,1
-275,800049,SNpp30,SNpp30,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-276,801205,SNpp12,SNpp12,vnc_sensory,mechanosensory_proprioceptive,haltere,acetylcholine,1
-277,801379,SNpp30,SNpp30,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-278,801533,SNpp30,SNpp30,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-279,801906,SNpp31,SNpp31,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-280,801960,SNpp30,SNpp30,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-281,801990,SNpp30,SNpp30,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-282,802008,SNpp30,SNpp30,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-283,802199,SNpp31,SNpp31,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-284,802424,SNpp32,SNpp32,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-285,802708,SNpp32,SNpp32,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-286,802956,SNpp32,SNpp32,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-287,803247,SNpp32,SNpp32,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-288,803325,SNpp30,SNpp30,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-289,803457,SNpp30,SNpp30,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-290,804292,SNpp33,SNpp33,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-291,804436,SNpp04,SNpp04,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-292,819255,SNpp53,SNpp53,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-293,820164,SNppxx,SNppxx,vnc_sensory,mechanosensory_proprioceptive,leg,acetylcholine,1
-294,902628,SNpp32,SNpp32,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-295,906992,SNpp32,SNpp32,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-296,909042,SNpp53,SNpp53,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-297,933318,SNpp53,SNpp53,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
-298,946174,SNpp12,SNpp12,vnc_sensory,mechanosensory_proprioceptive,haltere,acetylcholine,1
-299,1062512192,SNpp53,SNpp53,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+130,10758,IPC,IPC,cb_endocrine,,,unclear,1
+131,10771,LT66,LT66,visual_projection,,,acetylcholine,1
+132,10799,OA-VUMa4,OA-VUMa4,cb_intrinsic,,,octopamine,1
+133,10807,Pm11,Pm11,ol_intrinsic,,,gaba,-1
+134,10809,MeVC2,MeVC2,visual_centrifugal,,,acetylcholine,1
+135,10818,MeVPMe1,MeVPMe1,visual_projection,,,glutamate,-1
+136,10822,DNge047,DNge047,descending_neuron,,xn,unclear,1
+137,10825,OA-AL2i3,OA-AL2i3,visual_centrifugal,,,octopamine,1
+138,10839,Dm17,Dm17,ol_intrinsic,,,glutamate,-1
+139,10843,Cm31a,Cm31a,ol_intrinsic,,,gaba,-1
+140,10845,Dm17,Dm17,ol_intrinsic,,,glutamate,-1
+141,10852,LoVC18,LoVC18,visual_centrifugal,,,dopamine,1
+142,10860,Cm31a,Cm31a,ol_intrinsic,,,gaba,-1
+143,10879,AVLP076,AVLP076,cb_intrinsic,,,gaba,-1
+144,10893,LPi2b,LPi2b,ol_intrinsic,,,gaba,-1
+145,10907,MeVPMe1,MeVPMe1,visual_projection,,,glutamate,-1
+146,10911,IPC,IPC,cb_endocrine,,,unclear,1
+147,10914,LoVC18,LoVC18,visual_centrifugal,,,dopamine,1
+148,10936,LT61b,LT61b,visual_projection,,,acetylcholine,1
+149,10950,Pm11,Pm11,ol_intrinsic,,,gaba,-1
+150,10966,Cm31a,Cm31a,ol_intrinsic,,,gaba,-1
+151,10974,Li31,Li31,ol_intrinsic,,,glutamate,-1
+152,10977,APL,APL,cb_intrinsic,,,gaba,-1
+153,10997,AN06B009,AN06B009,ascending_neuron,,BA,gaba,-1
+154,11005,OA-VUMa4,OA-VUMa4,cb_intrinsic,,,octopamine,1
+155,11027,Pm13,Pm13,ol_intrinsic,,,glutamate,-1
+156,11029,Pm13,Pm13,ol_intrinsic,,,glutamate,-1
+157,11041,LPi21,LPi21,ol_intrinsic,,,gaba,-1
+158,11046,MeVC23,MeVC23,visual_centrifugal,,,glutamate,-1
+159,11052,IPC,IPC,cb_endocrine,,,unclear,1
+160,11059,Cm31a,Cm31a,ol_intrinsic,,,gaba,-1
+161,11079,LoVC22,LoVC22,visual_centrifugal,,,dopamine,1
+162,11085,Li38,Li38,ol_intrinsic,,,gaba,-1
+163,11113,Mi19,Mi19,ol_intrinsic,,,unclear,1
+164,11146,MeVPMe2,MeVPMe2,visual_projection,,,glutamate,-1
+165,11155,OLVC5,OLVC5,visual_centrifugal,,,acetylcholine,1
+166,11160,DNd02,DNd02,descending_neuron,,xl,unclear,1
+167,11188,Dm17,Dm17,ol_intrinsic,,,glutamate,-1
+168,11209,IPC,IPC,cb_endocrine,,,unclear,1
+169,11214,LoVC22,LoVC22,visual_centrifugal,,,dopamine,1
+170,11217,LT58,LT58,ol_intrinsic,,,glutamate,-1
+171,11264,OA-ASM1,OA-ASM1,visual_centrifugal,,,octopamine,1
+172,11284,IPC,IPC,cb_endocrine,,,unclear,1
+173,11303,PLP211,PLP211,cb_intrinsic,,,unclear,1
+174,11312,Dm17,Dm17,ol_intrinsic,,,glutamate,-1
+175,11319,LT42,LT42,visual_centrifugal,,,gaba,-1
+176,11327,PPL101,PPL101,cb_intrinsic,DAN,,dopamine,1
+177,11394,Li16,Li16,ol_intrinsic,,,glutamate,-1
+178,11466,DNge149,DNge149,descending_neuron,,xl,unclear,1
+179,11486,DNd03,DNd03,descending_neuron,,xn,glutamate,-1
+180,11507,PLP211,PLP211,cb_intrinsic,,,unclear,1
+181,11560,PPL201,PPL201,cb_intrinsic,DAN,,dopamine,1
+182,11602,OA-ASM1,OA-ASM1,visual_centrifugal,,,octopamine,1
+183,11608,OA-VUMa2,OA-VUMa2,cb_intrinsic,,,octopamine,1
+184,11689,Li16,Li16,ol_intrinsic,,,glutamate,-1
+185,11693,DNd03,DNd03,descending_neuron,,xn,glutamate,-1
+186,11709,LPi12,LPi12,ol_intrinsic,,,gaba,-1
+187,11734,DPM,DPM,cb_intrinsic,,,dopamine,1
+188,11752,PPL103,PPL103,cb_intrinsic,DAN,,dopamine,1
+189,11806,LoVCLo2,LoVCLo2,visual_centrifugal,,,unclear,1
+190,11900,PPL101,PPL101,cb_intrinsic,DAN,,dopamine,1
+191,11921,OA-VPM4,OA-VPM4,cb_intrinsic,,,octopamine,1
+192,11946,IPC,IPC,cb_endocrine,,,unclear,1
+193,12067,LoVCLo2,LoVCLo2,visual_centrifugal,,,unclear,1
+194,12109,OA-VUMa2,OA-VUMa2,cb_intrinsic,,,octopamine,1
+195,12151,DNge138,DNge138,descending_neuron,,xn,unclear,1
+196,12159,Cm34,Cm34,ol_intrinsic,,,glutamate,-1
+197,12196,Li29,Li29,ol_intrinsic,,,gaba,-1
+198,12253,LT58,LT58,ol_intrinsic,,,glutamate,-1
+199,12271,NPFL1-I,NPFL1-I,cb_intrinsic,,,unclear,1
+200,12330,IPC,IPC,cb_endocrine,,,unclear,1
+201,12400,IPC,IPC,cb_endocrine,,,unclear,1
+202,12505,Li12,Li12,ol_intrinsic,,,glutamate,-1
+203,12513,Cm31b,Cm31b,ol_intrinsic,,,gaba,-1
+204,12523,IPC,IPC,cb_endocrine,,,unclear,1
+205,12569,DPM,DPM,cb_intrinsic,,,dopamine,1
+206,12688,OA-ASM1,OA-ASM1,visual_centrifugal,,,octopamine,1
+207,12867,IPC,IPC,cb_endocrine,,,unclear,1
+208,12921,IPC,IPC,cb_endocrine,,,unclear,1
+209,12987,Li12,Li12,ol_intrinsic,,,glutamate,-1
+210,13079,Pm12,Pm12,ol_intrinsic,,,gaba,-1
+211,13113,Cm29,Cm29,ol_intrinsic,,,gaba,-1
+212,13216,IPC,IPC,cb_endocrine,,,unclear,1
+213,13308,Li29,Li29,ol_intrinsic,,,gaba,-1
+214,13310,LPi12,LPi12,ol_intrinsic,,,gaba,-1
+215,13431,lLN2T_b,lLN2T_b,cb_intrinsic,ALLN,,acetylcholine,1
+216,13447,Cm29,Cm29,ol_intrinsic,,,gaba,-1
+217,13532,LPT23,LPT23,visual_projection,,,acetylcholine,1
+218,13585,DNg34,DNg34,descending_neuron,,xl,unclear,1
+219,13612,Li32,Li32,ol_intrinsic,,,gaba,-1
+220,13712,IPC,IPC,cb_endocrine,,,unclear,1
+221,13797,Li29,Li29,ol_intrinsic,,,gaba,-1
+222,13846,Li29,Li29,ol_intrinsic,,,gaba,-1
+223,13850,Li29,Li29,ol_intrinsic,,,gaba,-1
+224,14182,PPL103,PPL103,cb_intrinsic,DAN,,dopamine,1
+225,14212,CSD,CSD,cb_intrinsic,,,serotonin,1
+226,14225,PPL105,PPL105,cb_intrinsic,DAN,,dopamine,1
+227,14243,lLN2T_b,lLN2T_b,cb_intrinsic,ALLN,,acetylcholine,1
+228,14486,Pm12,Pm12,ol_intrinsic,,,gaba,-1
+229,14605,NPFL1-I,NPFL1-I,cb_intrinsic,,,unclear,1
+230,15042,LoVC22,LoVC22,visual_centrifugal,,,dopamine,1
+231,16076,Li33,Li33,ol_intrinsic,,,acetylcholine,1
+232,16460,lLN2T_b,lLN2T_b,cb_intrinsic,ALLN,,acetylcholine,1
+233,17289,Li29,Li29,ol_intrinsic,,,gaba,-1
+234,17757,AN19B001,AN19B001,ascending_neuron,,BA,acetylcholine,1
+235,17819,Hugin-RG,Hugin-RG,cb_endocrine,,,unclear,1
+236,18794,Hugin-RG,Hugin-RG,cb_endocrine,,,unclear,1
+237,18865,Hugin-RG,Hugin-RG,cb_endocrine,,,unclear,1
+238,20227,ANXXX005,ANXXX005,ascending_neuron,,BA,unclear,1
+239,20418,DNpe053,DNpe053,descending_neuron,,xn,acetylcholine,1
+240,20524,Li16,Li16,ol_intrinsic,,,glutamate,-1
+241,21568,AVLP080,AVLP080,cb_intrinsic,,,gaba,-1
+242,22715,Li16,Li16,ol_intrinsic,,,glutamate,-1
+243,24427,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+244,34432,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+245,35821,Li12,Li12,ol_intrinsic,,,glutamate,-1
+246,39291,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+247,40428,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+248,40877,ANXXX005,ANXXX005,ascending_neuron,,BA,unclear,1
+249,41779,SApp04,SApp04,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+250,42875,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+251,46346,Li29,Li29,ol_intrinsic,,,gaba,-1
+252,47073,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+253,47264,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+254,48696,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+255,51454,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+256,52244,SApp04,SApp04,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+257,53582,SApp04,SApp04,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+258,53920,SApp04,SApp04,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+259,58803,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+260,59592,SApp04,SApp04,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+261,62985,SApp14,SApp14,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+262,63141,SApp04,SApp04,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+263,63701,DNd02,DNd02,descending_neuron,,xl,unclear,1
+264,67052,lLN2T_b,lLN2T_b,cb_intrinsic,ALLN,,acetylcholine,1
+265,67526,SApp10,SApp10,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+266,85602,SApp04,SApp04,sensory_ascending,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+267,101048,SApp,SApp,sensory_ascending,mechanosensory_proprioceptive,haltere,acetylcholine,1
+268,124747,Hugin-RG,Hugin-RG,cb_endocrine,,,unclear,1
+269,128834,SApp,SApp,sensory_ascending,mechanosensory_proprioceptive,haltere,acetylcholine,1
+270,132009,SApp,SApp,sensory_ascending,mechanosensory_proprioceptive,haltere,acetylcholine,1
+271,136883,SApp,SApp,sensory_ascending,mechanosensory_proprioceptive,haltere,acetylcholine,1
+272,147266,SApp,SApp,sensory_ascending,mechanosensory_proprioceptive,haltere,acetylcholine,1
+273,161212,SApp,SApp,sensory_ascending,mechanosensory_proprioceptive,haltere,acetylcholine,1
+274,286259,OA-ASM1,OA-ASM1,visual_centrifugal,,,octopamine,1
+275,287884,OA-VPM3,OA-VPM3,cb_intrinsic,,,octopamine,1
+276,512326,PPL105,PPL105,cb_intrinsic,DAN,,dopamine,1
+277,512736,IPC,IPC,cb_endocrine,,,unclear,1
+278,513930,MeVPMe2,MeVPMe2,visual_projection,,,glutamate,-1
+279,514407,Li29,Li29,ol_intrinsic,,,gaba,-1
+280,517685,Li12,Li12,ol_intrinsic,,,glutamate,-1
+281,519658,MeVPMe2,MeVPMe2,visual_projection,,,glutamate,-1
+282,523512,AVLP538,AVLP538,cb_intrinsic,,,unclear,1
+283,523591,il3LN6,il3LN6,cb_intrinsic,ALLN,,gaba,-1
+284,523599,LPi2b,LPi2b,ol_intrinsic,,,gaba,-1
+285,524968,DNp32,DNp32,descending_neuron,,xl,unclear,1
+286,529512,PPL106,PPL106,cb_intrinsic,DAN,,dopamine,1
+287,529516,PPL106,PPL106,cb_intrinsic,DAN,,dopamine,1
+288,532255,MeVC23,MeVC23,visual_centrifugal,,,glutamate,-1
+289,536048,DNp27,DNp27,descending_neuron,,xn,acetylcholine,1
+290,537032,LT33,LT33,ol_intrinsic,,,gaba,-1
+291,537899,LoVC18,LoVC18,visual_centrifugal,,,dopamine,1
+292,539413,LT56,LT56,visual_centrifugal,,,glutamate,-1
+293,555768,IPC,IPC,cb_endocrine,,,unclear,1
+294,556286,DNp32,DNp32,descending_neuron,,xl,unclear,1
+295,567407,IPC,IPC,cb_endocrine,,,unclear,1
+296,800012,AN19B001,AN19B001,ascending_neuron,,BA,acetylcholine,1
+297,800049,SNpp30,SNpp30,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+298,801205,SNpp12,SNpp12,vnc_sensory,mechanosensory_proprioceptive,haltere,acetylcholine,1
+299,801379,SNpp30,SNpp30,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+300,801533,SNpp30,SNpp30,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+301,801906,SNpp31,SNpp31,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+302,801960,SNpp30,SNpp30,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+303,801990,SNpp30,SNpp30,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+304,802008,SNpp30,SNpp30,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+305,802199,SNpp31,SNpp31,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+306,802424,SNpp32,SNpp32,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+307,802708,SNpp32,SNpp32,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+308,802956,SNpp32,SNpp32,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+309,803247,SNpp32,SNpp32,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+310,803325,SNpp30,SNpp30,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+311,803457,SNpp30,SNpp30,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+312,804292,SNpp33,SNpp33,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+313,804436,SNpp04,SNpp04,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+314,819255,SNpp53,SNpp53,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+315,820164,SNppxx,SNppxx,vnc_sensory,mechanosensory_proprioceptive,leg,acetylcholine,1
+316,902628,SNpp32,SNpp32,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+317,906992,SNpp32,SNpp32,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+318,909042,SNpp53,SNpp53,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+319,933318,SNpp53,SNpp53,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1
+320,946174,SNpp12,SNpp12,vnc_sensory,mechanosensory_proprioceptive,haltere,acetylcholine,1
+321,1062512192,SNpp53,SNpp53,vnc_sensory,mechanosensory_proprioceptive,campaniform sensilla,acetylcholine,1

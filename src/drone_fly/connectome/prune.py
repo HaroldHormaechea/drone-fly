@@ -6,8 +6,8 @@ even though only the directed ``visual_projection`` (sensory) → ``descending_n
 (motor) subcircuit drives the 4 control outputs. This module reduces a loaded
 :class:`~drone_fly.connectome.loader.ConnectomeData` to that subcircuit with a
 deterministic, **direction-aware** rule, returning a new (smaller) ``ConnectomeData``
-whose meta (``neuron_ids`` / ``superclass`` / ``neuron_class`` / ``subclass`` / ``sign`` /
-``top_nt``) is re-aligned to the pruned matrix rows. The input is never mutated.
+whose meta (``neuron_ids`` / ``superclass`` / ``neuron_class`` / ``subclass`` / ``cell_type`` /
+``sign`` / ``top_nt``) is re-aligned to the pruned matrix rows. The input is never mutated.
 
 Direction convention
 --------------------
@@ -139,7 +139,8 @@ def slice_connectome(
     (:mod:`drone_fly.prune_trained`). Given a 1-D array of retained neuron indices, it keeps
     only the intra-retained edges (``adjacency[kept][:, kept]``) and re-aligns every
     per-neuron meta array (``neuron_ids`` / ``superclass`` / ``neuron_class`` / ``subclass`` /
-    ``sign`` / ``top_nt``) to the pruned matrix rows, remapping indices to ``0..M-1``. Per-edge
+    ``cell_type`` / ``sign`` / ``top_nt``) to the pruned matrix rows, remapping indices to
+    ``0..M-1``. Per-edge
     signs are preserved because
     :class:`~drone_fly.controller.policy.SparseConnectomeLayer` rebuilds the sign mask from
     the presynaptic (column) neuron's sign, and ``sign[kept]`` carries every retained
@@ -164,6 +165,10 @@ def slice_connectome(
     sliced_top_nt = None if data.top_nt is None else np.asarray(data.top_nt)[kept]
     sliced_neuron_class = None if data.neuron_class is None else np.asarray(data.neuron_class)[kept]
     sliced_subclass = None if data.subclass is None else np.asarray(data.subclass)[kept]
+    # UC-17: re-align cell_type to the kept rows too, else a pruned graft graph loses the
+    # ``hunger`` binding column (select_modality(pruned, "hunger") would raise
+    # ModalityMetadataError) and battery_hunger_v3 becomes unbuildable on any pruned circuit.
+    sliced_cell_type = None if data.cell_type is None else np.asarray(data.cell_type)[kept]
     return ConnectomeData(
         adjacency=sliced_adj,
         neuron_ids=sliced_ids,
@@ -173,6 +178,7 @@ def slice_connectome(
         top_nt=sliced_top_nt,
         neuron_class=sliced_neuron_class,
         subclass=sliced_subclass,
+        cell_type=sliced_cell_type,
     )
 
 

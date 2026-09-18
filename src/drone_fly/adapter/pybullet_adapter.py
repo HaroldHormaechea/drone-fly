@@ -116,11 +116,16 @@ class PyBulletAdapter(DroneAdapter):
         floor_z: float,
         ceiling_z: float,
         dt: float,
+        battery=None,
     ) -> None:  # pragma: no cover - requires the sim; verified on the owner's macOS M4
         self._start = np.asarray(start_position, dtype=np.float64).reshape(3).copy()
         self._floor_z = float(floor_z)
         self._ceiling_z = float(ceiling_z)
         self._dt = float(dt)
+        # UC-17: accepted for signature parity with make_adapter / SimpleDroneAdapter but not
+        # modelled here — the battery drain + thrust-impact model is asserted only on the
+        # hermetic numpy backend. This backend always reports a full charge (battery=1.0 default).
+        self._battery = battery
         self._CtrlAviary, self._DroneModel, self._Physics = load_pybullet_drones()
         self._env = None
         self._hover_rpm = 0.0

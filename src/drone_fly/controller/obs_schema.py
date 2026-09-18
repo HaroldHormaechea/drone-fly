@@ -147,12 +147,32 @@ OBSTACLE_VISION_V2 = ObsSchema(
     version=2,
 )
 
+#: The v3 battery-("hunger") schema (UC-17 AC4). ``obstacle_vision_v2``'s three blocks PLUS an
+#: appended width-1 ``battery`` block bound to the approximate ``hunger`` modality (the
+#: internal-state / feeding population; see :mod:`drone_fly.controller.modality`). Because it only
+#: *appends*, ``BATTERY_HUNGER_V3.extends(OBSTACLE_VISION_V2)`` is ``True`` — an
+#: ``obstacle_vision_v2`` checkpoint grafts to it with the battery block zero-initialised (weight
+#: AND bias), so the grafted actor's action on old inputs (battery dim at its baseline) is
+#: bit-identical (AC4). The env encodes the battery dim as **depletion = 1 - charge**, so the
+#: zeroed graft input (0) equals the trained full-charge baseline. Total width is ``25``;
+#: re-binding the input→sensory wiring invalidates pre-UC-17 checkpoints (a fresh v3 retrain is
+#: required, exactly as UC-13/UC-15 — surfaced in the PR).
+BATTERY_HUNGER_V3 = ObsSchema(
+    blocks=(
+        *OBSTACLE_VISION_V2.blocks,
+        ObsBlock(name="battery", width=1, population="hunger"),
+    ),
+    version=3,
+)
+
 #: Named schemas selectable by string (e.g. from a YAML run-config's ``schema`` key). The CLI
 #: default is *no* schema (``None`` → legacy single-projection path); naming ``"migrated_v1"``
-#: opts into the migrated block schema, ``"obstacle_vision_v2"`` into the obstacle-vision one.
+#: opts into the migrated block schema, ``"obstacle_vision_v2"`` into the obstacle-vision one,
+#: ``"battery_hunger_v3"`` into the battery-("hunger") one.
 NAMED_SCHEMAS: dict[str, ObsSchema] = {
     "migrated_v1": MIGRATED_SCHEMA_V1,
     "obstacle_vision_v2": OBSTACLE_VISION_V2,
+    "battery_hunger_v3": BATTERY_HUNGER_V3,
 }
 
 

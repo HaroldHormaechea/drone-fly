@@ -66,12 +66,19 @@ class RaceEnv(gym.Env):
         self._adapter_choice = adapter
         course = self.config.course
 
+        # Battery drain + thrust-impact (UC-17): a single ``battery.enabled`` flag gates BOTH the
+        # adapter-side physics and the env-side width-1 battery observation block (they are
+        # physically coupled). Off by default → no battery param forwarded (byte-identical to
+        # UC-16) and the observation width is unchanged.
+        self._battery_enabled = bool(self.config.battery.enabled)
+
         self.adapter = make_adapter(
             adapter,
             course.start,
             floor_z=course.floor_z,
             ceiling_z=course.ceiling_z,
             dt=self.config.episode.dt,
+            battery=self.config.battery if self._battery_enabled else None,
         )
         self.backend = self.adapter.backend
 
@@ -84,6 +91,11 @@ class RaceEnv(gym.Env):
         obs_dim = OBS_DIM
         if self._obstacle_vision_enabled:
             obs_dim += OBSTACLE_FEATURES_PER * self._obstacle_vision_k
+        # UC-17: the width-1 battery block is appended STRICTLY AFTER the obstacle-vision block, so
+        # the dim order is (vision, proprioception, obstacle_vision, battery) — matching the
+        # ``battery_hunger_v3`` schema's block order.
+        if self._battery_enabled:
+            obs_dim += 1
 
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
@@ -157,6 +169,13 @@ class RaceEnv(gym.Env):
                     self._obstacle_vision_k,
                 )
             )
+        if self._battery_enabled:
+            # UC-17 AC4: width-1 battery block, appended AFTER the obstacle-vision block (so the
+            # dim order matches the schema block order) and BEFORE nan_to_num. Encoded as
+            # **depletion = 1.0 - battery** (0 at full charge), so the zero-init graft input (0)
+            # coincides with the trained full-charge baseline — the grafted actor's action on old
+            # inputs stays bit-identical (documented in obs_schema / graft_actor).
+            parts.append(np.array([1.0 - state.battery], dtype=np.float64))
         obs = np.concatenate(parts).astype(np.float32)
         # Belt-and-braces: the env never emits a non-finite observation to the policy.
         return np.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)
