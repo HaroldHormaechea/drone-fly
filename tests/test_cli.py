@@ -125,10 +125,54 @@ def test_smoke_train_dispatch(tmp_path, monkeypatch) -> None:
     assert any(f.name.startswith(CHECKPOINT_PREFIX) for f in models.iterdir())
 
 
-def test_fetch_connectome_stub(capsys) -> None:
+def test_fetch_connectome_downloads(capsys, monkeypatch) -> None:
+    """`fetch-connectome` is no longer a stub: it delegates to ensure_full_connectome (UC-14/AC3).
+
+    Mocked at the call site so nothing is downloaded or copied from the machine cache; the CLI
+    just reports the resolved directory and returns 0.
+    """
+    calls: dict = {}
+
+    def fake_ensure(dest_dir=None, *, force=False):
+        calls["dest_dir"] = dest_dir
+        calls["force"] = force
+        return Path("data/connectome")
+
+    monkeypatch.setattr("drone_fly.connectome.ensure_full_connectome", fake_ensure)
     rc = main(["fetch-connectome"])
     assert rc == 0
-    assert "stub" in capsys.readouterr().out.lower()
+    # Defaults: no explicit dir, no force.
+    assert calls == {"dest_dir": None, "force": False}
+    assert "ready at" in capsys.readouterr().out.lower()
+
+
+def test_fetch_connectome_forwards_flags(capsys, monkeypatch) -> None:
+    """`--connectome-dir` / `--force` thread through to ensure_full_connectome."""
+    calls: dict = {}
+
+    def fake_ensure(dest_dir=None, *, force=False):
+        calls["dest_dir"] = dest_dir
+        calls["force"] = force
+        return Path(dest_dir)
+
+    monkeypatch.setattr("drone_fly.connectome.ensure_full_connectome", fake_ensure)
+    rc = main(["fetch-connectome", "--connectome-dir", "some/dir", "--force"])
+    assert rc == 0
+    assert calls == {"dest_dir": "some/dir", "force": True}
+
+
+def test_fetch_connectome_download_error_exits_2(caplog, monkeypatch) -> None:
+    """A ConnectomeDownloadError becomes a one-line error + exit 2 (no stack trace) (AC7)."""
+    from drone_fly.connectome import ConnectomeDownloadError
+
+    def fake_ensure(dest_dir=None, *, force=False):
+        raise ConnectomeDownloadError("network down; no connectome was written")
+
+    monkeypatch.setattr("drone_fly.connectome.ensure_full_connectome", fake_ensure)
+    with caplog.at_level(logging.ERROR, logger="drone_fly.cli"):
+        rc = main(["fetch-connectome"])
+    assert rc == 2
+    assert any("network down" in r.getMessage() for r in caplog.records)
 
 
 # --------------------------------------------------------------------------- #
@@ -277,6 +321,66 @@ def test_prune_dispatch_writes_reusable_slice(tmp_path, capsys) -> None:
     reloaded = load_connectome(out)
     assert reloaded.neuron_count == 45 and reloaded.edge_count == 549
     assert "Pruned connectome written" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# UC-14 — prune defaults to the full auto-downloaded connectome (AC1/AC2/AC4/AC5)
+# --------------------------------------------------------------------------- #
+
+
+def test_prune_omitted_connectome_auto_downloads(tmp_path, monkeypatch, caplog) -> None:
+    """A prune config with no `connectome` resolves to the full matrix via ensure_full_connectome.
+
+    Mocked at the call site (returns the committed fixture dir) so nothing is downloaded or copied
+    from the machine cache — proving the None branch takes the auto-download path (AC1/AC2), and
+    that the scoped full-matrix runtime/memory INFO log fires only here.
+    """
+    calls: list = []
+
+    def fake_ensure(dest_dir=None, *, force=False):
+        calls.append((dest_dir, force))
+        return Path(FIXTURE_DIR)
+
+    monkeypatch.setattr("drone_fly.connectome.ensure_full_connectome", fake_ensure)
+    out = tmp_path / "pruned"
+    cfg = _write_config(tmp_path, {"out": str(out), "prune_k": 0})  # no `connectome:` key
+    with caplog.at_level(logging.INFO, logger="drone_fly.cli.prune"):
+        assert main(["prune", "--config", cfg]) == 0
+    # ensure_full_connectome was invoked exactly once with defaults (default location).
+    assert calls == [(None, False)]
+    assert (out / "connectome_pruned.npz").is_file()
+    # The runtime/memory note is scoped to the auto-download branch.
+    assert any("auto-downloaded" in r.getMessage() for r in caplog.records)
+
+
+def test_prune_explicit_connectome_does_not_download(tmp_path, monkeypatch, caplog) -> None:
+    """An explicit `connectome:` (the fixture) loads as-is — no auto-download, no runtime log."""
+
+    def boom_ensure(dest_dir=None, *, force=False):
+        raise AssertionError("ensure_full_connectome must not run when connectome is explicit")
+
+    monkeypatch.setattr("drone_fly.connectome.ensure_full_connectome", boom_ensure)
+    out = tmp_path / "pruned"
+    cfg = _write_config(tmp_path, {"connectome": FIXTURE_DIR, "out": str(out), "prune_k": 0})
+    with caplog.at_level(logging.INFO, logger="drone_fly.cli.prune"):
+        assert main(["prune", "--config", cfg]) == 0
+    assert (out / "connectome_pruned.npz").is_file()
+    # The auto-download runtime/memory note must NOT fire for an explicit target.
+    assert not any("auto-downloaded" in r.getMessage() for r in caplog.records)
+
+
+def test_prune_cli_fixture_is_offline(tmp_path, no_network) -> None:
+    """A real `prune --config` against the explicit fixture runs fully offline (enforces AC5).
+
+    Under `no_network` any socket use raises; an explicit `connectome: <fixture>` never downloads,
+    so the whole prune -> save -> reload round-trip must succeed with the network disabled. This
+    is what keeps prune-logic coverage hermetic in CI after the default moved to the full matrix.
+    """
+    out = tmp_path / "pruned"
+    cfg = _write_config(tmp_path, {"connectome": FIXTURE_DIR, "out": str(out), "prune_k": 0})
+    assert main(["prune", "--config", cfg]) == 0
+    reloaded = load_connectome(out)  # round-trips with sockets disabled
+    assert reloaded.neuron_count == 45 and reloaded.edge_count == 549
 
 
 # --------------------------------------------------------------------------- #

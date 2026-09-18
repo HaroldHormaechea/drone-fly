@@ -103,11 +103,21 @@ re-binds the 12-d observation into a *vision* block (target-relative → visual 
 input→sensory wiring, so checkpoints trained under the old wiring do not carry over — a fresh
 train is required.
 
-### Visualization
-The viewer (`viz/`, dependency-free, `file://`-safe) shows an MRI/fMRI-style activation heatmap
-over a static, spatially-registered MaleCNS brain outline (`viz/brain_outline.js`), with
-top-down / front / side presets and a per-frame ↔ global intensity toggle. Regenerate the outline
-with `uv run python scripts/build_brain_outline.py`.
+### Visualization & recording
+Enable recording in a train/evaluate config with `record: true` (tune cadence via `record_every`);
+frames land in that run's `training/<name>/recordings/`. Open `viz/viewer.html` in a browser
+(dependency-free, `file://`-safe) and load a recording — no server or build step.
+
+Two panels: an MRI/fMRI-style activation heatmap over a static, spatially-registered MaleCNS brain
+outline (`viz/brain_outline.js`, `top-down` / `front` / `side` presets + a per-frame ↔ global
+intensity toggle), and a **3D flight view** driven by the recorded `meta.course` geometry. 3D
+controls: **drag** to **rotate**, mouse **wheel** to **zoom**, the same view presets, and a `0.25`×
+slow-inspection speed. Regenerate the outline with `uv run python scripts/build_brain_outline.py`.
+
+Neuron coordinates use real MaleCNS **soma** positions; a neuron lacking one uses a deterministic
+computed-layout **fallback** (clearly labelled). The committed fixture ships real anatomy
+tokenlessly; arbitrary user slices may need a `NEUPRINT_TOKEN` (see `.env.example`), and
+`uv run python scripts/fetch_soma_positions.py` refreshes the committed soma sidecar.
 
 ### Requirements
 - **Python 3.11** + [`uv`](https://docs.astral.sh/uv/); `uv sync --extra dev` installs everything
@@ -116,6 +126,21 @@ with `uv run python scripts/build_brain_outline.py`.
   (full physics sim, for mastery training) needs a C/C++ toolchain and is verified on macOS +
   Xcode CLT; `./scripts/train.sh` bootstraps it and launches a config-driven run.
 - CI gates: `uv run ruff check .`, `uv run ruff format --check .`, `uv run pytest`.
+
+### Tested-vs-untested boundary
+What CI actually exercises versus what needs the native sim, recorded from a real install attempt:
+
+| Path | Status | Reality |
+|------|--------|---------|
+| `simple` numpy adapter, loader, prune, config, viz contract | tested (CI) | runs hermetically offline |
+| `pybullet` full-physics adapter | untested in CI | needs a C/C++ toolchain; verified on macOS + Xcode CLT |
+
+The gym-pybullet-drones pin is resolved with `git ls-remote` to a fixed commit SHA (never floating
+`main`); `scripts/train.sh` and the adapter share that SHA and verify `import pybullet` before training.
+
+**Mastery goal & dynamics.** The target is **80**% waypoint **mastery** (course completion). Mastery
+runs use **fixed** environment dynamics (**no domain randomization**) for reproducibility; enable
+randomization explicitly only for robustness experiments.
 
 ### Project layout & history
 Source under `src/drone_fly/` (connectome loader, controller/actor, adapter, env, train, evaluate,
