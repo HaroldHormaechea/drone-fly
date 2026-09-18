@@ -122,5 +122,16 @@ class DroneAdapter(abc.ABC):
         changes nothing, keeping the fixed-course behaviour byte-identical (AC7).
         """
 
+    def recharge(self, delta: float) -> float:  # noqa: B027 - optional hook
+        """Add ``delta`` charge to the battery, clamped at ``1.0``; return the new charge (UC-18).
+
+        The racing env calls this once per step while the drone is docked on a ``rechargeable``
+        pad (and battery physics are enabled), passing the per-step increment
+        ``recharge_rate * dt``. A backend that does not model a battery (e.g. the pybullet
+        backend, which always reports a full charge) may ignore ``delta`` and return ``1.0`` — the
+        default. The numpy backend overrides this to mutate its normalized charge (clamped ≤ 1.0).
+        """
+        return 1.0
+
     def close(self) -> None:  # noqa: B027 - intentional optional hook; most backends need no teardown
         """Release any backend resources. Default no-op; pybullet overrides it."""
