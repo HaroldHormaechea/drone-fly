@@ -405,6 +405,52 @@ class ObstacleVisionConfig:
 
 
 @dataclass(frozen=True)
+class BatteryConfig:
+    """Battery drain + thrust-impact settings (UC-17 AC1/AC2/AC3/AC5/AC6).
+
+    **Off by default** so ``EnvConfig()`` — and therefore every UC-01..16 caller — is
+    byte-identical: with ``enabled=False`` the adapter never reads or drains a battery and the
+    thrust path stays exactly ``throttle * max_thrust`` (no ``np_random`` draw, AC5/AC6). The
+    same flag also gates the width-1 battery observation block in the env, so enabling battery
+    physics and its sensory block is a single switch (they are physically coupled).
+
+    Semantics when ``enabled`` (all documented, tunable constants):
+
+    * The adapter carries a normalized ``battery ∈ [0, 1]`` reset to ``1.0``; each step it drains
+      ``(idle_rate + throttle_rate * throttle) * dt`` and clamps at ``0`` (monotone non-increasing;
+      higher throttle drains strictly faster — AC1).
+    * The effective thrust ceiling is scaled by :meth:`ceiling_factor` of the **start-of-step**
+      charge: ``effective_max_thrust = max_thrust * ceiling_factor(battery)`` (AC2/AC6).
+    * :meth:`ceiling_factor` is monotone non-decreasing, ``1.0`` at full charge, flat ``≈ 1.0`` for
+      ``battery >= knee``, and ramps **linearly** down to ``empty_factor`` at empty. With
+      ``empty_factor < 0.5`` (the exact hover threshold — base TWR is 2, so hover needs
+      ``ceiling_factor >= 0.5``) an empty battery cannot sustain hover: the drone sinks to the
+      floor and terminates via the **existing crash path** — a *soft* depletion consequence (AC3),
+      no new hard-terminate branch.
+    """
+
+    enabled: bool = False
+    idle_rate: float = 0.005  # fraction of full charge drained per second at zero throttle
+    throttle_rate: float = 0.01  # extra fraction per second at full throttle (∝ throttle)
+    knee: float = 0.2  # charge at/above which the thrust ceiling stays ≈ full
+    empty_factor: float = 0.3  # ceiling factor at empty charge; < 0.5 ⇒ cannot hover (soft crash)
+
+    def ceiling_factor(self, battery: float) -> float:
+        """Thrust-ceiling multiplier for a given normalized ``battery`` charge (AC2/AC6).
+
+        Monotone non-decreasing in ``battery``; ``1.0`` for ``battery >= knee`` (flat top), and a
+        straight line from ``empty_factor`` at ``battery == 0`` up to ``1.0`` at ``battery == knee``
+        below the knee. Returns a plain ``float``.
+        """
+        b = float(battery)
+        if b >= self.knee:
+            return 1.0
+        if b <= 0.0 or self.knee <= 0.0:
+            return float(self.empty_factor)
+        return float(self.empty_factor + (1.0 - self.empty_factor) * (b / self.knee))
+
+
+@dataclass(frozen=True)
 class EnvConfig:
     """Bundle of the config groups, so an env is configured by one object."""
 
@@ -418,3 +464,8 @@ class EnvConfig:
     # all-default value; combined with an empty ``course.pads`` default this keeps ``EnvConfig()``
     # byte-identical to UC-15 (the dock predicate short-circuits ``False`` when there are no pads).
     dock: DockConfig = field(default_factory=DockConfig)
+    # Battery drain + thrust-impact + battery-obs settings (UC-17). Appended **last** (after
+    # ``dock``) with an all-off default, so ``EnvConfig()`` stays byte-identical to UC-16: when
+    # ``battery.enabled`` is False the adapter never touches a battery and the env emits no
+    # battery observation dim.
+    battery: BatteryConfig = field(default_factory=BatteryConfig)

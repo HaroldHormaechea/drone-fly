@@ -37,6 +37,7 @@ def make_adapter(
     floor_z: float,
     ceiling_z: float,
     dt: float,
+    battery=None,
 ) -> DroneAdapter:
     """Construct a drone adapter for ``backend`` and log which physics is active.
 
@@ -45,6 +46,12 @@ def make_adapter(
     * ``"pybullet"`` — the real sim; raises an actionable error if it is not installed.
     * ``"auto"`` — PyBullet if importable, else Simple. The choice is logged loudly so a
       run always records the backend it used (mastery physics vs. the hermetic fallback).
+
+    ``battery`` (UC-17): an optional ``BatteryConfig`` forwarded to the backend to enable the
+    battery drain + thrust-impact model. ``None`` (default) means no battery (byte-identical to
+    pre-UC-17). The hermetic :class:`SimpleDroneAdapter` implements the model; the pybullet
+    backend accepts it for signature parity but ignores it (the battery model is only asserted on
+    the numpy backend).
     """
     if backend not in ADAPTER_CHOICES:
         raise ValueError(f"adapter must be one of {ADAPTER_CHOICES}, got {backend!r}.")
@@ -58,10 +65,14 @@ def make_adapter(
         from drone_fly.adapter.pybullet_adapter import PyBulletAdapter
 
         logger.info("Using PyBullet backend (mastery physics).")
-        return PyBulletAdapter(start_position, floor_z=floor_z, ceiling_z=ceiling_z, dt=dt)
+        return PyBulletAdapter(
+            start_position, floor_z=floor_z, ceiling_z=ceiling_z, dt=dt, battery=battery
+        )
 
     logger.info("Using SimpleDroneAdapter backend (pure-numpy; hermetic, NOT mastery physics).")
-    return SimpleDroneAdapter(start_position, floor_z=floor_z, ceiling_z=ceiling_z, dt=dt)
+    return SimpleDroneAdapter(
+        start_position, floor_z=floor_z, ceiling_z=ceiling_z, dt=dt, battery=battery
+    )
 
 
 __all__ = [

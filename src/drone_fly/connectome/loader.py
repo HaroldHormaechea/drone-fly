@@ -50,11 +50,13 @@ class ExpectedScale:
 #
 # FIXTURE_EXPECTED_SCALE describes the small, committed, real-MaleCNS subgraph that
 # ships under tests/fixtures/. It is produced deterministically by
-# scripts/build_test_fixture.py — the UC-13 modality-aware slice: a soma-populated
-# top-degree central core UNION a top-degree mechanosensory_proprioceptive afferent
-# quota (see that script + FIXTURE_PROVENANCE.md) — so the counts below are exact and
-# reproducible. Tests assert the loaded fixture matches these numbers exactly (AC1).
-FIXTURE_EXPECTED_SCALE = ExpectedScale(neuron_count=300, edge_count=8288)
+# scripts/build_test_fixture.py — the UC-13/UC-17 modality-aware slice: a soma-populated
+# top-degree central core UNION a top-degree mechanosensory_proprioceptive afferent quota
+# UNION the top-degree hunger (internal-state/feeding) cell_type quota (see that script +
+# FIXTURE_PROVENANCE.md) — so the counts below are exact and reproducible. The UC-17 hunger
+# quota (22 neurons: {IPC, Hugin-RG, NPFL1-I}) grew the slice from 300/8288 to 322/8413.
+# Tests assert the loaded fixture matches these numbers exactly (AC1).
+FIXTURE_EXPECTED_SCALE = ExpectedScale(neuron_count=322, edge_count=8413)
 
 # MALECNS_V1_EXPECTED_SCALE describes the full canonical MaleCNS whole-brain matrix
 # (connectome_data_prep: data/maleCNS/mcns_inprop_all_neuron.npz). These counts come
@@ -113,6 +115,15 @@ class ConnectomeData:
         ``"campaniform sensilla"``, ``"haltere"``), aligned to the matrix row order, or
         ``None`` when the metadata lacks a ``subclass`` column. Finer still than
         :pyattr:`neuron_class`; the approximate (curated-name-list) modalities read it.
+    cell_type:
+        Optional length-``N`` array of per-neuron MaleCNS ``cell_type`` labels (e.g. ``"IPC"``,
+        ``"Hugin-RG"``, ``"NPFL1-I"``), aligned to the matrix row order, or ``None`` when the
+        metadata lacks a ``cell_type`` column. This is the authoritative labelling for the
+        internal-state / feeding ("hunger") neurons UC-17 binds the battery block to — those
+        populations are labelled in ``cell_type``, not ``subclass`` — so the ``hunger`` modality
+        reads this column (UC-17, consumed by :mod:`drone_fly.controller.modality`). Loaded and
+        saved column-for-column, so a prune→save→reload preserves it (else ``hunger`` would stop
+        resolving on the pruned graft graph).
     """
 
     adjacency: sp.csr_matrix
@@ -123,6 +134,7 @@ class ConnectomeData:
     top_nt: np.ndarray | None = None
     neuron_class: np.ndarray | None = None
     subclass: np.ndarray | None = None
+    cell_type: np.ndarray | None = None
 
     @property
     def neuron_count(self) -> int:
@@ -223,6 +235,7 @@ _OPTIONAL_META_COLUMNS: dict[str, str] = {
     "superclass": "superclass",
     "class": "neuron_class",
     "subclass": "subclass",
+    "cell_type": "cell_type",
     "sign": "sign",
     "top_nt": "top_nt",
 }
@@ -298,6 +311,7 @@ def load_connectome(path: str | os.PathLike[str] | None = None) -> ConnectomeDat
         top_nt=attrs["top_nt"],
         neuron_class=attrs["neuron_class"],
         subclass=attrs["subclass"],
+        cell_type=attrs["cell_type"],
     )
 
 
@@ -318,8 +332,9 @@ def save_connectome(
     Produces ``<out_dir>/<stem>.npz`` (the CSR ``float32`` adjacency) plus the sidecar
     ``<out_dir>/<stem>_meta.csv`` carrying ``idx`` (contiguous ``0..N-1``), ``bodyid``
     (from :pyattr:`ConnectomeData.neuron_ids`), and whichever of ``superclass`` / ``class``
-    / ``subclass`` / ``top_nt`` / ``sign`` are present — the same columns the loader consumes
-    (``neuron_class`` is written back under its original ``class`` column name). The pair
+    / ``subclass`` / ``cell_type`` / ``top_nt`` / ``sign`` are present — the same columns the
+    loader consumes (``neuron_class`` is written back under its original ``class`` column name).
+    The pair
     round-trips:
     ``load_connectome(out_dir)`` reproduces an equivalent :class:`ConnectomeData` (same
     neuron/edge counts, meta aligned). Deterministic — identical input yields byte-identical
@@ -343,9 +358,11 @@ def save_connectome(
     sp.save_npz(npz_path, data.adjacency.tocsr().astype(np.float32))
 
     n = data.neuron_count
-    # Column order mirrors scripts/build_test_fixture.py (minus type/cell_type, which
-    # ConnectomeData does not carry). 'idx' is contiguous so the loader's idx-sort is a
-    # no-op and row order is preserved exactly.
+    # Column order mirrors scripts/build_test_fixture.py (minus ``type``, which ConnectomeData
+    # does not carry). ``cell_type`` IS carried (UC-17) and written back explicitly below, so a
+    # prune→save→reload preserves it — required for the ``hunger`` modality to keep resolving on
+    # the pruned graft graph. 'idx' is contiguous so the loader's idx-sort is a no-op and row
+    # order is preserved exactly.
     columns: dict[str, np.ndarray] = {
         "idx": np.arange(n, dtype=np.int64),
         "bodyid": np.asarray(data.neuron_ids),
@@ -356,6 +373,10 @@ def save_connectome(
         columns["class"] = np.asarray(data.neuron_class)
     if data.subclass is not None:
         columns["subclass"] = np.asarray(data.subclass)
+    # UC-17: cell_type is NOT written automatically by the loop above (it uses explicit per-attr
+    # blocks); this dedicated block persists it so hunger binding survives prune→save→reload.
+    if data.cell_type is not None:
+        columns["cell_type"] = np.asarray(data.cell_type)
     if data.top_nt is not None:
         columns["top_nt"] = np.asarray(data.top_nt)
     if data.sign is not None:

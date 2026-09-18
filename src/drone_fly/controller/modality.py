@@ -30,13 +30,15 @@ prefix) and are marked ``approximate=False``:
   ``class`` label.
 
 *Approximate* modalities have no clean connectome label; they are resolved by a **curated,
-best-effort substring match over the fine-grained ``subclass`` label** and are marked
-``approximate=True`` so a caller can surface the caveat. They are exposed (per the use case)
-but must never be mistaken for authoritative populations:
+best-effort substring match over a fine-grained name label** (``subclass`` or ``cell_type``,
+per rule) and are marked ``approximate=True`` so a caller can surface the caveat. They are
+exposed (per the use case) but must never be mistaken for authoritative populations:
 
-* ``motion`` — motion-detection-associated names (e.g. the ``T4``/``T5`` elementary motion
-  detectors).
-* ``hunger`` — internal-state / feeding-associated names.
+* ``motion`` — motion-detection-associated ``subclass`` names (e.g. the ``T4``/``T5`` elementary
+  motion detectors).
+* ``hunger`` — internal-state / feeding-associated ``cell_type`` names (IPCs, Hugin, NPF, and
+  insulin/DILP peptidergic cells; UC-17). Bound over ``cell_type`` — where these populations are
+  actually labelled — rather than ``subclass`` (where they do not appear at all).
 
 Both approximate modalities still fail loud on zero match, exactly like the clean ones.
 """
@@ -195,19 +197,31 @@ MODALITY_RULES: dict[str, _ModalityRule] = {
         description="curated name list (approximate): subclass contains one of ['t4', 't5']",
     ),
     "hunger": _ModalityRule(
-        attr="subclass",
+        # UC-17: repointed from ``subclass`` to ``cell_type``. The internal-state / feeding
+        # ("hunger") neurons (IPCs, Hugin, NPF, and insulin/DILP peptidergic cells) are labelled
+        # in the authoritative ``cell_type`` column, NOT in ``subclass`` — the old ``subclass``
+        # tokens matched 0 neurons in the full MaleCNS meta, making the binding unbuildable. The
+        # ``cell_type`` substring match resolves the real approximate population (~22 in the
+        # canonical matrix: {IPC, Hugin-RG, NPFL1-I}); ``insulin``/``dilp`` are future-proofing
+        # synonyms (0 matches today, harmless). Still approximate / non-authoritative.
+        attr="cell_type",
         match=_SUBSTRING,
-        values=("hunger", "feeding", "npf", "insulin"),
+        values=("ipc", "hugin", "npf", "insulin", "dilp"),
         approximate=True,
         description=(
-            "curated name list (approximate): subclass contains one of "
-            "['hunger', 'feeding', 'npf', 'insulin']"
+            "curated name list (approximate): cell_type contains one of "
+            "['ipc', 'hugin', 'npf', 'insulin', 'dilp']"
         ),
     ),
 }
 
 #: Human-friendly, sorted attribute-name map so error messages can point at the CSV column.
-_ATTR_TO_COLUMN = {"superclass": "superclass", "neuron_class": "class", "subclass": "subclass"}
+_ATTR_TO_COLUMN = {
+    "superclass": "superclass",
+    "neuron_class": "class",
+    "subclass": "subclass",
+    "cell_type": "cell_type",
+}
 
 
 def available_modalities() -> tuple[str, ...]:

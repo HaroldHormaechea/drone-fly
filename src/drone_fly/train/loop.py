@@ -102,6 +102,31 @@ def _reconcile_obstacle_vision(env_config, obs_schema):
     return replace(base, **updates)
 
 
+def _reconcile_battery(env_config, obs_schema):
+    """Make the env's battery block agree with ``obs_schema`` (UC-17 width coupling).
+
+    Mirrors :func:`_reconcile_obstacle_vision`: the obs schema is **authoritative** for the
+    observation width. If it carries a ``battery`` block, the env must emit it — this returns an
+    ``EnvConfig`` whose :class:`~drone_fly.env.config.BatteryConfig` is enabled (which turns on
+    BOTH the adapter-side battery physics and the env-side width-1 battery observation dim; they
+    are physically coupled). Any battery knobs already set on ``env_config`` (drain rates, knee,
+    empty_factor) are preserved — only ``enabled`` is forced on. When ``obs_schema`` is ``None`` or
+    has no ``battery`` block, ``env_config`` is returned unchanged (byte-identical to pre-UC-17).
+    """
+    if obs_schema is None:
+        return env_config
+    block = next((b for b in obs_schema.blocks if b.name == "battery"), None)
+    if block is None:
+        return env_config
+
+    from dataclasses import replace
+
+    from drone_fly.env.config import EnvConfig
+
+    base = env_config or EnvConfig()
+    return replace(base, battery=replace(base.battery, enabled=True))
+
+
 def find_latest_checkpoint(models_dir: str) -> str | None:
     """Return the newest ``*_steps.zip`` checkpoint in ``models_dir`` (AC7 idempotent resume).
 
@@ -284,10 +309,13 @@ def train(
                 resume,
             )
 
-    # UC-15: the obs schema is authoritative for the observation width — if it carries an
-    # obstacle-vision block, widen the env to emit it (k derived name-based) and, when course
-    # randomization is on, enable obstacle randomization. A no-op when there is no such block.
-    env_config = _reconcile_obstacle_vision(env_config, obs_schema)
+    # UC-15/UC-17: the obs schema is authoritative for the observation width. Reconcile BOTH the
+    # obstacle-vision block (widen the env + enable obstacle randomization when course
+    # randomization is on) and the battery block (enable battery physics + the width-1 battery
+    # obs dim). ``battery_hunger_v3`` carries both blocks, so both run; each is a no-op when its
+    # block is absent (byte-identical to before). The generic width assertion below then validates
+    # ``env.obs_width == obs_schema.total_width`` for the fully-reconciled config.
+    env_config = _reconcile_battery(_reconcile_obstacle_vision(env_config, obs_schema), obs_schema)
 
     venv = build_vec_env(
         config=env_config,

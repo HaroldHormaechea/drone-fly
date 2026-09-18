@@ -102,12 +102,16 @@ re-binds the 12-d observation into a *vision* block (target-relative → visual 
 `obstacle_vision_v2` (UC-15) extends `migrated_v1` with an *obstacle-vision* block (width 12 =
 nearest-3 pillars × 4 features) bound to the same visual population; setting it widens the
 observation to 24-d and makes the env emit the egocentric obstacle encoding (and, when course
-randomization is on, sample pillars). Omitting `schema` keeps the legacy single-projection
-behaviour. **Note:** a block schema changes the input→sensory wiring, so checkpoints trained
-under a different wiring do not carry over — a fresh train is required. A `migrated_v1`
-checkpoint can be *grafted* to `obstacle_vision_v2` (obstacle block zero-initialised → identical
-actions until fine-tuned), but VecNormalize obs-stats are 12-d and do **not** carry to 24-d, so
-fresh normalisation stats are part of that retrain.
+randomization is on, sample pillars). `battery_hunger_v3` (UC-17) extends `obstacle_vision_v2`
+with a width-1 *battery* block bound to the approximate `hunger` (internal-state / feeding)
+population; setting it widens the observation to 25-d, turns on the battery drain + thrust-impact
+model, and makes the env emit the battery dim (encoded as depletion = 1 − charge). Omitting
+`schema` keeps the legacy single-projection behaviour. **Note:** a block schema changes the
+input→sensory wiring, so checkpoints trained under a different wiring do not carry over — a fresh
+train is required. A checkpoint can be *grafted* one step up the chain (`migrated_v1` →
+`obstacle_vision_v2` → `battery_hunger_v3`; the appended block is zero-initialised → identical
+actions until fine-tuned), but VecNormalize obs-stats are tied to the old width and do **not**
+carry to the wider observation, so fresh normalisation stats are part of that retrain.
 
 ### Obstacles (UC-15)
 Courses may carry cylindrical **pillar obstacles** (floor-anchored: `center`, `radius`,

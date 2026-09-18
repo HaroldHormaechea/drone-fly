@@ -19,12 +19,14 @@ Provenance strategy (ordered — see use-cases/plans/01-connectome-plumbing-poc.
    Synthetic / ``numpy.random`` fabrication is forbidden. This script never fabricates
    data — it only slices a real downloaded matrix, and it never invents soma coordinates.
 
-Reduction rule (UC-13: modality-aware, deterministic, offline — never random)
------------------------------------------------------------------------------
+Reduction rule (UC-13/UC-17: modality-aware, deterministic, offline — never random)
+-----------------------------------------------------------------------------------
 The fixture must carry (a) a soma-complete central "core" so UC-05's anatomical map holds,
-AND (b) a genuinely-wired *proprioceptive/mechanosensory* afferent population so UC-13's
-modality selector and re-bind run against real biology. Real sensory afferents have no
-brain-volume somata, so those two goals pull apart — the rule builds the union of:
+(b) a genuinely-wired *proprioceptive/mechanosensory* afferent population so UC-13's
+modality selector and re-bind run against real biology, AND (c) the approximate internal-state
+/ feeding ("hunger") population so UC-17's battery observation block binds to real neurons.
+Real sensory afferents have no brain-volume somata, so (a) and (b) pull apart — the rule builds
+the union of:
 
 * **CORE** — the ``--core`` (default 250) neurons of highest total degree **among neurons that
   have a real, finite, parseable ``somaLocation``** (in + out nnz; tie-break ascending index).
@@ -33,11 +35,16 @@ brain-volume somata, so those two goals pull apart — the rule builds the union
 * **PROPRIO QUOTA** — the ``--proprio-quota`` (default 50) highest-degree
   ``class == "mechanosensory_proprioceptive"`` neurons, selected **without** the soma filter
   (they are real afferents that are intentionally soma-less).
+* **HUNGER QUOTA (UC-17)** — the ``--hunger-quota`` (default 22) highest-degree neurons whose
+  ``cell_type`` contains one of the hunger tokens (IPC / Hugin / NPF / insulin / DILP), selected
+  **without** the soma filter. In the canonical MaleCNS matrix this matches exactly 22 neurons
+  ({IPC, Hugin-RG, NPFL1-I}), which ARE soma-populated (endocrine/intrinsic). The ``hunger``
+  modality is labelled in ``cell_type``, not ``subclass`` — hence the cell_type match.
 
 The induced submatrix is taken over the union. Fully deterministic: the same source matrix
 always yields the same fixture. By construction the fixture has **partial** soma coverage
-(the core is 100% soma-populated; the proprioceptive quota is 0%), which UC-05's coverage
-test asserts as an exact partition rather than 100%.
+(the core + hunger quota are soma-populated; the proprioceptive quota is 0%), which UC-05's
+coverage test asserts as an exact partition rather than 100%.
 
 Outputs (default: ``tests/fixtures/``)
 --------------------------------------
@@ -89,9 +96,17 @@ META_KEEP_COLUMNS = [
 #: The MaleCNS ``class`` label of the proprioceptive afferents the quota draws from.
 PROPRIO_CLASS = "mechanosensory_proprioceptive"
 
-#: Default core / proprioceptive-quota sizes (see the module docstring).
+#: Curated, case-insensitive ``cell_type`` substrings that identify the approximate
+#: internal-state / feeding ("hunger") population UC-17 binds the battery observation block to.
+#: Mirrors :data:`drone_fly.controller.modality.MODALITY_RULES` ["hunger"] verbatim. In the
+#: canonical MaleCNS matrix these match exactly 22 neurons: {IPC x16, Hugin-RG x4, NPFL1-I x2}.
+HUNGER_CELL_TYPE_TOKENS = ("ipc", "hugin", "npf", "insulin", "dilp")
+
+#: Default core / proprioceptive-quota / hunger-quota sizes (see the module docstring). The
+#: hunger population is small and biologically fixed, so the quota is the full matched set (22).
 DEFAULT_CORE = 250
 DEFAULT_PROPRIO_QUOTA = 50
+DEFAULT_HUNGER_QUOTA = 22
 
 ATTRIBUTION = (
     "Derived from the connectome_data_prep dataset "
@@ -153,6 +168,7 @@ def build_fixture(
     out_dir: Path,
     core_size: int,
     proprio_quota: int,
+    hunger_quota: int,
     npz_url: str,
     meta_url: str,
     source_name: str,
@@ -182,6 +198,11 @@ def build_fixture(
         )
     if "class" not in meta.columns:
         raise SystemExit("Source meta lacks a 'class' column; cannot select the proprio quota.")
+    if "cell_type" not in meta.columns:
+        raise SystemExit(
+            "Source meta lacks a 'cell_type' column; cannot select the hunger quota (UC-17). "
+            "The 'hunger' population is labelled in cell_type, not subclass."
+        )
 
     # Total degree (in + out nnz) over the whole source matrix — the ranking key.
     in_deg = np.asarray((matrix != 0).sum(axis=0)).ravel()
@@ -192,9 +213,13 @@ def build_fixture(
     # astype(str) (not "string") so missing labels become the literal "nan" rather than pd.NA,
     # which would make the ``== PROPRIO_CLASS`` comparison raise on ambiguous truth values.
     class_labels = meta["class"].astype(str).to_numpy()
+    # Lowercased cell_type for the hunger substring match (UC-17); "nan" for missing labels.
+    cell_type_lower = meta["cell_type"].astype(str).str.lower().to_numpy()
 
     # CORE: top soma-bearing neurons by degree. PROPRIO: top proprioceptive by degree, no soma
-    # filter. Union (dedup) sorted for a deterministic contiguous layout.
+    # filter. HUNGER: top hunger-cell_type neurons by degree, no soma filter (UC-17; a small,
+    # biologically-fixed population — the quota takes the full matched set, ~22). Union (dedup)
+    # sorted for a deterministic contiguous layout.
     core = _rank_by_degree(np.nonzero(soma_mask)[0], total_deg, core_size)
     proprio_candidates = np.nonzero(class_labels == PROPRIO_CLASS)[0]
     if proprio_candidates.size < proprio_quota:
@@ -203,7 +228,22 @@ def build_fixture(
             f"need {proprio_quota}."
         )
     proprio = _rank_by_degree(proprio_candidates, total_deg, proprio_quota)
-    selected = np.sort(np.union1d(core, proprio))
+    hunger_mask = np.array(
+        [any(tok in ct for tok in HUNGER_CELL_TYPE_TOKENS) for ct in cell_type_lower],
+        dtype=bool,
+    )
+    hunger_candidates = np.nonzero(hunger_mask)[0]
+    if hunger_candidates.size == 0:
+        raise SystemExit(
+            "No neurons match the hunger cell_type tokens "
+            f"{list(HUNGER_CELL_TYPE_TOKENS)} in the source meta; cannot build the UC-17 hunger "
+            "quota. This script never fabricates data (STOP + flag)."
+        )
+    # Take the top-degree matched neurons up to the quota; the matched set is small and fixed by
+    # biology, so a quota >= the number available simply selects them all (no raise — unlike the
+    # proprio quota, which draws from a large class).
+    hunger = _rank_by_degree(hunger_candidates, total_deg, hunger_quota)
+    selected = np.sort(np.union1d(np.union1d(core, proprio), hunger))
 
     sub = matrix[selected][:, selected].tocsr().astype(np.float32)
     sub.eliminate_zeros()
@@ -252,26 +292,38 @@ def build_fixture(
     n_sel = int(selected.size)
     n_core = int(core.size)
     n_proprio_in_sel = int((class_labels[selected] == PROPRIO_CLASS).sum())
+    n_hunger_in_sel = int(hunger_mask[selected].sum())
     n_soma = len(soma_rows)
+    # Matched hunger cell_type breakdown (for provenance): the exact {label: count} set selected.
+    hunger_types = pd.Series(meta["cell_type"].to_numpy()[selected][hunger_mask[selected]])
+    hunger_breakdown = hunger_types.value_counts().to_dict()
+    hunger_set_str = ", ".join(f"{k} x{v}" for k, v in sorted(hunger_breakdown.items()))
 
-    prov = f"""# Test fixture provenance (UC-13 modality-aware slice)
+    prov = f"""# Test fixture provenance (UC-13 modality-aware slice; UC-17 hunger quota)
 
 - **Source dataset:** {source_name}
 - **Source matrix URL:** {npz_url}
 - **Source meta URL:** {meta_url}
 - **Source scale:** {n_total} neurons, {matrix.nnz} edges (stored non-zeros)
-- **Slice rule (UC-13, deterministic — no randomness):** the union of
+- **Slice rule (deterministic — no randomness):** the union of
   - **CORE:** top-{core_size} neurons by total degree (in + out nnz, tie-break ascending
     index) **among neurons with a parseable ``somaLocation``** (soma-complete central hubs:
     visual_projection, descending_neuron, hub intrinsics);
   - **PROPRIO QUOTA:** top-{proprio_quota} ``class == "{PROPRIO_CLASS}"`` neurons by total
     degree (tie-break ascending index), selected **without** the soma filter (real afferents,
-    intentionally soma-less).
+    intentionally soma-less);
+  - **HUNGER QUOTA (UC-17):** top-{hunger_quota} neurons whose ``cell_type`` contains one of
+    {list(HUNGER_CELL_TYPE_TOKENS)} (case-insensitive) by total degree (tie-break ascending
+    index), selected **without** the soma filter. This is the approximate internal-state /
+    feeding ("hunger") population the battery observation block binds to. Matched set in this
+    build: {{{hunger_set_str}}} ({n_hunger_in_sel} neurons).
 
   Induced submatrix over exactly the union.
 - **Resulting fixture scale:** {sub.shape[0]} neurons, {sub.nnz} edges.
 - **Soma coverage partition (by construction — partial, not 100%):**
-  - {n_soma} / {n_sel} neurons have a real, finite soma coordinate (the core);
+  - {n_soma} / {n_sel} neurons have a real, finite soma coordinate (the {n_core}-neuron core
+    plus the {n_hunger_in_sel} soma-bearing hunger-quota neurons — the hunger population is
+    endocrine/intrinsic and soma-populated);
   - {n_proprio_in_sel} proprioceptive-quota neurons have NO soma (flagged missing, never faked).
   - ``mcns_fixture_soma.csv`` carries a ``bodyid,x,y,z`` row for exactly the {n_soma}
     soma-populated neurons; soma-less neurons are absent from it.
@@ -290,8 +342,10 @@ def build_fixture(
     print()
     print(
         f"Selection: core={n_core} (soma-filtered) + proprio_quota={n_proprio_in_sel} "
-        f"=> {n_sel} unique neurons; soma coverage {n_soma}/{n_sel}."
+        f"+ hunger_quota={n_hunger_in_sel} => {n_sel} unique neurons; "
+        f"soma coverage {n_soma}/{n_sel}."
     )
+    print(f"Matched hunger cell_type set: {{{hunger_set_str}}}")
     print("=> Set FIXTURE_EXPECTED_SCALE in src/drone_fly/connectome/loader.py to:")
     print(f"     ExpectedScale(neuron_count={sub.shape[0]}, edge_count={sub.nnz})")
 
@@ -316,6 +370,16 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_PROPRIO_QUOTA,
         help=f"Proprioceptive ({PROPRIO_CLASS}) afferent quota (default: {DEFAULT_PROPRIO_QUOTA}).",
     )
+    parser.add_argument(
+        "--hunger-quota",
+        type=int,
+        default=DEFAULT_HUNGER_QUOTA,
+        help=(
+            "Hunger (internal-state/feeding cell_type) quota for the UC-17 battery obs binding "
+            f"(default: {DEFAULT_HUNGER_QUOTA}; the biological population is small, so a quota "
+            ">= the matched count selects them all)."
+        ),
+    )
     parser.add_argument("--source-name", default=DEFAULT_SOURCE_NAME)
     parser.add_argument("--source-url", dest="npz_url", default=DEFAULT_NPZ_URL)
     parser.add_argument("--meta-url", default=DEFAULT_META_URL)
@@ -331,6 +395,7 @@ def main(argv: list[str] | None = None) -> int:
         out_dir=args.out_dir,
         core_size=args.core,
         proprio_quota=args.proprio_quota,
+        hunger_quota=args.hunger_quota,
         npz_url=args.npz_url,
         meta_url=args.meta_url,
         source_name=args.source_name,
