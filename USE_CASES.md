@@ -24,3 +24,4 @@ Statuses:
 | 12 | [use-cases/12-mri-brain-heatmap.md](use-cases/12-mri-brain-heatmap.md) | MRI-style full-brain activation heatmap | done | 2026-09-18 |
 | 13 | [use-cases/13-modality-mapped-populations.md](use-cases/13-modality-mapped-populations.md) | Modality-mapped neuron populations + graft-ready observation schema | done | 2026-09-18 |
 | 14 | [use-cases/14-default-prune-full-connectome.md](use-cases/14-default-prune-full-connectome.md) | Default prune to the full auto-downloaded MaleCNS connectome | done | 2026-09-18 |
+| 15 | [use-cases/15-obstacles-vision-avoidance.md](use-cases/15-obstacles-vision-avoidance.md) | Obstacles in the course + vision sense (detection & avoidance) | pending | 2026-09-18 |
