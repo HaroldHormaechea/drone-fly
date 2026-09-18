@@ -40,16 +40,25 @@ logger = logging.getLogger(__name__)
 CHECKPOINT_PREFIX = "ppo_racer"
 
 
-def build_policy_kwargs(connectome: ConnectomeData, cfg: TrainConfig) -> dict:
+def build_policy_kwargs(connectome: ConnectomeData, cfg: TrainConfig, obs_schema=None) -> dict:
     """Assemble ``policy_kwargs`` keeping the connectome features load-bearing (AC4).
 
     ``net_arch=dict(pi=[], vf=cfg.vf_arch)``: the policy head is empty so PPO's action
     distribution is a linear map straight off the 4-channel connectome features; the value
     head is a small MLP on the same features.
+
+    ``obs_schema`` (UC-13): when ``None`` (default) the ``features_extractor_kwargs`` are
+    byte-identical to UC-01..12 (legacy single-projection actor). When an
+    :class:`~drone_fly.controller.obs_schema.ObsSchema` is supplied it is added to the kwargs,
+    so it is pickled into the checkpoint and ``PPO.load`` rebuilds the actor under the same
+    block schema (AC3).
     """
+    features_extractor_kwargs: dict = {"data": connectome}
+    if obs_schema is not None:
+        features_extractor_kwargs["obs_schema"] = obs_schema
     return {
         "features_extractor_class": ConnectomeFeaturesExtractor,
-        "features_extractor_kwargs": {"data": connectome},
+        "features_extractor_kwargs": features_extractor_kwargs,
         "net_arch": {"pi": [], "vf": list(cfg.vf_arch)},
     }
 
@@ -146,6 +155,7 @@ def train(
     record: bool = False,
     record_every: int = 1,
     record_dir: str | None = None,
+    obs_schema=None,
 ):
     """Run (or resume) PPO training; return the trained model.
 
@@ -179,6 +189,12 @@ def train(
     prune_k:
         Corridor slack passed to the pruner when ``prune`` is set (default
         :data:`~drone_fly.connectome.prune.DEFAULT_PRUNE_K`).
+    obs_schema:
+        Optional :class:`~drone_fly.controller.obs_schema.ObsSchema` (UC-13). ``None`` (default)
+        trains the legacy single-projection actor exactly (AC7 parity). A schema re-binds the
+        observation into biologically-mapped blocks; it is pickled into the checkpoint so a
+        resumed / reloaded run reconstructs the same block layout. Ignored on a ``resume`` run
+        (the checkpoint already carries its own schema).
     """
     from stable_baselines3 import PPO
     from stable_baselines3.common.callbacks import CheckpointCallback
@@ -264,7 +280,7 @@ def train(
             ent_coef=cfg.ent_coef,
             seed=cfg.seed,
             device=resolved_device,
-            policy_kwargs=build_policy_kwargs(connectome, cfg),
+            policy_kwargs=build_policy_kwargs(connectome, cfg, obs_schema=obs_schema),
         )
 
     model.set_logger(_make_logger(cfg.logs_dir))
@@ -322,13 +338,15 @@ def smoke_train(
     timesteps: int | None = None,
     prune: bool = False,
     prune_k: int = DEFAULT_PRUNE_K,
+    obs_schema=None,
 ):
     """A few-step training run on the pure-numpy backend (AC9, CI).
 
     Forces ``adapter="simple"`` (no pybullet) and a tiny step budget, proving the env +
     connectome policy + PPO loop + checkpointing wire together and stay finite. ``prune`` /
     ``prune_k`` (UC-04) are threaded through so the pruned subcircuit can be smoke-tested
-    end-to-end.
+    end-to-end. ``obs_schema`` (UC-13) is likewise threaded through so the migrated block schema
+    can be smoke-trained on the fixture — a finite completed update proves trainability (AC4).
     """
     cfg = cfg or TrainConfig()
     steps = timesteps if timesteps is not None else cfg.smoke_timesteps
@@ -344,4 +362,5 @@ def smoke_train(
         total_timesteps=steps,
         prune=prune,
         prune_k=prune_k,
+        obs_schema=obs_schema,
     )

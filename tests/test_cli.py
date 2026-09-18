@@ -275,7 +275,7 @@ def test_prune_dispatch_writes_reusable_slice(tmp_path, capsys) -> None:
     files = {p.name for p in out.iterdir()}
     assert {"connectome_pruned.npz", "connectome_pruned_meta.csv", "PRUNE_PROVENANCE.md"} <= files
     reloaded = load_connectome(out)
-    assert reloaded.neuron_count == 59 and reloaded.edge_count == 751
+    assert reloaded.neuron_count == 45 and reloaded.edge_count == 549
     assert "Pruned connectome written" in capsys.readouterr().out
 
 

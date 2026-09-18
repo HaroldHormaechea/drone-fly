@@ -4,8 +4,12 @@ Covers :func:`drone_fly.record.coordinates.provision_positions` and
 :func:`~drone_fly.record.coordinates.neuron_roles`:
 
 * **AC6/AC7** — the committed fixture ships **real** anatomical soma positions
-  (tokenless ``somaLocation`` sidecar): source labelled ``anatomical …``,
-  ``has_position`` all ``True``, 300/300 coverage, coords finite + deterministic.
+  (tokenless ``somaLocation`` sidecar): source labelled ``anatomical …``, coords finite +
+  deterministic. Per UC-13 (Option B) the fixture now has **partial** soma coverage by
+  construction — the soma-populated central core carries real coordinates while the real
+  ``mechanosensory_proprioceptive`` afferent quota has no brain-volume soma. Coverage is
+  asserted as an **exact partition** (``has_position[i]`` iff a soma exists for neuron ``i``),
+  the stronger successor to UC-05's old 100%-coverage assertion (recorded decision #3).
 * **AC6** — a neuron absent from the sidecar is **flagged** (``has_position=False``,
   ``coords3d=None``) and fallback-placed (``coords2d`` still finite) — never dropped
   and never fabricated with an anatomical value.
@@ -61,26 +65,69 @@ def _make_connectome(
     )
 
 
-# --- AC6/AC7 anatomical coverage on the committed fixture ------------------------------
-def test_fixture_positions_are_real_anatomical_full_coverage(connectome: ConnectomeData) -> None:
-    """The committed fixture sidecar yields 300/300 real soma positions (AC6/AC7)."""
+# --- AC6/AC7 anatomical coverage on the committed fixture (UC-13 exact partition) ------
+def test_fixture_positions_are_exact_soma_partition(
+    connectome: ConnectomeData, fixture_dir: Path
+) -> None:
+    """The regenerated fixture has an EXACT soma partition, not 100% coverage (UC-13, B).
+
+    Real sensory afferents (the ``mechanosensory_proprioceptive`` quota) have no
+    brain-volume soma, so coverage is partial by construction. This asserts the exact
+    partition (as strong as, not a relaxation of, the old 300/300 assertion; recorded
+    decision #3):
+
+    * the number of soma-populated neurons equals the committed sidecar's row count (the
+      central core);
+    * ``has_position[i]`` is ``True`` **iff** a soma exists for neuron ``i`` — for EVERY
+      neuron (the load-bearing identity);
+    * every proprioceptive-quota afferent is flagged soma-less (``coords3d`` ``None``),
+      never dropped and never fabricated;
+    * every soma-populated neuron carries a real, finite, deterministic 3-D coordinate.
+    """
+    import pandas as pd
+
     pos = provision_positions(connectome)
+    n = connectome.neuron_count
+
+    # Ground truth: a neuron has a real position iff its bodyid is in the committed soma CSV.
+    soma_ids = {
+        int(b) for b in pd.read_csv(fixture_dir / "mcns_fixture_soma.csv")["bodyid"].tolist()
+    }
+    ids = np.asarray(connectome.neuron_ids)
+    expected_has = [int(i) in soma_ids for i in ids.tolist()]
+    core_size = sum(expected_has)
 
     assert pos["source"].lower().startswith("anatomical")
     assert pos["projection"] == DEFAULT_PROJECTION
-    n = connectome.neuron_count
 
+    # (1) exact count: soma-populated core == sidecar rows (partial, < n by construction).
     assert len(pos["has_position"]) == n
-    assert all(pos["has_position"]), "every fixture neuron must have a real soma position"
-    assert sum(pos["has_position"]) == n == 300
+    assert sum(pos["has_position"]) == core_size == len(soma_ids)
+    assert core_size < n, "UC-13 fixture must have partial (not full) soma coverage"
 
+    # (2) identity: has_position[i] iff a soma exists for neuron i — for every neuron.
+    assert pos["has_position"] == expected_has
+
+    # (3) every mechanosensory_proprioceptive afferent is flagged soma-less.
+    neuron_class = [str(x) for x in np.asarray(connectome.neuron_class).tolist()]
+    proprio = [i for i, c in enumerate(neuron_class) if c == "mechanosensory_proprioceptive"]
+    assert proprio, "fixture must contain the proprioceptive afferent quota"
+    assert all(pos["has_position"][i] is False for i in proprio)
+    assert all(pos["coords3d"][i] is None for i in proprio)
+
+    # (4) soma-populated neurons: real, finite 3-D coords; soma-less: coords3d None (no fake).
     coords3d = pos["coords3d"]
     assert len(coords3d) == n
-    assert all(c is not None for c in coords3d), "no anatomical neuron may have null coords3d"
-    arr3 = np.asarray(coords3d, dtype=float)
-    assert arr3.shape == (n, 3)
-    assert np.isfinite(arr3).all()
+    for i in range(n):
+        if expected_has[i]:
+            assert coords3d[i] is not None
+            arr = np.asarray(coords3d[i], dtype=float)
+            assert arr.shape == (3,)
+            assert np.isfinite(arr).all()
+        else:
+            assert coords3d[i] is None
 
+    # 2-D fallback keeps EVERY neuron drawable (finite), soma-less included.
     coords2d = np.asarray(pos["coords2d"], dtype=float)
     assert coords2d.shape == (n, 2)
     assert np.isfinite(coords2d).all()
@@ -91,9 +138,15 @@ def test_fixture_positions_are_deterministic(connectome: ConnectomeData) -> None
     a = provision_positions(connectome)
     b = provision_positions(connectome)
     assert np.array_equal(np.asarray(a["coords2d"]), np.asarray(b["coords2d"]))
-    assert np.array_equal(
-        np.asarray(a["coords3d"], dtype=float), np.asarray(b["coords3d"], dtype=float)
-    )
+    assert a["has_position"] == b["has_position"]
+    # coords3d carries None for soma-less afferents; compare element-wise (a plain
+    # np.asarray(..., dtype=float) would choke on the ragged None/[x,y,z] mix).
+    assert len(a["coords3d"]) == len(b["coords3d"])
+    for ca, cb in zip(a["coords3d"], b["coords3d"], strict=True):
+        if ca is None or cb is None:
+            assert ca is None and cb is None
+        else:
+            assert np.array_equal(np.asarray(ca, dtype=float), np.asarray(cb, dtype=float))
     assert a["source"] == b["source"]
 
 
@@ -187,8 +240,11 @@ def test_projection_selects_documented_axes(connectome: ConnectomeData) -> None:
     for plane, (a0, a1) in PROJECTIONS.items():
         pos = provision_positions(connectome, projection=plane)
         assert pos["projection"] == plane
-        arr3 = np.asarray(pos["coords3d"], dtype=float)
-        arr2 = np.asarray(pos["coords2d"], dtype=float)
-        # All fixture neurons are anatomical, so 2-D is exactly the selected axis pair.
+        # Only soma-populated (anatomical) neurons project straight from their 3-D coords;
+        # the soma-less afferents get a finite 2-D fallback (asserted in the partition test).
+        anat = [i for i, h in enumerate(pos["has_position"]) if h]
+        assert anat, "fixture must contain anatomical neurons"
+        arr3 = np.asarray([pos["coords3d"][i] for i in anat], dtype=float)
+        arr2 = np.asarray(pos["coords2d"], dtype=float)[anat]
         assert np.allclose(arr2[:, 0], arr3[:, a0])
         assert np.allclose(arr2[:, 1], arr3[:, a1])

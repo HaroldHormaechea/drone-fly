@@ -230,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
 def _run_train(config_path: str) -> int:
     """Load a train config, build the ``training/<name>/`` layout, and dispatch to ``train``."""
     from drone_fly.config import TrainRunConfig, load_yaml, run_layout
+    from drone_fly.controller.obs_schema import resolve_schema
     from drone_fly.train.config import TrainConfig
     from drone_fly.train.loop import train
 
@@ -240,6 +241,8 @@ def _run_train(config_path: str) -> int:
     record_every = cfg.record_every if cfg.record_every is not None else 1
     record_dir = cfg.record_dir if cfg.record_dir is not None else layout.recordings
     resume = _resolve_config_resume(cfg.resume, layout.checkpoints)
+    # UC-13: None (default) -> legacy single-projection run (AC7 parity); a named schema opts in.
+    obs_schema = resolve_schema(cfg.schema)
 
     # Route this run's checkpoints + logs under training/<name>/; every other TrainConfig
     # default is unchanged, so smoke-train (which never comes through here) stays identical.
@@ -259,6 +262,7 @@ def _run_train(config_path: str) -> int:
         record=cfg.record,
         record_every=record_every,
         record_dir=record_dir,
+        obs_schema=obs_schema,
     )
     return 0
 

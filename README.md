@@ -211,7 +211,13 @@ exit code `2` (never a stack trace).
 
 **`train`** — `name` **(required)**; optional: `connectome`, `adapter` (`auto`|`simple`|`pybullet`,
 default `auto`), `device` (`cpu`|`cuda`|`mps`), `timesteps`, `n_envs` (≥ 1), `resume`, `prune`,
-`prune_k`, `record`, `record_every`, `record_dir`, `randomize`, `randomize_dynamics`.
+`prune_k`, `record`, `record_every`, `record_dir`, `randomize`, `randomize_dynamics`, `schema`.
+`schema` (UC-13) opts into a named **block observation schema** — currently `migrated_v1`, which
+re-binds the 12-d observation into a vision block (target-relative → visual neurons) and a
+proprioception block (self-motion → the proprioceptive/mechanosensory population). Omitting it
+(the default) runs the legacy single-projection observation unchanged. Re-binding deliberately
+changes input wiring, so a `migrated_v1` run must be trained from scratch (a prior checkpoint is
+not carried over).
 
 **`evaluate`** — `checkpoint` **(required)**; optional: `vecnormalize`, `episodes`, `seed`
 (default 0), `device`, `adapter` (default `auto`), `connectome`, `record`, `record_every`,

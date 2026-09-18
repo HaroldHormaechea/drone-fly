@@ -117,6 +117,79 @@ def test_metadata_present_is_loaded_and_aligned(tmp_path: Path) -> None:
     np.testing.assert_array_equal(data.sign, sign.astype(np.int8))
 
 
+# --- UC-13 (AC1): loader surfaces class/subclass without breaking superclass -------
+
+
+def test_fixture_exposes_class_and_subclass(connectome: ConnectomeData) -> None:
+    """The regenerated fixture carries real ``class``/``subclass`` aligned to N (AC1)."""
+    n = connectome.neuron_count
+    assert connectome.neuron_class is not None, "class must be surfaced (read from 'class' col)"
+    assert connectome.subclass is not None, "subclass must be surfaced"
+    assert len(connectome.neuron_class) == n
+    assert len(connectome.subclass) == n
+    # The proprioceptive afferent population the schema binds to must be present.
+    classes = {str(x) for x in np.asarray(connectome.neuron_class).tolist()}
+    assert "mechanosensory_proprioceptive" in classes
+
+
+def test_surfacing_class_does_not_break_superclass_selection(connectome: ConnectomeData) -> None:
+    """AC1 — adding class/subclass is purely additive: superclass selection is untouched."""
+    from drone_fly.controller.populations import select_populations
+
+    # superclass is still surfaced and still drives the existing population selection.
+    assert connectome.superclass is not None
+    (motor_idx, _), (sensory_idx, _) = select_populations(connectome)
+    assert motor_idx.size > 0 and sensory_idx.size > 0
+
+
+def test_class_subclass_absent_leaves_fields_none(tmp_path: Path) -> None:
+    """A meta CSV without class/subclass -> attributes None (documented degrade, AC1)."""
+    _write_fixture(tmp_path, columns={"superclass": np.array(["x"] * 20, dtype=object)}, n=20)
+    data = load_connectome(tmp_path)
+    assert data.neuron_class is None
+    assert data.subclass is None
+    # superclass still loads — the degrade is per-column.
+    assert data.superclass is not None
+
+
+def test_class_subclass_present_loaded_under_reserved_word_alias(tmp_path: Path) -> None:
+    """The CSV 'class' column loads onto the ``neuron_class`` attribute (reserved-word alias)."""
+    n = 12
+    neuron_class = np.array(["mechanosensory_proprioceptive"] * n, dtype=object)
+    subclass = np.array(["haltere"] * n, dtype=object)
+    _write_fixture(tmp_path, {"class": neuron_class, "subclass": subclass}, n)
+
+    data = load_connectome(tmp_path)
+    assert data.neuron_class is not None and len(data.neuron_class) == n
+    assert data.subclass is not None and len(data.subclass) == n
+    np.testing.assert_array_equal(np.asarray(data.neuron_class), neuron_class)
+    np.testing.assert_array_equal(np.asarray(data.subclass), subclass)
+
+
+def test_class_subclass_save_load_round_trips_column_for_column(tmp_path: Path) -> None:
+    """save_connectome writes neuron_class back as 'class'; load reproduces both (AC1)."""
+    from drone_fly.connectome import save_connectome
+    from drone_fly.connectome.loader import ConnectomeData
+
+    n = 8
+    matrix = sp.random(n, n, density=0.3, format="csr", dtype=np.float32, random_state=1)
+    original = ConnectomeData(
+        adjacency=matrix,
+        neuron_ids=np.arange(2000, 2000 + n, dtype=np.int64),
+        source="crafted",
+        superclass=np.array(["visual_projection"] * n, dtype=object),
+        neuron_class=np.array(["olfactory"] * n, dtype=object),
+        subclass=np.array(["ORN"] * n, dtype=object),
+    )
+    save_connectome(original, tmp_path)
+    reloaded = load_connectome(tmp_path)
+
+    np.testing.assert_array_equal(np.asarray(reloaded.neuron_class), original.neuron_class)
+    np.testing.assert_array_equal(np.asarray(reloaded.subclass), original.subclass)
+    np.testing.assert_array_equal(np.asarray(reloaded.superclass), original.superclass)
+    np.testing.assert_array_equal(np.asarray(reloaded.neuron_ids), original.neuron_ids)
+
+
 def test_malecns_full_scale_constant_defined_and_positive() -> None:
     assert MALECNS_V1_EXPECTED_SCALE.neuron_count > 0
     assert MALECNS_V1_EXPECTED_SCALE.edge_count > 0

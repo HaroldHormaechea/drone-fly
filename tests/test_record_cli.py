@@ -201,7 +201,7 @@ def test_evaluate_record_writes_files(trained_checkpoint, tmp_path) -> None:
 
 
 def test_evaluate_record_raises_on_connectome_mismatch(trained_checkpoint, tmp_path) -> None:
-    """Re-loading a pruned (274-neuron) connectome against the 300-neuron actor must raise."""
+    """Re-loading a pruned (245-neuron) connectome against the 300-neuron actor must raise."""
     final, stats = trained_checkpoint
     with pytest.raises(ValueError, match="alignment|neuron"):
         evaluate_checkpoint(
@@ -213,5 +213,5 @@ def test_evaluate_record_raises_on_connectome_mismatch(trained_checkpoint, tmp_p
             record=True,
             record_dir=str(tmp_path / "rec"),
             connectome_path=FIXTURE_DIR,
-            prune=True,  # 300 -> 274 neurons, no longer matches the checkpoint's actor
+            prune=True,  # 300 -> 245 neurons, no longer matches the checkpoint's actor
         )
