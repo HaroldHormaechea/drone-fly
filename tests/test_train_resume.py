@@ -24,7 +24,13 @@ import pytest
 
 from drone_fly.env.racing_env import build_vec_env
 from drone_fly.train.config import TrainConfig
-from drone_fly.train.loop import CHECKPOINT_PREFIX, find_latest_checkpoint, smoke_train, train
+from drone_fly.train.loop import (
+    CHECKPOINT_PREFIX,
+    _resolve_resume,
+    find_latest_checkpoint,
+    smoke_train,
+    train,
+)
 
 
 @pytest.fixture
@@ -132,6 +138,116 @@ def test_find_latest_checkpoint_none_when_empty(tmp_path) -> None:
     empty = tmp_path / "empty"
     empty.mkdir()
     assert find_latest_checkpoint(str(empty)) is None
+
+
+# --------------------------------------------------------------------------- #
+# _resolve_resume — --resume ("latest" sentinel / directory / explicit .zip / None)
+# --------------------------------------------------------------------------- #
+def _seed_fake_checkpoints(directory, steps) -> None:
+    """Touch empty ``ppo_racer_<N>_steps.zip`` files so newest-selection can be tested
+    without a real (slow) training run — resolution keys purely off the filename."""
+    directory.mkdir(parents=True, exist_ok=True)
+    for n in steps:
+        (directory / f"{CHECKPOINT_PREFIX}_{n}_steps.zip").write_bytes(b"")
+
+
+def test_resolve_resume_none_is_none(tmp_path) -> None:
+    """No --resume (None) resolves to None (a fresh run), models_dir irrelevant."""
+    assert _resolve_resume(None, str(tmp_path)) is None
+
+
+def test_resolve_resume_latest_picks_newest_in_models_dir(tmp_path) -> None:
+    """The "latest" sentinel resolves to the newest checkpoint in models_dir."""
+    models = tmp_path / "models"
+    _seed_fake_checkpoints(models, [64, 256, 128])
+    resolved = _resolve_resume("latest", str(models))
+    assert resolved.endswith(f"{CHECKPOINT_PREFIX}_256_steps.zip")
+
+
+def test_resolve_resume_directory_picks_newest_in_that_dir(tmp_path) -> None:
+    """A directory value resolves to the newest checkpoint inside *that* directory
+    (not models_dir)."""
+    models = tmp_path / "models"
+    _seed_fake_checkpoints(models, [10])  # a decoy in models_dir that must NOT be picked
+    other = tmp_path / "elsewhere"
+    _seed_fake_checkpoints(other, [64, 512])
+    resolved = _resolve_resume(str(other), str(models))
+    assert resolved.endswith(f"{CHECKPOINT_PREFIX}_512_steps.zip")
+    assert str(other) in resolved
+
+
+def test_resolve_resume_explicit_zip_passthrough_unchanged(tmp_path) -> None:
+    """An explicit .zip path is returned byte-identical — never validated or rewritten."""
+    explicit = str(tmp_path / "some" / "ckpt.zip")  # need not even exist
+    assert _resolve_resume(explicit, str(tmp_path / "models")) == explicit
+
+
+def test_resolve_resume_empty_dir_raises_naming_dir(tmp_path) -> None:
+    """A directory with no checkpoints raises FileNotFoundError naming the searched dir
+    (loud hard error — never a silent fresh start)."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(FileNotFoundError, match=str(empty)):
+        _resolve_resume(str(empty), str(tmp_path / "models"))
+
+
+def test_resolve_resume_latest_no_checkpoints_raises_naming_models_dir(tmp_path) -> None:
+    """The "latest" sentinel with no checkpoints in models_dir raises, naming models_dir."""
+    models = tmp_path / "models"
+    models.mkdir()
+    with pytest.raises(FileNotFoundError, match=str(models)):
+        _resolve_resume("latest", str(models))
+
+
+def test_train_resume_latest_continues_counter(connectome, tiny_cfg) -> None:
+    """End-to-end: `train(..., resume="latest")` resolves the newest checkpoint in
+    cfg.models_dir and continues the step counter rather than restarting."""
+    m1 = smoke_train(connectome=connectome, cfg=tiny_cfg, timesteps=128)
+    steps0 = m1.num_timesteps
+    assert steps0 == 128
+    assert find_latest_checkpoint(tiny_cfg.models_dir) is not None
+
+    m2 = train(
+        tiny_cfg,
+        connectome=connectome,
+        adapter="simple",
+        device="cpu",
+        resume="latest",
+        total_timesteps=64,
+    )
+    assert m2.num_timesteps > steps0
+
+
+def test_train_resume_directory_continues_counter(connectome, tiny_cfg) -> None:
+    """End-to-end: `train(..., resume=<models_dir>)` resolves the newest checkpoint in that
+    directory and continues the step counter."""
+    m1 = smoke_train(connectome=connectome, cfg=tiny_cfg, timesteps=128)
+    steps0 = m1.num_timesteps
+    assert steps0 == 128
+
+    m2 = train(
+        tiny_cfg,
+        connectome=connectome,
+        adapter="simple",
+        device="cpu",
+        resume=tiny_cfg.models_dir,  # a directory -> newest checkpoint within it
+        total_timesteps=64,
+    )
+    assert m2.num_timesteps > steps0
+
+
+def test_train_resume_latest_no_checkpoint_raises(connectome, tiny_cfg) -> None:
+    """`train(..., resume="latest")` with no checkpoint yet is a loud FileNotFoundError,
+    never a silent train-from-scratch."""
+    with pytest.raises(FileNotFoundError):
+        train(
+            tiny_cfg,
+            connectome=connectome,
+            adapter="simple",
+            device="cpu",
+            resume="latest",
+            total_timesteps=64,
+        )
 
 
 # --------------------------------------------------------------------------- #

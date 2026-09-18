@@ -79,6 +79,41 @@ def find_latest_checkpoint(models_dir: str) -> str | None:
     return max(matches, key=_steps)
 
 
+def _resolve_resume(resume: str | None, models_dir: str) -> str | None:
+    """Resolve the ``--resume`` argument to a concrete checkpoint ``.zip`` path (or ``None``).
+
+    Resolution order (the ``"latest"`` sentinel is checked *before* the directory test):
+
+    * ``None`` → ``None`` (fresh run, no resume).
+    * ``"latest"`` sentinel (bare ``--resume``) → newest checkpoint in ``models_dir``.
+    * an existing directory → newest checkpoint in that directory.
+    * anything else → returned unchanged (an explicit ``.zip`` path; byte-identical to before).
+
+    For the ``"latest"``/directory forms, if no ``*_steps.zip`` checkpoint is found we raise
+    :class:`FileNotFoundError` naming the searched directory. This is a deliberate hard error:
+    silently starting from scratch would be the exact data-loss (an unnoticed training rewind)
+    this resolution is meant to prevent. An explicit ``.zip`` path is never validated here — it
+    flows through untouched so existing behaviour is unchanged.
+    """
+    if resume is None:
+        return None
+    if resume == "latest":
+        latest = find_latest_checkpoint(models_dir)
+        if latest is None:
+            raise FileNotFoundError(
+                f"--resume: no {CHECKPOINT_PREFIX}_*_steps.zip checkpoint found in {models_dir!r}."
+            )
+        return latest
+    if os.path.isdir(resume):
+        latest = find_latest_checkpoint(resume)
+        if latest is None:
+            raise FileNotFoundError(
+                f"--resume: no {CHECKPOINT_PREFIX}_*_steps.zip checkpoint found in {resume!r}."
+            )
+        return latest
+    return resume
+
+
 def _infer_vecnormalize_path(model_path: str, models_dir: str, cfg: TrainConfig) -> str | None:
     """Best-effort locate the VecNormalize stats saved alongside ``model_path``.
 
@@ -126,7 +161,10 @@ def train(
     device:
         Explicit torch device override, or ``None`` for the AC8 auto-policy.
     resume:
-        Path to a checkpoint ``.zip`` to continue from (``reset_num_timesteps=False``).
+        Checkpoint to continue from (``reset_num_timesteps=False``). Accepts an explicit
+        ``.zip`` path (byte-identical to before), a directory (resume its newest
+        ``*_steps.zip``), or the ``"latest"`` sentinel (newest in ``cfg.models_dir``);
+        resolved via :func:`_resolve_resume`. ``None`` starts fresh.
     total_timesteps:
         Override ``cfg.total_timesteps`` for this call.
     n_envs:
@@ -182,6 +220,11 @@ def train(
     )
 
     Path(cfg.models_dir).mkdir(parents=True, exist_ok=True)
+
+    # Resolve --resume ("latest" sentinel / directory / explicit .zip) to a concrete path
+    # before any resume logic runs, so a directory or bare --resume auto-selects the newest
+    # checkpoint instead of erroring, while an explicit .zip stays byte-identical.
+    resume = _resolve_resume(resume, cfg.models_dir)
 
     resuming = resume is not None
     stats_path = None

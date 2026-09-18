@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from drone_fly.cli import build_parser
+from drone_fly.cli import build_parser, main
 from drone_fly.evaluate.evaluator import evaluate_checkpoint
 from drone_fly.train.config import TrainConfig
 from drone_fly.train.loop import CHECKPOINT_PREFIX, smoke_train
@@ -60,7 +60,62 @@ def test_train_parses_record_flags() -> None:
 def test_record_off_by_default() -> None:
     args = build_parser().parse_args(["evaluate", "--checkpoint", "c.zip"])
     assert args.record is False
-    assert args.record_every == 1
+    # --record-every now defaults to None (not 1) so "explicitly passed" is detectable at the
+    # dispatch boundary; the value is coalesced to 1 before it reaches the callee (below).
+    assert args.record_every is None
+
+
+# --- dispatch-boundary coalesce: None default -> 1 reaching the callee -----------------
+def test_evaluate_dispatch_coalesces_record_every_to_one(monkeypatch) -> None:
+    """With --record-every omitted (parses to None), evaluate() still receives record_every=1."""
+    captured: dict = {}
+
+    class _FakeMetrics:
+        def summary(self) -> str:
+            return "completion_rate=0.0"
+
+    def fake_evaluate(*args, **kwargs):
+        captured.update(kwargs)
+        return _FakeMetrics()
+
+    # main() imports evaluate_checkpoint at call time from its home module — patch there.
+    monkeypatch.setattr("drone_fly.evaluate.evaluator.evaluate_checkpoint", fake_evaluate)
+
+    rc = main(["evaluate", "--checkpoint", "c.zip", "--adapter", "simple", "--device", "cpu"])
+    assert rc == 0
+    assert captured["record_every"] == 1  # coalesced from the None default
+
+
+def test_train_dispatch_coalesces_record_every_to_one(monkeypatch) -> None:
+    """With --record-every omitted (parses to None), train() still receives record_every=1."""
+    captured: dict = {}
+
+    def fake_train(*args, **kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr("drone_fly.train.loop.train", fake_train)
+
+    rc = main(["train", "--adapter", "simple", "--device", "cpu"])
+    assert rc == 0
+    assert captured["record_every"] == 1  # coalesced from the None default
+
+
+def test_train_dispatch_forwards_explicit_record_every(monkeypatch) -> None:
+    """An explicit --record-every N flows through unchanged (no accidental coalesce to 1)."""
+    captured: dict = {}
+
+    def fake_train(*args, **kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr("drone_fly.train.loop.train", fake_train)
+
+    rc = main(
+        ["train", "--record", "--record-every", "7", "--adapter", "simple", "--device", "cpu"]
+    )
+    assert rc == 0
+    assert captured["record_every"] == 7
 
 
 # --- checkpoint fixture ----------------------------------------------------------------

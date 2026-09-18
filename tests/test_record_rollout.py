@@ -17,6 +17,7 @@ Hermetic: ``adapter="simple"``, short episodes, no pybullet / checkpoint / netwo
 from __future__ import annotations
 
 import json
+import types
 from pathlib import Path
 
 import numpy as np
@@ -118,6 +119,68 @@ def test_recorder_actor_misalignment_raises(
     env = _short_env()
     with pytest.raises(ValueError, match="aligned|neurons"):
         record_rollout(actor, env, recorder, n_episodes=1, record_every=1)
+
+
+# --------------------------------------------------------------------------- #
+# Recording no-clobber on resume — RecordingCallback continues the episode counter
+# past any existing episode_<n>.json[.gz] in the record dir (empty dir -> 0).
+# --------------------------------------------------------------------------- #
+def test_highest_episode_index_empty_dir(tmp_path: Path) -> None:
+    from drone_fly.train.record_callback import _highest_episode_index
+
+    assert _highest_episode_index(tmp_path) == -1  # empty -> -1 (so next index is 0)
+
+
+def test_highest_episode_index_scans_json_and_gz(tmp_path: Path) -> None:
+    """The scan covers BOTH plain .json and gzipped .json.gz playback files."""
+    from drone_fly.train.record_callback import _highest_episode_index
+
+    (tmp_path / "episode_0.json").write_text("{}")
+    (tmp_path / "episode_1.json").write_text("{}")
+    (tmp_path / "episode_3.json.gz").write_bytes(b"")  # gz variant must count toward the max
+    (tmp_path / "not_an_episode.json").write_text("{}")  # ignored (no episode_<n> pattern)
+    assert _highest_episode_index(tmp_path) == 3
+
+
+def _stub_callback(monkeypatch, connectome, record_dir):
+    """Build a RecordingCallback with a stubbed actor so `_on_training_start` runs without a
+    real PPO model (actor_from_model is patched to a no-op namespace with a settable sink)."""
+    from drone_fly.record.recorder import ActivationRecorder
+    from drone_fly.train import record_callback as rc_mod
+    from drone_fly.train.record_callback import RecordingCallback
+
+    recorder = ActivationRecorder(connectome, record_dir, backend="simple")
+    cb = RecordingCallback(recorder, record_every=1, seed=0)
+    monkeypatch.setattr(rc_mod, "actor_from_model", lambda model: types.SimpleNamespace(sink=None))
+    cb.model = object()  # never dereferenced — actor_from_model is stubbed above
+    return cb
+
+
+def test_callback_continues_past_existing_recordings(
+    connectome: ConnectomeData, tmp_path: Path, monkeypatch
+) -> None:
+    """A resumed run's callback starts numbering at max+1 so it never clobbers prior files."""
+    rec_dir = tmp_path / "acts"
+    rec_dir.mkdir()
+    (rec_dir / "episode_0.json").write_text("{}")
+    (rec_dir / "episode_1.json").write_text("{}")
+    (rec_dir / "episode_2.json.gz").write_bytes(b"")  # max index on disk is 2
+
+    cb = _stub_callback(monkeypatch, connectome, rec_dir)
+    cb._on_training_start()
+    assert cb._episode == 3  # max(0, 1, 2) + 1 — continues past the existing recordings
+
+
+def test_callback_starts_at_zero_for_empty_dir(
+    connectome: ConnectomeData, tmp_path: Path, monkeypatch
+) -> None:
+    """A fresh run (empty record dir) starts at episode 0 — fresh-run parity, no regression."""
+    rec_dir = tmp_path / "acts"
+    rec_dir.mkdir()
+
+    cb = _stub_callback(monkeypatch, connectome, rec_dir)
+    cb._on_training_start()
+    assert cb._episode == 0  # empty dir -> -1 + 1
 
 
 def record_rollout_wrapper(actor, recorder, *, n_episodes: int, record_every: int):

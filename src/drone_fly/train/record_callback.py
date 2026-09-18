@@ -17,7 +17,10 @@ per-step rewards seen during training (documented caveat).
 
 from __future__ import annotations
 
+import glob
 import logging
+import os
+import re
 
 from stable_baselines3.common.callbacks import BaseCallback
 
@@ -25,6 +28,25 @@ from drone_fly.controller.sb3 import actor_from_model
 from drone_fly.record.recorder import ActivationRecorder
 
 logger = logging.getLogger(__name__)
+
+_EPISODE_RE = re.compile(r"episode_(\d+)\.json(\.gz)?$")
+
+
+def _highest_episode_index(record_dir) -> int:
+    """Return the highest ``n`` across ``episode_<n>.json[.gz]`` files in ``record_dir``.
+
+    Scans both plain ``.json`` and gzipped ``.json.gz`` playback files. Returns ``-1`` for a
+    missing or empty directory, so callers can add 1 to get the next index to write (empty →
+    0). This is how a resumed run continues past the prior run's recordings instead of
+    clobbering them.
+    """
+    highest = -1
+    for suffix in ("episode_*.json", "episode_*.json.gz"):
+        for path in glob.glob(os.path.join(str(record_dir), suffix)):
+            m = _EPISODE_RE.search(os.path.basename(path))
+            if m:
+                highest = max(highest, int(m.group(1)))
+    return highest
 
 
 class RecordingCallback(BaseCallback):
@@ -67,7 +89,12 @@ class RecordingCallback(BaseCallback):
             logger.warning("Recording disabled: %s", exc)
             self._enabled = False
             return
-        self._episode = 0
+        # Continue numbering past any existing recordings in this dir so a resumed run never
+        # clobbers the prior run's episode_<n>.json[.gz] (empty dir → 0, fresh-run parity).
+        # Note: this counter is derived from the files on disk, so with record_every>1 it
+        # will NOT equal the prior run's cumulative episode count — that is intentional (it
+        # guarantees no clobber while preserving the absolute-index cadence); don't "correct" it.
+        self._episode = _highest_episode_index(self.recorder.out_dir) + 1
         self._begin_episode()
 
     def _on_step(self) -> bool:
