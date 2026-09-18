@@ -29,7 +29,7 @@ import torch
 from drone_fly.connectome.loader import ConnectomeData
 from drone_fly.controller.actor import ConnectomeActorNetwork
 from drone_fly.controller.encoding import ACTION_DIM, OBS_DIM
-from drone_fly.env.config import CourseConfig, ObstacleSpec
+from drone_fly.env.config import CourseConfig, ObstacleSpec, PadSpec
 from drone_fly.record.recorder import ActivationRecorder
 
 
@@ -231,3 +231,59 @@ def test_obstacle_recording_is_additive_and_field_absent_loads(
     assert {"start", "gates", "finish", "floor_z", "ceiling_z"} <= set(with_pillars)
     # WITHOUT pillars: the key is absent (field-absent files load; viewer omits the pillars).
     assert "obstacles" not in without
+
+
+def test_pad_recording_is_additive_and_field_absent_loads(
+    connectome: ConnectomeData, tmp_path: Path
+) -> None:
+    """UC-16 (challenger rec 3): a pad course adds only ``course.pads``; a field-absent file loads.
+
+    Presence-guarded exactly like the UC-15 obstacles block: a course WITH pads carries the extra
+    ``pads`` array (each ``{center, radius}``, floor-anchored, no z) while every pre-UC-16 field is
+    untouched, and a course WITHOUT pads omits the key entirely — so a pad-free / older recording
+    is byte-for-byte unchanged and still loads (the viewer degrades gracefully; ``drawPads`` is
+    deferred to a later UC).
+    """
+    n = connectome.neuron_count
+
+    def record(course: CourseConfig) -> dict:
+        rec = ActivationRecorder(
+            connectome, tmp_path / "act", backend="simple", dt=0.05, course=course
+        )
+        rec.start_episode(0, seed=0)
+        for f in range(2):
+            rec.sink(np.linspace(-1.0, 1.0, n, dtype=np.float32) * (f + 1) / 2)
+            rec.capture_frame(np.zeros(ACTION_DIM), np.array([float(f), 0.0, 1.0]))
+        path = rec.finish_episode(completed=True, completion_time=0.1, total_reward=1.0, steps=2)
+        return json.loads(path.read_text())
+
+    pads = (PadSpec(center=(0.0, 0.0), radius=0.5), PadSpec(center=(6.5, 0.0), radius=0.4))
+    with_pads = record(CourseConfig(pads=pads))["meta"]["course"]
+    without = record(CourseConfig())["meta"]["course"]
+
+    # WITH pads: the additive pads array is present and correct; every pre-UC-16 field remains.
+    assert with_pads["pads"] == [
+        {"center": [0.0, 0.0], "radius": 0.5},
+        {"center": [6.5, 0.0], "radius": 0.4},
+    ]
+    assert {"start", "gates", "finish", "floor_z", "ceiling_z"} <= set(with_pads)
+    # WITHOUT pads: the key is absent (field-absent files load byte-identically; viewer degrades).
+    assert "pads" not in without
+
+
+def test_obstacles_and_pads_coexist_additively(connectome: ConnectomeData, tmp_path: Path) -> None:
+    """A course with BOTH pillars and pads stamps both additive arrays independently."""
+    n = connectome.neuron_count
+    course = CourseConfig(
+        obstacles=(ObstacleSpec(center=(3.25, 1.5), radius=0.3, height=2.5),),
+        pads=(PadSpec(center=(0.0, 0.0), radius=0.5),),
+    )
+    rec = ActivationRecorder(connectome, tmp_path / "act", backend="simple", dt=0.05, course=course)
+    rec.start_episode(0, seed=0)
+    rec.sink(np.linspace(-1.0, 1.0, n, dtype=np.float32))
+    rec.capture_frame(np.zeros(ACTION_DIM), np.array([0.0, 0.0, 1.0]))
+    path = rec.finish_episode(completed=True, completion_time=0.05, total_reward=1.0, steps=1)
+
+    meta_course = json.loads(path.read_text())["meta"]["course"]
+    assert len(meta_course["obstacles"]) == 1
+    assert len(meta_course["pads"]) == 1

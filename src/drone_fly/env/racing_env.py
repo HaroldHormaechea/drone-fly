@@ -33,6 +33,7 @@ import numpy as np
 from drone_fly.adapter import make_adapter
 from drone_fly.controller.encoding import ACTION_DIM, OBS_DIM
 from drone_fly.env.config import DynamicsParams, EnvConfig
+from drone_fly.env.docking import evaluate_dock
 from drone_fly.env.geometry import advance, current_target
 from drone_fly.env.obstacles import (
     OBSTACLE_FEATURES_PER,
@@ -112,6 +113,11 @@ class RaceEnv(gym.Env):
         # contact with a pillar on the *previous* step, so a penalty fires only when contact
         # begins. Reset to False every episode.
         self._prev_contact = False
+        # Authoritative docked state (UC-16): the single source of truth for ``info["docked"]``.
+        # LEVEL/every-step (recomputed fresh each step from the stateless dock predicate), NOT
+        # edge-triggered — it stays True across every dwell step and clears the step takeoff lifts
+        # the drone off the floor. No vestigial copy anywhere else in the env.
+        self._docked = False
 
     @property
     def obs_width(self) -> int:
@@ -195,6 +201,9 @@ class RaceEnv(gym.Env):
         self._step_count = 0
         # Fresh episode: no prior obstacle contact (edge-trigger state, UC-15).
         self._prev_contact = False
+        # Fresh episode: not docked (UC-16). Recomputed every step; reset here for the pre-first-
+        # step read and so ``info["docked"]`` is well-defined before step() runs.
+        self._docked = False
         # Effective step budget scales with the active course's gate count (UC-09): a longer
         # course gets proportionally more time so it stays completable. N=1 => 400 exactly.
         episode = self.config.episode
@@ -244,25 +253,62 @@ class RaceEnv(gym.Env):
         obstacle_contact = bool(contact and not self._prev_contact)
         self._prev_contact = contact
 
+        # Pad docking (UC-16 AC2/AC3/AC7): re-classify a floor contact as a controlled *dock*
+        # (not a crash) when it lands slow, upright, and over a pad. Evaluated FRESH every step
+        # (stateless) off ``self._prev_pos`` (this step's START position — updated at the very end
+        # of step(), so the ``(prev_z - curr_z)/dt`` descent proxy is valid at the contact step)
+        # and the adapter's contact flag. Ceiling contact never docks (floor-only). With
+        # ``course.pads == ()`` the predicate short-circuits ``False`` ⇒ ``crash == state.collided``
+        # and the whole termination/reward path is byte-identical to pre-UC-16 (AC8).
+        docked = evaluate_dock(
+            self._prev_pos,
+            state.position,
+            state.attitude,
+            state.collided,
+            course.floor_z,
+            course.pads,
+            self.config.episode.dt,
+            self.config.dock.max_dock_descent_speed,
+            self.config.dock.max_dock_tilt,
+        )
+        # A crash is a collision that is NOT a controlled dock. This is the only signal that
+        # feeds termination and the collision penalty now (UC-16): a dock keeps the episode alive.
+        crash = bool(state.collided and not docked)
+        # Single authoritative docked state (no vestigial copy): LEVEL/every-step so it persists
+        # across dwell (each docked step re-satisfies the rule) and clears on takeoff (collided
+        # goes False ⇒ docked False), giving repeatable dock↔fly within one episode (AC4/AC5).
+        self._docked = docked
+
         reward = compute_reward(
             dist_to_target_prev=dist_prev,
             dist_to_target_curr=dist_curr,
             event=event,
-            collided=state.collided,
+            # UC-16: pass the CRASH flag, not the raw contact flag — a controlled dock earns the
+            # neutral (no collision_penalty) reward while every other floor/ceiling contact still
+            # eats collision_penalty. No new reward term (docking is unincentivised this UC).
+            collided=crash,
             completed=completed,
             cfg=self.config.reward,
             num_gates=course.num_gates,
             obstacle_contact=obstacle_contact,
         )
 
-        terminated = bool(completed or state.collided)
+        # UC-16: a dock does NOT terminate — only a valid completion or a (non-dock) crash does.
+        terminated = bool(completed or crash)
         truncated = bool(not terminated and self._step_count >= self._max_steps)
 
         info = {
             "phase": self._phase_str(),
             "backend": self.backend,
             "event": event,
-            "collided": bool(state.collided),
+            # UC-16: ``collided`` now reports the CRASH (terminating floor/ceiling contact), i.e.
+            # a controlled dock is NOT reported as a collision. A dock is surfaced separately via
+            # ``docked`` below; no downstream consumer reads ``collided``, so this stays safe.
+            "collided": bool(crash),
+            # UC-16: authoritative docked flag, surfaced via ``info`` ONLY (the observation vector
+            # is byte-identical — no obs-schema block, no checkpoint invalidation, AC6). LEVEL/
+            # every-step so it stays True across dwell steps (AC4) and clears on takeoff (AC5).
+            "docked": bool(self._docked),
             "completed": bool(completed),
             # UC-15: True only on the step an obstacle contact *begins* (edge-triggered), i.e.
             # the step the severe non-terminating obstacle penalty was applied. Additive key.

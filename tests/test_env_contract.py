@@ -19,13 +19,16 @@ from drone_fly.controller.encoding import ACTION_DIM, OBS_DIM
 from drone_fly.env import EnvConfig, make_env
 from drone_fly.env.config import (
     CourseConfig,
+    DockConfig,
     EpisodeConfig,
     GateSpec,
     ObstacleSpec,
     ObstacleVisionConfig,
     RandomizationConfig,
     default_obstacle_course,
+    default_pad_course,
     single_gate_course,
+    single_pad_course,
 )
 from drone_fly.env.randomization import is_course_solvable
 
@@ -645,3 +648,266 @@ def test_no_obstacle_course_never_flags_contact() -> None:
         assert info["obstacle_contact"] is False
         if terminated:
             break
+
+
+# ===========================================================================
+# UC-16 — pad docking: land / dwell / takeoff, docked via info only, byte-identity
+# ===========================================================================
+class _DockScriptedAdapter:
+    """A scripted adapter with **per-step** contact flags and attitudes, for dock tests.
+
+    ``_ScriptedAdapter`` only supports a single ``collide_at`` and always-level attitude; a
+    dock→dwell→takeoff trajectory needs contact sustained across several steps (dwell) and a
+    controllable attitude (to prove upright landings dock). Positions/attitudes/contact are
+    replayed frame by frame; the env infers descent speed from ``(prev_z - curr_z)/dt`` across
+    the replayed positions, so the trajectory drives the dock classifier deterministically.
+    """
+
+    backend = "scripted"
+
+    def __init__(self, positions, collided_flags, attitudes=None):
+        self._positions = [np.asarray(p, dtype=np.float64) for p in positions]
+        self._collided = list(collided_flags)
+        if attitudes is None:
+            attitudes = [(0.0, 0.0, 0.0)] * len(positions)
+        self._attitudes = [np.asarray(a, dtype=np.float64) for a in attitudes]
+        self._i = 0
+
+    def _state(self, idx) -> DroneState:
+        j = min(idx, len(self._positions) - 1)
+        return DroneState(
+            position=self._positions[j].copy(),
+            velocity=np.zeros(3),
+            attitude=self._attitudes[j].copy(),
+            angular_velocity=np.zeros(3),
+            collided=bool(self._collided[j]),
+        )
+
+    def reset(self, seed=None) -> DroneState:
+        self._i = 0
+        return self._state(0)
+
+    def step(self, action) -> DroneState:
+        self._i += 1
+        return self._state(self._i)
+
+    def close(self) -> None:  # pragma: no cover - trivial
+        pass
+
+
+# A one-gate, one-pad course with the pad at the spawn (0,0). Floor z=0; gate far away at x=3
+# and finish at x=6, so an at-origin dock/dwell/takeoff never passes a gate or the finish.
+_DOCK_COURSE = single_pad_course(pad_center=(0.0, 0.0), pad_radius=0.5)
+
+# dt = 0.05 (EpisodeConfig default) ⇒ descent = (prev_z - curr_z)/0.05.
+# Frames: 0 spawn (just above floor, over pad) → 1 land (descent 0.4<0.5) → 2,3 dwell (settled)
+# → 4 takeoff (airborne, no contact) → 5 descend → 6 re-dock (descent 0.4<0.5). All upright.
+_DOCK_POSITIONS = [
+    (0.0, 0.0, 0.02),  # 0: spawn, over the pad, just above the floor
+    (0.0, 0.0, 0.00),  # 1: DOCK — floor contact, |vz|≈0.4 m/s, upright, over pad
+    (0.0, 0.0, 0.00),  # 2: DWELL — settled on the pad
+    (0.0, 0.0, 0.00),  # 3: DWELL — still settled
+    (0.0, 0.0, 0.30),  # 4: TAKEOFF — lifted off the floor, no contact
+    (0.0, 0.0, 0.02),  # 5: descending back toward the pad (airborne)
+    (0.0, 0.0, 0.00),  # 6: RE-DOCK — controlled touchdown again
+]
+_DOCK_CONTACT = [False, True, True, True, False, False, True]
+
+
+def _dock_env():
+    env = _env_with(
+        _DockScriptedAdapter(_DOCK_POSITIONS, _DOCK_CONTACT), EnvConfig(course=_DOCK_COURSE)
+    )
+    env.reset()
+    return env
+
+
+def test_controlled_landing_docks_without_terminating() -> None:
+    """AC2: a slow, upright, over-pad floor contact sets ``docked`` and does NOT terminate."""
+    env = _dock_env()
+    _obs, _r, terminated, truncated, info = env.step(HOVER)  # frame 1: the landing
+    assert info["docked"] is True
+    assert terminated is False
+    assert truncated is False
+    # A dock is NOT reported as a collision (crash) — the two are disjoint (AC3 wiring).
+    assert info["collided"] is False
+    assert info["completed"] is False
+
+
+def test_dock_dwell_persists_across_steps() -> None:
+    """AC4: ``docked`` stays True across several dwell steps; the episode stays alive."""
+    env = _dock_env()
+    docked_flags = []
+    for _ in range(4):  # frames 1 (land) + 2,3 (dwell) + ...
+        _obs, _r, terminated, truncated, info = env.step(HOVER)
+        docked_flags.append(info["docked"])
+        assert terminated is False and truncated is False
+    # Land + two dwell steps are all docked (level info, not edge-triggered).
+    assert docked_flags[:3] == [True, True, True]
+
+
+def test_takeoff_clears_dock_then_redocks() -> None:
+    """AC5: throttling off the pad clears ``docked`` (normal flight), a re-touchdown re-docks.
+
+    Dock↔fly is repeatable within one episode and never terminates — the whole
+    land→dwell→takeoff→re-dock sequence stays live.
+    """
+    env = _dock_env()
+    seq = []
+    for _ in range(len(_DOCK_POSITIONS) - 1):  # frames 1..6
+        _obs, _r, terminated, _trunc, info = env.step(HOVER)
+        seq.append(info["docked"])
+        assert terminated is False  # nothing in the sequence crashes or completes
+    # land, dwell, dwell, takeoff(clear), fly, re-dock
+    assert seq == [True, True, True, False, False, True]
+
+
+def test_docked_state_surfaced_via_info_only_observation_byte_identical() -> None:
+    """AC6: docking changes ``info`` only — the observation is byte-identical to the no-pad run.
+
+    Two envs replay the *same* scripted positions/attitudes/contact; one course has the pad
+    (so frame 1 docks), the other has none (so frame 1 crashes). The emitted observation at the
+    contact step is bit-for-bit identical — the divergence lives entirely in ``info['docked']``
+    / ``info['collided']`` / ``terminated``, never in the 12-d observation vector.
+    """
+    no_pad_course = single_gate_course(
+        gate_center=(3.0, 0.0, 1.0), finish_x=6.0
+    )  # identical geo, 0 pads
+    pad_env = _env_with(
+        _DockScriptedAdapter(_DOCK_POSITIONS, _DOCK_CONTACT), EnvConfig(course=_DOCK_COURSE)
+    )
+    bare_env = _env_with(
+        _DockScriptedAdapter(_DOCK_POSITIONS, _DOCK_CONTACT), EnvConfig(course=no_pad_course)
+    )
+    obs_pad, _ = pad_env.reset()
+    obs_bare, _ = bare_env.reset()
+    # Reset observation identical (no pad influence on the obs vector).
+    assert obs_pad.shape == (OBS_DIM,)
+    np.testing.assert_array_equal(obs_pad, obs_bare)
+
+    # Frame 1 — the contact step: obs identical, but behaviour diverges only in info/termination.
+    obs_pad, _r, term_pad, _t, info_pad = pad_env.step(HOVER)
+    obs_bare, _r, term_bare, _t, info_bare = bare_env.step(HOVER)
+    np.testing.assert_array_equal(obs_pad, obs_bare)  # byte-identical observation
+    assert obs_pad.shape == (OBS_DIM,)  # still the locked 12-d contract (no obs-schema block)
+    assert info_pad["docked"] is True and term_pad is False  # pad → dock, alive
+    assert info_bare["docked"] is False and term_bare is True  # no pad → crash, terminated
+    assert "docked" in info_pad  # surfaced via info, not the observation
+
+
+# --- AC8: off-by-default byte-identity (no pads, no dock, no RNG draw) ---------------
+def _full_stream(config, seed, actions):
+    """Run a numpy-backed env and capture the full (obs, reward, terminated, truncated) stream
+    plus the final RNG bit-generator state — the byte-identity fingerprint for AC8.
+    """
+    env = make_env(config, adapter="simple")
+    obs, _ = env.reset(seed=seed)
+    obs_trace = [obs.copy()]
+    rewards, terms, truncs = [], [], []
+    for a in actions:
+        obs, r, terminated, truncated, _info = env.step(np.asarray(a, dtype=np.float32))
+        obs_trace.append(obs.copy())
+        rewards.append(r)
+        terms.append(terminated)
+        truncs.append(truncated)
+        if terminated or truncated:
+            break
+    rng_state = env.np_random.bit_generator.state
+    return np.array(obs_trace, dtype=np.float32), rewards, terms, truncs, rng_state
+
+
+def test_no_pad_env_is_byte_identical_to_committed_baseline() -> None:
+    """AC8: with no pads, a fixed-seed episode reproduces the pre-UC-16 committed baseline obs.
+
+    ``EnvConfig()`` has an empty ``course.pads`` and an all-default ``dock``; the dock predicate
+    short-circuits ``False`` every step, so the observation stream is bit-identical to the
+    regenerated seed-42 golden rollout (which predates the UC-16 dock wiring).
+    """
+    golden = np.load(_BASELINE_ROLLOUT)
+    actions = list(golden["actions"])
+    obs_trace, _r, _t, _tr, _rng = _full_stream(EnvConfig(), seed=42, actions=actions)
+    assert obs_trace.shape == golden["env_trace"].shape
+    np.testing.assert_array_equal(obs_trace, golden["env_trace"])
+
+
+def test_dock_config_and_present_pads_do_not_perturb_stream_or_rng() -> None:
+    """AC8: pads/dock are inert when no floor contact occurs — obs, reward, termination step,
+    and RNG consumption are all byte-identical to the default env.
+
+    Compares three configs under the same seed + action stream: the default env (no pads), a
+    custom ``DockConfig`` with a different threshold (still no pads), and ``default_pad_course``
+    (pads PRESENT but never touched — the drone never lands). All three must match bit-for-bit,
+    proving the dock thresholds are inert without contact and pads draw **zero** RNG.
+    """
+    rng = np.random.default_rng(7)
+    actions = [rng.uniform([0, -1, -1, -1], [1, 1, 1, 1]) for _ in range(60)]
+
+    base = _full_stream(EnvConfig(), seed=0, actions=actions)
+    custom_dock = _full_stream(
+        EnvConfig(dock=DockConfig(max_dock_descent_speed=99.0, max_dock_tilt=3.0)),
+        seed=0,
+        actions=actions,
+    )
+    with_pads = _full_stream(EnvConfig(course=default_pad_course()), seed=0, actions=actions)
+
+    for other in (custom_dock, with_pads):
+        np.testing.assert_array_equal(base[0], other[0])  # observation stream
+        assert base[1] == other[1]  # reward stream
+        assert base[2] == other[2]  # terminated stream (same termination step)
+        assert base[3] == other[3]  # truncated stream
+        assert base[4] == other[4]  # final RNG state — identical draw count (no pad RNG draw)
+
+
+def test_no_pad_stream_is_deterministic_for_a_fixed_seed() -> None:
+    """AC8: same seed → identical obs/reward/termination/RNG stream (determinism guard)."""
+    rng = np.random.default_rng(3)
+    actions = [rng.uniform([0, -1, -1, -1], [1, 1, 1, 1]) for _ in range(40)]
+    a = _full_stream(EnvConfig(), seed=5, actions=actions)
+    b = _full_stream(EnvConfig(), seed=5, actions=actions)
+    np.testing.assert_array_equal(a[0], b[0])
+    assert (a[1], a[2], a[3], a[4]) == (b[1], b[2], b[3], b[4])
+
+
+# --- AC9: hermetic finite docking trajectory (scripted + real-adapter smoke) ---------
+def test_scripted_dock_trajectory_is_finite_and_bounded() -> None:
+    """AC9: the offline scripted dock→dwell→takeoff→re-dock trajectory runs finite and clean.
+
+    No pybullet, no network — every step yields a finite 12-d observation and a finite reward,
+    the run never raises, and it stays live (a dock never terminates) through the whole script.
+    """
+    env = _dock_env()
+    docked_any = False
+    for _ in range(len(_DOCK_POSITIONS) - 1):
+        obs, reward, terminated, truncated, info = env.step(HOVER)
+        assert obs.shape == (OBS_DIM,)
+        assert np.isfinite(obs).all()
+        assert np.isfinite(reward)
+        assert terminated is False and truncated is False
+        docked_any = docked_any or info["docked"]
+    assert docked_any is True  # the scripted trajectory did dock at least once
+
+
+def test_real_adapter_docking_smoke_run_completes_finitely() -> None:
+    """AC9: a real numpy-adapter episode on a pad course terminates/truncates within budget.
+
+    Hover over the spawn pad on the ``simple`` adapter for the whole step budget: the run is
+    hermetic, every observation/reward stays finite, and the episode ends (truncation) in a
+    bounded number of steps — the docking wiring never makes the env hang or diverge.
+    """
+    # Small budget so the smoke run is fast: steps_per_gate=0 pins it to max_steps for N gates.
+    cfg = EnvConfig(
+        course=default_pad_course(), episode=EpisodeConfig(max_steps=25, steps_per_gate=0)
+    )
+    env = make_env(cfg, adapter="simple")
+    env.reset(seed=0)
+    ended = False
+    steps = 0
+    for _ in range(200):  # hard cap well above the 25-step budget → proves it is finite
+        obs, reward, terminated, truncated, _info = env.step(HOVER)
+        steps += 1
+        assert np.isfinite(obs).all() and np.isfinite(reward)
+        if terminated or truncated:
+            ended = True
+            break
+    assert ended is True
+    assert steps <= 25

@@ -342,6 +342,20 @@ def _course_meta(course: CourseConfig) -> dict:
             }
             for o in obstacles
         ]
+    # UC-16: landing/takeoff pads stamped **additively** and presence-guarded exactly like the
+    # obstacles block above — the key is emitted only when the course actually has pads, so no-pad
+    # runs and every pre-UC-16 recording stay byte-for-byte unchanged (the viewer degrades
+    # gracefully when the field is absent; ``drawPads`` is deferred to a later UC). Floor-anchored:
+    # a pad sits on ``floor_z`` with a horizontal disc of ``radius`` about ``center``.
+    pads = getattr(course, "pads", ())
+    if pads:
+        meta["pads"] = [
+            {
+                "center": [float(p.center[0]), float(p.center[1])],
+                "radius": float(p.radius),
+            }
+            for p in pads
+        ]
     return meta
 
 

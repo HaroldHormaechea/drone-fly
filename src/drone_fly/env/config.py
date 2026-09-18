@@ -50,6 +50,27 @@ class ObstacleSpec:
 
 
 @dataclass(frozen=True)
+class PadSpec:
+    """A floor-anchored landing/takeoff **pad** (UC-16 AC1): ``center + horizontal radius``.
+
+    A pad sits **on the floor** — it carries no ``z`` of its own (its z is the course
+    ``floor_z``), analogous to how :class:`ObstacleSpec` is floor-anchored. Its footprint is a
+    horizontal disc of ``radius`` about the ``(x, y)`` world position ``center``. A controlled
+    floor contact that is horizontally within ``radius`` of a pad (and slow + upright enough —
+    see :mod:`drone_fly.env.docking`) is a **dock** rather than a crash. Pure geometry resolves
+    this against the numpy adapter's point position, hermetic and offline.
+    """
+
+    center: tuple[float, float]
+    radius: float
+
+    @property
+    def axis_xy(self) -> np.ndarray:
+        """The pad's floor-anchored ``(x, y)`` centre as a float64 ``ndarray``."""
+        return np.asarray(self.center, dtype=np.float64)
+
+
+@dataclass(frozen=True)
 class GateSpec:
     """A single waypoint gate: a 3D centre and an aperture (UC-09 AC1).
 
@@ -96,6 +117,10 @@ class CourseConfig:
     # positional constructor call from UC-01..14 is unshifted; the default is **empty**, so a
     # ``CourseConfig()`` is byte-identical to UC-14 (no obstacles, no collision, no vision block).
     obstacles: tuple[ObstacleSpec, ...] = ()
+    # Floor-anchored landing/takeoff pads (UC-16 AC1). Appended **last** (after ``obstacles``) so
+    # every positional constructor call from UC-01..15 is unshifted; the default is **empty**, so
+    # a ``CourseConfig()`` stays byte-identical to UC-15 (no pads ⇒ no dock path ever taken).
+    pads: tuple[PadSpec, ...] = ()
 
     @property
     def start(self) -> np.ndarray:
@@ -157,6 +182,76 @@ def default_obstacle_course() -> CourseConfig:
         "default_obstacle_course must be solvable by construction"
     )
     return course
+
+
+#: The fixed default pad set (UC-16 AC1): two floor pads on the default 3-gate corridor — one at
+#: the start spawn ``(0, 0)`` and one just past the last gate near the finish ``(6.5, 0)`` — so a
+#: demo/scripted run can land, dwell, and take off without leaving the corridor. Pads never block
+#: flight (they only re-classify a floor contact), so — unlike obstacles — no solvability guard is
+#: needed. Values are documented, tunable constants; the "manually placed" set AC1 requires.
+_DEFAULT_PADS: tuple[PadSpec, ...] = (
+    PadSpec(center=(0.0, 0.0), radius=0.5),
+    PadSpec(center=(6.5, 0.0), radius=0.5),
+)
+
+
+def default_pad_course() -> CourseConfig:
+    """Build the default 3-gate course **with** the fixed :data:`_DEFAULT_PADS` (UC-16 AC1).
+
+    The manually-placed pad set for AC1: the standard default course plus two floor pads. Pads
+    are landing targets, not obstacles — they never obstruct the start→gates→finish path — so
+    (unlike :func:`default_obstacle_course`) there is no solvability assertion to run.
+    """
+    return CourseConfig(pads=_DEFAULT_PADS)
+
+
+def single_pad_course(
+    *,
+    start_position: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    pad_center: tuple[float, float] = (0.0, 0.0),
+    pad_radius: float = 0.5,
+    gate_center: tuple[float, float, float] = (3.0, 0.0, 1.0),
+    gate_aperture: float = 0.6,
+    finish_x: float = 6.0,
+    floor_z: float = 0.0,
+    ceiling_z: float = 2.5,
+) -> CourseConfig:
+    """Build a **one-gate, one-pad** course for hermetic docking tests (UC-16 AC1/AC9).
+
+    A minimal fixture: the single-gate geometry of :func:`single_gate_course` plus one floor pad
+    (default at the spawn ``(0, 0)``), so a scripted dock → dwell → takeoff trajectory has a pad
+    directly under a low spawn. Everything is a documented, overridable keyword.
+    """
+    return CourseConfig(
+        start_position=start_position,
+        gates=(GateSpec(center=gate_center, aperture=gate_aperture),),
+        finish_x=finish_x,
+        floor_z=floor_z,
+        ceiling_z=ceiling_z,
+        pads=(PadSpec(center=pad_center, radius=pad_radius),),
+    )
+
+
+@dataclass(frozen=True)
+class DockConfig:
+    """Pad-docking thresholds (UC-16 AC2). Documented, tunable constants.
+
+    A floor contact within a pad's radius is a controlled **dock** (not a crash) iff the inferred
+    descent speed is ``<= max_dock_descent_speed`` **and** the drone is roughly upright
+    (``|roll|, |pitch| <= max_dock_tilt``); see :func:`drone_fly.env.docking.evaluate_dock`.
+
+    ``max_dock_descent_speed`` is deliberately **conservative (low)**: the env infers descent
+    speed from the per-step vertical drop ``(prev_z - curr_z) / dt`` (the adapter zeroes ``vz`` on
+    contact), a proxy that *underestimates* a deep-penetration impact. A low threshold means that
+    underestimate can never turn a genuinely fast crash into a dock — the classifier fails **safe
+    toward crash**. ``0.5 m/s`` is a gentle-touchdown speed a controlled landing can hit while any
+    hard impact reads well above it. ``EnvConfig.dock`` is appended **last** with an all-default
+    value, so ``EnvConfig()`` stays byte-identical to UC-15 (with no pads the dock path is never
+    reached regardless of these thresholds).
+    """
+
+    max_dock_descent_speed: float = 0.5  # m/s — max gentle-landing descent that still docks
+    max_dock_tilt: float = 0.2618  # rad (~15°) — max |roll|/|pitch| that still counts as upright
 
 
 @dataclass(frozen=True)
@@ -319,3 +414,7 @@ class EnvConfig:
     randomization: RandomizationConfig = field(default_factory=RandomizationConfig)
     # Appended last with an all-off default, so ``EnvConfig()`` stays byte-identical to UC-14.
     obstacle_vision: ObstacleVisionConfig = field(default_factory=ObstacleVisionConfig)
+    # Pad-docking thresholds (UC-16). Appended **last** (after ``obstacle_vision``) with an
+    # all-default value; combined with an empty ``course.pads`` default this keeps ``EnvConfig()``
+    # byte-identical to UC-15 (the dock predicate short-circuits ``False`` when there are no pads).
+    dock: DockConfig = field(default_factory=DockConfig)
