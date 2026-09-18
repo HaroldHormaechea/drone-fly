@@ -25,7 +25,7 @@ Statuses:
 | 13 | [use-cases/13-modality-mapped-populations.md](use-cases/13-modality-mapped-populations.md) | Modality-mapped neuron populations + graft-ready observation schema | done | 2026-09-18 |
 | 14 | [use-cases/14-default-prune-full-connectome.md](use-cases/14-default-prune-full-connectome.md) | Default prune to the full auto-downloaded MaleCNS connectome | done | 2026-09-18 |
 | 15 | [use-cases/15-obstacles-vision-avoidance.md](use-cases/15-obstacles-vision-avoidance.md) | Obstacles in the course + vision sense (detection & avoidance) | done | 2026-09-18 |
-| 16 | [use-cases/16-landing-takeoff-pad-docking.md](use-cases/16-landing-takeoff-pad-docking.md) | Controlled landing + takeoff (pad docking) foundation | in-progress | 2026-09-18 |
+| 16 | [use-cases/16-landing-takeoff-pad-docking.md](use-cases/16-landing-takeoff-pad-docking.md) | Controlled landing + takeoff (pad docking) foundation | done | 2026-09-18 |
 | 17 | [use-cases/17-battery-drain-thrust-sense.md](use-cases/17-battery-drain-thrust-sense.md) | Battery drain + thrust impact + battery ("hunger") observation block | pending | 2026-09-18 |
 | 18 | [use-cases/18-recharge-pads.md](use-cases/18-recharge-pads.md) | Recharge pads (dock-to-recharge, energy-constrained course variation) | pending | 2026-09-18 |
 | 19 | [use-cases/19-damage-repair-pads.md](use-cases/19-damage-repair-pads.md) | Damage/integrity + repair pads + proprioceptive(damage) observation block | pending | 2026-09-18 |
