@@ -317,9 +317,15 @@ class EvaluateRunConfig:
 
 @dataclass(frozen=True)
 class PruneRunConfig:
-    """Validated settings for ``drone-fly prune --config`` (1:1 with the old prune flags)."""
+    """Validated settings for ``drone-fly prune --config``.
 
-    connectome: str
+    ``connectome`` is optional (UC-14): when omitted (or ``null``) it defaults to ``None``, which
+    the CLI resolves to the full auto-downloaded MaleCNS connectome in the default location
+    (``DRONE_FLY_CONNECTOME_DIR`` / ``data/connectome``) — never the committed fixture. Set it
+    explicitly (e.g. ``connectome: tests/fixtures``) to prune a specific artifact with no download.
+    """
+
+    connectome: str | None
     out: str
     prune_k: int
     prune_rule: str
@@ -329,7 +335,7 @@ class PruneRunConfig:
         from drone_fly.connectome.prune import DEFAULT_PRUNE_K, DEFAULT_PRUNE_RULE
 
         specs = [
-            _Spec("connectome", (str,), required=True),
+            _Spec("connectome", (str,)),
             _Spec("out", (str,), required=True),
             _Spec("prune_k", (int,), default=DEFAULT_PRUNE_K),
             _Spec("prune_rule", (str,), default=DEFAULT_PRUNE_RULE),

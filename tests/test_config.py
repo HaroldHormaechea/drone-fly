@@ -185,8 +185,12 @@ def test_evaluate_missing_required_checkpoint_errors() -> None:
 
 
 def test_prune_missing_required_keys_error() -> None:
-    with pytest.raises(ConfigError, match="connectome|out"):
+    """UC-14: `connectome` is now optional; only `out` remains required."""
+    with pytest.raises(ConfigError, match="out"):
         PruneRunConfig.from_mapping({"prune_k": 0})
+    # Omitting only `connectome` (with `out` present) is now valid — no error.
+    cfg = PruneRunConfig.from_mapping({"out": "out"})
+    assert cfg.connectome is None
 
 
 def test_prune_trained_missing_required_keys_error() -> None:
@@ -245,9 +249,18 @@ def test_evaluate_defaults_match_existing_flag_defaults() -> None:
 
 
 def test_prune_defaults_match_existing_flag_defaults() -> None:
-    cfg = PruneRunConfig.from_mapping({"connectome": "in", "out": "out"})
+    # UC-14: with `connectome` omitted it defaults to None (the CLI then resolves it to the full
+    # auto-downloaded MaleCNS connectome in the default location — never the fixture).
+    cfg = PruneRunConfig.from_mapping({"out": "out"})
+    assert cfg.connectome is None
     assert cfg.prune_k == DEFAULT_PRUNE_K
     assert cfg.prune_rule == DEFAULT_PRUNE_RULE
+
+
+def test_prune_explicit_connectome_is_preserved() -> None:
+    """An explicit `connectome:` still round-trips unchanged (the fixture-targeted path)."""
+    cfg = PruneRunConfig.from_mapping({"connectome": "tests/fixtures", "out": "out"})
+    assert cfg.connectome == "tests/fixtures"
 
 
 def test_prune_trained_defaults_match_existing_constants() -> None:
