@@ -226,23 +226,13 @@ def test_cell_type_save_load_round_trips_column_for_column(tmp_path: Path) -> No
     np.testing.assert_array_equal(np.asarray(reloaded.cell_type), cell_type)
 
 
-@pytest.mark.xfail(
-    reason=(
-        "UC-17 production bug (reported to team-lead): slice_connectome() re-aligns "
-        "superclass/sign/top_nt/neuron_class/subclass to the pruned rows but OMITS cell_type, so "
-        "prune_to_subcircuit() drops cell_type and hunger stops resolving on the pruned graft "
-        "graph. Contradicts the plan's challenger-fold #3. Fix: add "
-        "sliced_cell_type = None if data.cell_type is None else np.asarray(data.cell_type)[kept] "
-        "and pass cell_type=sliced_cell_type into the returned ConnectomeData in prune.py."
-    ),
-    strict=True,
-)
 def test_prune_save_reload_preserves_cell_type_and_hunger(connectome, tmp_path: Path) -> None:
     """UC-17 (challenger fold): prune→save→reload must keep ``cell_type`` so ``hunger`` still
     resolves on the pruned graft graph. This is the load-bearing round-trip for the graft path.
 
-    Currently xfails because ``slice_connectome`` drops ``cell_type`` (see the xfail reason);
-    it will pass once the one-line propagation is added to ``prune.py``."""
+    ``slice_connectome`` re-aligns ``cell_type`` to the kept rows (like the other meta columns);
+    ``save_connectome`` persists it and the loader reloads it — so hunger keeps resolving after a
+    prune→save→reload cycle instead of raising ``ModalityMetadataError`` on the pruned graph."""
     from drone_fly.connectome import prune_to_subcircuit, save_connectome
     from drone_fly.controller.modality import select_modality
 
