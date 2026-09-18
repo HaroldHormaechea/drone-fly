@@ -34,6 +34,11 @@ from drone_fly.adapter import make_adapter
 from drone_fly.controller.encoding import ACTION_DIM, OBS_DIM
 from drone_fly.env.config import DynamicsParams, EnvConfig
 from drone_fly.env.geometry import advance, current_target
+from drone_fly.env.obstacles import (
+    OBSTACLE_FEATURES_PER,
+    obstacle_vision_features,
+    segment_contact,
+)
 from drone_fly.env.randomization import sample_course, sample_dynamics
 from drone_fly.env.reward import compute_reward
 
@@ -69,8 +74,18 @@ class RaceEnv(gym.Env):
         )
         self.backend = self.adapter.backend
 
+        # Obstacle-vision block (UC-15): schema-agnostic — the env only knows whether to append
+        # the nearest-k egocentric obstacle encoding and how wide it is. Off by default → the
+        # observation stays the locked 12-d contract (byte-identical to UC-01..14).
+        ov = self.config.obstacle_vision
+        self._obstacle_vision_enabled = bool(ov.enabled)
+        self._obstacle_vision_k = int(ov.k)
+        obs_dim = OBS_DIM
+        if self._obstacle_vision_enabled:
+            obs_dim += OBSTACLE_FEATURES_PER * self._obstacle_vision_k
+
         self.observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(OBS_DIM,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
         self.action_space = gym.spaces.Box(
             low=np.array([0.0, -1.0, -1.0, -1.0], dtype=np.float32),
@@ -93,6 +108,20 @@ class RaceEnv(gym.Env):
         # Effective per-episode step budget (UC-09): base max_steps + steps_per_gate*(N-1).
         # Recomputed each reset() from the active (possibly randomized) course. N=1 => 400.
         self._max_steps = self.config.episode.max_steps
+        # Edge-trigger state for the obstacle penalty (UC-15 AC2/AC9): whether the drone was in
+        # contact with a pillar on the *previous* step, so a penalty fires only when contact
+        # begins. Reset to False every episode.
+        self._prev_contact = False
+
+    @property
+    def obs_width(self) -> int:
+        """Width of the emitted observation vector (UC-15).
+
+        ``OBS_DIM`` (12) normally; ``OBS_DIM + OBSTACLE_FEATURES_PER * k`` when the obstacle-vision
+        block is enabled. The training coordinator asserts this equals the obs schema's
+        ``total_width`` (fail-loud env↔schema width coupling).
+        """
+        return int(self.observation_space.shape[0])
 
     @property
     def active_course(self):
@@ -108,9 +137,21 @@ class RaceEnv(gym.Env):
     def _observation(self, state) -> np.ndarray:
         target = current_target(self._course, self._gates_passed)
         rel = target - state.position
-        obs = np.concatenate([rel, state.attitude, state.velocity, state.angular_velocity]).astype(
-            np.float32
-        )
+        parts = [rel, state.attitude, state.velocity, state.angular_velocity]
+        if self._obstacle_vision_enabled:
+            # Append the nearest-k egocentric obstacle encoding after the base 12 dims and
+            # BEFORE nan_to_num, so sanitation wraps the full concatenated observation (UC-15).
+            # Uses the body/heading-frame yaw (attitude[2]) and the active course's obstacles.
+            parts.append(
+                obstacle_vision_features(
+                    state.position,
+                    state.attitude[2],
+                    self._course.obstacles,
+                    self._course.floor_z,
+                    self._obstacle_vision_k,
+                )
+            )
+        obs = np.concatenate(parts).astype(np.float32)
         # Belt-and-braces: the env never emits a non-finite observation to the policy.
         return np.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)
 
@@ -152,6 +193,8 @@ class RaceEnv(gym.Env):
         self._done = False
         self._prev_pos = state.position.copy()
         self._step_count = 0
+        # Fresh episode: no prior obstacle contact (edge-trigger state, UC-15).
+        self._prev_contact = False
         # Effective step budget scales with the active course's gate count (UC-09): a longer
         # course gets proportionally more time so it stays completable. N=1 => 400 exactly.
         episode = self.config.episode

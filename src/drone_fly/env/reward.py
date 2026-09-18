@@ -35,6 +35,7 @@ def compute_reward(
     completed: bool,
     cfg: RewardConfig,
     num_gates: int = 1,
+    obstacle_contact: bool = False,
 ) -> float:
     """Return the scalar step reward.
 
@@ -61,6 +62,15 @@ def compute_reward(
         ``gate_bonus`` in total across its N gates, keeping gate reward comparable as N is
         randomized. For ``num_gates == 1`` the per-gate bonus equals ``gate_bonus`` exactly
         (backward compatible). ``max(1, num_gates)`` guards against a zero divisor.
+    obstacle_contact:
+        Whether the drone contacted a pillar obstacle this step (UC-15 AC2/AC9). When ``True``
+        the SEVERE ``cfg.obstacle_penalty`` is subtracted. This flag is **edge-triggered by the
+        env** (raised only on the step contact *begins*, not every overlapping step), so the
+        total obstacle penalty over an episode is bounded by ``obstacle_penalty × distinct
+        contacts`` and a sustained graze cannot stack unboundedly. Obstacle contact is a pure
+        reward signal — it NEVER feeds episode termination (the env owns that), so a penalised
+        drone may recover aerially and still complete the course. Default ``False`` keeps every
+        pre-UC-15 caller byte-identical.
     """
     reward = -cfg.time_penalty
     reward += cfg.progress_weight * (dist_to_target_prev - dist_to_target_curr)
@@ -70,4 +80,6 @@ def compute_reward(
         reward += cfg.completion_bonus
     if collided:
         reward -= cfg.collision_penalty
+    if obstacle_contact:
+        reward -= cfg.obstacle_penalty
     return float(reward)

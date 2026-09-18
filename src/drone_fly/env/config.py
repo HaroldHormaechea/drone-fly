@@ -26,6 +26,28 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from drone_fly.env.obstacles import OBSTACLE_VISION_K
+
+
+@dataclass(frozen=True)
+class ObstacleSpec:
+    """A cylindrical **pillar** obstacle (UC-15 AC1): floor-anchored, ``center + radius + height``.
+
+    The pillar is anchored on the floor: its base sits at the course ``floor_z`` and its top at
+    ``floor_z + height``, with a circular horizontal footprint of ``radius`` about the vertical
+    axis at ``center`` (an ``(x, y)`` world position). Collision and vision resolve this against
+    the numpy adapter's point position via :mod:`drone_fly.env.obstacles` (hermetic, offline).
+    """
+
+    center: tuple[float, float]
+    radius: float
+    height: float
+
+    @property
+    def axis_xy(self) -> np.ndarray:
+        """The pillar's vertical-axis ``(x, y)`` position as a float64 ``ndarray``."""
+        return np.asarray(self.center, dtype=np.float64)
+
 
 @dataclass(frozen=True)
 class GateSpec:
@@ -70,6 +92,10 @@ class CourseConfig:
     finish_x: float = 7.0
     floor_z: float = 0.0
     ceiling_z: float = 2.5
+    # Cylindrical pillar obstacles (UC-15 AC1). Appended **last** (after ``ceiling_z``) so every
+    # positional constructor call from UC-01..14 is unshifted; the default is **empty**, so a
+    # ``CourseConfig()`` is byte-identical to UC-14 (no obstacles, no collision, no vision block).
+    obstacles: tuple[ObstacleSpec, ...] = ()
 
     @property
     def start(self) -> np.ndarray:
@@ -102,6 +128,35 @@ def single_gate_course(
         floor_z=floor_z,
         ceiling_z=ceiling_z,
     )
+
+
+#: The fixed default obstacle set (UC-15 AC1): two full-height pillars placed **off** the
+#: default 3-gate corridor (which runs start→(2.5,0)→(4.0,0.6)→(5.5,-0.5)→finish). Each pillar
+#: sits well clear of every gate centre and of the start→gates→finish polyline, so
+#: :func:`default_obstacle_course` is solvable-by-construction (asserted at build time). Values
+#: are documented, tunable constants — the "manually placed" set AC1 requires.
+_DEFAULT_OBSTACLES: tuple[ObstacleSpec, ...] = (
+    ObstacleSpec(center=(3.25, 1.5), radius=0.3, height=2.5),
+    ObstacleSpec(center=(4.75, -1.6), radius=0.3, height=2.5),
+)
+
+
+def default_obstacle_course() -> CourseConfig:
+    """Build the default 3-gate course **with** the fixed :data:`_DEFAULT_OBSTACLES` (UC-15 AC1).
+
+    The manually-placed obstacle set for AC1: the standard default course plus two off-corridor
+    pillars. Asserted solvable-by-construction against the default solvability bounds (no start /
+    gate / finish inside a pillar and a collision-free start→gates→finish polyline). The
+    :func:`~drone_fly.env.randomization.is_course_solvable` import is deferred to call time to
+    avoid an import cycle (randomization imports this module).
+    """
+    from drone_fly.env.randomization import is_course_solvable
+
+    course = CourseConfig(obstacles=_DEFAULT_OBSTACLES)
+    assert is_course_solvable(course, RandomizationConfig()), (
+        "default_obstacle_course must be solvable by construction"
+    )
+    return course
 
 
 @dataclass(frozen=True)
@@ -145,9 +200,13 @@ class RandomizationConfig:
     deterministic, zero-RNG **fallback course** that is solvable-by-construction for every N.
     """
 
-    # -- enable flags (both off by default) ---------------------------------------------
+    # -- enable flags (all off by default) ----------------------------------------------
     enable_course: bool = False
     enable_dynamics: bool = False
+    # Obstacle axis (UC-15): sample pillars each reset() when on. Off by default and its draws
+    # are pinned **after** the gate walk, so a disabled obstacle axis never perturbs the UC-08/09
+    # course/dynamics RNG stream (byte-identity, AC7-style). Only sampled when a course is drawn.
+    enable_obstacles: bool = False
 
     # -- gate count (UC-09 AC5) ---------------------------------------------------------
     num_gates_range: tuple[int, int] = (1, 10)  # inclusive integer range for N
@@ -186,6 +245,17 @@ class RandomizationConfig:
     rate_factor_range: tuple[float, float] = (0.8, 1.2)
     latency_steps_range: tuple[int, int] = (0, 2)
 
+    # -- obstacle sampling (UC-15 AC3) --------------------------------------------------
+    # Pillars are drawn off the corridor (lateral y-offset from a random gate), reject-resampled
+    # against the extended solvability guard. ``obstacle_clearance`` is the horizontal margin the
+    # start→gates→finish polyline must keep beyond each pillar's radius (constructively
+    # guarantees ≥1 collision-free path). All appended last so field order is UC-14-compatible.
+    obstacle_count_range: tuple[int, int] = (1, 3)  # inclusive count of pillars per course
+    obstacle_radius_range: tuple[float, float] = (0.3, 0.6)
+    obstacle_height_range: tuple[float, float] = (1.0, 2.5)
+    obstacle_lateral_offset_range: tuple[float, float] = (1.0, 1.8)  # |y| offset off a gate
+    obstacle_clearance: float = 0.3  # polyline must clear each pillar by radius + this
+
 
 @dataclass(frozen=True)
 class RewardConfig:
@@ -201,6 +271,12 @@ class RewardConfig:
     gate_bonus: float = 10.0  # per-gate reward, NORMALISED by num_gates (UC-09 AC4)
     completion_bonus: float = 100.0  # one-off reward on a VALID all-gates-then-finish
     collision_penalty: float = 100.0  # subtracted on floor/ceiling contact (episode ends)
+    # SEVERE, NON-terminating obstacle-contact penalty (UC-15 AC2/AC9). Documented, tunable.
+    # Applied **edge-triggered** (once per distinct contact, not per overlapping step), so a
+    # sustained graze cannot stack an unbounded per-frame penalty. Sized well above a single
+    # normalised gate_bonus (severe) yet below the terminal collision_penalty, and it never
+    # feeds ``terminated`` — the drone may recover aerially and still complete the course.
+    obstacle_penalty: float = 50.0
 
 
 @dataclass(frozen=True)
@@ -218,6 +294,22 @@ class EpisodeConfig:
 
 
 @dataclass(frozen=True)
+class ObstacleVisionConfig:
+    """Obstacle-vision observation-block settings (UC-15 AC4/AC5).
+
+    **Off by default** so ``EnvConfig()`` — and therefore every UC-01..14 caller — emits the
+    unchanged 12-d observation. When ``enabled`` the env appends a ``4 * k`` obstacle-vision
+    block (nearest-``k`` egocentric encoding) to the observation, widening it to
+    ``OBS_DIM + 4 * k``. ``k`` defaults to :data:`~drone_fly.env.obstacles.OBSTACLE_VISION_K`
+    so it matches the ``obstacle_vision_v2`` schema block's width (``12 == 4 * 3``); the training
+    coordinator derives ``k`` name-based from the schema, so the two never drift.
+    """
+
+    enabled: bool = False
+    k: int = OBSTACLE_VISION_K
+
+
+@dataclass(frozen=True)
 class EnvConfig:
     """Bundle of the config groups, so an env is configured by one object."""
 
@@ -225,3 +317,5 @@ class EnvConfig:
     reward: RewardConfig = field(default_factory=RewardConfig)
     episode: EpisodeConfig = field(default_factory=EpisodeConfig)
     randomization: RandomizationConfig = field(default_factory=RandomizationConfig)
+    # Appended last with an all-off default, so ``EnvConfig()`` stays byte-identical to UC-14.
+    obstacle_vision: ObstacleVisionConfig = field(default_factory=ObstacleVisionConfig)
