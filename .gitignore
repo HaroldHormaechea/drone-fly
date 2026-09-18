@@ -30,6 +30,10 @@ data/**
 artifacts/**
 !artifacts/**/.gitkeep
 
+# Per-run output layout (UC-11): training/<name>/{checkpoints,logs,recordings}/
+training/**
+!training/**/.gitkeep
+
 # Model / RL byproducts
 *.pt
 *.pth

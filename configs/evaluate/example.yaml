@@ -1,0 +1,28 @@
+# Example `drone-fly evaluate --config` file.
+#
+#   drone-fly evaluate --config configs/evaluate/example.yaml
+#
+# Evaluate a trained checkpoint over N deterministic episodes and print completion rate +
+# mean time. Point `checkpoint` at a real .zip produced by a training run, e.g.
+# training/baseline/checkpoints/ppo_racer_final.zip.
+
+# REQUIRED: the checkpoint .zip to evaluate.
+checkpoint: training/baseline/checkpoints/ppo_racer_final.zip
+
+# Sim backend: auto | simple | pybullet.
+adapter: simple
+
+# --- Optional keys (defaults shown) ---
+# vecnormalize: null     # VecNormalize stats .pkl saved alongside the checkpoint
+# episodes: 20           # number of evaluation episodes
+# seed: 0                # evaluation seed
+# device: cpu            # cpu | cuda | mps; omit for the auto-policy
+# connectome: tests/fixtures  # MUST match the connectome the checkpoint was trained on if recording
+# name: baseline         # when set with record: true, recordings go to training/<name>/recordings/
+# record: false          # capture per-frame activations for the viz/ viewer (UC-05)
+# record_every: 1        # record every Nth episode (only meaningful with record: true)
+# record_dir: null       # override recordings dir
+# prune: false           # rebuild the pruned graph (UC-04) so recording aligns with a pruned-trained ckpt
+# prune_k: 2             # corridor slack for prune (must match training)
+# randomize: false       # randomize the course per episode (UC-08)
+# randomize_dynamics: false  # randomize dynamics per episode (UC-08)

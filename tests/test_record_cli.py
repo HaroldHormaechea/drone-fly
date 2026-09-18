@@ -1,14 +1,17 @@
-"""AC4 — recording flags on the CLI + the evaluator's hard alignment assertion.
+"""UC-11 — config-driven recording on the ``evaluate`` / ``train`` paths.
 
-Recording is enabled via ``--record`` / ``--record-every N`` / ``--record-dir`` on the
-``evaluate`` path (tested, deterministic primary) and on ``train`` (best-effort). Verified:
+Recording used to be enabled via ``--record`` / ``--record-every`` / ``--record-dir`` flags;
+under UC-11 those live in the YAML config. This module verifies:
 
-* the flags parse on both ``evaluate`` and ``train``;
-* an ``evaluate --record`` run threads the flags through and writes the correct subset of
-  self-contained playback files on the hermetic numpy backend;
-* the evaluator re-loads the connectome (the checkpoint does not retain
-  ``neuron_ids``/``superclass``/positions) and **raises** on a neuron-count mismatch
-  between the re-loaded connectome and the checkpoint's actor.
+* an ``evaluate`` config with ``record: true`` threads the recording settings through to
+  :func:`evaluate_checkpoint`, and routes recordings under ``training/<name>/recordings/`` when a
+  ``name`` is set (else keeps the historical default);
+* ``record_every`` omitted (config default ``None``) is coalesced to ``1`` at the dispatch
+  boundary, while an explicit value passes through unchanged;
+* the accepted developer deviation #1 — an ``evaluate`` config still accepts ``prune``/``prune_k``
+  and routes them through to :func:`evaluate_checkpoint`;
+* the evaluator still writes the correct playback files and still raises on a connectome/actor
+  neuron-count mismatch (behaviour parity, AC7).
 
 Hermetic: ``adapter="simple"``, a tiny smoke-trained checkpoint, no pybullet / network.
 """
@@ -19,8 +22,9 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 
-from drone_fly.cli import build_parser, main
+from drone_fly.cli import main
 from drone_fly.evaluate.evaluator import evaluate_checkpoint
 from drone_fly.train.config import TrainConfig
 from drone_fly.train.loop import CHECKPOINT_PREFIX, smoke_train
@@ -28,97 +32,137 @@ from drone_fly.train.loop import CHECKPOINT_PREFIX, smoke_train
 FIXTURE_DIR = str(Path(__file__).parent / "fixtures")
 
 
-# --- flag parsing ----------------------------------------------------------------------
-def test_evaluate_parses_record_flags() -> None:
-    args = build_parser().parse_args(
-        [
-            "evaluate",
-            "--checkpoint",
-            "c.zip",
-            "--record",
-            "--record-every",
-            "5",
-            "--record-dir",
-            "out/acts",
-            "--connectome",
-            FIXTURE_DIR,
-        ]
-    )
-    assert args.record is True
-    assert args.record_every == 5
-    assert args.record_dir == "out/acts"
-    assert args.connectome == FIXTURE_DIR
+def _write_config(tmp_path: Path, mapping: dict, name: str = "config.yaml") -> str:
+    p = tmp_path / name
+    p.write_text(yaml.safe_dump(mapping), encoding="utf-8")
+    return str(p)
 
 
-def test_train_parses_record_flags() -> None:
-    args = build_parser().parse_args(["train", "--record", "--record-every", "50"])
-    assert args.record is True
-    assert args.record_every == 50
-    assert args.record_dir is None  # defaults to artifacts/activations/
+# --------------------------------------------------------------------------- #
+# Config-driven recording thread-through (evaluate)
+# --------------------------------------------------------------------------- #
 
 
-def test_record_off_by_default() -> None:
-    args = build_parser().parse_args(["evaluate", "--checkpoint", "c.zip"])
-    assert args.record is False
-    # --record-every now defaults to None (not 1) so "explicitly passed" is detectable at the
-    # dispatch boundary; the value is coalesced to 1 before it reaches the callee (below).
-    assert args.record_every is None
-
-
-# --- dispatch-boundary coalesce: None default -> 1 reaching the callee -----------------
-def test_evaluate_dispatch_coalesces_record_every_to_one(monkeypatch) -> None:
-    """With --record-every omitted (parses to None), evaluate() still receives record_every=1."""
+def test_evaluate_config_threads_record_settings(tmp_path, monkeypatch) -> None:
     captured: dict = {}
 
-    class _FakeMetrics:
+    class _Metrics:
         def summary(self) -> str:
             return "completion_rate=0.0"
 
-    def fake_evaluate(*args, **kwargs):
-        captured.update(kwargs)
-        return _FakeMetrics()
-
-    # main() imports evaluate_checkpoint at call time from its home module — patch there.
-    monkeypatch.setattr("drone_fly.evaluate.evaluator.evaluate_checkpoint", fake_evaluate)
-
-    rc = main(["evaluate", "--checkpoint", "c.zip", "--adapter", "simple", "--device", "cpu"])
-    assert rc == 0
-    assert captured["record_every"] == 1  # coalesced from the None default
-
-
-def test_train_dispatch_coalesces_record_every_to_one(monkeypatch) -> None:
-    """With --record-every omitted (parses to None), train() still receives record_every=1."""
-    captured: dict = {}
-
-    def fake_train(*args, **kwargs):
-        captured.update(kwargs)
-        return None
-
-    monkeypatch.setattr("drone_fly.train.loop.train", fake_train)
-
-    rc = main(["train", "--adapter", "simple", "--device", "cpu"])
-    assert rc == 0
-    assert captured["record_every"] == 1  # coalesced from the None default
-
-
-def test_train_dispatch_forwards_explicit_record_every(monkeypatch) -> None:
-    """An explicit --record-every N flows through unchanged (no accidental coalesce to 1)."""
-    captured: dict = {}
-
-    def fake_train(*args, **kwargs):
-        captured.update(kwargs)
-        return None
-
-    monkeypatch.setattr("drone_fly.train.loop.train", fake_train)
-
-    rc = main(
-        ["train", "--record", "--record-every", "7", "--adapter", "simple", "--device", "cpu"]
+    monkeypatch.setattr(
+        "drone_fly.evaluate.evaluator.evaluate_checkpoint",
+        lambda checkpoint, **k: (captured.update(k, checkpoint=checkpoint), _Metrics())[1],
     )
-    assert rc == 0
+
+    cfg = _write_config(
+        tmp_path,
+        {
+            "checkpoint": "c.zip",
+            "adapter": "simple",
+            "record": True,
+            "record_every": 5,
+            "record_dir": "out/acts",
+            "connectome": FIXTURE_DIR,
+        },
+    )
+    assert main(["evaluate", "--config", cfg]) == 0
+    assert captured["record"] is True
+    assert captured["record_every"] == 5
+    assert captured["record_dir"] == "out/acts"
+    assert captured["connectome_path"] == FIXTURE_DIR
+
+
+def test_evaluate_record_dir_routes_under_run_layout_when_named(tmp_path, monkeypatch) -> None:
+    """name + record + no explicit record_dir -> training/<name>/recordings/ (AC2 consistency)."""
+    captured: dict = {}
+    monkeypatch.setattr(
+        "drone_fly.evaluate.evaluator.evaluate_checkpoint",
+        lambda checkpoint, **k: (captured.update(k), _StubMetrics())[1],
+    )
+    cfg = _write_config(
+        tmp_path, {"checkpoint": "c.zip", "adapter": "simple", "record": True, "name": "myeval"}
+    )
+    assert main(["evaluate", "--config", cfg]) == 0
+    assert captured["record_dir"] == "training/myeval/recordings"
+
+
+def test_evaluate_record_dir_none_when_unnamed(tmp_path, monkeypatch) -> None:
+    """No name -> record_dir stays None so the evaluator keeps its historical default (AC7)."""
+    captured: dict = {}
+    monkeypatch.setattr(
+        "drone_fly.evaluate.evaluator.evaluate_checkpoint",
+        lambda checkpoint, **k: (captured.update(k), _StubMetrics())[1],
+    )
+    cfg = _write_config(tmp_path, {"checkpoint": "c.zip", "adapter": "simple", "record": True})
+    assert main(["evaluate", "--config", cfg]) == 0
+    assert captured["record_dir"] is None
+
+
+class _StubMetrics:
+    def summary(self) -> str:
+        return "completion_rate=0.0"
+
+
+# --------------------------------------------------------------------------- #
+# record_every None -> 1 coalesce at the dispatch boundary
+# --------------------------------------------------------------------------- #
+
+
+def test_evaluate_dispatch_coalesces_record_every_to_one(tmp_path, monkeypatch) -> None:
+    captured: dict = {}
+    monkeypatch.setattr(
+        "drone_fly.evaluate.evaluator.evaluate_checkpoint",
+        lambda checkpoint, **k: (captured.update(k), _StubMetrics())[1],
+    )
+    cfg = _write_config(tmp_path, {"checkpoint": "c.zip", "adapter": "simple"})
+    assert main(["evaluate", "--config", cfg]) == 0
+    assert captured["record_every"] == 1  # coalesced from the None default
+
+
+def test_train_dispatch_coalesces_record_every_to_one(tmp_path, monkeypatch) -> None:
+    captured: dict = {}
+    monkeypatch.setattr("drone_fly.train.loop.train", lambda *a, **k: captured.update(k))
+    cfg = _write_config(tmp_path, {"name": "r", "adapter": "simple"})
+    assert main(["train", "--config", cfg]) == 0
+    assert captured["record_every"] == 1
+
+
+def test_train_dispatch_forwards_explicit_record_every(tmp_path, monkeypatch) -> None:
+    captured: dict = {}
+    monkeypatch.setattr("drone_fly.train.loop.train", lambda *a, **k: captured.update(k))
+    cfg = _write_config(
+        tmp_path, {"name": "r", "adapter": "simple", "record": True, "record_every": 7}
+    )
+    assert main(["train", "--config", cfg]) == 0
     assert captured["record_every"] == 7
 
 
-# --- checkpoint fixture ----------------------------------------------------------------
+# --------------------------------------------------------------------------- #
+# Deviation #1 — evaluate config keeps optional prune / prune_k and routes them
+# --------------------------------------------------------------------------- #
+
+
+def test_evaluate_config_routes_prune_keys(tmp_path, monkeypatch) -> None:
+    """A pruned-checkpoint recording needs prune/prune_k to reach evaluate_checkpoint."""
+    captured: dict = {}
+    monkeypatch.setattr(
+        "drone_fly.evaluate.evaluator.evaluate_checkpoint",
+        lambda checkpoint, **k: (captured.update(k), _StubMetrics())[1],
+    )
+    cfg = _write_config(
+        tmp_path,
+        {"checkpoint": "c.zip", "adapter": "simple", "prune": True, "prune_k": 1},
+    )
+    assert main(["evaluate", "--config", cfg]) == 0
+    assert captured["prune"] is True and captured["prune_k"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# Behaviour parity — the evaluator still records + still asserts alignment (AC7)
+# --------------------------------------------------------------------------- #
+
+
 @pytest.fixture
 def trained_checkpoint(connectome, tmp_path):
     """A tiny hermetic smoke-trained checkpoint on the full fixture (300 neurons)."""
@@ -138,8 +182,7 @@ def trained_checkpoint(connectome, tmp_path):
     return final, stats
 
 
-# --- AC4 thread-through: evaluate --record writes files --------------------------------
-def test_evaluate_record_threads_through_and_writes_files(trained_checkpoint, tmp_path) -> None:
+def test_evaluate_record_writes_files(trained_checkpoint, tmp_path) -> None:
     final, stats = trained_checkpoint
     rec_dir = tmp_path / "recordings"
     evaluate_checkpoint(
@@ -153,12 +196,10 @@ def test_evaluate_record_threads_through_and_writes_files(trained_checkpoint, tm
         record_dir=str(rec_dir),
         connectome_path=FIXTURE_DIR,  # unpruned -> 300, aligns with the actor
     )
-    # Episodes 0 and 2 recorded (record_every=2); 1 skipped.
     names = sorted(p.name for p in rec_dir.glob("episode_*.json"))
     assert names == ["episode_0.json", "episode_2.json"]
 
 
-# --- AC4 alignment assertion -----------------------------------------------------------
 def test_evaluate_record_raises_on_connectome_mismatch(trained_checkpoint, tmp_path) -> None:
     """Re-loading a pruned (274-neuron) connectome against the 300-neuron actor must raise."""
     final, stats = trained_checkpoint

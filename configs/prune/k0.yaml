@@ -1,0 +1,10 @@
+# Example `drone-fly prune --config` — tightest (k=0) sensory->motor subcircuit slice.
+#
+#   drone-fly prune --config configs/prune/k0.yaml
+#
+# Reads the fixture connectome, prunes it, and writes a reusable slice to `out`. The output
+# lands under artifacts/ (gitignored), so running this never dirties the tree.
+
+connectome: tests/fixtures   # REQUIRED: input connectome dir/.npz to prune
+out: artifacts/pruned/k0     # REQUIRED: output dir for the pruned slice (+ provenance)
+prune_k: 0                   # 0 = tight shortest-path corridor

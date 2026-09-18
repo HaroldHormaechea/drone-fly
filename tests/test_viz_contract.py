@@ -344,9 +344,12 @@ def test_viewer_js_has_map_view_presets_constant() -> None:
 def test_readme_documents_recording_and_viewer() -> None:
     readme = (_REPO_ROOT / "README.md").read_text()
     for token in (
-        "--record",
-        "--record-every",
-        "artifacts/activations",
+        # UC-11 migrated recording from the removed `--record*` flags to config keys; the
+        # README documents recording via the YAML `record` / `record_every` keys writing to
+        # the per-run `training/<name>/recordings/` layout (replacing `artifacts/activations`).
+        "record:",
+        "record_every",
+        "recordings",
         "viz/viewer.html",
         "NEUPRINT_TOKEN",
         "fetch_soma_positions.py",

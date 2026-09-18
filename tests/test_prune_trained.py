@@ -593,15 +593,17 @@ def test_slice_connectome_reuse_keeps_uc04_prune_unchanged(connectome: Connectom
 
 
 def test_prune_trained_cli_parses_and_is_opt_in() -> None:
-    """AC8 — the ``prune-trained`` subcommand parses; other commands are unaffected by it."""
+    """AC8 — the ``prune-trained`` subcommand parses; other commands are unaffected by it.
+
+    Under UC-11 the subcommand takes a single ``--config`` (its old per-setting flags —
+    ``--checkpoint`` / ``--out`` / ``--threshold`` — moved into the YAML schema).
+    """
     from drone_fly.cli import build_parser
 
     parser = build_parser()
-    ns = parser.parse_args(
-        ["prune-trained", "--checkpoint", "c.zip", "--out", "o", "--threshold", "0.5"]
-    )
+    ns = parser.parse_args(["prune-trained", "--config", "pt.yaml"])
     assert ns.command == "prune-trained"
-    assert ns.checkpoint == "c.zip" and ns.out == "o" and ns.threshold == 0.5
+    assert ns.config == "pt.yaml"
     # An unrelated command still parses (the new subcommand is purely additive).
     other = parser.parse_args(["fetch-connectome"])
     assert other.command == "fetch-connectome"
