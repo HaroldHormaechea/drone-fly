@@ -50,8 +50,8 @@ def _add_record_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--record-every",
         type=int,
-        default=1,
-        help="Record every Nth episode (default 1 = every episode).",
+        default=None,
+        help="Record every Nth episode (default 1 = every episode). Only meaningful with --record.",
     )
     p.add_argument(
         "--record-dir",
@@ -101,8 +101,33 @@ def _build_env_config(args: argparse.Namespace):
     )
 
 
+def _warn_record_every_without_record(args: argparse.Namespace) -> None:
+    """Warn when ``--record-every`` is passed without ``--record`` (a silent no-op otherwise).
+
+    ``--record-every`` only takes effect when recording is enabled, so passing it alone is a
+    user mistake worth surfacing. Detection relies on ``--record-every`` defaulting to
+    ``None`` (see :func:`_add_record_args`), so "explicitly passed" is distinguishable from
+    "left at default".
+    """
+    if getattr(args, "record_every", None) is not None and not getattr(args, "record", False):
+        logging.getLogger("drone_fly.cli").warning(
+            "--record-every was passed without --record; it has no effect. Add --record to "
+            "enable activation recording."
+        )
+
+
 def _add_train_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--resume", default=None, help="Checkpoint .zip to continue from.")
+    p.add_argument(
+        "--resume",
+        nargs="?",
+        default=None,
+        const="latest",
+        help="Continue from a checkpoint. Omit for a fresh run. Pass a checkpoint .zip to "
+        "resume that exact file; pass a directory to resume its newest ppo_racer_*_steps.zip; "
+        "or pass the bare flag (--resume) to resume the newest checkpoint in the default "
+        "models dir. A directory/bare form with no checkpoint found is a hard error (never a "
+        "silent fresh start).",
+    )
     p.add_argument(
         "--device",
         default=None,
@@ -283,8 +308,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "train":
         if args.n_envs is not None and args.n_envs < 1:
             build_parser().error("--n-envs must be >= 1")
+        _warn_record_every_without_record(args)
         from drone_fly.train.loop import train
 
+        record_every = args.record_every if args.record_every is not None else 1
         train(
             connectome_path=args.connectome,
             env_config=_build_env_config(args),
@@ -296,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
             prune=args.prune,
             prune_k=args.prune_k,
             record=args.record,
-            record_every=args.record_every,
+            record_every=record_every,
             record_dir=args.record_dir,
         )
         return 0
@@ -313,8 +340,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "evaluate":
+        _warn_record_every_without_record(args)
         from drone_fly.evaluate.evaluator import evaluate_checkpoint
 
+        record_every = args.record_every if args.record_every is not None else 1
         metrics = evaluate_checkpoint(
             args.checkpoint,
             vecnormalize_path=args.vecnormalize,
@@ -324,7 +353,7 @@ def main(argv: list[str] | None = None) -> int:
             env_config=_build_env_config(args),
             device=args.device,
             record=args.record,
-            record_every=args.record_every,
+            record_every=record_every,
             record_dir=args.record_dir,
             connectome_path=args.connectome,
             prune=args.prune,

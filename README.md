@@ -12,7 +12,7 @@ Terse path from clone to a trained policy. Each step links to its full write-up 
 2. **Provision a connectome** — point at the committed fixture (`tests/fixtures`, works offline), or download the full MaleCNS matrix into `data/connectome`. See [Provisioning connectome data](#provisioning-connectome-data-required-before-training).
 3. *(Optional)* **Prune once, reuse** — `uv run drone-fly prune --connectome data/connectome --out data/pruned` writes a reusable sensory→motor slice. See [Subcircuit pruning](#subcircuit-pruning-uc-04).
 4. **Train** — `uv run drone-fly train --connectome <dir> --timesteps 1000000` (use `data/pruned` for the pruned slice, or add `--prune` to prune on the fly). See [Flight training](#flight-training-uc-03).
-5. **Resume** — `uv run drone-fly train --resume artifacts/models/ppo_racer_<steps>_steps.zip`.
+5. **Resume** — `uv run drone-fly train --resume` (bare flag → newest checkpoint in the default models dir), or point it at a directory (`--resume artifacts/models`) or an exact checkpoint (`--resume artifacts/models/ppo_racer_<steps>_steps.zip`).
 6. **Evaluate** — `uv run drone-fly evaluate --checkpoint artifacts/models/ppo_racer_final.zip --vecnormalize artifacts/models/vecnormalize.pkl --episodes 20`.
 
 > Hermetic sanity check (no network, seconds): `uv run drone-fly smoke-train --connectome tests/fixtures`.
@@ -188,6 +188,11 @@ uv run drone-fly train --connectome tests/fixtures --timesteps 1000000
 uv run drone-fly train --connectome tests/fixtures --timesteps 1000000 --n-envs 4
 
 # Resume an interrupted run from a checkpoint (step counter continues, not restarts).
+# Bare --resume auto-picks the newest checkpoint in the default models dir; you can also
+# pass a directory (newest checkpoint inside it) or an exact .zip. If a directory/bare form
+# finds no checkpoint it errors out loudly rather than silently training from scratch.
+uv run drone-fly train --resume
+uv run drone-fly train --resume artifacts/models
 uv run drone-fly train --resume artifacts/models/ppo_racer_120000_steps.zip
 
 # Evaluate a checkpoint over 20 episodes: completion rate + mean start→gate→finish time.
@@ -215,9 +220,10 @@ the only copy of your trained model is whatever is on that disk until *you* copy
 
 To **back up or move** a run to another machine, just copy the whole `artifacts/` folder (Finder
 drag-and-drop, or `cp -R artifacts /somewhere/`, or a USB drive) — no git needed. To resume later,
-put `artifacts/models/` back in the repo root and run
-`drone-fly train --resume artifacts/models/ppo_racer_<steps>_steps.zip` (or just re-run
-`scripts/train.sh`, which auto-resumes from the latest checkpoint). To evaluate a model you moved,
+put `artifacts/models/` back in the repo root and run `drone-fly train --resume` (bare flag →
+newest checkpoint in the default models dir), or pass a directory / exact `.zip`
+(`--resume artifacts/models/ppo_racer_<steps>_steps.zip`) — or just re-run
+`scripts/train.sh`, which auto-resumes from the latest checkpoint. To evaluate a model you moved,
 pass its `--checkpoint` and `--vecnormalize` paths explicitly. An interrupted run loses at most the
 steps since the last checkpoint (default every 25,000 steps — tune `checkpoint_freq` in
 `src/drone_fly/train/config.py`).
