@@ -386,6 +386,41 @@ def test_workflow_end_to_end_writes_all_artifacts(trained_checkpoint, tmp_path) 
     assert report.sensory_mode == PINNED and report.motor_mode == PINNED
 
 
+def test_workflow_provisions_positions_for_subcircuit(trained_checkpoint, tmp_path) -> None:
+    """UC-27 AC-3: the prune-trained subcircuit artifact gets its OWN node-set-keyed sidecars.
+
+    The workflow saves ``connectome_pruned.npz`` and (post-``save_connectome``) provisions
+    positions once via ``resolve_positions(..., artifact_npz=npz, source_data=base)`` — so the
+    subcircuit's ``connectome_pruned_positions.csv`` covers exactly the subcircuit's node set
+    (never the pre-prune connectome's), keyed off the artifact it belongs to.
+    """
+    import pandas as pd
+
+    out = tmp_path / "out"
+    report = prune_trained(
+        checkpoint=trained_checkpoint["checkpoint"],
+        out_dir=str(out),
+        connectome_path=trained_checkpoint["connectome_path"],
+        threshold=50.0,
+        threshold_mode="percentile",
+        episodes=1,
+        finetune_steps=0,
+        adapter="simple",
+        seed=0,
+    )
+
+    pos_path = out / "connectome_pruned_positions.csv"
+    assert pos_path.is_file()
+    pos = pd.read_csv(pos_path)
+
+    subcircuit = load_connectome(Path(report.connectome_npz))
+    sub_ids = {int(b) for b in subcircuit.neuron_ids.tolist()}
+    # The sidecar is keyed to the SUBCIRCUIT's node set, not the source connectome's.
+    assert len(pos) == report.neurons_after == subcircuit.neuron_count
+    assert {int(b) for b in pos["bodyid"].tolist()} == sub_ids
+    assert sub_ids != {int(b) for b in load_connectome(FIXTURE_DIR).neuron_ids.tolist()}
+
+
 def test_workflow_input_checkpoint_and_connectome_unmutated(trained_checkpoint, tmp_path) -> None:
     """AC7 — the workflow never mutates its input checkpoint file or the on-disk connectome."""
     ckpt = Path(trained_checkpoint["checkpoint"])

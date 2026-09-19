@@ -1,0 +1,7 @@
+idx,bodyid,superclass,class,somaLocation
+0,90001,visual_projection,visual,[1000 2000 3000]
+1,90002,intrinsic_neuron,central,[1100 2100 3100]
+2,90003,intrinsic_neuron,central,[1200 2200 3200]
+3,90004,intrinsic_neuron,central,[1300 2300 3300]
+4,90005,sensory_neuron,mechanosensory_proprioceptive,
+5,90006,sensory_neuron,mechanosensory_proprioceptive,

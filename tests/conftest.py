@@ -14,6 +14,7 @@ Provides:
 
 from __future__ import annotations
 
+import shutil
 import socket
 from pathlib import Path
 
@@ -26,10 +27,35 @@ from drone_fly.connectome.loader import ConnectomeData
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
+#: The committed fixture files copied into a throwaway dir before any provisioning write.
+#: The soma sidecar is included so anatomical resolution (tier-2) still works against the copy.
+_FIXTURE_FILES = ("mcns_fixture.npz", "mcns_fixture_meta.csv", "mcns_fixture_soma.csv")
+
+
+def _copy_fixture_into(dst: Path) -> Path:
+    """Copy the committed fixture artifacts into ``dst`` and return it.
+
+    UC-27 provisioning writes ``<stem>_positions.csv`` / ``<stem>_soma.csv`` sidecars *beside*
+    the connectome ``.npz``. Loading the connectome from a throwaway copy (rather than the
+    committed ``tests/fixtures/``) means those slice-time / self-heal writes land in ``tmp``
+    and the committed fixture is never dirtied.
+    """
+    dst.mkdir(parents=True, exist_ok=True)
+    for name in _FIXTURE_FILES:
+        src = FIXTURE_DIR / name
+        if src.is_file():
+            shutil.copy2(src, dst / name)
+    return dst
+
 
 @pytest.fixture(scope="session")
 def fixture_dir() -> Path:
-    """Absolute path to the committed test-fixture directory."""
+    """Absolute path to the committed test-fixture directory (read-only ground truth).
+
+    Use :func:`fixture_dir_copy` (not this) whenever a test constructs an
+    ``ActivationRecorder`` or runs a record-enabled train/eval, so UC-27 sidecar writes never
+    dirty the committed fixture.
+    """
     npz = FIXTURE_DIR / "mcns_fixture.npz"
     if not npz.is_file():
         pytest.fail(
@@ -40,9 +66,27 @@ def fixture_dir() -> Path:
 
 
 @pytest.fixture
-def connectome(fixture_dir: Path):
-    """The loaded connectome for the committed fixture."""
-    return load_connectome(fixture_dir)
+def fixture_dir_copy(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A throwaway per-test copy of the committed fixture dir (UC-27 sidecar isolation).
+
+    Pass this (as a directory path) into any real record-enabled ``train`` / ``evaluate`` run —
+    provisioning writes its ``<stem>_positions.csv`` / ``<stem>_soma.csv`` sidecars here in
+    ``tmp`` instead of into ``tests/fixtures/``.
+    """
+    return _copy_fixture_into(tmp_path_factory.mktemp("connectome_copy"))
+
+
+@pytest.fixture
+def connectome(fixture_dir_copy: Path):
+    """The loaded connectome for the committed fixture, from a throwaway copy.
+
+    UC-27: ``ActivationRecorder`` construction self-heals a missing positions sidecar by
+    writing it *beside* the connectome ``.npz``. Loading from a per-test copy (not the
+    committed ``tests/fixtures/``) keeps that write in ``tmp`` — the committed fixture is never
+    dirtied. Content is byte-identical to the committed fixture, so every existing assertion
+    (scale, metadata, anatomy) holds unchanged.
+    """
+    return load_connectome(fixture_dir_copy)
 
 
 @pytest.fixture

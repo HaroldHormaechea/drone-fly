@@ -182,7 +182,7 @@ def trained_checkpoint(connectome, tmp_path):
     return final, stats
 
 
-def test_evaluate_record_writes_files(trained_checkpoint, tmp_path) -> None:
+def test_evaluate_record_writes_files(trained_checkpoint, fixture_dir_copy, tmp_path) -> None:
     final, stats = trained_checkpoint
     rec_dir = tmp_path / "recordings"
     evaluate_checkpoint(
@@ -194,13 +194,17 @@ def test_evaluate_record_writes_files(trained_checkpoint, tmp_path) -> None:
         record=True,
         record_every=2,
         record_dir=str(rec_dir),
-        connectome_path=FIXTURE_DIR,  # unpruned -> 322, aligns with the actor
+        # UC-27: a throwaway fixture copy so the recorder's positions sidecar write lands in
+        # tmp, not in committed tests/fixtures/. Unpruned -> 322, aligns with the actor.
+        connectome_path=str(fixture_dir_copy),
     )
     names = sorted(p.name for p in rec_dir.glob("episode_*.json"))
     assert names == ["episode_0.json", "episode_2.json"]
 
 
-def test_evaluate_record_raises_on_connectome_mismatch(trained_checkpoint, tmp_path) -> None:
+def test_evaluate_record_raises_on_connectome_mismatch(
+    trained_checkpoint, fixture_dir_copy, tmp_path
+) -> None:
     """Re-loading a pruned (247-neuron) connectome against the 322-neuron actor must raise."""
     final, stats = trained_checkpoint
     with pytest.raises(ValueError, match="alignment|neuron"):
@@ -212,6 +216,7 @@ def test_evaluate_record_raises_on_connectome_mismatch(trained_checkpoint, tmp_p
             device="cpu",
             record=True,
             record_dir=str(tmp_path / "rec"),
-            connectome_path=FIXTURE_DIR,
+            # UC-27: throwaway copy so any sidecar write stays out of committed fixtures.
+            connectome_path=str(fixture_dir_copy),
             prune=True,  # 322 -> 247 neurons, no longer matches the checkpoint's actor
         )

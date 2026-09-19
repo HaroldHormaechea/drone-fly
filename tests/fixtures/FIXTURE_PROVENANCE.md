@@ -27,6 +27,20 @@
   - ``mcns_fixture_soma.csv`` carries a ``bodyid,x,y,z`` row for exactly the 272
     soma-populated neurons; soma-less neurons are absent from it.
 
+## `uc27_soma_meta.csv` — synthetic tier-0 anatomy fixture (UC-27 AC-10)
+
+- **Purpose:** exercise the UC-27 tier-0 "real anatomy from the connectome meta ``somaLocation``
+  column" path. The main ``mcns_fixture_meta.csv`` (above) has **no** ``somaLocation`` column, so a
+  distinct fixture is needed that *does* carry one.
+- **Provenance:** **synthetic / hand-authored** for UC-27 — it is NOT derived from MaleCNS. The six
+  ``bodyid``s (``90001``–``90006``) and their ``somaLocation`` coordinates are arbitrary finite
+  integers chosen to be recognisable in assertions; they are not real neuron identities or
+  positions. Format mirrors ``connectome_data_prep`` meta: ``somaLocation`` is ``"[x y z]"`` in an
+  (arbitrary) integer voxel space, blank for the two intentionally soma-less rows (``90005``,
+  ``90006``) that model peripheral afferents flagged missing (never faked).
+- **Shape:** 6 rows; 4 soma-bearing (``90001``–``90004``), 2 soma-less. Tests pair it with a
+  matching synthetic 6×6 adjacency ``.npz`` built at runtime (never committed).
+
 ## Attribution
 
 Derived from the connectome_data_prep dataset (https://github.com/YijieYin/connectome_data_prep), which packages the MaleCNS connectome (Janelia FlyEM / neuPrint). MaleCNS is released under CC-BY; this fixture is a small deterministic slice redistributed with attribution.

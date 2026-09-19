@@ -124,7 +124,9 @@ def test_eval_recording_path_is_single_env_dummy_never_subproc() -> None:
         venv.close()
 
 
-def test_evaluate_checkpoint_recording_round_trips_uncorrupted(connectome, fixture_dir, tmp_path):
+def test_evaluate_checkpoint_recording_round_trips_uncorrupted(
+    connectome, fixture_dir_copy, tmp_path
+):
     """AC-12: an evaluate_checkpoint(record=True) run (always single-env) writes uncorrupted,
     valid playback files — the parallel backend never touches the tested eval recording path."""
     from drone_fly.evaluate.evaluator import evaluate_checkpoint
@@ -154,7 +156,8 @@ def test_evaluate_checkpoint_recording_round_trips_uncorrupted(connectome, fixtu
         record=True,
         record_every=1,
         record_dir=str(record_dir),
-        connectome_path=str(fixture_dir),
+        # UC-27: throwaway fixture copy so the recorder's positions sidecar write lands in tmp.
+        connectome_path=str(fixture_dir_copy),
     )
 
     files = _episode_files(record_dir)
