@@ -34,4 +34,4 @@ Statuses:
 | 22 | [use-cases/22-training-tui-observability.md](use-cases/22-training-tui-observability.md) | Full-screen live training TUI (observability dashboard) | pending | 2026-09-19 |
 | 23 | [use-cases/23-training-health-and-capacity-guardrail.md](use-cases/23-training-health-and-capacity-guardrail.md) | Training-health assessment engine + capacity guardrail | pending | 2026-09-19 |
 | 24 | [use-cases/24-full-course-randomization-toggles.md](use-cases/24-full-course-randomization-toggles.md) | Full-course randomization by default + feature toggles | pending | 2026-09-19 |
-| 25 | [use-cases/25-env-ground-stuck-early-termination.md](use-cases/25-env-ground-stuck-early-termination.md) | Ground/no-progress episode early termination | in-progress | 2026-09-19 |
+| 25 | [use-cases/25-env-ground-stuck-early-termination.md](use-cases/25-env-ground-stuck-early-termination.md) | Ground/no-progress episode early termination | done | 2026-09-19 |

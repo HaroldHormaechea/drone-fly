@@ -152,13 +152,15 @@ def test_env_config_has_default_dock() -> None:
     assert EnvConfig().dock == DockConfig()
 
 
-def test_env_config_damage_is_last_field() -> None:
-    """UC-19 (retargets the UC-17 last-field test): ``damage`` is appended **after** ``battery``
-    (which is after ``dock`` / ``obstacle_vision``), so every UC-15..18 positional/keyword call is
-    unshifted and ``EnvConfig()`` stays byte-identical. ``battery`` is now second-to-last."""
+def test_env_config_early_termination_is_last_field() -> None:
+    """UC-25 (retargets the UC-19 last-field test): ``early_termination`` is appended **after**
+    ``damage`` (itself after ``battery`` / ``dock`` / ``obstacle_vision``), so every UC-15..19
+    positional/keyword call is unshifted and ``EnvConfig()`` stays byte-identical. ``damage`` is
+    now second-to-last."""
     fields = [f.name for f in dataclasses.fields(EnvConfig)]
-    assert fields[-1] == "damage"
-    # battery is now second-to-last, still directly after dock (itself after obstacle_vision).
+    assert fields[-1] == "early_termination"
+    # The append-last chain is preserved: early_termination ← damage ← battery ← dock ← obstacle.
+    assert fields.index("damage") == fields.index("early_termination") - 1
     assert fields.index("battery") == fields.index("damage") - 1
     assert fields.index("dock") == fields.index("battery") - 1
     assert fields.index("obstacle_vision") == fields.index("dock") - 1
