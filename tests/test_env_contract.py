@@ -22,6 +22,7 @@ from drone_fly.env.config import (
     CourseConfig,
     DamageConfig,
     DockConfig,
+    EarlyTerminationConfig,
     EpisodeConfig,
     GateSpec,
     ObstacleSpec,
@@ -1727,3 +1728,291 @@ def test_ac7_light_course_completable_without_repair() -> None:
             break
     assert completed is True, "a light (no-obstacle) course completes without any repair"
     assert all(v == pytest.approx(1.0) for v in integrity), "no damage source ⇒ integrity stays 1.0"
+
+
+# ===========================================================================
+# UC-25 — grounded / no-progress early termination (AC1–AC7)
+# ===========================================================================
+# The two detectors need a full ``stuck_window`` of consecutive qualifying steps to fire, so the
+# committed golden fixtures (baseline 24, reproducibility 50, dynamics 30 steps) are untouched by
+# the default ``stuck_window=100`` (AC6). The tests below drive the rule with a small window so the
+# scripted trajectories stay short and readable (challenger's non-blocking note). Scripted adapters
+# hardcode ``velocity=zeros`` — perfect for the grounded/stuck cuts, but the low-but-progressing
+# case (AC5) MUST use the REAL ``simple`` adapter, whose flight velocity is far above the rest band.
+
+
+def test_uc25_grounded_episode_is_cut_as_a_crash() -> None:
+    """AC1: a drone that falls and rests ~8 mm above the floor at zero speed is cut as a floor
+    crash well under the step budget (grounded detector), not run to ``_max_steps``."""
+    # Fall from spawn, then rest inside the floor band (z=0.008 < floor_epsilon=0.05) at zero speed.
+    positions = [(0.0, 0.0, 1.0), (0.0, 0.0, 0.3)] + [(0.0, 0.0, 0.008)] * 8
+    env = _env_with(
+        _ScriptedAdapter(positions),
+        EnvConfig(early_termination=EarlyTerminationConfig(stuck_window=4)),
+    )
+    env.reset()
+    terminated = truncated = False
+    info: dict = {}
+    steps = 0
+    for _ in range(env._max_steps + 1):
+        _obs, _r, terminated, truncated, info = env.step(HOVER)
+        steps += 1
+        if terminated or truncated:
+            break
+    assert terminated is True, "a grounded episode must terminate (crash), not truncate"
+    assert truncated is False, "it ends promptly via the crash path, not at the budget"
+    assert info["collided"] is True, "a grounded cut is reported as a crash collision (AC3)"
+    assert info["completed"] is False, "resting on the floor is not a course success"
+    assert info["early_termination"] == "grounded"
+    # Warm-up: it takes a full window of grounded steps (spawn + fall are not grounded).
+    assert steps == 5, "cut fires exactly on the 4th consecutive grounded step (window=4)"
+    assert steps < env._max_steps, "the cut is well under the full step budget"
+
+
+def test_uc25_no_progress_episode_is_cut_as_a_crash() -> None:
+    """AC2: an airborne drone that hovers in place — never reducing its distance to the target
+    gate for a full window — is cut as a crash by the no-progress (stuck) detector."""
+    # Airborne hover (z=1.0, above the floor band) that never closes on gate g0.
+    positions = [(0.0, 0.0, 1.0)] + [(0.5, 0.0, 1.0)] * 10
+    env = _env_with(
+        _ScriptedAdapter(positions),
+        EnvConfig(early_termination=EarlyTerminationConfig(stuck_window=4)),
+    )
+    env.reset()
+    terminated = truncated = False
+    info: dict = {}
+    for _ in range(env._max_steps + 1):
+        _obs, _r, terminated, truncated, info = env.step(HOVER)
+        if terminated or truncated:
+            break
+    assert terminated is True and truncated is False
+    assert info["collided"] is True, "a stuck cut is reported as a crash collision (AC3)"
+    assert info["early_termination"] == "stuck"
+    assert info["completed"] is False
+
+
+def test_uc25_closing_path_is_not_cut() -> None:
+    """AC2 (negative): a drone that keeps closing the gap to each gate completes the course and is
+    never cut by the stuck detector, even under an aggressively small window."""
+    env = _env_with(
+        _ScriptedAdapter(_THREE_GATE_PATH),
+        EnvConfig(early_termination=EarlyTerminationConfig(stuck_window=4)),
+    )
+    env.reset()
+    terminated = truncated = False
+    info: dict = {}
+    reasons = []
+    for _ in range(len(_THREE_GATE_PATH) + 2):
+        _obs, _r, terminated, truncated, info = env.step(HOVER)
+        reasons.append(info["early_termination"])
+        if terminated or truncated:
+            break
+    assert info["completed"] is True, "a monotonically-closing path completes the course"
+    assert info["collided"] is False, "a completion is not a crash"
+    assert all(r is None for r in reasons), "a progressing flight is never cut early"
+
+
+def test_uc25_grounded_cut_applies_the_collision_penalty() -> None:
+    """AC3: a grounded/stuck cut earns the EXISTING collision penalty in the reward, exactly like a
+    floor/ceiling crash — the cut step's reward is dominated by ``collision_penalty`` (100)."""
+    positions = [(0.0, 0.0, 1.0)] + [(0.0, 0.0, 0.008)] * 8
+    cfg = EnvConfig(early_termination=EarlyTerminationConfig(stuck_window=3))
+    env = _env_with(_ScriptedAdapter(positions), cfg)
+    env.reset()
+    reward = 0.0
+    terminated = False
+    for _ in range(env._max_steps + 1):
+        _obs, reward, terminated, _tr, info = env.step(HOVER)
+        if terminated:
+            break
+    assert terminated is True and info["collided"] is True
+    # The default collision_penalty is 100; the cut step's reward must reflect that big negative.
+    assert reward <= -cfg.reward.collision_penalty + 1.0, (
+        "the cut step must eat the collision penalty (AC3)"
+    )
+
+
+def test_uc25_docked_exemption_is_two_sided_and_non_vacuous() -> None:
+    """AC4: a drone on a rechargeable pad is NOT cut while service is productive (battery rising)
+    across MORE than a full window of docked steps — but once the battery clamps at 1.0 the dwell
+    is no longer productive and the stuck detector cuts it after the window. One run, both sides.
+
+    This is the non-loophole test: mere presence on a pad does not exempt (the drone stays docked
+    the whole time); only *productive* service keeps it alive. It FAILS if the exemption is keyed on
+    docking rather than on charge/integrity actually improving.
+    """
+    # drain 0.10/airborne-step, net +0.10/docked-step (recharge 0.20 gross − 0.10 drain).
+    battery = BatteryConfig(enabled=True, idle_rate=2.0, throttle_rate=0.0, recharge_rate=4.0)
+    # Airborne approach draining to ~0.40, a valid slow dock, then a long dwell.
+    positions = [
+        (0.0, 0.0, 1.0),
+        (0.4, 0.0, 1.0),
+        (0.8, 0.0, 1.0),
+        (1.2, 0.0, 0.9),
+        (1.6, 0.0, 0.7),
+        (2.0, 0.0, 0.4),
+        (2.0, 0.0, 0.02),  # final slow approach (airborne, over the pad)
+    ] + [(2.0, 0.0, 0.0)] * 12  # DOCK + long dwell on the pad
+    contact = [False] * 7 + [True] * 12
+    cfg = EnvConfig(
+        course=_recharge_course(True),
+        battery=battery,
+        early_termination=EarlyTerminationConfig(stuck_window=4),
+    )
+    env = _env_with(_BatteryDockScriptedAdapter(positions, contact, battery), cfg)
+    obs, _ = env.reset(seed=0)
+
+    docked_frames = 0
+    rising_docked_alive = 0
+    prev_charge = 1.0 - float(obs[-1])
+    terminated = False
+    cut_info: dict = {}
+    for _ in range(1, len(positions)):
+        obs, _r, terminated, _tr, info = env.step(HOVER)
+        charge = 1.0 - float(obs[-1])
+        if info["docked"]:
+            docked_frames += 1
+            # While docked AND charging, the episode must stay alive (productive exemption).
+            if charge > prev_charge + 1e-9:
+                rising_docked_alive += 1
+                assert terminated is False, "a productive docked dwell must not be cut (AC4)"
+        prev_charge = charge
+        if terminated:
+            cut_info = info
+            break
+
+    assert rising_docked_alive > 4, (
+        "the productive dwell must outlast a full window (non-vacuous alive side)"
+    )
+    assert docked_frames > 4, "the drone stays docked for more than a window before the cut"
+    assert terminated is True, "once the battery clamps, the idle dock is cut (loophole closed)"
+    assert cut_info["collided"] is True
+    assert cut_info["docked"] is True, "the cut happens while still docked — it is the idle-cut"
+    assert cut_info["early_termination"] == "stuck", "the idle-after-full cut is a stuck cut"
+
+
+def test_uc25_normal_flight_is_byte_identical_to_rule_disabled() -> None:
+    """AC5/AC6: default (rule ON) per-step outcomes on a real-adapter flight are byte-identical to
+    the rule explicitly OFF — a normal flight never accumulates a window, so nothing fires and obs/
+    reward/termination/RNG are untouched (warm-up guard + no-spurious-firing)."""
+    golden = np.load(_BASELINE_ROLLOUT)
+    actions = list(golden["actions"])
+    on = _full_stream(EnvConfig(), seed=42, actions=actions)
+    off = _full_stream(
+        EnvConfig(early_termination=EarlyTerminationConfig(enabled=False)),
+        seed=42,
+        actions=actions,
+    )
+    np.testing.assert_array_equal(on[0], off[0])  # observation stream
+    assert on[1] == off[1]  # reward stream
+    assert on[2] == off[2]  # terminated stream
+    assert on[3] == off[3]  # truncated stream
+    assert on[4] == off[4]  # final RNG state
+
+
+def test_uc25_committed_baseline_still_matches_with_no_regen() -> None:
+    """AC6: with the rule ON by default, the committed seed-42 golden rollout still reproduces
+    byte-for-byte (window=100 cannot fire in the 24-step baseline) and the obs width stays 12 — no
+    fixture regeneration, no observation-schema/checkpoint impact."""
+    golden = np.load(_BASELINE_ROLLOUT)
+    actions = list(golden["actions"])
+    obs_trace, _r, _t, _tr, _rng = _full_stream(EnvConfig(), seed=42, actions=actions)
+    assert obs_trace.shape == golden["env_trace"].shape
+    np.testing.assert_array_equal(obs_trace, golden["env_trace"])
+    assert make_env(EnvConfig(), adapter="simple").obs_width == OBS_DIM == 12
+
+
+def test_uc25_low_but_progressing_real_flight_is_not_cut() -> None:
+    """AC5: a low-but-progressing flight on the REAL ``simple`` adapter is NOT cut. The drone dips
+    into the floor band while moving fast toward a low gate; the grounded detector's speed guard
+    (real velocity ≫ rest_speed_epsilon) keeps it from being mis-cut, and its steady progress keeps
+    the stuck counter at zero. Uses the real adapter — scripted adapters hardcode velocity=zeros."""
+    course = CourseConfig(
+        start_position=(0.0, 0.0, 0.3),
+        gates=(GateSpec(center=(3.0, 0.0, 0.2), aperture=0.6),),
+        finish_x=5.0,
+        floor_z=0.0,
+        ceiling_z=2.5,
+    )
+    cfg = EnvConfig(course=course, early_termination=EarlyTerminationConfig(stuck_window=4))
+    env = make_env(cfg, adapter="simple")
+    env.reset(seed=0)
+    fe = cfg.early_termination.floor_epsilon
+    rse = cfg.early_termination.rest_speed_epsilon
+    saw_low_and_moving = False
+    reasons = []
+    forward = np.array([0.52, 0.0, 0.4, 0.0], dtype=np.float32)  # pitch forward, ~hover throttle
+    for _ in range(30):
+        _obs, _r, terminated, truncated, info = env.step(forward)
+        z = float(info["position"][2])
+        speed = float(np.linalg.norm(env.adapter._velocity))
+        reasons.append(info["early_termination"])
+        if not terminated and z <= course.floor_z + fe and speed > rse:
+            saw_low_and_moving = True
+        if terminated or truncated:
+            # If it ends, it is a REAL floor collision, never a grounded/stuck cut.
+            assert info["early_termination"] is None
+            break
+    assert saw_low_and_moving, "the flight must actually enter the floor band while moving fast"
+    assert all(r is None for r in reasons), "a low-but-progressing real flight is never cut early"
+
+
+def test_uc25_config_defaults_are_named_and_documented() -> None:
+    """AC7: the early-termination constants are named config fields with the documented defaults,
+    and ``EnvConfig()`` keeps ``early_termination`` ON by default (the fix)."""
+    et = EarlyTerminationConfig()
+    assert et.floor_epsilon == 0.05
+    assert et.stuck_window == 100
+    assert et.progress_epsilon == 0.01
+    assert et.rest_speed_epsilon == 0.05
+    assert et.enabled is True
+    assert EnvConfig().early_termination == et, "early_termination is appended with all defaults"
+
+
+def test_uc25_stuck_window_tunes_cut_timing() -> None:
+    """AC7: shrinking ``stuck_window`` cuts a grounded episode sooner — the window length is a live,
+    tunable knob on the cut timing."""
+    positions = [(0.0, 0.0, 1.0)] + [(0.0, 0.0, 0.008)] * 20
+
+    def cut_step(window: int) -> int:
+        env = _env_with(
+            _ScriptedAdapter(positions),
+            EnvConfig(early_termination=EarlyTerminationConfig(stuck_window=window)),
+        )
+        env.reset()
+        for i in range(1, 25):
+            _obs, _r, terminated, truncated, info = env.step(HOVER)
+            if terminated or truncated:
+                assert info["early_termination"] == "grounded"
+                return i
+        raise AssertionError("expected a grounded cut")
+
+    assert cut_step(2) == 2
+    assert cut_step(6) == 6
+    assert cut_step(2) < cut_step(6), "a smaller window cuts sooner (tunable)"
+
+
+def test_uc25_floor_epsilon_tunes_the_grounded_band() -> None:
+    """AC7: the floor-epsilon band is tunable — a drone resting at z=0.1 is OUTSIDE the default
+    0.05 band (so it is not 'grounded', only eventually 'stuck'), but WITHIN a widened 0.2 band (so
+    it is classified 'grounded')."""
+    positions = [(0.0, 0.0, 1.0)] + [(0.0, 0.0, 0.1)] * 20
+
+    def cut_reason(floor_epsilon: float) -> str:
+        env = _env_with(
+            _ScriptedAdapter(positions),
+            EnvConfig(
+                early_termination=EarlyTerminationConfig(
+                    stuck_window=3, floor_epsilon=floor_epsilon
+                )
+            ),
+        )
+        env.reset()
+        for _ in range(25):
+            _obs, _r, terminated, truncated, info = env.step(HOVER)
+            if terminated or truncated:
+                return info["early_termination"]
+        raise AssertionError("expected an early cut")
+
+    assert cut_reason(0.05) == "stuck", "z=0.1 is above the default band ⇒ not grounded"
+    assert cut_reason(0.2) == "grounded", "a widened band captures z=0.1 as grounded"

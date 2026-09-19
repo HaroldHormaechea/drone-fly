@@ -652,6 +652,51 @@ class DamageConfig:
 
 
 @dataclass(frozen=True)
+class EarlyTerminationConfig:
+    """Grounded / no-progress early-termination thresholds (UC-25). Documented, tunable constants.
+
+    Training episodes used to waste almost the whole step budget with the drone lying motionless
+    on the floor: the numpy adapter's floor collision is ``position[2] <= floor_z`` but a resting
+    drone asymptotes ~8 mm **above** the floor and never crosses it, so ``collided``/``crash``/
+    ``terminated`` never fire and the episode only ends by truncation at the inflated
+    ``max_steps``. This config adds two env-level detectors, both wired in
+    :meth:`drone_fly.env.racing_env.RaceEnv.step`:
+
+    * **Grounded (resting) detector** — the drone sits within ``floor_epsilon`` above ``floor_z``
+      at near-zero speed (``<= rest_speed_epsilon``) and is **not** docked, for ``stuck_window``
+      consecutive steps.
+    * **No-progress (stuck) detector** — the distance to the current target gate (or to the finish
+      on the last leg) fails to drop by more than ``progress_epsilon`` for ``stuck_window``
+      consecutive steps, measured against the best distance reached so far (robust to hover
+      oscillation / jitter).
+
+    Either detector firing is folded into ``crash`` (``terminated=True`` + the existing collision
+    penalty + ``info["collided"]=True``); an additive ``info["early_termination"]`` key reports
+    ``"grounded"`` / ``"stuck"`` / ``None``. The legitimate UC-16 docked/servicing state is exempt
+    while service is **productive** (battery or integrity strictly improving).
+
+    Invariants (do not violate without re-reasoning the whole rule):
+
+    * ``floor_epsilon (0.05) < randomization z_margin (0.2)`` so no waypoint gate can sit inside
+      the grounded band — a drone parked AT a gate is never mis-read as "grounded".
+    * ``stuck_window >= ~65`` for byte-identity with the committed golden fixtures (baseline 24,
+      reproducibility 50, dynamics 30 steps): the window must exceed every committed fixture length
+      so the rule cannot fire within them. Don't lower the default below this without regenerating
+      the fixtures via ``scripts/regen_uc08_baseline.py``.
+
+    ``EnvConfig.early_termination`` is appended **last** with an all-default value; because the
+    rule only fires on genuinely grounded/stuck episodes (counters start at 0 and need a full
+    window of qualifying steps), a normally-flying or crashing episode is byte-identical to UC-19.
+    """
+
+    floor_epsilon: float = 0.05  # m — band above floor_z counted as "on the ground" (8–14 mm rest)
+    stuck_window: int = 100  # consecutive grounded/no-progress steps that cut (5 s @ 20 Hz)
+    progress_epsilon: float = 0.01  # m — min drop in dist-to-target for a step to count as progress
+    rest_speed_epsilon: float = 0.05  # m/s — max speed in the floor band still counted as "resting"
+    enabled: bool = True  # ON by default (the fix); explicit off-switch restores legacy behaviour
+
+
+@dataclass(frozen=True)
 class EnvConfig:
     """Bundle of the config groups, so an env is configured by one object."""
 
@@ -675,3 +720,10 @@ class EnvConfig:
     # when ``damage.enabled`` is False the adapter never touches integrity and the env emits no
     # damage observation dim.
     damage: DamageConfig = field(default_factory=DamageConfig)
+    # Grounded / no-progress early-termination thresholds (UC-25). Appended **last** (after
+    # ``damage``) with an all-default value. Unlike the earlier blocks its default is ON
+    # (``enabled=True``), but it still keeps ``EnvConfig()`` byte-identical for normal/crashing
+    # episodes: the rule only fires after ``stuck_window`` consecutive grounded/no-progress steps,
+    # which a flying or promptly-crashing episode never accumulates. No obs-schema / checkpoint
+    # impact — it only affects the termination decision on genuinely grounded/stuck episodes.
+    early_termination: EarlyTerminationConfig = field(default_factory=EarlyTerminationConfig)
