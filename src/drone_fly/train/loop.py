@@ -240,6 +240,8 @@ def train(
     record_every: int = 1,
     record_dir: str | None = None,
     obs_schema=None,
+    strict_capacity: bool = False,
+    capacity_floor: int | None = None,
 ):
     """Run (or resume) PPO training; return the trained model.
 
@@ -279,6 +281,16 @@ def train(
         observation into biologically-mapped blocks; it is pickled into the checkpoint so a
         resumed / reloaded run reconstructs the same block layout. Ignored on a ``resume`` run
         (the checkpoint already carries its own schema).
+    strict_capacity:
+        UC-23 pre-train capacity guardrail (AC5). When the seeded (post-prune) actor is
+        under-capacity, ``True`` aborts the run with :class:`~drone_fly.train.capacity_guard.
+        CapacityAbort` in either mode; ``False`` (default) prompts on an interactive TTY and
+        warn-and-continues when non-interactive. A sufficiently-capable start never prompts.
+    capacity_floor:
+        Optional override for the actor trainable-parameter floor
+        (:data:`~drone_fly.train.health.DEFAULT_CAPACITY_FLOOR`). ``None`` (default) uses the
+        calibrated default. The guardrail + runtime :class:`~drone_fly.train.health_callback.
+        HealthCallback` both use the resulting thresholds.
     """
     from stable_baselines3 import PPO
     from stable_baselines3.common.callbacks import CheckpointCallback
@@ -421,6 +433,28 @@ def train(
             "Training-time activation recording enabled (every %d episodes, best-effort).",
             record_every,
         )
+
+    # UC-23: pre-train capacity guardrail (runs on fresh AND resume paths, before learn) +
+    # the runtime health callback. The guardrail always logs the capacity verdict; when the
+    # seeded actor is under-capacity it aborts (strict / declined prompt) or warn-continues
+    # (non-interactive). Close the vec env on an in-process abort so no envs leak.
+    from dataclasses import replace as _dc_replace
+
+    from drone_fly.train.capacity_guard import CapacityAbort, enforce_capacity
+    from drone_fly.train.health import DEFAULT_THRESHOLDS
+    from drone_fly.train.health_callback import HealthCallback
+
+    thresholds = (
+        DEFAULT_THRESHOLDS
+        if capacity_floor is None
+        else _dc_replace(DEFAULT_THRESHOLDS, capacity_floor=int(capacity_floor))
+    )
+    try:
+        enforce_capacity(model, strict=strict_capacity, thresholds=thresholds)
+    except CapacityAbort:
+        venv.close()
+        raise
+    callbacks.append(HealthCallback(thresholds=thresholds))
 
     model.learn(
         total_timesteps=steps,

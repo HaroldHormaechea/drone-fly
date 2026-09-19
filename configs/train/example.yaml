@@ -34,3 +34,8 @@ resume: auto
 # record_dir: null       # override; defaults to training/<name>/recordings/
 # randomize: false       # randomize the course per episode (UC-08)
 # randomize_dynamics: false  # randomize mass/drag/thrust/latency per episode (UC-08)
+# strict_capacity: false # UC-23 pre-train guardrail: when the seeded (post-prune) actor is
+#                        # under-capacity, abort with exit code 3 in any mode. Default false
+#                        # prompts on an interactive TTY and warn-and-continues non-interactively.
+# capacity_floor: null   # UC-23 override for the actor trainable-parameter floor (default 3000,
+#                        # calibrated so the k=2 default slice passes and a k=0 slice trips it).
