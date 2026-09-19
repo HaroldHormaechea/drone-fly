@@ -31,3 +31,5 @@ Statuses:
 | 19 | [use-cases/19-damage-repair-pads.md](use-cases/19-damage-repair-pads.md) | Damage/integrity + repair pads + proprioceptive(damage) observation block | done | 2026-09-18 |
 | 20 | [use-cases/20-macos-sim-setup-automation.md](use-cases/20-macos-sim-setup-automation.md) | Automated macOS real-physics sim setup (prebuilt pybullet, no source build) | done | 2026-09-19 |
 | 21 | [use-cases/21-viewer-pads-obstacles.md](use-cases/21-viewer-pads-obstacles.md) | Viewer renders recharge/repair pads and obstacles | done | 2026-09-19 |
+| 22 | [use-cases/22-training-tui-observability.md](use-cases/22-training-tui-observability.md) | Full-screen live training TUI (observability dashboard) | pending | 2026-09-19 |
+| 23 | [use-cases/23-training-health-and-capacity-guardrail.md](use-cases/23-training-health-and-capacity-guardrail.md) | Training-health assessment engine + capacity guardrail | pending | 2026-09-19 |
