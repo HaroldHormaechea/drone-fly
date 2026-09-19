@@ -80,10 +80,11 @@ tier-0 anatomy is read from the source meta and subset to the artifact's bodyids
 * **Large-connectome guard.** A dense ``eigh`` at full-MaleCNS scale (~161k neurons) is
   infeasible, so when a compute would need the spectral fallback for more than
   :func:`_spectral_cap` neurons (:data:`SPECTRAL_MAX_NEURONS`, overridable via
-  :data:`SPECTRAL_MAX_ENV` = ``DRONE_FLY_SPECTRAL_MAX``) *and* anatomy is absent/partial,
-  provisioning is deferred (WARN, no ``_positions.csv``): provide anatomy (``NEUPRINT_TOKEN``
-  or ``DRONE_FLY_SOMA_CSV``) or prune the connectome before recording. Complete real anatomy
-  at any scale still provisions (no spectral needed).
+  :data:`SPECTRAL_MAX_ENV` = ``DRONE_FLY_SPECTRAL_MAX``) *and* there is zero real anatomy to
+  anchor a schematic body, provisioning is deferred (WARN, no ``_positions.csv``): provide
+  anatomy (``NEUPRINT_TOKEN`` or ``DRONE_FLY_SOMA_CSV``) or prune the connectome before
+  recording. Partial or complete real anatomy at any scale still provisions (real soma coords
+  plus cheap schematic placement for soma-less afferents — no spectral needed).
 
 Roles
 -----
@@ -1148,9 +1149,10 @@ def resolve_positions(
         so it is authoritative for later self-heal loads (never a stale sidecar).
     2c. **neuPrint** — only when tier-0 is empty and a token is set (AC-6).
     3. **Large-connectome guard** — when a compute would still need the dense spectral fallback
-       for ``n > _spectral_cap()`` neurons AND anatomy (incl. tier-0) is absent/partial, do NOT
-       build the giant Laplacian: WARN, leave ``_positions.csv`` unwritten, return ``None``. Real
-       anatomy from the meta means the full connectome provisions without an ``eigh`` (AC-11).
+       for ``n > _spectral_cap()`` neurons AND there is zero real anatomy (incl. tier-0) to anchor
+       a schematic body, do NOT build the giant Laplacian: WARN, leave ``_positions.csv``
+       unwritten, return ``None``. Any real anatomy (partial or complete) means the connectome
+       provisions without an ``eigh`` — real soma coords plus cheap schematic placement (AC-11).
     4. **Compute** via :func:`provision_positions` (``anatomy_override`` = tier-0 map; identical
        output when the map is empty — AC-8).
     5. **Persist** the result to ``<stem>_positions.csv`` when ``persist`` (best-effort when
@@ -1199,14 +1201,17 @@ def resolve_positions(
     elif not meta_map:
         _maybe_persist_neuprint_soma(compute_data, soma_path, strict=persist_strict)
 
-    # 3. Large-connectome refuse guard — never build a full-MaleCNS-scale dense eigh. Real meta
-    # anatomy (tier-0) counts toward coverage, so a full connectome with somaLocation provisions.
+    # 3. Large-connectome refuse guard — never build a full-MaleCNS-scale dense eigh. Provisioning
+    # only needs the expensive spectral fallback when there is ZERO real anatomy to anchor: with
+    # ≥1 real soma, soma-less afferents are placed via cheap schematic body clusters (UC-28, no
+    # eigh). So defer only when coverage is exactly zero (and n > cap); partial or full anatomy
+    # provisions at any scale.
     n = data.neuron_count
-    if n > _spectral_cap() and _anatomy_coverage(compute_data, override=meta_map) < n:
+    if n > _spectral_cap() and _anatomy_coverage(compute_data, override=meta_map) == 0:
         logger.warning(
-            "No/partial anatomy for a %d-neuron connectome (> spectral cap %d): the real soma "
-            "sidecar (from any available somaLocation) WAS written, but the full-graph position "
-            "layout was NOT computed (a dense spectral layout at this scale is infeasible). "
+            "Zero real anatomy for a %d-neuron connectome (> spectral cap %d): with no real soma "
+            "to anchor a schematic body, the full-graph position layout would require a dense "
+            "spectral layout at this scale, which is infeasible, so it was NOT computed. "
             "Provide anatomy (%s / %s) or prune the connectome before recording.",
             n,
             _spectral_cap(),
