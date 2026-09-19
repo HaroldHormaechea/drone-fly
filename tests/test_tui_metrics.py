@@ -397,3 +397,30 @@ def test_entropy_derivation_sign() -> None:
     m2.update(entropy_loss=float("nan"))
     assert m2.history["entropy"].latest() is None
     assert not math.isnan(0.0)  # sanity: nan handling above did not leak
+
+
+# --------------------------------------------------------------------------- #
+# UC-26 AC-11 — DashboardModel carries the RESOLVED rollout parallelism
+# --------------------------------------------------------------------------- #
+
+
+def test_dashboard_model_defaults_to_single_dummy_env() -> None:
+    """A model built without the UC-26 fields defaults to the serial 1-env / dummy run so
+    pre-UC-26 construction is unchanged."""
+    m = DashboardModel()
+    assert m.n_envs == 1
+    assert m.backend == "dummy"
+
+
+def test_dashboard_model_stores_resolved_n_envs_and_backend() -> None:
+    """AC-11: the model stores the RESOLVED worker count + active backend verbatim (ints/strs)."""
+    m = DashboardModel(scheduled_iters=488, n_envs=8, backend="subproc")
+    assert m.n_envs == 8
+    assert m.backend == "subproc"
+
+
+def test_dashboard_model_coerces_resolved_parallelism_types() -> None:
+    m = DashboardModel(n_envs="4", backend=None)  # type: ignore[arg-type]
+    assert m.n_envs == 4
+    assert isinstance(m.n_envs, int)
+    assert m.backend == "None" and isinstance(m.backend, str)

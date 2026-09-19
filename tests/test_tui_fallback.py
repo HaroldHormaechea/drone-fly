@@ -84,9 +84,13 @@ class _FakeDashboard:
 
     instances = 0
 
-    def __init__(self, *, scheduled_iters: int = 0) -> None:
+    def __init__(
+        self, *, scheduled_iters: int = 0, n_envs: int = 1, backend: str = "dummy"
+    ) -> None:
         type(self).instances += 1
         self.scheduled_iters = scheduled_iters
+        self.n_envs = n_envs  # UC-26 AC-11: resolved rollout parallelism forwarded by train()
+        self.backend = backend
         self.redraws = 0
         self.verdicts: list[object] = []
 
