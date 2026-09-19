@@ -36,6 +36,18 @@ Neurons that lack a real soma position anywhere — e.g. peripheral sensory affe
 bodies sit outside the brain volume — are **flagged** (``has_position=False``) and
 fallback-placed — never dropped and never fabricated with a made-up anatomical value.
 
+Full coverage + body-schematic placement (UC-28)
+------------------------------------------------
+Every neuron additionally carries a finite ``display3d`` render coordinate so the viewer can
+draw all N neurons on any plane (AC-2). Real-soma neurons render at their true anatomy
+(``placement="anatomical"``). Soma-less afferents keep ``coords3d=None`` but are placed in a
+deterministic **schematic fly body around the brain** (``placement="schematic"``), grouped by
+a real categorical body-region label (:func:`resolve_body_region`: ``leg`` / ``haltere`` /
+``campaniform`` / ``vnc`` / ``ascending``, generic → ``torso``) at bounded offsets from the
+real-soma brain bbox (:func:`_schematic_body_coords`) — honest (no fabricated precise xyz) and
+brain-scale-guarded (:data:`BRAIN_DOMINANCE_MIN_FRACTION`). When no anatomy anchors the layout
+at all, every neuron is ``placement="computed"`` (spectral). Arrays are never reordered.
+
 Provisioning at slice time (UC-27)
 ----------------------------------
 Positions are provisioned **once, when a connectome artifact is created** — the ``prune``
@@ -52,10 +64,12 @@ tier-0 anatomy is read from the source meta and subset to the artifact's bodyids
 ``fetch-connectome`` reads the fetched connectome's own sibling meta directly.
 
 * **Sidecar format.** One row per neuron, columns
-  ``bodyid,has_position,x,y,z,u,v,source,projection`` (a verbatim serialisation of the
-  :func:`provision_positions` dict). ``x/y/z`` are blank iff that neuron has no 3-D anatomy
-  (``coords3d[i] is None``); ``has_position`` is an *independent* column. Floats use ``%.17g``
-  so a load reproduces the compute bit-exactly.
+  ``bodyid,has_position,x,y,z,u,v,source,projection,placement,region,x3d,y3d,z3d`` (a verbatim
+  serialisation of the :func:`provision_positions` dict). ``x/y/z`` are blank iff that neuron
+  has no 3-D anatomy (``coords3d[i] is None``); ``x3d/y3d/z3d`` (``display3d``) are always
+  finite; ``has_position`` is an *independent* column. Floats use ``%.17g`` so a load
+  reproduces the compute bit-exactly. A pre-UC-28 sidecar lacks the last five columns → MISS
+  → recompute (self-heal).
 * **Node-set binding.** A sidecar is only reused when its ``bodyid`` set equals the loaded
   connectome's neuron-id set exactly *and* its ``projection`` matches; otherwise it is a MISS
   and positions are recomputed. A pruned subcircuit can never pick up the full connectome's
@@ -83,6 +97,7 @@ from __future__ import annotations
 
 import logging
 import os
+import zlib
 from dataclasses import replace
 from pathlib import Path
 
@@ -133,6 +148,12 @@ _FLOAT_FMT = "%.17g"
 #: :func:`provision_positions` dict). ``x/y/z`` are blank iff ``coords3d[i] is None``;
 #: ``has_position`` is an INDEPENDENT column (the no-anatomy spectral branch stores
 #: ``has_position=False`` with non-null ``coords3d``), so null-ness is serialised directly.
+#: UC-28 appends three additive,
+#: always-present columns — ``placement`` / ``region`` (see below) and ``x3d/y3d/z3d`` (the
+#: full-coverage :data:`display3d` render coords, always finite). Old sidecars written before
+#: UC-28 lack these columns, so :func:`_load_positions_sidecar`'s column-subset check turns
+#: them into a MISS → the recorder self-heals by recomputing (there is no committed sidecar,
+#: so nothing breaks).
 POSITIONS_SIDECAR_COLUMNS = (
     "bodyid",
     "has_position",
@@ -143,7 +164,109 @@ POSITIONS_SIDECAR_COLUMNS = (
     "v",
     "source",
     "projection",
+    "placement",
+    "region",
+    "x3d",
+    "y3d",
+    "z3d",
 )
+
+# --- UC-28: full-coverage body-schematic placement ------------------------------------------
+#
+# UC-27 renders real-soma neurons at true anatomy and flags soma-less peripheral afferents
+# (``has_position=False``); those afferents were previously fallback-placed *inside* the brain
+# extent (``_scale_into_box``), overlapping the brain. UC-28 replaces that with a **schematic
+# fly body around the brain**: each soma-less afferent is placed in a deterministic body-region
+# cluster derived from its real categorical label (``subclass`` for limbs, ``superclass`` for
+# vnc/ascending). This is honest — no fabricated precise xyz; ``coords3d`` stays real-or-``None``
+# and the new :data:`display3d` carries the schematic render coords, distinctly flagged via
+# :data:`placement`.
+
+#: Per-neuron placement category recorded in ``positions.placement`` (drives the viewer's
+#: AC-6 visual distinction and per-neuron honesty).
+PLACEMENT_ANATOMICAL = "anatomical"  # real soma (``has_position=True``)
+PLACEMENT_SCHEMATIC = "schematic"  # soma-less afferent placed in a body-region cluster
+PLACEMENT_COMPUTED = "computed"  # whole-slice spectral fallback (no brain to anchor to)
+
+#: Body-region labels for schematic-placed afferents (recorded in ``positions.region``;
+#: ``""`` for anatomical & computed neurons).
+REGION_LEG = "leg"
+REGION_HALTERE = "haltere"
+REGION_CAMPANIFORM = "campaniform"
+REGION_VNC = "vnc"
+REGION_ASCENDING = "ascending"
+REGION_TORSO = "torso"  # generic / unrecognised label → neutral torso group (AC-4)
+
+#: Ordered region-label rules with documented precedence. Each rule is
+#: ``(attr, match, values, region)`` where ``attr`` is a :class:`ConnectomeData` label column,
+#: ``match`` is ``"exact"`` or ``"prefix"``, and ``values`` the label(s) to test. Rules are
+#: tried in order and the **first** match wins, so the fine-grained limb ``subclass`` (leg /
+#: haltere / campaniform) takes precedence over the coarse ``superclass`` (vnc_sensory,
+#: sensory_ascending). Anything matching no rule falls to :data:`REGION_TORSO`. The region
+#: label lives in ``subclass`` + ``superclass`` (verified against the MaleCNS fixture), NOT in
+#: ``cell_type`` (opaque codes).
+REGION_LABEL_RULES: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
+    ("subclass", "exact", ("leg",), REGION_LEG),
+    ("subclass", "exact", ("haltere",), REGION_HALTERE),
+    ("subclass", "prefix", ("campaniform",), REGION_CAMPANIFORM),
+    ("superclass", "exact", ("vnc_sensory",), REGION_VNC),
+    ("superclass", "exact", ("sensory_ascending",), REGION_ASCENDING),
+)
+
+#: Schematic body-cluster centre offsets, expressed as **multiples of the real brain's per-axis
+#: bounding-box extent** and added to the brain centre (see :func:`_schematic_body_coords`).
+#: They are a documented schematic choice (no real peripheral xyz exists), chosen so the six
+#: clusters sit *outside* and around the brain in distinct directions (spatial separation, AC-6)
+#: while every component stays within :data:`MAX_BODY_OFFSET_FACTOR` (the brain-dominance
+#: guardrail, AC-5). Axis order is neuPrint MaleCNS voxel space ``(x, y, z)``; the default
+#: ``xz`` projection is the dorsal top-down view (``y`` is dorsal-ventral).
+REGION_CLUSTER_OFFSETS: dict[str, tuple[float, float, float]] = {
+    REGION_LEG: (0.0, 0.75, -0.55),  # legs: ventral & below the brain
+    REGION_HALTERE: (0.70, 0.55, 0.0),  # haltere: postero-lateral thorax
+    REGION_CAMPANIFORM: (0.70, -0.55, 0.0),  # wing campaniform: opposite lateral thorax
+    REGION_VNC: (-0.75, 0.55, 0.0),  # ventral nerve cord: posterior
+    REGION_ASCENDING: (-0.75, -0.55, 0.0),  # ascending sensory: posterior, opposite side
+    REGION_TORSO: (0.0, 0.80, 0.0),  # generic torso group: ventral, distinct from limbs
+}
+
+#: Upper bound on any single-axis component of a :data:`REGION_CLUSTER_OFFSETS` entry, in
+#: brain-extent units. The guardrail math below depends on this being a true cap.
+MAX_BODY_OFFSET_FACTOR = 0.9
+
+#: Radius of the deterministic within-cluster spread, in brain-extent units. A neuron's exact
+#: point inside its cluster is a deterministic function of its bodyid (crc32), never random.
+REGION_CLUSTER_RADIUS_FRAC = 0.10
+
+#: Documented lower bound on the brain's share of the total rendered extent (AC-5). The
+#: conservative worst-case relationship is::
+#:
+#:     brain_fraction >= 1 / (1 + 2 * (MAX_BODY_OFFSET_FACTOR + REGION_CLUSTER_RADIUS_FRAC))
+#:
+#: i.e. the farthest a body point can sit beyond the brain, on each side, is
+#: ``(MAX + RADIUS) * brain_extent``. With MAX=0.9 and RADIUS=0.10 that bound is 1/3 ≈ 0.333,
+#: so any :data:`BRAIN_DOMINANCE_MIN_FRACTION` at or below it is guaranteed. The real geometry
+#: (offsets are not all maximal and rarely symmetric on one axis) leaves the brain well above
+#: this floor. Keep this relationship true if the constants are ever retuned — the guardrail
+#: test asserts the *actual* brain bbox stays ≥ this fraction of the total.
+BRAIN_DOMINANCE_MIN_FRACTION = 0.30
+
+# Guardrail invariants (kept honest at import time so the constants and the documented
+# relationship above can never silently drift apart).
+assert all(
+    max(abs(c) for c in offset) <= MAX_BODY_OFFSET_FACTOR
+    for offset in REGION_CLUSTER_OFFSETS.values()
+), "a REGION_CLUSTER_OFFSETS component exceeds MAX_BODY_OFFSET_FACTOR"
+assert (
+    1.0 / (1.0 + 2.0 * (MAX_BODY_OFFSET_FACTOR + REGION_CLUSTER_RADIUS_FRAC))
+) >= BRAIN_DOMINANCE_MIN_FRACTION, "BRAIN_DOMINANCE_MIN_FRACTION violates the guardrail bound"
+assert set(REGION_CLUSTER_OFFSETS) == {
+    REGION_LEG,
+    REGION_HALTERE,
+    REGION_CAMPANIFORM,
+    REGION_VNC,
+    REGION_ASCENDING,
+    REGION_TORSO,
+}, "REGION_CLUSTER_OFFSETS must cover every body region exactly"
 
 
 def neuron_roles(data: ConnectomeData) -> list[str]:
@@ -451,24 +574,132 @@ def _project(coords3d: np.ndarray, axes: tuple[int, int]) -> np.ndarray:
     return coords3d[:, list(axes)]
 
 
-def _scale_into_box(source: np.ndarray, reference: np.ndarray) -> np.ndarray:
-    """Min-max map ``source`` points into the per-axis bounding box of ``reference``.
+def _label_column(data: ConnectomeData, attr: str) -> list[str]:
+    """Return one label string per neuron for ``attr`` (``""`` for missing / NaN / absent).
 
-    Used to place fallback (non-anatomical) neurons *within* the anatomical map's extent so
-    they are visible near the real dots, without inventing an anatomical coordinate — they
-    stay flagged ``has_position=False``.
+    A ``None`` attribute (older/reduced fixture lacking the column) yields all-``""`` — those
+    neurons then fall through :data:`REGION_LABEL_RULES` to :data:`REGION_TORSO` rather than
+    erroring (documented degrade, never fabricated).
     """
-    out = np.array(source, dtype=np.float64, copy=True)
-    for axis in range(source.shape[1]):
-        s = source[:, axis]
-        s_lo, s_hi = float(s.min()), float(s.max())
-        r = reference[:, axis]
-        r_lo, r_hi = float(r.min()), float(r.max())
-        if s_hi - s_lo < 1e-12:
-            out[:, axis] = (r_lo + r_hi) / 2.0
-        else:
-            out[:, axis] = r_lo + (s - s_lo) / (s_hi - s_lo) * (r_hi - r_lo)
+    values = getattr(data, attr, None)
+    if values is None:
+        return [""] * data.neuron_count
+    return ["" if pd.isna(v) else str(v) for v in np.asarray(values).tolist()]
+
+
+def resolve_body_region(data: ConnectomeData) -> list[str]:
+    """Return one body-region label per neuron (index-aligned), for schematic placement.
+
+    Applies :data:`REGION_LABEL_RULES` in order (first match wins), so the fine-grained limb
+    ``subclass`` (leg / haltere / campaniform) takes precedence over the coarse ``superclass``
+    (vnc_sensory → :data:`REGION_VNC`, sensory_ascending → :data:`REGION_ASCENDING`). Any
+    neuron matching no rule — a blank or unrecognised label — maps to :data:`REGION_TORSO`
+    (AC-4). The label is computed for *every* neuron; the caller uses it only for soma-less
+    (schematic) neurons and records ``""`` for anatomical / computed ones.
+    """
+    columns: dict[str, list[str]] = {}
+    regions: list[str] = []
+    for i in range(data.neuron_count):
+        label = REGION_TORSO
+        for attr, match, values, region_label in REGION_LABEL_RULES:
+            if attr not in columns:
+                columns[attr] = _label_column(data, attr)
+            text = columns[attr][i]
+            if match == "exact":
+                hit = text in values
+            else:  # "prefix"
+                hit = any(text.startswith(v) for v in values)
+            if hit:
+                label = region_label
+                break
+        regions.append(label)
+    return regions
+
+
+def _crc_unit_ball(bodyid: object) -> np.ndarray:
+    """Deterministic point in the unit ball keyed on ``bodyid`` (bit-reproducible cross-process).
+
+    Derives three components in ``[-1, 1]`` from ``zlib.crc32`` over ``"{bodyid}:{axis}"`` and
+    clamps the vector to the unit ball (project onto the surface when it lands outside). The
+    builtin :func:`hash` is **deliberately not used**: it is salted per process
+    (``PYTHONHASHSEED``) for ``str`` inputs, so it would give different layouts on different
+    runs/machines. ``crc32`` is a fixed polynomial → identical output everywhere (AC-3).
+    """
+
+    def component(axis: str) -> float:
+        digest = zlib.crc32(f"{bodyid}:{axis}".encode())
+        return (digest / 0xFFFFFFFF) * 2.0 - 1.0
+
+    vector = np.array([component("x"), component("y"), component("z")], dtype=np.float64)
+    norm = float(np.linalg.norm(vector))
+    if norm > 1.0:
+        vector /= norm
+    return vector
+
+
+def _schematic_body_coords(
+    data: ConnectomeData,
+    regions: list[str],
+    coords3d: list[list[float] | None],
+    missing_idx: list[int],
+) -> np.ndarray | None:
+    """Compute schematic body-cluster 3-D coords for the soma-less (missing) neurons.
+
+    The real-soma coordinates in ``coords3d`` define the brain bounding box (centre + per-axis
+    extent). Each missing neuron is placed at ``brain_center + REGION_CLUSTER_OFFSETS[region] *
+    brain_extent`` plus a deterministic within-cluster spread of :data:`REGION_CLUSTER_RADIUS_FRAC`
+    · ``brain_extent`` (via :func:`_crc_unit_ball`). Returns an ``(len(missing_idx), 3)`` array
+    aligned to ``missing_idx``, or ``None`` when there is no real soma to anchor to (the caller
+    then degrades to the computed spectral layout).
+    """
+    real = np.array([c for c in coords3d if c is not None], dtype=np.float64)
+    if real.shape[0] == 0:
+        return None
+    brain_min = real.min(axis=0)
+    brain_max = real.max(axis=0)
+    brain_center = (brain_min + brain_max) / 2.0
+    brain_extent = brain_max - brain_min
+    # A degenerate (zero-extent) axis would collapse the whole body onto the brain; guard it so
+    # offsets/spread stay meaningful and finite.
+    brain_extent = np.where(brain_extent < 1e-9, 1.0, brain_extent)
+
+    ids = np.asarray(data.neuron_ids).tolist()
+    out = np.zeros((len(missing_idx), 3), dtype=np.float64)
+    for slot, i in enumerate(missing_idx):
+        offset = np.asarray(REGION_CLUSTER_OFFSETS[regions[i]], dtype=np.float64)
+        center = brain_center + offset * brain_extent
+        spread = _crc_unit_ball(ids[i]) * (REGION_CLUSTER_RADIUS_FRAC * brain_extent)
+        out[slot] = center + spread
     return out
+
+
+def _computed_positions(
+    data: ConnectomeData, projection: str, axes: tuple[int, int], n: int
+) -> dict:
+    """Whole-slice computed (spectral) positions when no anatomy anchors the layout.
+
+    Every neuron gets the deterministic spectral embedding, labelled non-anatomical
+    (:data:`SOURCE_COMPUTED`) with ``placement="computed"`` and ``region=""``. ``display3d``
+    mirrors the finite spectral coords so the viewer still renders all neurons (AC-2/AC-8).
+    """
+    embedding = _spectral_embedding(data)
+    coords2d = _project(embedding, axes)
+    logger.info(
+        "No anatomical soma positions available; using the deterministic computed "
+        "spectral layout for all %d neurons (labelled non-anatomical).",
+        n,
+    )
+    emb_list = embedding.tolist()
+    return {
+        "source": SOURCE_COMPUTED,
+        "projection": projection,
+        "coords3d": emb_list,
+        "coords2d": coords2d.tolist(),
+        "has_position": [False] * n,
+        "placement": [PLACEMENT_COMPUTED] * n,
+        "region": [""] * n,
+        "display3d": [list(row) for row in emb_list],
+    }
 
 
 def provision_positions(
@@ -484,19 +715,26 @@ def provision_positions(
         {
           "source": <provenance label>,          # "anatomical (…)" | computed fallback
           "projection": <plane, e.g. "xz">,
-          "coords3d": [[x, y, z] | null, ...],    # null only for fallback-placed neurons
-          "coords2d": [[u, v], ...],              # ALWAYS finite (real or fallback)
+          "coords3d": [[x, y, z] | null, ...],    # null only for soma-less neurons (honest)
+          "coords2d": [[u, v], ...],              # ALWAYS finite (projection of display3d)
           "has_position": [bool, ...],            # True iff a real anatomical soma
+          "placement": [str, ...],                # "anatomical" | "schematic" | "computed"
+          "region": [str, ...],                   # body region for schematic; "" otherwise
+          "display3d": [[x, y, z], ...],          # UC-28: full-coverage finite render coords
         }
 
-    Anatomical positions are used where available; neurons missing a soma are flagged
-    ``has_position=False`` and fallback-placed inside the anatomical extent (their ``coords3d``
-    is ``null`` — no fabricated 3-D anatomy). When no anatomy is reachable at all, every neuron
-    gets the deterministic spectral layout, labelled as *computed*.
+    UC-28 completeness + honesty: real-soma neurons keep their true ``coords3d`` and are
+    ``placement="anatomical"``. Soma-less afferents keep ``coords3d=null`` (no fabricated
+    anatomy) but get a deterministic **schematic body-cluster** position in ``display3d`` —
+    ``placement="schematic"`` with a ``region`` label (:func:`resolve_body_region`) — placed
+    around the real brain (:func:`_schematic_body_coords`). ``display3d`` is finite for every
+    neuron and ``coords2d`` is its projection, so the viewer renders all N neurons on any plane
+    (AC-2). When no anatomy is reachable, every neuron gets the computed spectral layout
+    (``placement="computed"``). Arrays are never reordered — the positional activation↔neuron
+    join stays exact (AC-8).
 
     ``anatomy_override`` (UC-27 AC-10) is the tier-0 meta-``somaLocation`` mapping; when non-empty
-    it is the authoritative anatomy source (see :func:`_load_anatomical`). ``None`` (default)
-    reproduces the historical output exactly (AC-8).
+    it is the authoritative anatomy source (see :func:`_load_anatomical`).
     """
     if projection not in PROJECTIONS:
         raise ValueError(
@@ -521,21 +759,42 @@ def provision_positions(
                 coords3d.append(None)
                 has_position.append(False)
 
-        real_rows = np.array([c for c in coords3d if c is not None], dtype=np.float64)
-        real_2d = _project(real_rows, axes)
-        coords2d = np.zeros((n, 2), dtype=np.float64)
-        real_iter = iter(real_2d)
         missing_idx = [i for i, ok in enumerate(has_position) if not ok]
+        regions = resolve_body_region(data)
+        schematic = _schematic_body_coords(data, regions, coords3d, missing_idx)
+        if schematic is None:
+            # Anatomy source matched none of this connectome's ids (a subset/id mismatch): with
+            # no real soma there is no brain to anchor a schematic body to, so degrade to the
+            # whole-slice computed spectral layout rather than crash or place a body around
+            # nothing (AC-8).
+            logger.info(
+                "Anatomy source %r covered no neuron in this connectome; using the computed "
+                "spectral layout for all %d neurons.",
+                source,
+                n,
+            )
+            return _computed_positions(data, projection, axes, n)
+
+        # display3d: full-coverage finite render coords for EVERY neuron — real soma where we
+        # have one, schematic body cluster otherwise. coords3d stays real-or-None (honesty);
+        # coords2d is display3d projected, so every neuron renders on the default plane too.
+        display3d: list[list[float]] = [[0.0, 0.0, 0.0] for _ in range(n)]
+        placement: list[str] = [""] * n
+        region: list[str] = [""] * n
         for i, ok in enumerate(has_position):
             if ok:
-                coords2d[i] = next(real_iter)
+                display3d[i] = list(coords3d[i])  # type: ignore[arg-type]
+                placement[i] = PLACEMENT_ANATOMICAL
+        for slot, i in enumerate(missing_idx):
+            display3d[i] = [float(v) for v in schematic[slot]]
+            placement[i] = PLACEMENT_SCHEMATIC
+            region[i] = regions[i]
+
+        coords2d = _project(np.asarray(display3d, dtype=np.float64), axes)
         if missing_idx:
-            spec2 = _project(_spectral_embedding(data), axes)
-            placed = _scale_into_box(spec2[missing_idx], real_2d)
-            for slot, i in enumerate(missing_idx):
-                coords2d[i] = placed[slot]
             logger.info(
-                "Provisioned anatomical soma positions for %d/%d neurons (%d fallback-placed).",
+                "Provisioned anatomical soma positions for %d/%d neurons "
+                "(%d schematic body-placed).",
                 n - len(missing_idx),
                 n,
                 len(missing_idx),
@@ -548,22 +807,12 @@ def provision_positions(
             "coords3d": coords3d,
             "coords2d": coords2d.tolist(),
             "has_position": has_position,
+            "placement": placement,
+            "region": region,
+            "display3d": display3d,
         }
 
-    embedding = _spectral_embedding(data)
-    coords2d = _project(embedding, axes)
-    logger.info(
-        "No anatomical soma positions available; using the deterministic computed "
-        "spectral layout for all %d neurons (labelled non-anatomical).",
-        n,
-    )
-    return {
-        "source": SOURCE_COMPUTED,
-        "projection": projection,
-        "coords3d": embedding.tolist(),
-        "coords2d": coords2d.tolist(),
-        "has_position": [False] * n,
-    }
+    return _computed_positions(data, projection, axes, n)
 
 
 def _is_int_like(value: object) -> bool:
@@ -629,7 +878,8 @@ def _write_positions_sidecar(
     serialised **directly**: ``x/y/z`` cells are left blank iff ``coords3d[i] is None`` (they
     read back as ``NaN``); otherwise the three values are written at :data:`_FLOAT_FMT`
     (bit-exact ``float64`` — AC-8). ``u/v`` (``coords2d``) are always written. ``has_position``
-    is its own column, independent of ``coords3d`` null-ness.
+    is its own column, independent of ``coords3d`` null-ness. UC-28 also writes ``placement`` /
+    ``region`` and the always-finite ``x3d/y3d/z3d`` (``display3d``) full-coverage render coords.
 
     When ``strict`` is false any :class:`OSError` (e.g. a read-only dir on the recorder
     self-heal path) is logged and swallowed rather than raised.
@@ -640,6 +890,10 @@ def _write_positions_sidecar(
     has_position = positions["has_position"]
     source = positions["source"]
     projection = positions["projection"]
+    # UC-28 additive columns (always present in a freshly-provisioned dict).
+    placement = positions["placement"]
+    region = positions["region"]
+    display3d = positions["display3d"]
 
     rows: list[dict[str, object]] = []
     for i, bid in enumerate(ids):
@@ -651,6 +905,7 @@ def _write_positions_sidecar(
             y = _FLOAT_FMT % float(c3[1])
             z = _FLOAT_FMT % float(c3[2])
         u, v = coords2d[i]
+        d3 = display3d[i]  # display3d is always finite (full coverage)
         rows.append(
             {
                 "bodyid": bid,
@@ -662,6 +917,11 @@ def _write_positions_sidecar(
                 "v": _FLOAT_FMT % float(v),
                 "source": source,
                 "projection": projection,
+                "placement": placement[i],
+                "region": region[i],
+                "x3d": _FLOAT_FMT % float(d3[0]),
+                "y3d": _FLOAT_FMT % float(d3[1]),
+                "z3d": _FLOAT_FMT % float(d3[2]),
             }
         )
 
@@ -691,9 +951,11 @@ def _load_positions_sidecar(
     ``projection`` equals ``projection``, and its ``bodyid`` set equals the connectome's
     ``neuron_ids`` set exactly (both canonicalised via :func:`_canonical_id`). On a HIT the
     rows are realigned to the connectome's row order by bodyid and the dict is reconstructed
-    (blank ``x/y/z`` → ``coords3d[i] = None``). Anything else (unreadable, missing columns,
-    wrong length, id-set mismatch — a stale/wrong-subcircuit artifact —, projection mismatch)
-    is a MISS → caller recomputes. Never applies partial or wrong-neuron positions (AC-7).
+    (blank ``x/y/z`` → ``coords3d[i] = None``; ``placement`` / ``region`` / ``display3d`` read
+    back verbatim). Anything else (unreadable, missing columns, wrong length, id-set mismatch —
+    a stale/wrong-subcircuit artifact —, projection mismatch) is a MISS → caller recomputes.
+    A pre-UC-28 sidecar lacks the ``placement`` / ``region`` / ``x3d/y3d/z3d`` columns, so it
+    MISSes here and self-heals into a recompute. Never applies partial/wrong positions (AC-7).
     """
     if pos_path is None or not pos_path.is_file():
         return None
@@ -742,6 +1004,9 @@ def _load_positions_sidecar(
     coords3d: list[list[float] | None] = []
     coords2d: list[list[float]] = []
     has_position: list[bool] = []
+    placement: list[str] = []
+    region: list[str] = []
+    display3d: list[list[float]] = []
     for i in range(len(frame)):
         x = frame["x"].iloc[i]
         y = frame["y"].iloc[i]
@@ -752,6 +1017,17 @@ def _load_positions_sidecar(
             coords3d.append([float(x), float(y), float(z)])
         coords2d.append([float(frame["u"].iloc[i]), float(frame["v"].iloc[i])])
         has_position.append(bool(frame["has_position"].iloc[i]))
+        p = frame["placement"].iloc[i]
+        r = frame["region"].iloc[i]
+        placement.append("" if pd.isna(p) else str(p))
+        region.append("" if pd.isna(r) else str(r))
+        display3d.append(
+            [
+                float(frame["x3d"].iloc[i]),
+                float(frame["y3d"].iloc[i]),
+                float(frame["z3d"].iloc[i]),
+            ]
+        )
 
     return {
         "source": str(frame["source"].iloc[0]),
@@ -759,6 +1035,9 @@ def _load_positions_sidecar(
         "coords3d": coords3d,
         "coords2d": coords2d,
         "has_position": has_position,
+        "placement": placement,
+        "region": region,
+        "display3d": display3d,
     }
 
 

@@ -37,6 +37,22 @@ const MAP_KERNEL_R = 7; // Gaussian splat radius, in downscaled buffer pixels
 const MAP_KERNEL_SIGMA = MAP_KERNEL_R / 2.4;
 const MAP_MIN_WEIGHT = 2 / 255; // skip near-silent neurons (perf; sub-uint8-step activation)
 
+// ---- UC-28: full-coverage body-schematic placement + modality overlay -----------------
+// Soma-less afferents are placed in a schematic fly body around the brain (placement ===
+// "schematic"); to keep them visually distinct from real-anatomy neurons (AC-6) — beyond the
+// spatial separation the placement itself gives — their heatmap splat is stamped at a reduced
+// weight so a schematic dot never reads as bright as a real soma.
+const SCHEMATIC_SPLAT_WEIGHT = 0.55;
+// Modality-tag overlay colours (AC-7). Exactly the recorder's RECORDED_MODALITIES set — vision
+// / proprioceptive / hunger. `damage` is intentionally absent (MaleCNS has no nociceptive
+// label; documented as unavailable, never faked). The overlay is drawn ON TOP of the hot
+// activation colormap and does not replace it.
+const MODALITY_COLORS = {
+  vision: "#4fc3f7",
+  proprioceptive: "#81c784",
+  hunger: "#ff8a65",
+};
+
 // ---- 3D flight panel constants --------------------------------------------------------
 // World frame (confirmed from env/config.py + adapter): z UP, +x FORWARD, +y = LEFT,
 // −y = RIGHT, right-handed. A right bank (+roll → −y) must read as a right turn on screen,
@@ -276,8 +292,14 @@ function projectedPoints() {
   const plane = MAP_VIEW_PRESETS[el("map-view-select").value] || "xz";
   const [a0, a1] = PROJECTIONS[plane] || PROJECTIONS.xz;
   const isDefault = plane === (pos.projection || "xz");
+  // UC-28: prefer display3d — the full-coverage finite render coords (real soma or schematic
+  // body cluster) — so every neuron renders on EVERY plane (AC-2). Legacy recordings without
+  // display3d fall back to the UC-27 behaviour (real coords3d, else the default-plane coords2d).
+  const disp = pos.display3d;
   const pts = new Array(pos.has_position.length);
   for (let i = 0; i < pts.length; i++) {
+    const d3 = disp && disp[i];
+    if (d3) { pts[i] = [d3[a0], d3[a1]]; continue; }
     const c3 = pos.coords3d[i];
     if (c3 != null) pts[i] = [c3[a0], c3[a1]];
     else if (isDefault && pos.coords2d[i]) pts[i] = pos.coords2d[i].slice();
@@ -367,7 +389,13 @@ function ensureMapCache(W, H, pad) {
   let tf, poly = null;
   if (fixed) {
     const mn = outline.bbox3d.min, mx = outline.bbox3d.max;
-    tf = makeTransform(W, H, pad, mn[a0], mx[a0], mn[a1], mx[a1]);
+    // UC-28: widen the fixed transform to the UNION of the registered outline bbox and the
+    // display3d extent, so schematic body clusters placed OUTSIDE the brain bbox stay on-canvas
+    // (a bare outline-bbox transform would clip them off the edges).
+    const b = bounds(pts);
+    const uMin = Math.min(mn[a0], b.minX), uMax = Math.max(mx[a0], b.maxX);
+    const vMin = Math.min(mn[a1], b.minY), vMax = Math.max(mx[a1], b.maxY);
+    tf = makeTransform(W, H, pad, uMin, uMax, vMin, vMax);
     const pl = outline.planes && outline.planes[viewKey];
     if (pl && pl.polygon) poly = pl.polygon.map(([u, v]) => tf.pt(u, v));
   } else {
@@ -378,17 +406,22 @@ function ensureMapCache(W, H, pad) {
   const bw = Math.max(1, Math.ceil(W / MAP_SS)), bh = Math.max(1, Math.ceil(H / MAP_SS));
   const sx = new Int32Array(pts.length), sy = new Int32Array(pts.length);
   const valid = new Uint8Array(pts.length);
+  // UC-28 AC-6: per-neuron splat weight — schematic (body) neurons stamp fainter than real
+  // anatomy so they are visually distinct (in addition to being spatially separated).
+  const placement = pos.placement || null;
+  const wmul = new Float32Array(pts.length);
   for (let i = 0; i < pts.length; i++) {
     const p = pts[i];
-    if (!p) continue; // null coords3d on a non-default plane don't contribute there (as today)
+    if (!p) continue; // null coords on a non-default plane don't contribute there (as today)
     const xy = tf.pt(p[0], p[1]);
     sx[i] = Math.round(xy[0] / MAP_SS);
     sy[i] = Math.round(xy[1] / MAP_SS);
     valid[i] = 1;
+    wmul[i] = placement && placement[i] === "schematic" ? SCHEMATIC_SPLAT_WEIGHT : 1.0;
   }
 
   const cache = {
-    viewKey, W, H, plane, tf, poly, fixed, bw, bh, sx, sy, valid,
+    viewKey, W, H, plane, tf, poly, fixed, bw, bh, sx, sy, valid, wmul,
     buf: new Float32Array(bw * bh),
     img: el("brain-canvas").getContext("2d").createImageData(bw, bh),
     globalPeak: 0,
@@ -401,13 +434,14 @@ function ensureMapCache(W, H, pad) {
 // Zero the accumulation buffer and stamp every active neuron's weighted Gaussian into it for
 // one frame's activations. Returns the frame's peak intensity (for per-frame normalization).
 function stampFrame(cache, act) {
-  const { buf, bw, bh, sx, sy, valid } = cache;
+  const { buf, bw, bh, sx, sy, valid, wmul } = cache;
   buf.fill(0);
   const R = MAP_KERNEL.R, size = MAP_KERNEL.size, kd = MAP_KERNEL.data;
   let peak = 0;
   for (let i = 0; i < valid.length; i++) {
     if (!valid[i]) continue;
-    const w = act[i] / 255;
+    // UC-28: scale by the per-neuron splat weight (schematic neurons stamp fainter — AC-6).
+    const w = (act[i] / 255) * (wmul ? wmul[i] : 1.0);
     if (w < MAP_MIN_WEIGHT) continue; // perf: skip near-silent neurons
     const cx = sx[i], cy = sy[i];
     for (let dy = -R; dy <= R; dy++) {
@@ -505,6 +539,38 @@ function drawBrainMap() {
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
+
+  // UC-28 AC-7: modality-tag overlay, drawn ON TOP of the hot colormap (does not replace it).
+  drawModalityOverlay(cache);
+}
+
+// UC-28 AC-7: when a modality is selected, ring every neuron tagged with it (from meta.modality)
+// at its screen position, in a distinct colour. This is an additive overlay — it never touches
+// the underlying activation heatmap colours. A no-op when the toggle is "off", the recording has
+// no meta.modality (legacy files), or the modality is unknown. Uses source-over so the rings sit
+// crisply above the additively-composited heatmap.
+function drawModalityOverlay(cache) {
+  const sel = el("modality-tag-select");
+  const value = sel ? sel.value : "off";
+  if (!value || value === "off") return;
+  const mod = state.data.meta.modality;
+  if (!mod) return;
+  const color = MODALITY_COLORS[value];
+  if (!color) return;
+  const ctx = el("brain-canvas").getContext("2d");
+  ctx.save();
+  ctx.globalCompositeOperation = "source-over";
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  const n = Math.min(mod.length, cache.valid.length);
+  for (let i = 0; i < n; i++) {
+    if (mod[i] !== value || !cache.valid[i]) continue;
+    const x = cache.sx[i] * MAP_SS, y = cache.sy[i] * MAP_SS;
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function drawHeatmap() {
@@ -1085,6 +1151,15 @@ el("map-norm-select").addEventListener("change", (ev) => {
   state.mapNorm = ev.target.value === "global" ? "global" : "frame";
   drawBrainMap();
 });
+
+// UC-28 modality-tag overlay toggle (AC-7). Positions are unchanged, so no cache rebuild is
+// needed — just redraw the brain map (which re-stamps the heatmap and re-draws the overlay).
+const modalitySelect = el("modality-tag-select");
+if (modalitySelect) {
+  modalitySelect.addEventListener("change", () => {
+    if (state.data) drawBrainMap();
+  });
+}
 
 // View presets (AC13): change the 3D camera angle; the camera stays freely orbitable after.
 el("view-select").addEventListener("change", (ev) => {
