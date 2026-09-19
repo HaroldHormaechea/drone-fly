@@ -71,7 +71,7 @@ def build_values_panel(model: M.DashboardModel) -> Panel:
 
 
 def build_trends_panel(model: M.DashboardModel) -> Panel:
-    """Middle-left panel: the 7 trend rows + the iterations progress bar."""
+    """Middle-left panel: the 7 trend rows, the iterations bar, and the UC-30 collecting bar."""
     table = Table.grid(expand=True, padding=(0, 1))
     table.add_column(justify="left", ratio=2)  # label
     table.add_column(justify="right")  # value
@@ -91,7 +91,18 @@ def build_trends_panel(model: M.DashboardModel) -> Panel:
     prog.add_column(justify="right")
     prog.add_row(bar, f"{cur}/{sched} ({M.format_pct(frac)})")
 
-    body = Group(table, Text("iterations", style="bold"), prog)
+    # UC-30: a distinct within-rollout "collecting" bar below the iterations bar, so a slow
+    # rollout shows live step-progress instead of a frozen screen. Label is deliberately
+    # distinct from "iterations" so both bars stay legible; sourced from tick()-fed counters.
+    rcur, rtgt, rfrac = model.rollout_progress()
+    rtotal = max(rtgt, 1)
+    collecting_bar = ProgressBar(total=rtotal, completed=min(rcur, rtotal))
+    collecting = Table.grid(expand=True, padding=(0, 1))
+    collecting.add_column()
+    collecting.add_column(justify="right")
+    collecting.add_row(collecting_bar, f"collecting {rcur}/{rtgt} ({M.format_pct(rfrac)})")
+
+    body = Group(table, Text("iterations", style="bold"), prog, collecting)
     return Panel(body, title="TRENDS", border_style="cyan")
 
 

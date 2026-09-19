@@ -328,6 +328,10 @@ class DashboardModel:
         }
         self.current_iter = 0
         self.elapsed_seconds = 0.0
+        # UC-30 intra-rollout heartbeat: steps collected in the current rollout and its target
+        # (``n_steps × n_envs``). Fed by :meth:`tick` only — never through :meth:`update`.
+        self.rollout_steps = 0
+        self.rollout_target = 0
         # Latest raw snapshot for the grouped value panel (None → placeholder, never 0).
         self.raw: dict[str, float | None] = {
             "ep_rew": None,
@@ -383,6 +387,19 @@ class DashboardModel:
         self.raw["value_loss"] = _finite(value_loss)
         self.raw["explained_variance"] = _finite(explained_variance)
 
+    def tick(self, *, elapsed_seconds, rollout_steps, rollout_target) -> None:
+        """Ingest one intra-rollout heartbeat (UC-30): live elapsed + within-rollout progress.
+
+        Deliberately touches **neither** ``history`` **nor** ``raw`` — unlike :meth:`update`,
+        whose unconditional ``raw[...]`` assignments would blank the six values-panel entries to
+        the placeholder after the first rollout. It only refreshes the live clock and the
+        collecting-progress counters, so the last rollout-end snapshot persists through the next
+        collection (AC-4).
+        """
+        self.elapsed_seconds = float(elapsed_seconds)
+        self.rollout_steps = int(rollout_steps)
+        self.rollout_target = int(rollout_target)
+
     def set_verdict(self, verdict) -> None:
         """Store the latest health verdict (the UC-23 seam the status bar renders)."""
         self.latest_verdict = verdict
@@ -416,6 +433,18 @@ class DashboardModel:
             self.current_iter,
             self.scheduled_iters,
             progress_fraction(self.current_iter, self.scheduled_iters),
+        )
+
+    def rollout_progress(self) -> tuple[int, int, float]:
+        """``(rollout_steps, rollout_target, fraction)`` for the UC-30 collecting bar.
+
+        The fraction reuses :func:`progress_fraction` (clamped to ``[0, 1]``, ``0`` when the
+        target is unknown), so a pre-tick / missing-attr rollout degrades to an empty bar.
+        """
+        return (
+            self.rollout_steps,
+            self.rollout_target,
+            progress_fraction(self.rollout_steps, self.rollout_target),
         )
 
     def eta_seconds(self) -> float | None:
