@@ -210,3 +210,97 @@ def test_default_course_energy_budget_keeps_battery_above_knee() -> None:
     worst_drop = (battery_cfg.idle_rate + battery_cfg.throttle_rate * 1.0) * ep.dt * budget
     assert st.battery == pytest.approx(1.0 - worst_drop)
     assert (1.0 - worst_drop) > battery_cfg.knee  # the bound itself clears the knee
+
+
+def test_full_course_randomization_smoke_trains_finitely_with_all_placement_axes(
+    connectome: ConnectomeData, tmp_path
+) -> None:
+    """UC-24 AC7: the full-course-by-default path smoke-trains end-to-end. Because ``smoke_train``
+    BYPASSES the CLI resolver (``_resolve_train_randomization``), this constructs the resolved
+    inputs EXPLICITLY — the full ``damage_proprioception_v4`` schema plus a ``RandomizationConfig``
+    with course + obstacle + recharge + repair placement all ON — and asserts a finite update
+    completes with the 26-d observation. Obstacle placement no longer self-enables via
+    ``_reconcile_obstacle_vision`` (UC-24 decoupling), so the placement axes are set here directly.
+    """
+    from drone_fly.controller.obs_schema import DAMAGE_PROPRIOCEPTION_V4, resolve_schema
+    from drone_fly.env.config import EnvConfig, RandomizationConfig
+    from drone_fly.train.config import TrainConfig
+    from drone_fly.train.loop import smoke_train
+
+    obs_schema = resolve_schema("damage_proprioception_v4")
+    assert obs_schema is DAMAGE_PROPRIOCEPTION_V4  # the resolver returns the registered schema
+    env_config = EnvConfig(
+        randomization=RandomizationConfig(
+            enable_course=True,
+            enable_obstacles=True,
+            enable_recharge=True,
+            enable_repair=True,
+        )
+    )
+
+    cfg = TrainConfig(
+        models_dir=str(tmp_path / "models"),
+        logs_dir=str(tmp_path / "logs"),
+        checkpoint_freq=64,
+        n_envs=1,
+        n_steps=64,
+        batch_size=32,
+        seed=0,
+    )
+    model = smoke_train(
+        connectome=connectome,
+        cfg=cfg,
+        timesteps=128,
+        obs_schema=obs_schema,
+        env_config=env_config,
+    )
+    # A finite, completed update against the full 26-d observation (AC7: everything on, no blow-up).
+    assert model.num_timesteps == 128
+    actor = model.policy.features_extractor.actor
+    assert actor.obs_schema == DAMAGE_PROPRIOCEPTION_V4
+    assert actor.sensory_mode == "schema"
+    assert model.env.observation_space.shape == (DAMAGE_PROPRIOCEPTION_V4.total_width,) == (26,)
+    for p in actor.parameters():
+        assert np.isfinite(p.detach().cpu().numpy()).all()
+
+
+def test_full_course_randomization_samples_one_recharge_and_one_repair_pad(
+    connectome: ConnectomeData,
+) -> None:
+    """UC-24 AC7 (placement wired through the env): building the env exactly as ``train`` does —
+    reconciling the full schema onto the all-axes-on ``RandomizationConfig`` (which forces battery +
+    damage physics on, coupling the pads to sensable state) — every sampled course carries EXACTLY
+    ONE rechargeable and ONE repairable pad. Reuses the real reconcile chain so the test tracks the
+    production wiring, not a hand-forced battery flag."""
+    from drone_fly.controller.obs_schema import resolve_schema
+    from drone_fly.env import make_env
+    from drone_fly.env.config import EnvConfig, RandomizationConfig
+    from drone_fly.train.loop import (
+        _reconcile_battery,
+        _reconcile_damage,
+        _reconcile_obstacle_vision,
+    )
+
+    obs_schema = resolve_schema("damage_proprioception_v4")
+    env_config = EnvConfig(
+        randomization=RandomizationConfig(
+            enable_course=True,
+            enable_obstacles=True,
+            enable_recharge=True,
+            enable_repair=True,
+        )
+    )
+    # The exact reconcile chain train() runs: forces battery + damage physics on (so a recharge /
+    # repair pad is sensable) and widens the obstacle-vision block.
+    reconciled = _reconcile_damage(
+        _reconcile_battery(_reconcile_obstacle_vision(env_config, obs_schema), obs_schema),
+        obs_schema,
+    )
+    assert reconciled.battery.enabled and reconciled.damage.enabled
+
+    env = make_env(reconciled, adapter="simple")
+    for seed in range(10):
+        env.reset(seed=seed)
+        pads = env.active_course.pads
+        assert len([p for p in pads if p.rechargeable]) == 1
+        assert len([p for p in pads if p.repairable]) == 1

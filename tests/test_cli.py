@@ -28,11 +28,14 @@ import yaml
 from drone_fly.cli import (
     _env_config,
     _resolve_config_resume,
+    _resolve_train_randomization,
     _warn_record_every_without_record,
     build_parser,
     main,
 )
+from drone_fly.config import ConfigError, TrainRunConfig
 from drone_fly.connectome import DEFAULT_PRUNE_K, load_connectome
+from drone_fly.controller.obs_schema import DAMAGE_PROPRIOCEPTION_V4, OBSTACLE_VISION_V2
 from drone_fly.train.loop import CHECKPOINT_PREFIX
 
 FIXTURE_DIR = str(Path(__file__).parent / "fixtures")
@@ -482,6 +485,134 @@ def test_env_config_enables_requested_axes() -> None:
 
     dyn = _env_config(False, True)
     assert dyn.randomization.enable_course is False and dyn.randomization.enable_dynamics is True
+
+
+# --------------------------------------------------------------------------- #
+# UC-24 — _resolve_train_randomization: full-course-by-default + placement toggles
+# --------------------------------------------------------------------------- #
+def _train_cfg(**overrides) -> TrainRunConfig:
+    """Build a TrainRunConfig via from_mapping (so defaults + three-state toggles are real)."""
+    return TrainRunConfig.from_mapping({"name": "x", **overrides})
+
+
+def test_resolver_non_randomized_returns_none_env_and_none_schema() -> None:
+    """AC6 parity: a non-randomized train run resolves to ``(None, None)`` — no env_config and no
+    schema — exactly the byte-identical legacy path (like the old ``_env_config`` both-off case)."""
+    env_config, obs_schema = _resolve_train_randomization(_train_cfg())
+    assert env_config is None
+    assert obs_schema is None
+
+
+def test_resolver_bare_randomize_defaults_to_full_schema_all_placement_on() -> None:
+    """AC5: a bare ``randomize: true`` with NO schema/toggles ⇒ schema ``damage_proprioception_v4``
+    (26-d) and ALL THREE placement axes ON (dpv4 carries obstacle/battery/damage blocks)."""
+    env_config, obs_schema = _resolve_train_randomization(_train_cfg(randomize=True))
+    assert obs_schema is DAMAGE_PROPRIOCEPTION_V4
+    assert env_config is not None
+    r = env_config.randomization
+    assert r.enable_course is True
+    assert r.enable_obstacles is True
+    assert r.enable_recharge is True
+    assert r.enable_repair is True
+
+
+def test_resolver_explicit_schema_defaults_placement_to_what_it_can_sense() -> None:
+    """AC5: an explicit lighter schema overrides the dpv4 default and defaults placement to only the
+    axes it can sense — ``obstacle_vision_v2`` carries only the obstacle block, so obstacles default
+    ON while recharge/repair default OFF (no battery/damage block)."""
+    env_config, obs_schema = _resolve_train_randomization(
+        _train_cfg(randomize=True, schema="obstacle_vision_v2")
+    )
+    assert obs_schema is OBSTACLE_VISION_V2
+    r = env_config.randomization
+    assert r.enable_obstacles is True
+    assert r.enable_recharge is False
+    assert r.enable_repair is False
+
+
+def test_resolver_battery_schema_defaults_recharge_on_repair_off() -> None:
+    """AC5: ``battery_hunger_v3`` carries obstacle + battery blocks (no damage) ⇒ obstacles and
+    recharge default ON, repair defaults OFF."""
+    env_config, _ = _resolve_train_randomization(
+        _train_cfg(randomize=True, schema="battery_hunger_v3")
+    )
+    r = env_config.randomization
+    assert r.enable_obstacles is True
+    assert r.enable_recharge is True
+    assert r.enable_repair is False
+
+
+def test_resolver_explicit_toggle_overrides_each_axis_independently() -> None:
+    """AC5: an explicit toggle always wins over the schema-aware default, independently per axis —
+    here, under the full dpv4 default, each axis is turned OFF one at a time while the others stay
+    ON."""
+    # Obstacles off, recharge/repair still on.
+    r = _resolve_train_randomization(_train_cfg(randomize=True, randomize_obstacles=False))[
+        0
+    ].randomization
+    assert r.enable_obstacles is False and r.enable_recharge is True and r.enable_repair is True
+
+    # Recharge off, obstacles/repair still on.
+    r = _resolve_train_randomization(_train_cfg(randomize=True, randomize_recharge_pads=False))[
+        0
+    ].randomization
+    assert r.enable_recharge is False and r.enable_obstacles is True and r.enable_repair is True
+
+    # Repair off, obstacles/recharge still on.
+    r = _resolve_train_randomization(_train_cfg(randomize=True, randomize_repair_pads=False))[
+        0
+    ].randomization
+    assert r.enable_repair is False and r.enable_obstacles is True and r.enable_recharge is True
+
+
+def test_resolver_dynamics_only_builds_env_without_placement_or_schema() -> None:
+    """AC6: ``randomize_dynamics`` alone builds an env_config (dynamics on, course off) but no
+    schema and no placement — the schema-aware defaults are gated on ``randomize``."""
+    env_config, obs_schema = _resolve_train_randomization(_train_cfg(randomize_dynamics=True))
+    assert obs_schema is None
+    assert env_config is not None
+    r = env_config.randomization
+    assert r.enable_course is False and r.enable_dynamics is True
+    assert r.enable_obstacles is False
+    assert r.enable_recharge is False
+    assert r.enable_repair is False
+
+
+def test_resolver_schema_without_randomize_yields_schema_but_no_env() -> None:
+    """AC6: an explicit ``schema`` with ``randomize: false`` trains on a FIXED course — the schema
+    resolves (so the actor is schema-mode) but env_config is None (no randomization) and no
+    placement default fires (all gated on ``randomize``)."""
+    env_config, obs_schema = _resolve_train_randomization(
+        _train_cfg(schema="damage_proprioception_v4")
+    )
+    assert obs_schema is DAMAGE_PROPRIOCEPTION_V4
+    assert env_config is None
+
+
+# --- AC4 coherence: fail-loud ConfigError, not a silent inert pad --------------------------
+def test_resolver_recharge_toggle_without_battery_schema_raises() -> None:
+    """AC4: an explicit ``randomize_recharge_pads: true`` under a schema with no battery block is a
+    fail-loud ``ConfigError`` (a recharge pad would be inert), never a silent zero-pad no-op."""
+    with pytest.raises(ConfigError, match="randomize_recharge_pads"):
+        _resolve_train_randomization(
+            _train_cfg(randomize=True, schema="obstacle_vision_v2", randomize_recharge_pads=True)
+        )
+
+
+def test_resolver_repair_toggle_without_damage_schema_raises() -> None:
+    """AC4: an explicit ``randomize_repair_pads: true`` under a schema with no damage block is a
+    fail-loud ``ConfigError`` (a repair pad would be inert)."""
+    with pytest.raises(ConfigError, match="randomize_repair_pads"):
+        _resolve_train_randomization(
+            _train_cfg(randomize=True, schema="battery_hunger_v3", randomize_repair_pads=True)
+        )
+
+
+def test_resolver_full_default_never_triggers_coherence_error() -> None:
+    """AC4/AC5: the schema-aware defaults make the coherence error unreachable on the happy path —
+    a bare ``randomize: true`` (⇒ dpv4, which carries battery + damage) resolves without raising."""
+    env_config, obs_schema = _resolve_train_randomization(_train_cfg(randomize=True))
+    assert obs_schema is DAMAGE_PROPRIOCEPTION_V4 and env_config is not None
 
 
 def test_prune_default_prune_k_matches_source() -> None:

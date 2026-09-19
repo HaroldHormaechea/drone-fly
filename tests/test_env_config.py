@@ -363,11 +363,14 @@ def test_randomization_config_recharge_axis_defaults() -> None:
     assert r.recharge_energy_margin == 1.5
 
 
-def test_randomization_recharge_fields_appended_last_in_order() -> None:
+def test_randomization_recharge_fields_appended_in_order() -> None:
     """AC5: the five recharge fields are appended after the UC-15 obstacle fields (field-order
-    compatibility with UC-15/16/17 positional/keyword construction)."""
+    compatibility with UC-15/16/17 positional/keyword construction). UC-24 appends the two repair
+    fields AFTER them (see :func:`test_randomization_repair_fields_appended_last_in_order`), so the
+    recharge block is no longer the tail — but it still follows ``obstacle_clearance`` in order."""
     fields = [f.name for f in dataclasses.fields(RandomizationConfig)]
-    assert fields[-5:] == [
+    i = fields.index("enable_recharge")
+    assert fields[i : i + 5] == [
         "enable_recharge",
         "recharge_nominal_speed",
         "recharge_nominal_throttle",
@@ -376,6 +379,32 @@ def test_randomization_recharge_fields_appended_last_in_order() -> None:
     ]
     # obstacle_clearance (the last UC-15 field) still precedes the recharge block.
     assert fields.index("obstacle_clearance") < fields.index("enable_recharge")
+
+
+# --- UC-24 RandomizationConfig repair axis — off/neutral defaults, appended LAST -----------
+def test_randomization_config_repair_axis_defaults() -> None:
+    """UC-24 AC1/AC5: the repair axis is off by default with a neutral pad radius, so a default
+    ``RandomizationConfig`` places no repair pad and stays byte-identical to UC-18."""
+    r = RandomizationConfig()
+    assert r.enable_repair is False
+    assert r.repair_pad_radius == 0.5
+
+
+def test_randomization_repair_fields_appended_last_in_order() -> None:
+    """UC-24 AC1: the two repair fields (``enable_repair``, ``repair_pad_radius``) are appended
+    LAST — after the whole UC-18 recharge block — so every UC-15/16/17/18 positional/keyword
+    construction of ``RandomizationConfig`` is unshifted and byte-identical."""
+    fields = [f.name for f in dataclasses.fields(RandomizationConfig)]
+    assert fields[-2:] == ["enable_repair", "repair_pad_radius"]
+    # The repair fields follow the last recharge field.
+    assert fields.index("recharge_energy_margin") < fields.index("enable_repair")
+
+
+def test_default_env_config_is_stable_under_uc24_repair_fields() -> None:
+    """UC-24 AC6: with the two new repair fields at their defaults, ``RandomizationConfig()`` /
+    ``EnvConfig()`` equality (a frozen-dataclass byte-identity proxy) still holds."""
+    assert RandomizationConfig() == RandomizationConfig()
+    assert EnvConfig().randomization == RandomizationConfig()
 
 
 def test_energy_margin_is_conservative() -> None:

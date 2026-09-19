@@ -221,6 +221,46 @@ def test_train_defaults_match_existing_flag_defaults() -> None:
     assert cfg.randomize_dynamics is False
     # UC-13: no schema key -> None -> legacy single-projection run (AC7 parity).
     assert cfg.schema is None
+    # UC-24: the three placement toggles are THREE-STATE — omitted -> None (not False), so the CLI
+    # resolver can distinguish "use the schema-aware default" from an explicit "off".
+    assert cfg.randomize_obstacles is None
+    assert cfg.randomize_recharge_pads is None
+    assert cfg.randomize_repair_pads is None
+
+
+def test_train_placement_toggles_parse_bool_true_and_false() -> None:
+    """UC-24 AC1: each placement toggle parses an explicit bool, preserved verbatim (three-state:
+    the explicit value always wins over the schema-aware default in the CLI resolver)."""
+    cfg = TrainRunConfig.from_mapping(
+        {
+            "name": "x",
+            "randomize_obstacles": True,
+            "randomize_recharge_pads": False,
+            "randomize_repair_pads": True,
+        }
+    )
+    assert cfg.randomize_obstacles is True
+    assert cfg.randomize_recharge_pads is False
+    assert cfg.randomize_repair_pads is True
+
+
+def test_train_placement_toggle_explicit_null_is_none() -> None:
+    """UC-24 AC1: an explicit YAML ``null`` for a placement toggle is treated as omitted -> None
+    (the schema-aware default), never coerced to False."""
+    cfg = TrainRunConfig.from_mapping({"name": "x", "randomize_recharge_pads": None})
+    assert cfg.randomize_recharge_pads is None
+
+
+@pytest.mark.parametrize(
+    "key", ["randomize_obstacles", "randomize_recharge_pads", "randomize_repair_pads"]
+)
+def test_train_placement_toggle_rejects_non_bool(key: str) -> None:
+    """UC-24 AC1: a placement toggle is a strict bool key — a non-bool (e.g. an int or string) is a
+    type error naming the command + key (a stray ``1`` is NOT silently accepted as ``True``)."""
+    with pytest.raises(ConfigError, match=key):
+        TrainRunConfig.from_mapping({"name": "x", key: 1})
+    with pytest.raises(ConfigError, match=key):
+        TrainRunConfig.from_mapping({"name": "x", key: "yes"})
 
 
 def test_train_schema_key_accepts_registered_name() -> None:
