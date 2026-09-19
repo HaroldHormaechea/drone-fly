@@ -36,3 +36,4 @@ Statuses:
 | 24 | [use-cases/24-full-course-randomization-toggles.md](use-cases/24-full-course-randomization-toggles.md) | Full-course randomization by default + feature toggles | done | 2026-09-19 |
 | 25 | [use-cases/25-env-ground-stuck-early-termination.md](use-cases/25-env-ground-stuck-early-termination.md) | Ground/no-progress episode early termination | done | 2026-09-19 |
 | 26 | [use-cases/26-parallel-vec-env-rollout.md](use-cases/26-parallel-vec-env-rollout.md) | Parallel vec-env rollout backend (real multi-core speedup) | done | 2026-09-19 |
+| 27 | [use-cases/27-provision-positions-at-slice.md](use-cases/27-provision-positions-at-slice.md) | Provision neuron positions at slice time (not every training run) | in-progress | 2026-09-19 |
