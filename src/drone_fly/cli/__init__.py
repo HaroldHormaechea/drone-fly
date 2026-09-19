@@ -205,6 +205,10 @@ def main(argv: list[str] | None = None) -> int:
     from drone_fly.config import ConfigError
     from drone_fly.connectome import ConnectomeDownloadError
 
+    # UC-23: cheap to import (capacity_guard defers torch/SB3 to its functions), so this does
+    # not drag the heavy stack into light commands like `clean` / `fetch-connectome`.
+    from drone_fly.train.capacity_guard import CapacityAbort
+
     try:
         if args.command == "train":
             return _run_train(args.config)
@@ -242,6 +246,11 @@ def main(argv: list[str] | None = None) -> int:
         # Clean one-line message, no stack trace — matches the ConfigError convention (AC7).
         logging.getLogger("drone_fly.cli").error("%s", e)
         return 2
+    except CapacityAbort as e:
+        # UC-23 AC5: under-capacity abort (strict / declined prompt). One-line guidance + exit
+        # code 3 (2 is ConfigError), no stack trace — same convention as the errors above.
+        logging.getLogger("drone_fly.cli").error("%s", e)
+        return 3
 
     return 1  # pragma: no cover - argparse requires a subcommand
 
@@ -282,6 +291,8 @@ def _run_train(config_path: str) -> int:
         record_every=record_every,
         record_dir=record_dir,
         obs_schema=obs_schema,
+        strict_capacity=cfg.strict_capacity,
+        capacity_floor=cfg.capacity_floor,
     )
     return 0
 

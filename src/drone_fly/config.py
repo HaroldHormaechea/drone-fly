@@ -230,6 +230,8 @@ class TrainRunConfig:
     randomize: bool
     randomize_dynamics: bool
     schema: str | None
+    strict_capacity: bool
+    capacity_floor: int | None
 
     @classmethod
     def from_mapping(cls, mapping: Any) -> TrainRunConfig:
@@ -255,6 +257,12 @@ class TrainRunConfig:
             # legacy single-projection run (AC7 parity). Choices come from obs_schema so the
             # valid names are never re-declared here.
             _Spec("schema", (str,), choices=tuple(sorted(NAMED_SCHEMAS))),
+            # UC-23: pre-train capacity guardrail. ``strict_capacity`` makes an under-capacity
+            # start abort (exit 3) in either mode; default False prompts on a TTY and warn-
+            # continues non-interactively. ``capacity_floor`` overrides the calibrated actor
+            # trainable-parameter floor (null -> the default in drone_fly.train.health).
+            _Spec("strict_capacity", (bool,), default=False),
+            _Spec("capacity_floor", (int,)),
         ]
         resolved = _validate("train", mapping, specs)
         resolved["name"] = validate_run_name(resolved["name"])

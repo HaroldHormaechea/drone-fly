@@ -95,6 +95,27 @@ fail with a clear one-line error (exit code `2`, no stack trace). The example co
 `configs/` are runnable as-is and document every key. `smoke-train` and `fetch-connectome` keep
 their small flag surfaces.
 
+### Training health & capacity guardrail (UC-23)
+Every `train` run assesses training health with a headless, pure-logic engine and gates on the
+seeded actor's capacity:
+
+- **Pre-train capacity guardrail.** Before training starts, the resolved (post-prune) actor's
+  **trainable-parameter count** is checked against a floor (default `3000`, calibrated on the
+  committed fixture: the `prune_k: 0` minimal corridor yields 942 params — undersized — while the
+  `prune_k: 2` default slice yields 7918, which passes). The verdict is always logged. When the
+  actor is under-capacity the run **prompts to confirm** on an interactive terminal (declining
+  aborts), and on a non-interactive/CI start (no TTY) it degrades to **warn-and-continue**. Set
+  `strict_capacity: true` to abort instead in either mode — a clean one-line message and **exit
+  code `3`** (config errors own `2`). Override the floor with `capacity_floor: <int>`. A
+  sufficiently-capable start never prompts and changes nothing.
+- **Runtime health assessment.** During training a callback snapshots the metrics each rollout and
+  emits a verdict — `normal` / `warning` / `critical` with a human message and the contributing
+  reasons — as a log line (only on a status change or every 10th update, so it never spams). It
+  codifies the recurring diagnosis (a healthy critic with a flat, non-committing actor and ~0%
+  success = an under-capacity slice) plus reward-stall, `approx_kl` runaway, `value_loss`
+  divergence, and premature-entropy-collapse rules. The engine is pure and CI-unit-tested, and its
+  verdict object is the interface a future status bar (UC-22) renders.
+
 ### Observation schema & retraining
 The `schema` train key (UC-13) opts into a named **block observation schema**. `migrated_v1`
 re-binds the 12-d observation into a *vision* block (target-relative → visual neurons) and a
