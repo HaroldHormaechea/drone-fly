@@ -152,3 +152,25 @@ def test_renders_with_no_color_without_raising() -> None:
     m = _populated_model()
     out = _render(build_layout(m), no_color=True)
     assert out.strip()
+
+
+# --------------------------------------------------------------------------- #
+# UC-26 AC-11 — the values panel surfaces the resolved n_envs + backend
+# --------------------------------------------------------------------------- #
+
+
+def test_values_panel_shows_resolved_parallelism_for_a_parallel_run() -> None:
+    """AC-11: a parallel run renders the resolved worker count + 'subproc' backend, not the raw
+    config input, in the values panel (verified against the pure render layer — no live Live)."""
+    m = M.DashboardModel(scheduled_iters=488, n_envs=8, backend="subproc")
+    out = _render(build_values_panel(m))
+    assert "envs" in out
+    assert "8 (subproc)" in out
+
+
+def test_values_panel_shows_resolved_parallelism_for_a_serial_run() -> None:
+    """AC-11: the serial (dummy) run shows its resolved 1-env / dummy parallelism too."""
+    m = M.DashboardModel(scheduled_iters=488, n_envs=1, backend="dummy")
+    out = _render(build_values_panel(m))
+    assert "envs" in out
+    assert "1 (dummy)" in out

@@ -312,8 +312,14 @@ class DashboardModel:
         window: int = DEFAULT_WINDOW,
         spark_width: int = DEFAULT_SPARK_WIDTH,
         flat_tol: float = DEFAULT_FLAT_TOL,
+        n_envs: int = 1,
+        backend: str = "dummy",
     ) -> None:
         self.scheduled_iters = int(scheduled_iters or 0)
+        # UC-26 AC-11: the RESOLVED rollout parallelism (worker count + active vec-env backend),
+        # shown static in the values panel so the operator sees how many cores are in use.
+        self.n_envs = int(n_envs)
+        self.backend = str(backend)
         self.window = window
         self.spark_width = spark_width
         self.flat_tol = flat_tol

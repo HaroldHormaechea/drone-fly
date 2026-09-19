@@ -39,7 +39,10 @@ def build_values_panel(model: M.DashboardModel) -> Panel:
     time_col.append("TIME\n", style="bold")
     time_col.append(f" iters   {cur}/{sched}\n")
     time_col.append(f" elapsed {M.format_duration(model.elapsed_seconds)}\n")
-    time_col.append(f" eta     {M.format_duration(model.eta_seconds())}")
+    time_col.append(f" eta     {M.format_duration(model.eta_seconds())}\n")
+    # UC-26 AC-11: resolved rollout parallelism (worker count + active backend), e.g.
+    # " envs  8 (subproc)" — the value shown is the RESOLVED one, not the raw config input.
+    time_col.append(f" envs    {model.n_envs} ({model.backend})")
 
     ent_loss = _fmt_or_dash(model.raw["entropy_loss"], lambda v: f"{v:.2f}")
     value_loss = _fmt_or_dash(model.raw["value_loss"], lambda v: f"{v:.1f}")
@@ -126,7 +129,7 @@ def build_layout(model: M.DashboardModel, log_lines: list[str] | None = None) ->
         Layout(name="logs", ratio=3),
     )
     layout["left"].split_column(
-        Layout(build_values_panel(model), name="values", size=6),
+        Layout(build_values_panel(model), name="values", size=7),
         Layout(build_trends_panel(model), name="trends", ratio=1),
     )
     layout["logs"].update(build_logs_panel(log_lines))

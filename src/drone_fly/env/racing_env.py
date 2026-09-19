@@ -31,7 +31,7 @@ import logging
 import gymnasium as gym
 import numpy as np
 
-from drone_fly.adapter import make_adapter
+from drone_fly.adapter import make_adapter, pybullet_available
 from drone_fly.controller.encoding import ACTION_DIM, OBS_DIM
 from drone_fly.env.config import DynamicsParams, EnvConfig
 from drone_fly.env.docking import evaluate_dock, pad_under
@@ -547,6 +547,66 @@ def make_env(config: EnvConfig | None = None, *, adapter: str = "auto") -> RaceE
     return RaceEnv(config, adapter=adapter)
 
 
+#: Default worker count for a parallel (subproc) rollout when ``n_envs`` is not set
+#: explicitly (UC-26 AC-5/AC-10). Matches the Apple M4 Pro's 8 performance cores.
+DEFAULT_PARALLEL_N_ENVS = 8
+#: Multiprocessing start method for :class:`SubprocVecEnv` — ``"spawn"`` is the safe choice
+#: cross-platform (incl. macOS) and with native libs like pybullet (UC-26 AC-4/AC-10).
+VEC_ENV_START_METHOD = "spawn"
+
+
+def resolve_vec_env(
+    adapter: str,
+    n_envs_arg: int | None,
+    cfg_n_envs: int,
+) -> tuple[str, int, str]:
+    """Resolve ``(resolved_adapter, resolved_n_envs, vec_backend)`` for a rollout (UC-26).
+
+    Pure decision function (no I/O beyond the one user-facing warning) so it is independently
+    unit-testable per branch (AC-1/AC-5):
+
+    * ``resolved_adapter`` — ``adapter`` verbatim unless it is ``"auto"``, which resolves to
+      ``"pybullet"`` when the sim stack imports else ``"simple"`` (mirrors
+      :func:`~drone_fly.adapter.make_adapter`).
+    * ``resolved_n_envs`` — the explicit ``n_envs_arg`` when given; **elif** the adapter is
+      parallel-capable (pybullet) it defaults to :data:`DEFAULT_PARALLEL_N_ENVS` (8);
+      **else** it falls back to ``cfg_n_envs`` (the pre-UC-26 behaviour — the load-bearing
+      branch that keeps the config default working for the simple/CI path).
+    * ``vec_backend`` — ``"subproc"`` only when the adapter is parallel-capable **and**
+      ``resolved_n_envs > 1``; otherwise ``"dummy"`` (so ``simple``/CI and single-env runs
+      stay on :class:`DummyVecEnv`, AC-1/AC-6).
+
+    A user-facing warning fires only when more than one env was *explicitly* requested but the
+    adapter is not parallel-capable (the ``simple`` adapter stays serial on ``DummyVecEnv`` —
+    AC-1/AC-5 edge case).
+    """
+    resolved_adapter = (
+        adapter if adapter != "auto" else ("pybullet" if pybullet_available() else "simple")
+    )
+    parallel_capable = resolved_adapter == "pybullet"
+
+    if n_envs_arg is not None:
+        resolved_n_envs = int(n_envs_arg)
+    elif parallel_capable:
+        resolved_n_envs = DEFAULT_PARALLEL_N_ENVS
+    else:
+        resolved_n_envs = int(cfg_n_envs)
+    resolved_n_envs = max(1, resolved_n_envs)
+
+    vec_backend = "subproc" if (parallel_capable and resolved_n_envs > 1) else "dummy"
+
+    if n_envs_arg is not None and n_envs_arg > 1 and not parallel_capable:
+        logger.warning(
+            "n_envs=%d requested but the resolved adapter is %r (not 'pybullet'); the "
+            "'simple' adapter gains nothing from subprocesses, so the rollout stays serial "
+            "on DummyVecEnv. Use the pybullet adapter for real cross-core parallelism.",
+            n_envs_arg,
+            resolved_adapter,
+        )
+
+    return resolved_adapter, resolved_n_envs, vec_backend
+
+
 def build_vec_env(
     *,
     config: EnvConfig | None = None,
@@ -556,6 +616,8 @@ def build_vec_env(
     training: bool = True,
     norm_reward: bool | None = None,
     vecnormalize_path: str | None = None,
+    vec_backend: str = "auto",
+    suppress_worker_output: bool = False,
 ):
     """Build a ``VecNormalize``-wrapped vectorised env for SB3 (AC4/AC6).
 
@@ -569,16 +631,59 @@ def build_vec_env(
     vecnormalize_path:
         If given, load saved VecNormalize stats from this path (checkpoint resume / eval)
         instead of starting fresh.
+    vec_backend:
+        Base vec-env backend (UC-26). ``"auto"`` (default) delegates to
+        :func:`resolve_vec_env` to pick ``"subproc"`` vs ``"dummy"``; ``"dummy"`` forces the
+        serial :class:`DummyVecEnv` (byte-identical to pre-UC-26); ``"subproc"`` forces a
+        :class:`SubprocVecEnv` with ``start_method`` :data:`VEC_ENV_START_METHOD`. The
+        explicit ``"dummy"``/``"subproc"`` values are internal test hooks and, unlike the
+        auto path, forcing subproc on a non-parallel adapter does NOT warn.
+    suppress_worker_output:
+        Subproc-only. When ``True``, each spawned worker redirects its own native
+        ``stdout``/``stderr`` (fd 1/2) to ``os.devnull`` *before* building its env, so worker
+        native spew can't corrupt the live TUI display (UC-26 AC-13). The redirect runs ONLY
+        inside spawned workers — never the main process — and only for the subproc backend.
     """
+    import os
+
     from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor, VecNormalize
 
     cfg = config or EnvConfig()
     norm_reward = training if norm_reward is None else norm_reward
 
+    if vec_backend == "auto":
+        # Concrete-``n_envs`` callers pass a value, so this is the identity for n_envs; we only
+        # consume the backend choice. resolved_adapter is intentionally ignored here — the
+        # factory below builds against the ``adapter`` argument as given (``"auto"`` resolves
+        # per-process, which is correct for spawned workers too).
+        _, _, vec_backend = resolve_vec_env(adapter, n_envs, n_envs)
+
+    # Main-process factory (dummy backend): byte-identical to pre-UC-26. Runs in THIS process.
     def _factory():
         return make_env(cfg, adapter=adapter)
 
-    venv = DummyVecEnv([_factory for _ in range(max(1, n_envs))])
+    # Worker-only factory (subproc backend): the devnull redirect executes only inside spawned
+    # workers (never the main process — a main-process dup2 would kill logging/the TUI) and only
+    # when suppress_worker_output is set. Otherwise it is byte-identical to the dummy factory.
+    def _subproc_factory():
+        if suppress_worker_output:
+            devnull_fd = os.open(os.devnull, os.O_WRONLY)
+            try:
+                os.dup2(devnull_fd, 1)
+                os.dup2(devnull_fd, 2)
+            finally:
+                os.close(devnull_fd)
+        return make_env(cfg, adapter=adapter)
+
+    if vec_backend == "subproc":
+        from stable_baselines3.common.vec_env import SubprocVecEnv
+
+        venv = SubprocVecEnv(
+            [_subproc_factory for _ in range(max(1, n_envs))],
+            start_method=VEC_ENV_START_METHOD,
+        )
+    else:
+        venv = DummyVecEnv([_factory for _ in range(max(1, n_envs))])
     if seed is not None:
         venv.seed(seed)
 

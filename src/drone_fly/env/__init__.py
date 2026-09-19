@@ -26,7 +26,14 @@ from drone_fly.env.geometry import (
     finish_crossed,
     gate_reached,
 )
-from drone_fly.env.racing_env import RaceEnv, build_vec_env, make_env
+from drone_fly.env.racing_env import (
+    DEFAULT_PARALLEL_N_ENVS,
+    VEC_ENV_START_METHOD,
+    RaceEnv,
+    build_vec_env,
+    make_env,
+    resolve_vec_env,
+)
 from drone_fly.env.randomization import (
     is_course_solvable,
     sample_course,
@@ -46,6 +53,9 @@ __all__ = [
     "RaceEnv",
     "make_env",
     "build_vec_env",
+    "resolve_vec_env",
+    "DEFAULT_PARALLEL_N_ENVS",
+    "VEC_ENV_START_METHOD",
     "compute_reward",
     "advance",
     "current_target",
