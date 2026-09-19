@@ -78,10 +78,16 @@ def _reconcile_obstacle_vision(env_config, obs_schema):
     ``obstacle_vision`` block, the env must emit that block: this returns an ``EnvConfig`` whose
     :class:`~drone_fly.env.config.ObstacleVisionConfig` is enabled with ``k`` derived
     **name-based** — ``block.width // OBSTACLE_FEATURES_PER`` — never by arithmetic on the
-    schema's ``total_width`` (which mixes in the unrelated base blocks). When course
-    randomization is already on, obstacle randomization is switched on too, so a randomized
-    obstacle-vision run actually sees pillars. When ``obs_schema`` is ``None`` or has no such
-    block, ``env_config`` is returned unchanged (byte-identical to pre-UC-15).
+    schema's ``total_width`` (which mixes in the unrelated base blocks). When ``obs_schema`` is
+    ``None`` or has no such block, ``env_config`` is returned unchanged (byte-identical to
+    pre-UC-15).
+
+    UC-24: this reconcile only **widens the observation** (enables the ``ObstacleVisionConfig``
+    block); it no longer flips ``randomization.enable_obstacles``. Obstacle *placement* is now
+    driven solely by the CLI resolver's ``randomize_obstacles`` toggle, so an explicit
+    ``randomize_obstacles: false`` under a full schema is honoured (the env still *senses*
+    obstacles, it just isn't given any to place). evaluate / prune-trained never reach this
+    reconcile, so their behaviour is unchanged.
     """
     if obs_schema is None:
         return env_config
@@ -96,10 +102,7 @@ def _reconcile_obstacle_vision(env_config, obs_schema):
 
     k = int(block.width) // OBSTACLE_FEATURES_PER
     base = env_config or EnvConfig()
-    updates = {"obstacle_vision": ObstacleVisionConfig(enabled=True, k=k)}
-    if base.randomization.enable_course and not base.randomization.enable_obstacles:
-        updates["randomization"] = replace(base.randomization, enable_obstacles=True)
-    return replace(base, **updates)
+    return replace(base, obstacle_vision=ObstacleVisionConfig(enabled=True, k=k))
 
 
 def _reconcile_battery(env_config, obs_schema):

@@ -34,6 +34,31 @@ resume: auto
 # record_dir: null       # override; defaults to training/<name>/recordings/
 # randomize: false       # randomize the course per episode (UC-08)
 # randomize_dynamics: false  # randomize mass/drag/thrust/latency per episode (UC-08)
+#
+# --- Course randomization: schema + per-feature placement toggles (UC-13 / UC-24) ---
+# schema: null           # observation schema. Omit / null on a NON-randomized run = the legacy
+#                        # single-projection observation. On a randomized run (`randomize: true`)
+#                        # omitting it defaults to the FULL `damage_proprioception_v4` (26-d) schema.
+#                        # Named schemas: migrated_v1 | obstacle_vision_v2 | battery_hunger_v3 |
+#                        # damage_proprioception_v4.
+#
+# By DEFAULT a bare `randomize: true` (no schema, no toggles below) trains against the FULL course:
+# the `damage_proprioception_v4` schema PLUS obstacle + one recharge pad + one repair pad placement
+# all ON (exactly one recharge pad and one repair pad per course — feature presence, not a cover).
+# The three toggles below are THREE-STATE: leave them out (or `null`) to take that schema-aware
+# default (a feature is placed only when the effective schema carries the block that can sense it),
+# or set `true`/`false` to force a feature on/off independently. Enabling a recharge pad requires a
+# schema with a `battery` block, and a repair pad a schema with a `damage` block — otherwise the
+# pad would be inert, so the run FAILS LOUD (exit 2) rather than silently placing nothing.
+#
+# RETRAIN / CHECKPOINT INVALIDATION: defaulting randomized runs to the 26-d schema changes the
+# observation width, so pre-UC-24 randomized-run checkpoints are invalidated and need a fresh
+# retrain (the same class of change as the UC-13/15/17/19 schema extensions). A bare
+# `randomize: true` also now trains against a much harder course (obstacles + energy/damage).
+#
+# randomize_obstacles: null       # place pillars (default: on when randomize + schema has obstacle_vision)
+# randomize_recharge_pads: null   # place ONE recharge pad (default: on when randomize + schema has battery)
+# randomize_repair_pads: null     # place ONE repair pad (default: on when randomize + schema has damage)
 # strict_capacity: false # UC-23 pre-train guardrail: when the seeded (post-prune) actor is
 #                        # under-capacity, abort with exit code 3 in any mode. Default false
 #                        # prompts on an interactive TTY and warn-and-continues non-interactively.

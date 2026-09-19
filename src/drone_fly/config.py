@@ -230,6 +230,13 @@ class TrainRunConfig:
     randomize: bool
     randomize_dynamics: bool
     schema: str | None
+    # UC-24: three-state placement toggles (``bool | None``). ``None`` (omitted / null) means "use
+    # the schema-aware default" resolved in the CLI; an explicit ``True``/``False`` always wins.
+    # They gate per-episode placement of obstacles / a recharge pad / a repair pad during course
+    # randomization.
+    randomize_obstacles: bool | None
+    randomize_recharge_pads: bool | None
+    randomize_repair_pads: bool | None
     strict_capacity: bool
     capacity_floor: int | None
 
@@ -257,6 +264,12 @@ class TrainRunConfig:
             # legacy single-projection run (AC7 parity). Choices come from obs_schema so the
             # valid names are never re-declared here.
             _Spec("schema", (str,), choices=tuple(sorted(NAMED_SCHEMAS))),
+            # UC-24: three-state placement toggles. NO ``default`` (so omitted / null -> None ->
+            # "schema-aware default", distinguishable from an explicit ``false``). ``true`` places
+            # the feature, ``false`` suppresses it, both overriding the randomize-driven default.
+            _Spec("randomize_obstacles", (bool,)),
+            _Spec("randomize_recharge_pads", (bool,)),
+            _Spec("randomize_repair_pads", (bool,)),
             # UC-23: pre-train capacity guardrail. ``strict_capacity`` makes an under-capacity
             # start abort (exit 3) in either mode; default False prompts on a TTY and warn-
             # continues non-interactively. ``capacity_floor`` overrides the calibrated actor

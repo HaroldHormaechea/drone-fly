@@ -445,14 +445,17 @@ class RandomizationConfig:
     obstacle_lateral_offset_range: tuple[float, float] = (1.0, 1.8)  # |y| offset off a gate
     obstacle_clearance: float = 0.3  # polyline must clear each pillar by radius + this
 
-    # -- recharge axis (UC-18 AC3/AC4) --------------------------------------------------
-    # A **course-variation** axis (NOT a shaping reward): when on, a sampled/fallback course whose
-    # full 3D flight path costs more than one battery charge (under the caller's battery config)
-    # has recharge pads placed on it so the finish is reachable *with* a landing-and-recharge; a
-    # course that fits one charge gets none. Placement is a pure, **zero-RNG** greedy interval
-    # cover over the reference path (see randomization._place_recharge_pads), so a disabled axis —
-    # and every non-constrained course — draws nothing and stays byte-identical (AC5). All fields
-    # appended **last** with off/neutral defaults so field order stays UC-15/16/17-compatible.
+    # -- recharge axis (UC-18 AC3/AC4; UC-24 single-pad redefinition) --------------------
+    # A **course-variation** axis (NOT a shaping reward): when on, a sampled/fallback course gets
+    # **exactly one** ``rechargeable=True`` pad placed at an eligible gate anchor, REGARDLESS of
+    # whether the course is energy-constrained (UC-24 makes recharge placement *reachable*: UC-18
+    # placed pads only on over-budget courses, so under the shipped default battery zero pads were
+    # ever produced). Placement is a pure, **zero-RNG** feature-presence choice (see
+    # randomization._place_single_recharge_pad), so a disabled axis draws nothing and stays
+    # byte-identical (AC5). One pad narrows UC-18's multi-pad covering guarantee: it makes only
+    # courses solvable-with-a-single-recharge completable — unconstrained under the default battery,
+    # load-bearing only under a cranked test battery where one pad suffices. All fields appended
+    # **last** with off/neutral defaults so field order stays UC-15/16/17-compatible.
     #
     # The energy model is a deliberately CONSERVATIVE generation-and-guard HEURISTIC over the
     # reference polyline (mirroring the UC-15 obstacle-clearance guard); its only hard guarantee is
@@ -470,6 +473,20 @@ class RandomizationConfig:
     # Safety margin multiplying the modelled path energy (>1 ⇒ conservative: the guard treats a
     # course as costlier than the bare model says, so it never under-provisions recharge pads).
     recharge_energy_margin: float = 1.5
+
+    # -- repair axis (UC-24) ------------------------------------------------------------
+    # A **course-variation** axis symmetric with the recharge axis: when on, a sampled/fallback
+    # course gets **exactly one** ``repairable=True`` pad placed at an eligible gate anchor (reusing
+    # the recharge descend-column-clear geometry). Unlike recharge there is no energy/reachability
+    # model — damage does not gate whether the finish is reachable — so placement is pure, **zero-
+    # RNG** feature presence: a repair pad simply exists so a damaged drone *can* recover. Off by
+    # default and its placement draws no RNG, so a disabled axis stays byte-identical. Appended
+    # **last** so field order stays UC-15/16/17/18-compatible. Coherence with the damage obs block
+    # (a repair pad is inert without damage physics) is enforced fail-loud in the CLI resolver, not
+    # here.
+    enable_repair: bool = False
+    # Horizontal radius of a placed repair pad (m); matches the default landing-/recharge-pad size.
+    repair_pad_radius: float = 0.5
 
 
 @dataclass(frozen=True)

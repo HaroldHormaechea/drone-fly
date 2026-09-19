@@ -155,10 +155,13 @@ count), the battery refills toward `1.0` at `BatteryConfig.recharge_rate` per se
 full). The rate exceeds the docked drain, so a dwell nets a gain. This reuses UC-17's battery
 observation block — **no new observation dim, so checkpoints are not invalidated**. To make a
 recharge worth the detour without a shaping reward, recharge is a **course-variation axis**
-(`RandomizationConfig.enable_recharge`): when a sampled (or fallback) course's modelled flight
-energy exceeds one charge, the randomizer places recharge pads so the finish is reachable *with*
-a landing-and-recharge, and the solvability guard guarantees every induced leg fits one charge;
-courses that fit one charge get none. A per-rechargeable-pad step-budget allowance
+(`RandomizationConfig.enable_recharge`). **As of UC-24** the randomizer places **exactly one**
+recharge pad per randomized course at an eligible gate anchor **regardless** of whether the course
+is energy-constrained (feature presence, not a variable cover — before UC-24 pads were placed only
+on over-budget courses, so under the shipped default battery *none* were ever produced). The
+battery-aware solvability guard still holds: under the default battery a course is unconstrained and
+the lone pad is a bonus; only under a cranked (test) battery must the single pad form a valid
+one-pad cover. A per-rechargeable-pad step-budget allowance
 (`EpisodeConfig.recharge_step_allowance`) keeps a legitimate recharge detour within the timeout.
 Off by default (no recharge pads ⇒ byte-identical behaviour). The energy model is a conservative
 generation-and-guard heuristic; it only guarantees model-level reachability.
@@ -182,6 +185,31 @@ path is byte-identical to the disabled one (the `min_authority < max_body_rate` 
 it), and with no repairable pads/damage config an `EnvConfig()` is unchanged. Enabling the schema
 adds the 26th observation dim, so **pre-UC-19 checkpoints are invalidated** (retrain, or graft one
 step from `battery_hunger_v3` as above).
+
+### Full-course randomization by default & placement toggles (UC-24)
+By default a bare `randomize: true` train run now trains against the **full** course: it defaults to
+the `damage_proprioception_v4` (26-d) schema **and** turns on obstacle, recharge-pad, and repair-pad
+placement — gates + pillars + exactly one recharge pad + exactly one repair pad per course (each pad
+is *feature presence*, not a variable cover). Three-state YAML toggles let you steer each placement
+axis independently of the schema:
+
+| Key | Default (when unset / `null`) |
+|---|---|
+| `randomize_obstacles` | on when `randomize` **and** the effective schema has an `obstacle_vision` block |
+| `randomize_recharge_pads` | on when `randomize` **and** the schema has a `battery` block |
+| `randomize_repair_pads` | on when `randomize` **and** the schema has a `damage` block |
+
+Set any toggle to `true`/`false` to force it, overriding the schema-aware default. Because a recharge
+pad is inert without battery physics and a repair pad without the damage block (auto-enabling either
+would change the observation width), enabling `randomize_recharge_pads` without a battery-block
+schema — or `randomize_repair_pads` without a damage-block schema — is a **fail-loud** config error
+(exit 2), not a silent no-op. When both recharge and repair are on and the course has only one
+eligible gate anchor (e.g. a 1-gate course), the two co-locate into a single dual-purpose pad. The
+non-randomized path (`randomize: false`/unset) is byte-identical to before (no schema, no placement).
+
+**Retrain note:** defaulting randomized runs to the 26-d schema changes the observation width, so
+pre-UC-24 randomized-run checkpoints are invalidated and need a fresh retrain (same class of change
+as the UC-13/15/17/19 schema extensions). See `configs/train/example.yaml` for the documented keys.
 
 ### Grounded / no-progress early termination (UC-25)
 Training episodes used to waste almost the whole step budget with the drone lying motionless on the
