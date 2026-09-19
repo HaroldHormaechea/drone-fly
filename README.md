@@ -264,6 +264,39 @@ computed-layout **fallback** (clearly labelled). The committed fixture ships rea
 tokenlessly; arbitrary user slices may need a `NEUPRINT_TOKEN` (see `.env.example`), and
 `uv run python scripts/fetch_soma_positions.py` refreshes the committed soma sidecar.
 
+**Positions are provisioned at slice time, not per training run (UC-27).** When a connectome
+artifact is created — by `prune` (the slice), `fetch-connectome` (the base download), or
+`prune-trained` (the post-training subcircuit) — neuron positions are computed once and cached as a
+`<stem>_positions.csv` sidecar beside the `.npz` (plus a `<stem>_soma.csv` sidecar of the real
+anatomy). A recording-enabled training run then only **loads** that sidecar — no per-run neuPrint
+fetch and no per-run spectral eigendecomposition. Key points:
+
+- **Real anatomy is the tokenless default.** The primary anatomy source is the connectome's own meta
+  CSV: the MaleCNS download already ships `mcns_all_neuron_meta.csv`, whose `somaLocation` column
+  holds real neuPrint MaleCNS 8 nm-voxel soma coordinates (CC-BY). Provisioning reads it for the
+  artifact's `bodyid`s **before any network call**, so a freshly fetched or pruned artifact gets real
+  soma coordinates offline, with no token. Anatomy precedence:
+  **meta `somaLocation` → `DRONE_FLY_SOMA_CSV` → `<stem>_soma.csv` → neuPrint → spectral.** neuPrint
+  (a `NEUPRINT_TOKEN`) is only an optional supplement for anatomy absent from the meta; the dense
+  spectral layout is a last resort for neurons with no `somaLocation` anywhere. Anatomically soma-less
+  neurons (peripheral sensory afferents whose cell bodies sit outside the brain volume) are flagged
+  missing and handled by the partial-anatomy fill — never faked.
+- **Format.** One row per neuron: `bodyid,has_position,x,y,z,u,v,source,projection`. `x/y/z` are
+  blank when a neuron has no 3-D anatomy; `has_position` is an independent flag. Floats are written
+  at full `%.17g` precision, so a load reproduces the original compute exactly.
+- **Node-set binding.** A sidecar is reused only when its neuron-id set and projection match the
+  loaded connectome exactly; otherwise it is recomputed. A pruned subcircuit never picks up the full
+  connectome's positions, and a stale/corrupt sidecar is never applied to the wrong neurons.
+- **Self-heal.** An older artifact with no sidecar (sliced before this feature) still works: the
+  recorder computes the layout once, warns, and persists the sidecar (best-effort — a read-only
+  directory does not crash the run), so later runs take the fast load path.
+- **Large connectomes.** Because the meta supplies real somas for the full connectome, `fetch-connectome`
+  provisions real anatomy directly with **no** dense `eigh` over ~161k neurons (UC-27 AC-11). A dense
+  spectral layout at that scale is infeasible, so if a compute would still need the fallback for more
+  than `DRONE_FLY_SPECTRAL_MAX` neurons (default `50000`) **and** anatomy is missing/partial, the real
+  soma sidecar is still written but the full-graph position layout is deferred with a warning: provide
+  anatomy (`NEUPRINT_TOKEN` or `DRONE_FLY_SOMA_CSV`) or prune the connectome before recording.
+
 ### Requirements
 - **Python 3.11** + [`uv`](https://docs.astral.sh/uv/); `uv sync --extra dev` installs everything
   for lint, tests, and `smoke-train`.

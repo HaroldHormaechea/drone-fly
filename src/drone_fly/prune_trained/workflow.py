@@ -427,6 +427,22 @@ def prune_trained(
         vecnorm_env.save(str(out / PRUNED_VECNORMALIZE_NAME))
     npz_path, _meta_path = save_connectome(pruned, out, stem=PRUNED_CONNECTOME_STEM)
 
+    # UC-27 (AC-3/AC-10): provision positions for the activation-pruned subcircuit, with its own
+    # node-set-keyed sidecars (``<stem>_positions.csv`` + ``<stem>_soma.csv``) beside this
+    # artifact — keyed off the explicit npz path, never the pruned data.source. Real anatomy is
+    # sourced tokenlessly from the SOURCE connectome's meta ``somaLocation`` (``source_data=base``,
+    # the connectome activation-pruning ran over — its meta carries the soma column; the subcircuit
+    # artifact's own meta does not), subset to this subcircuit's bodyids.
+    from drone_fly.record.coordinates import DEFAULT_PROJECTION, resolve_positions
+
+    resolve_positions(
+        pruned,
+        projection=DEFAULT_PROJECTION,
+        artifact_npz=npz_path,
+        source_data=base,
+        persist=True,
+    )
+
     # metric summary over all neurons + kept/dropped split
     values = np.asarray(imp.values, dtype=np.float64)
     kept_mask = np.zeros(base.neuron_count, dtype=bool)

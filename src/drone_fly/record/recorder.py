@@ -36,7 +36,7 @@ import numpy as np
 from drone_fly.connectome.loader import ConnectomeData
 from drone_fly.controller.encoding import ACTION_DIM, ACTION_LAYOUT
 from drone_fly.env.config import CourseConfig
-from drone_fly.record.coordinates import DEFAULT_PROJECTION, neuron_roles, provision_positions
+from drone_fly.record.coordinates import DEFAULT_PROJECTION, neuron_roles, resolve_positions
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,24 @@ class ActivationRecorder:
             else ["unknown"] * self.n_neurons
         )
         self.roles = neuron_roles(data)
-        self.positions = provision_positions(data, projection=projection)
+        # UC-27: positions are provisioned at slice/artifact time and only LOADED here (fast
+        # path). If this artifact predates the sidecar (older slice), self-heal: compute once,
+        # WARN, and persist it beside the connectome (best-effort — a read-only dir must not
+        # crash recording) so the next run takes the fast path. ``persist_strict=False`` makes
+        # a write failure non-fatal.
+        positions = resolve_positions(
+            data, projection=projection, persist=True, persist_strict=False
+        )
+        if positions is None:
+            # Only the large-connectome guard returns None: recording a full-scale connectome
+            # (> spectral cap) with no/partial anatomy is unsupported — prune it first, or
+            # provide anatomy. Fail clearly rather than serialise empty positions.
+            raise RuntimeError(
+                "Neuron positions could not be provisioned for this connectome: it exceeds the "
+                "spectral-layout cap and has no/partial anatomy. Prune the connectome before "
+                "recording, or provide anatomy via NEUPRINT_TOKEN or DRONE_FLY_SOMA_CSV."
+            )
+        self.positions = positions
         self._reset_episode_state()
 
     # -- episode lifecycle --------------------------------------------------------------

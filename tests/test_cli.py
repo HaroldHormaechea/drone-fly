@@ -35,6 +35,7 @@ from drone_fly.cli import (
 )
 from drone_fly.config import ConfigError, TrainRunConfig
 from drone_fly.connectome import DEFAULT_PRUNE_K, load_connectome
+from drone_fly.connectome.fetch import DEST_NPZ_NAME
 from drone_fly.controller.obs_schema import DAMAGE_PROPRIOCEPTION_V4, OBSTACLE_VISION_V2
 from drone_fly.train.loop import CHECKPOINT_PREFIX
 
@@ -128,11 +129,34 @@ def test_smoke_train_dispatch(tmp_path, monkeypatch) -> None:
     assert any(f.name.startswith(CHECKPOINT_PREFIX) for f in models.iterdir())
 
 
+def _stub_fetch_provisioning(monkeypatch) -> dict:
+    """Mock the UC-27 post-fetch provisioning hook (load + resolve_positions).
+
+    The ``fetch-connectome`` hook now, after ``ensure_full_connectome``, loads the fetched
+    connectome and provisions its position sidecars (AC-2/AC-11). These dispatch tests mock
+    ``ensure_full_connectome`` to a nonexistent dir, so ``load_connectome`` /
+    ``resolve_positions`` must also be stubbed — otherwise the hook would try to read a
+    connectome that was never written. Returns a dict recording the ``resolve_positions`` call
+    so a test can assert provisioning was invoked with the artifact npz keyed off the dir.
+    """
+    seen: dict = {}
+    monkeypatch.setattr("drone_fly.connectome.load_connectome", lambda _dir: object())
+
+    def fake_resolve(data, *, projection=None, artifact_npz=None, persist=True):  # noqa: ANN001
+        seen["artifact_npz"] = artifact_npz
+        seen["persist"] = persist
+        return {}
+
+    monkeypatch.setattr("drone_fly.record.coordinates.resolve_positions", fake_resolve)
+    return seen
+
+
 def test_fetch_connectome_downloads(capsys, monkeypatch) -> None:
     """`fetch-connectome` is no longer a stub: it delegates to ensure_full_connectome (UC-14/AC3).
 
     Mocked at the call site so nothing is downloaded or copied from the machine cache; the CLI
-    just reports the resolved directory and returns 0.
+    just reports the resolved directory and returns 0. UC-27: the post-fetch provisioning hook
+    (load + resolve_positions) is stubbed too so no disk read of a non-written connectome occurs.
     """
     calls: dict = {}
 
@@ -142,11 +166,15 @@ def test_fetch_connectome_downloads(capsys, monkeypatch) -> None:
         return Path("data/connectome")
 
     monkeypatch.setattr("drone_fly.connectome.ensure_full_connectome", fake_ensure)
+    seen = _stub_fetch_provisioning(monkeypatch)
     rc = main(["fetch-connectome"])
     assert rc == 0
     # Defaults: no explicit dir, no force.
     assert calls == {"dest_dir": None, "force": False}
     assert "ready at" in capsys.readouterr().out.lower()
+    # UC-27 AC-2: provisioning ran against the fetched dir's artifact npz.
+    assert seen["artifact_npz"] == Path("data/connectome") / DEST_NPZ_NAME
+    assert seen["persist"] is True
 
 
 def test_fetch_connectome_forwards_flags(capsys, monkeypatch) -> None:
@@ -159,6 +187,7 @@ def test_fetch_connectome_forwards_flags(capsys, monkeypatch) -> None:
         return Path(dest_dir)
 
     monkeypatch.setattr("drone_fly.connectome.ensure_full_connectome", fake_ensure)
+    _stub_fetch_provisioning(monkeypatch)
     rc = main(["fetch-connectome", "--connectome-dir", "some/dir", "--force"])
     assert rc == 0
     assert calls == {"dest_dir": "some/dir", "force": True}
@@ -359,6 +388,57 @@ def test_prune_dispatch_writes_reusable_slice(tmp_path, capsys) -> None:
     reloaded = load_connectome(out)
     assert reloaded.neuron_count == 45 and reloaded.edge_count == 549
     assert "Pruned connectome written" in capsys.readouterr().out
+
+
+def test_prune_provisions_positions_sidecars(tmp_path, monkeypatch) -> None:
+    """UC-27 AC-1/AC-10: the prune slice provisions real anatomy sidecars, tokenless (primary hook).
+
+    After ``save_connectome`` the ``_run_prune_export`` hook provisions positions once, writing a
+    ``connectome_pruned_positions.csv`` covering the pruned node set exactly and a
+    ``connectome_pruned_soma.csv`` with real soma coordinates for the soma-bearing pruned bodyids
+    (resolved tokenlessly from the SOURCE connectome — its meta ``somaLocation`` / soma sidecar —
+    via ``source_data``). neuPrint is never consulted.
+    """
+    import pandas as pd
+
+    from drone_fly.record import coordinates as _coords
+
+    # Spy: assert the offline slice never touches neuPrint (tokenless real anatomy).
+    neuprint_calls: list = []
+    monkeypatch.setattr(
+        _coords,
+        "_load_from_neuprint",
+        lambda *a, **k: (neuprint_calls.append(1), None)[1],
+    )
+
+    out = tmp_path / "pruned"
+    cfg = _write_config(tmp_path, {"connectome": FIXTURE_DIR, "out": str(out), "prune_k": 0})
+    assert main(["prune", "--config", cfg]) == 0
+
+    reloaded = load_connectome(out)
+    pruned_ids = {int(b) for b in reloaded.neuron_ids.tolist()}
+
+    pos_path = out / "connectome_pruned_positions.csv"
+    soma_path = out / "connectome_pruned_soma.csv"
+    assert pos_path.is_file() and soma_path.is_file()
+
+    # positions.csv covers the pruned node set exactly (AC-1 + AC-7 node-set binding).
+    pos = pd.read_csv(pos_path)
+    assert len(pos) == reloaded.neuron_count
+    assert {int(b) for b in pos["bodyid"].tolist()} == pruned_ids
+    assert str(pos["source"].iloc[0]).lower().startswith("anatomical")
+
+    # soma.csv holds real coordinates for the soma-bearing pruned bodyids (a subset of the
+    # committed fixture's 272 soma-populated neurons), never the full connectome's set.
+    fixture_soma = {
+        int(b) for b in pd.read_csv(Path(FIXTURE_DIR) / "mcns_fixture_soma.csv")["bodyid"].tolist()
+    }
+    soma_ids = {int(b) for b in pd.read_csv(soma_path)["bodyid"].tolist()}
+    assert soma_ids <= pruned_ids
+    assert soma_ids == (pruned_ids & fixture_soma)
+    assert soma_ids, "the pruned slice should retain at least one soma-bearing neuron"
+    # Tokenless: no neuPrint call happened.
+    assert neuprint_calls == []
 
 
 # --------------------------------------------------------------------------- #
