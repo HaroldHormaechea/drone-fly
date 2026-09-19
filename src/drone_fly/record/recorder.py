@@ -154,11 +154,12 @@ class ActivationRecorder:
         )
         if positions is None:
             # Only the large-connectome guard returns None: recording a full-scale connectome
-            # (> spectral cap) with no/partial anatomy is unsupported — prune it first, or
-            # provide anatomy. Fail clearly rather than serialise empty positions.
+            # (> spectral cap) with zero real anatomy is unsupported — with no real soma to
+            # anchor a schematic body it would need an infeasible dense spectral layout. Prune
+            # it first, or provide anatomy. Fail clearly rather than serialise empty positions.
             raise RuntimeError(
                 "Neuron positions could not be provisioned for this connectome: it exceeds the "
-                "spectral-layout cap and has no/partial anatomy. Prune the connectome before "
+                "spectral-layout cap and has zero anatomy. Prune the connectome before "
                 "recording, or provide anatomy via NEUPRINT_TOKEN or DRONE_FLY_SOMA_CSV."
             )
         self.positions = positions

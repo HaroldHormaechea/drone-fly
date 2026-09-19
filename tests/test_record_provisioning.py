@@ -16,9 +16,10 @@ and its sidecars — the single mechanism behind UC-27:
   across all three branches (anatomical, partial, spectral).
 * **AC-9** — scope containment: a ``record: false`` run provisions nothing; the whole path is
   offline (no network).
-* **AC-11** — the large-connectome guard: complete real anatomy provisions without a dense
-  ``eigh`` at any scale; no/partial anatomy above the cap defers (WARN, real soma sidecar written,
-  no ``_positions.csv``).
+* **AC-11** — the large-connectome guard (UC-29 narrowed): real anatomy provisions without a
+  dense ``eigh`` at any scale — **zero** anatomy above the cap defers; **partial**/complete
+  anatomy above the cap now provisions (real soma + cheap schematic body placement, no spectral).
+  The deferral WARN + recorder raise are keyed on "zero" (not "partial").
 
 All hermetic: synthetic connectomes + a committed tier-0 meta fixture (``uc27_soma_meta.csv``),
 no network, no token.
@@ -441,41 +442,123 @@ def test_precedence_env_csv_beats_sidecar(tmp_path, monkeypatch) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# AC-11 / (d) — large-connectome guard (defer without eigh; complete anatomy always provisions)
+# AC-11 / (d) — large-connectome guard (UC-29 narrowed: defer ONLY on zero effective
+# anatomy above the cap; partial/complete anatomy provisions cheaply without eigh)
 # --------------------------------------------------------------------------- #
-def test_ac11_no_anatomy_above_cap_defers_without_eigh(tmp_path, monkeypatch) -> None:
+def test_ac11_no_anatomy_above_cap_defers_without_eigh(tmp_path, monkeypatch, caplog) -> None:
+    """AC-3/AC-6: zero real anatomy above the cap still defers — no eigh, no positions.csv,
+
+    and the deferral WARN is keyed on "zero" (never "partial") so guard + wording can't drift.
+    """
     monkeypatch.setenv(SPECTRAL_MAX_ENV, "3")  # cap below the connectome size
     npz = tmp_path / "conn.npz"
     data = _make_data([1, 2, 3, 4, 5, 6], npz)  # 6 > cap 3, no anatomy anywhere
 
     spectral = _spy(monkeypatch, "_spectral_embedding")
-    result = resolve_positions(data, artifact_npz=npz, persist=True)
+    with caplog.at_level(logging.WARNING, logger="drone_fly.record.coordinates"):
+        result = resolve_positions(data, artifact_npz=npz, persist=True)
 
     assert result is None  # deferred
     assert spectral == []  # the giant eigendecomposition was never attempted
     assert not _positions_sidecar_path(data).is_file()  # no positions.csv written
+    # AC-6 (challenger note 2): the WARN describes the true remaining condition — ZERO anatomy.
+    warns = " ".join(r.getMessage().lower() for r in caplog.records if r.levelno >= logging.WARNING)
+    assert "zero" in warns and "partial" not in warns
 
 
-def test_ac11_partial_anatomy_above_cap_writes_soma_but_defers_positions(
-    tmp_path, monkeypatch, caplog
-) -> None:
-    monkeypatch.setenv(SPECTRAL_MAX_ENV, "3")
+def test_ac11_partial_anatomy_above_cap_now_provisions(tmp_path, monkeypatch) -> None:
+    """AC-1 (UC-29 regression): partial anatomy above the cap now PROVISIONS, not defers.
+
+    A connectome with n > cap that has ≥1 real soma + soma-less afferents provisions cheaply:
+    real soma coords for the soma-bearing, schematic body placement for the rest, all
+    ``display3d`` finite — with ZERO spectral eigendecomposition (the whole point: no eigh).
+    """
+    monkeypatch.setenv(SPECTRAL_MAX_ENV, "3")  # cap 3 < n 6
     data, npz = _build_meta_connectome(tmp_path)  # 6 neurons, only 4 soma-bearing → partial
 
     spectral = _spy(monkeypatch, "_spectral_embedding")
-    with caplog.at_level(logging.WARNING, logger="drone_fly.record.coordinates"):
-        result = resolve_positions(data, artifact_npz=npz, persist=True)
+    result = resolve_positions(data, artifact_npz=npz, persist=True)
 
-    assert result is None  # partial anatomy above the cap → defer
-    assert spectral == []
-    # Real soma sidecar for the covered subset WAS written; positions.csv was NOT.
+    assert result is not None  # UC-29: partial anatomy above the cap provisions
+    assert spectral == []  # AC-1: zero spectral eigendecomposition
+    assert result["has_position"] == [True, True, True, True, False, False]
+    # Every neuron has a finite render coord (real soma OR schematic body cluster).
+    assert len(result["display3d"]) == 6
+    assert all(len(c) == 3 and all(np.isfinite(v) for v in c) for c in result["display3d"])
+    # Positively prove the cheap schematic body was actually placed (not merely "not None"):
+    # 4 real-soma slots are "anatomical", the 2 soma-less are "schematic" with a real region.
+    assert result["placement"] == ["anatomical"] * 4 + ["schematic"] * 2
+    assert result["region"][4] != "" and result["region"][5] != ""
+    # The positions.csv WAS written this time; real soma sidecar for the covered subset too.
+    assert _positions_sidecar_path(data).is_file()
     assert _sidecar_path(data).is_file()
     assert set(pd.read_csv(_sidecar_path(data))["bodyid"].tolist()) == {90001, 90002, 90003, 90004}
+
+
+def test_ac11_disjoint_env_csv_above_cap_defers_on_effective_coverage(
+    tmp_path, monkeypatch
+) -> None:
+    """Pitfall / challenger note 1: the guard keys on *effective* coverage, not mapping-non-empty.
+
+    A bare connectome (NO meta ``somaLocation`` → tier-0 empty) whose ``DRONE_FLY_SOMA_CSV``
+    loads a real mapping whose bodyids are DISJOINT from the connectome's ids. ``_load_anatomical``
+    returns a non-empty mapping (not ``None``), yet it covers zero of this connectome's neurons,
+    so above the cap the guard must still defer (no schematic anchor → would need spectral).
+    """
+    monkeypatch.setenv(SPECTRAL_MAX_ENV, "3")  # cap 3 < n 6
+    npz = tmp_path / "conn.npz"  # NO sibling _meta.csv → tier-0 (meta_map) is {}
+    data = _make_data([1, 2, 3, 4, 5, 6], npz)
+
+    # A valid soma CSV whose bodyids are disjoint from {1..6}.
+    env_csv = tmp_path / "env_soma.csv"
+    pd.DataFrame(
+        [{"bodyid": b, "x": float(b), "y": float(b), "z": float(b)} for b in (7001, 7002, 7003)]
+    ).to_csv(env_csv, index=False)
+    monkeypatch.setenv(SOMA_CSV_ENV, str(env_csv))
+
+    # A real mapping WAS loaded (exercises the "non-empty mapping, zero effective coverage"
+    # path, NOT an accidental None path).
+    loaded = _load_anatomical(data, override={})
+    assert loaded is not None
+    assert _anatomy_coverage(data, override={}) == 0  # but it covers none of these ids
+
+    spectral = _spy(monkeypatch, "_spectral_embedding")
+    result = resolve_positions(data, artifact_npz=npz, persist=True)
+
+    assert result is None  # defers on effective coverage, not mapping-non-empty
+    assert spectral == []
     assert not _positions_sidecar_path(data).is_file()
-    assert any(
-        "not computed" in r.getMessage().lower() and "soma sidecar" in r.getMessage().lower()
-        for r in caplog.records
+
+
+def test_ac11_small_connectome_unaffected_in_every_anatomy_state(tmp_path, monkeypatch) -> None:
+    """AC-4 regression: at n <= cap the guard never fires, in any anatomy state.
+
+    None / partial / complete anatomy all provision below the cap exactly as before (the UC-29
+    guard change only removes deferrals at scale; small connectomes are untouched).
+    """
+    # Cap comfortably above every case's neuron count → guard cannot fire.
+    monkeypatch.setenv(SPECTRAL_MAX_ENV, "1000")
+
+    # (a) No anatomy → spectral layout still produced (small n, cheap).
+    none_data = _make_data([1, 2, 3, 4], tmp_path / "none.npz")
+    r_none = resolve_positions(none_data, artifact_npz=tmp_path / "none.npz", persist=True)
+    assert r_none is not None and r_none["source"] == SOURCE_COMPUTED
+
+    # (b) Partial anatomy → real soma + schematic, no defer.
+    partial_data, partial_npz = _build_meta_connectome(tmp_path, stem="partial")
+    r_partial = resolve_positions(partial_data, artifact_npz=partial_npz, persist=True)
+    assert r_partial is not None
+    assert r_partial["has_position"] == [True, True, True, True, False, False]
+
+    # (c) Complete anatomy → all real.
+    import shutil
+
+    shutil.copy(UC27_META, tmp_path / "complete_meta.csv")
+    complete_data = _make_data([90001, 90002, 90003, 90004], tmp_path / "complete.npz")
+    r_complete = resolve_positions(
+        complete_data, artifact_npz=tmp_path / "complete.npz", persist=True
     )
+    assert r_complete is not None and r_complete["has_position"] == [True, True, True, True]
 
 
 def test_ac11_complete_anatomy_above_cap_provisions_without_eigh(

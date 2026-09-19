@@ -38,3 +38,4 @@ Statuses:
 | 26 | [use-cases/26-parallel-vec-env-rollout.md](use-cases/26-parallel-vec-env-rollout.md) | Parallel vec-env rollout backend (real multi-core speedup) | done | 2026-09-19 |
 | 27 | [use-cases/27-provision-positions-at-slice.md](use-cases/27-provision-positions-at-slice.md) | Provision neuron positions at slice time (not every training run) | done | 2026-09-19 |
 | 28 | [use-cases/28-heatmap-real-coords-full-coverage.md](use-cases/28-heatmap-real-coords-full-coverage.md) | Heatmap on real coordinates with complete, body-schematic neuron coverage | done | 2026-09-19 |
+| 29 | [use-cases/29-partial-anatomy-position-cap-fix.md](use-cases/29-partial-anatomy-position-cap-fix.md) | Partial-anatomy connectomes above the spectral cap must still provision positions | done | 2026-09-19 |

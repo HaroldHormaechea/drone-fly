@@ -23,10 +23,12 @@ from __future__ import annotations
 import gzip
 import json
 import logging
+import shutil
 from pathlib import Path
 
 import numpy as np
 import pytest
+import scipy.sparse as sp
 
 from drone_fly.connectome.loader import ConnectomeData
 from drone_fly.controller.encoding import ACTION_DIM
@@ -37,6 +39,7 @@ from drone_fly.env.config import (
     PadSpec,
     single_gate_course,
 )
+from drone_fly.record.coordinates import SOMA_CSV_ENV, SPECTRAL_MAX_ENV
 from drone_fly.record.recorder import (
     ACTIVATION_OFFSET,
     ACTIVATION_SCALE,
@@ -558,3 +561,87 @@ def test_meta_course_omits_pads_when_course_has_none(
     """AC5 back-compat: a no-pad course emits NO ``pads`` key (byte-identical to pre-UC-21)."""
     block = _record_with_course(connectome, tmp_path / "act", CourseConfig())["meta"]["course"]
     assert "pads" not in block
+
+
+# ===========================================================================
+# UC-29 — the large-connectome guard, from the recorder's point of view:
+# partial anatomy above the cap no longer raises; only zero anatomy above the
+# cap raises, with a message keyed on "zero" (never "partial").
+# ===========================================================================
+_UC29_FIXTURE_DIR = Path(__file__).parent / "fixtures"
+_UC29_META = _UC29_FIXTURE_DIR / "uc27_soma_meta.csv"
+
+
+def _make_meta_connectome(tmp_path: Path, stem: str = "conn") -> ConnectomeData:
+    """A tiny 6-neuron connectome (4 soma-bearing, 2 soma-less) with a tier-0 meta sidecar.
+
+    The committed ``uc27_soma_meta.csv`` is copied to ``<stem>_meta.csv`` beside the ``.npz``
+    source so tier-0 anatomy resolves offline; ids 90005/90006 carry no ``somaLocation`` →
+    partial anatomy. Mirrors ``_build_meta_connectome`` in ``test_record_provisioning.py``.
+    """
+    shutil.copy(_UC29_META, tmp_path / f"{stem}_meta.csv")
+    ids = [90001, 90002, 90003, 90004, 90005, 90006]
+    n = len(ids)
+    rng = np.random.default_rng(0)
+    dense = rng.random((n, n)).astype(np.float32)
+    dense[dense < 0.6] = 0.0
+    return ConnectomeData(
+        adjacency=sp.csr_matrix(dense),
+        neuron_ids=np.asarray(ids, dtype=np.int64),
+        source=str(tmp_path / f"{stem}.npz"),
+    )
+
+
+def _make_bare_connectome(tmp_path: Path, stem: str = "bare") -> ConnectomeData:
+    """A 6-neuron connectome with NO meta / soma anywhere → zero anatomy."""
+    ids = [1, 2, 3, 4, 5, 6]
+    n = len(ids)
+    rng = np.random.default_rng(1)
+    dense = rng.random((n, n)).astype(np.float32)
+    dense[dense < 0.6] = 0.0
+    return ConnectomeData(
+        adjacency=sp.csr_matrix(dense),
+        neuron_ids=np.asarray(ids, dtype=np.int64),
+        source=str(tmp_path / f"{stem}.npz"),
+    )
+
+
+@pytest.fixture(autouse=False)
+def _uc29_hermetic(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv(SOMA_CSV_ENV, raising=False)
+    monkeypatch.delenv("NEUPRINT_TOKEN", raising=False)
+
+
+def test_ac2_recorder_partial_anatomy_above_cap_does_not_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _uc29_hermetic
+) -> None:
+    """AC-2 (UC-29): constructing ActivationRecorder on a partial-anatomy above-cap connectome
+
+    no longer raises the "exceeds the spectral-layout cap" error — it provisions and proceeds.
+    """
+    monkeypatch.setenv(SPECTRAL_MAX_ENV, "3")  # cap 3 < n 6
+    data = _make_meta_connectome(tmp_path)
+
+    rec = ActivationRecorder(data, tmp_path / "act", backend="simple")
+
+    # It provisioned real + schematic positions rather than refusing.
+    assert rec.positions is not None
+    assert rec.positions["has_position"] == [True, True, True, True, False, False]
+
+
+def test_ac6_recorder_zero_anatomy_above_cap_raises_keyed_on_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _uc29_hermetic
+) -> None:
+    """AC-6 (UC-29): a zero-anatomy above-cap connectome still raises, and the message is keyed
+
+    on "zero" (never "partial") so the recorder text and the guard condition can't drift apart.
+    """
+    monkeypatch.setenv(SPECTRAL_MAX_ENV, "3")  # cap 3 < n 6
+    data = _make_bare_connectome(tmp_path)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        ActivationRecorder(data, tmp_path / "act", backend="simple")
+
+    message = str(excinfo.value).lower()
+    assert "zero" in message
+    assert "partial" not in message
