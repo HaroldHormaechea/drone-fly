@@ -217,8 +217,8 @@ def _recharge_gate_indices(course: CourseConfig, rechargeable) -> list[int]:
     """Ordered gate indices that carry a rechargeable pad under their (x, y) column (UC-18).
 
     A gate is a recharge point iff some rechargeable pad's centre lies within that pad's own
-    ``radius`` of the gate's ``(x, y)`` — exactly how :func:`_place_recharge_pads` places pads
-    (at gate columns). Pads not under any gate contribute no recharge (the covering check then
+    ``radius`` of the gate's ``(x, y)`` — exactly how :func:`_place_single_recharge_pad` places the
+    pad (at a gate column). Pads not under any gate contribute no recharge (the covering check then
     treats the intervening path as un-refilled — the safe, conservative direction).
     """
     idxs: list[int] = []
@@ -313,16 +313,19 @@ def sample_course(
     to ``rcfg.max_resample_attempts``; on exhaustion a deterministic zero-RNG
     :func:`_fallback_course` (solvable-by-construction, **no obstacles**) is returned.
 
-    ``battery`` (UC-18): when ``rcfg.enable_recharge`` **and** ``battery.enabled``, each solvable
-    candidate is run through :func:`_place_recharge_pads` (a pure, **zero-RNG** greedy cover): a
-    course that fits one charge is returned unchanged (no pads); an energy-constrained one gets
-    recharge pads so the finish is reachable *with* landings, then is re-verified by the
-    battery-aware :func:`is_course_solvable`. A candidate whose next gate is unreachable even on a
-    full charge (no valid cover) is rejected and resampled. When the recharge axis is inactive the
-    placer is never called and ``is_course_solvable`` is invoked with ``battery=None``, so the RNG
-    stream and result are byte-identical to UC-15/16/17 (AC5).
+    ``battery`` (UC-18; UC-24 single-pad model): when ``rcfg.enable_recharge`` **and**
+    ``battery.enabled`` — and/or when ``rcfg.enable_repair`` — each solvable candidate is run
+    through :func:`_place_service_pads` (a pure, **zero-RNG** feature-presence placer): it appends
+    **exactly one** ``rechargeable`` pad and/or **exactly one** ``repairable`` pad at eligible gate
+    anchors, then the result is re-verified by the (battery-aware, when recharge is active)
+    :func:`is_course_solvable`. A candidate with no eligible anchor (every gate's descend column
+    clips a pillar), or one whose single recharge pad cannot cover a cranked-battery-constrained
+    course, is rejected and resampled. When neither service axis is active the placer is never
+    called and ``is_course_solvable`` is invoked with ``battery=None``, so the RNG stream and result
+    are byte-identical to UC-15/16/17 (AC5).
     """
     recharge_active = rcfg.enable_recharge and battery is not None and battery.enabled
+    service_active = recharge_active or rcfg.enable_repair
     n = _draw_num_gates(rng, rcfg)
 
     for _ in range(max(int(rcfg.max_resample_attempts), 1)):
@@ -358,11 +361,11 @@ def sample_course(
             ceiling_z=base_course.ceiling_z,
             obstacles=obstacles,
         )
-        # UC-18: place recharge pads on an energy-constrained candidate (zero-RNG, so the stream
-        # is untouched). ``None`` means no valid cover (next gate unreachable on a full charge, or
-        # every reachable anchor's descend column clips a pillar) → reject-resample.
-        if recharge_active:
-            placed = _place_recharge_pads(candidate, rcfg, battery)
+        # UC-24: place the single recharge / repair feature pads on the candidate (zero-RNG, so the
+        # stream is untouched). ``None`` means no eligible anchor (every gate's descend column clips
+        # a pillar) → reject-resample.
+        if service_active:
+            placed = _place_service_pads(candidate, rcfg, battery)
             if placed is None:
                 continue
             candidate = placed
@@ -427,87 +430,67 @@ def _descend_column_clear(
     return True
 
 
-def _place_recharge_pads(
+def _eligible_gate_indices(course: CourseConfig, rcfg: RandomizationConfig) -> list[int]:
+    """Ordered gate indices whose floor→gate descend column clears every pillar (UC-24).
+
+    A service pad (recharge or repair) forces a descend-and-climb at its gate's ``(x, y)`` column,
+    so an anchor is eligible only if that column is obstacle-clear (:func:`_descend_column_clear`).
+    On an obstacle-free course (including every :func:`_fallback_course`) every gate is eligible, so
+    the list is non-empty and placement never deadlocks.
+    """
+    return [
+        i
+        for i, gate in enumerate(course.gates)
+        if _descend_column_clear(gate, course.obstacles, rcfg)
+    ]
+
+
+def _energy_midpoint_gate(
     course: CourseConfig,
     rcfg: RandomizationConfig,
     battery: BatteryConfig,
-) -> CourseConfig | None:
-    """Greedy, **zero-RNG** recharge-pad cover for an energy-constrained course (UC-18 AC3/AC4).
+    candidates: list[int],
+) -> int:
+    """Pick the ``candidates`` gate whose start-cumulative path energy is nearest the path midpoint.
 
-    If the full reference 3D path fits one charge, the course is returned **unchanged** (no pads —
-    a non-constrained course). Otherwise a greedy interval cover walks the gates: from the current
-    charged point (the start, or the last placed pad — both at full charge), it advances to the
-    **furthest** gate whose cumulative sub-path energy (including the descend-to-floor at that
-    gate) fits one charge, places a recharge pad there, resets the charged point to that pad, and
-    repeats until the remaining path to the finish (including the climb-out from the last pad)
-    fits one charge. Cumulative sub-path energy is monotonic non-decreasing in the anchor index,
-    so "the furthest anchor within budget" is a valid per-leg guarantee.
-
-    Two ways to fail (return ``None`` → the caller reject-resamples): the immediate next gate is
-    unreachable even on a full charge, or every reachable anchor's descend column clips a pillar
-    (cross-axis safety, :func:`_descend_column_clear`) so no pad can be placed. The pad radius is
-    ``rcfg.recharge_pad_radius`` and every placed pad is ``rechargeable=True``; existing course
-    pads (if any) are preserved and the recharge pads appended after them.
+    Deterministic and **zero-RNG**: for each candidate gate the modelled energy of
+    ``start → gates[0..i]`` is compared to half the full reference-path energy; the nearest wins,
+    ties broken toward the lower index (candidates are scanned in ascending order with a strict
+    ``<``). Anchoring the single recharge pad near the energy midpoint gives the most useful split
+    of a constrained course into two comparable-cost legs.
     """
-    gates = course.gates
-    n = len(gates)
-    floor_z = course.floor_z
-    last = gates[-1]
-    finish_pt = np.asarray([course.finish_x, last.center[1], last.center[2]], dtype=np.float64)
-
-    # Non-constrained: fits one charge as-is → no recharge pads (byte-identical to a plain course).
-    if _path_energy(_reference_path(course), rcfg, battery) <= _BATTERY_BUDGET:
-        return course
-
-    placed_gate_idxs: list[int] = []
-    charged_point = course.start
-    cursor = 0  # first gate not yet covered by the current charge
-    while True:
-        # Done? remaining path (charged_point → remaining gates → finish, incl. climb-out) fits.
-        remaining = [charged_point, *(gates[j].position for j in range(cursor, n)), finish_pt]
-        if _path_energy(remaining, rcfg, battery) <= _BATTERY_BUDGET:
-            break
-
-        # Furthest gate k in [cursor, n-1] whose sub-path (charged → gates[cursor..k] → floor(gk))
-        # fits one charge. Energy is monotonic in k, so stop at the first over-budget k.
-        max_k: int | None = None
-        for k in range(cursor, n):
-            sub = [
-                charged_point,
-                *(gates[j].position for j in range(cursor, k + 1)),
-                _floor_point(gates[k], floor_z),
-            ]
-            if _path_energy(sub, rcfg, battery) <= _BATTERY_BUDGET:
-                max_k = k
-            else:
-                break
-        if max_k is None:
-            return None  # even the immediate next gate is unreachable on a full charge
-
-        # Among the reachable anchors, pick the furthest whose descend column clears all pillars.
-        chosen: int | None = None
-        for k in range(max_k, cursor - 1, -1):
-            if _descend_column_clear(gates[k], course.obstacles, rcfg):
-                chosen = k
-                break
-        if chosen is None:
-            return None  # no reachable anchor is obstacle-clear → cannot cover this course
-
-        placed_gate_idxs.append(chosen)
-        charged_point = _floor_point(gates[chosen], floor_z)
-        cursor = chosen + 1
-
-    if not placed_gate_idxs:
-        return course
-
-    recharge_pads = tuple(
-        PadSpec(
-            center=(float(gates[k].center[0]), float(gates[k].center[1])),
-            radius=float(rcfg.recharge_pad_radius),
-            rechargeable=True,
+    target = 0.5 * _path_energy(_reference_path(course), rcfg, battery)
+    best = candidates[0]
+    best_d: float | None = None
+    for i in candidates:
+        cum = _path_energy(
+            [course.start, *(course.gates[j].position for j in range(i + 1))], rcfg, battery
         )
-        for k in placed_gate_idxs
-    )
+        d = abs(cum - target)
+        if best_d is None or d < best_d:
+            best, best_d = i, d
+    return best
+
+
+def _index_midpoint_gate(candidates: list[int], num_gates: int) -> int:
+    """Pick the ``candidates`` gate nearest the middle **index** of the course (UC-24, zero-RNG).
+
+    The repair axis has no energy model (damage does not gate reachability), so a repair pad is pure
+    feature placement: anchor it at the eligible gate closest to the course's middle index, ties
+    broken toward the lower index (candidates scanned ascending with a strict ``<``).
+    """
+    target = (num_gates - 1) / 2.0
+    best = candidates[0]
+    best_d: float | None = None
+    for i in candidates:
+        d = abs(i - target)
+        if best_d is None or d < best_d:
+            best, best_d = i, d
+    return best
+
+
+def _with_pads(course: CourseConfig, extra_pads: list[PadSpec]) -> CourseConfig:
+    """Return a copy of ``course`` with ``extra_pads`` appended after its existing pads (0-RNG)."""
     return CourseConfig(
         start_position=course.start_position,
         gates=course.gates,
@@ -515,8 +498,142 @@ def _place_recharge_pads(
         floor_z=course.floor_z,
         ceiling_z=course.ceiling_z,
         obstacles=course.obstacles,
-        pads=(*course.pads, *recharge_pads),
+        pads=(*course.pads, *extra_pads),
     )
+
+
+def _place_single_recharge_pad(
+    course: CourseConfig,
+    rcfg: RandomizationConfig,
+    battery: BatteryConfig,
+) -> CourseConfig | None:
+    """Place **exactly one** ``rechargeable`` pad at an eligible gate anchor (UC-24 single pad).
+
+    UC-24 redefinition of UC-18's placer: a single recharge pad is placed **regardless** of whether
+    the course is energy-constrained (UC-18 placed pads only on over-budget courses, so under the
+    shipped default battery *zero* pads were ever produced — the unreachable-placement bug this
+    fixes). The anchor is the eligible gate nearest the path-energy midpoint
+    (:func:`_energy_midpoint_gate`); anchor choice is deterministic and **zero-RNG**, so it never
+    perturbs the seeded stream and only ever *appends* a pad (never shifts gate geometry). The pad
+    radius is ``rcfg.recharge_pad_radius`` and it is tagged ``rechargeable=True``; existing course
+    pads are preserved.
+
+    Returns ``None`` when no gate's descend column is obstacle-clear (see
+    :func:`_eligible_gate_indices`) → the caller reject-resamples.
+
+    **One-pad narrowing of UC-18's covering guarantee (documented, load-bearing):** a single pad
+    makes only courses solvable-with-one-recharge completable — not the arbitrary multi-pad covers
+    UC-18 could build. Solvability is still enforced by the battery-aware :func:`is_course_solvable`
+    (which accepts any pad set via :func:`_recharge_covering_valid`): under the **shipped default
+    battery** a course is non-constrained, the recharge branch is skipped, and the lone pad is a
+    valid bonus (always solvable). The battery-aware ``assert`` in :func:`_fallback_course` can
+    therefore fire ONLY under a non-default, cranked-constrained battery whose one-charge reach is
+    below a single fallback gate gap plus its vertical legs — a fail-loud precondition, not a silent
+    hole (unreachable under the shipped default: ~133 m of one-charge reach vs a ~20–30 m realistic
+    path).
+    """
+    eligible = _eligible_gate_indices(course, rcfg)
+    if not eligible:
+        return None
+    k = _energy_midpoint_gate(course, rcfg, battery, eligible)
+    gate = course.gates[k]
+    pad = PadSpec(
+        center=(float(gate.center[0]), float(gate.center[1])),
+        radius=float(rcfg.recharge_pad_radius),
+        rechargeable=True,
+    )
+    return _with_pads(course, [pad])
+
+
+def _place_single_repair_pad(
+    course: CourseConfig,
+    rcfg: RandomizationConfig,
+) -> CourseConfig | None:
+    """Place **exactly one** ``repairable`` pad at an eligible gate anchor (UC-24, zero-RNG).
+
+    Symmetric with :func:`_place_single_recharge_pad` but with **no energy model** — damage does not
+    gate whether the finish is reachable, so a repair pad is pure feature presence: a damaged drone
+    simply *can* land and recover. The anchor is the eligible gate nearest the course's middle index
+    (:func:`_index_midpoint_gate`), reusing the recharge descend-column-clear eligibility geometry.
+    The pad radius is ``rcfg.repair_pad_radius`` and it is tagged ``repairable=True``; existing
+    course pads are preserved. Returns ``None`` when no gate's descend column is obstacle-clear →
+    the caller reject-resamples.
+    """
+    eligible = _eligible_gate_indices(course, rcfg)
+    if not eligible:
+        return None
+    k = _index_midpoint_gate(eligible, len(course.gates))
+    gate = course.gates[k]
+    pad = PadSpec(
+        center=(float(gate.center[0]), float(gate.center[1])),
+        radius=float(rcfg.repair_pad_radius),
+        repairable=True,
+    )
+    return _with_pads(course, [pad])
+
+
+def _place_service_pads(
+    course: CourseConfig,
+    rcfg: RandomizationConfig,
+    battery: BatteryConfig | None,
+) -> CourseConfig | None:
+    """Place the single recharge and/or repair feature pads on ``course`` (UC-24 coordinator).
+
+    Dispatches by which service axes are active:
+
+    * recharge only → :func:`_place_single_recharge_pad`;
+    * repair only → :func:`_place_single_repair_pad`;
+    * **both** → one ``rechargeable`` pad at the energy-midpoint anchor and one ``repairable`` pad
+      at a **distinct** eligible anchor (recharge then repair, appended in that order). When only
+      **one** eligible gate exists (e.g. a 1-gate course or the fallback), the two co-locate into a
+      **single dual-purpose pad** (``rechargeable=True, repairable=True``) — a documented
+      co-location exception that still counts as "one of each" and avoids one pad shadowing the
+      other under a shared gate column.
+
+    Recharge is active only when ``rcfg.enable_recharge`` **and** a battery is enabled; repair is
+    active whenever ``rcfg.enable_repair``. Returns ``course`` unchanged when neither axis is
+    active, and ``None`` when no gate's descend column is obstacle-clear → the caller
+    reject-resamples. All placement is deterministic and **zero-RNG**.
+    """
+    recharge_active = rcfg.enable_recharge and battery is not None and battery.enabled
+    repair_active = rcfg.enable_repair
+    if not (recharge_active or repair_active):
+        return course
+    if recharge_active and not repair_active:
+        return _place_single_recharge_pad(course, rcfg, battery)  # type: ignore[arg-type]
+    if repair_active and not recharge_active:
+        return _place_single_repair_pad(course, rcfg)
+
+    # Both axes active: distinct anchors when possible, else a single dual-purpose pad.
+    eligible = _eligible_gate_indices(course, rcfg)
+    if not eligible:
+        return None
+    rk = _energy_midpoint_gate(course, rcfg, battery, eligible)  # type: ignore[arg-type]
+    if len(eligible) == 1:
+        gate = course.gates[rk]
+        dual = PadSpec(
+            center=(float(gate.center[0]), float(gate.center[1])),
+            radius=max(float(rcfg.recharge_pad_radius), float(rcfg.repair_pad_radius)),
+            rechargeable=True,
+            repairable=True,
+        )
+        return _with_pads(course, [dual])
+
+    repair_candidates = [i for i in eligible if i != rk]
+    pk = _index_midpoint_gate(repair_candidates, len(course.gates))
+    gr = course.gates[rk]
+    gp = course.gates[pk]
+    recharge_pad = PadSpec(
+        center=(float(gr.center[0]), float(gr.center[1])),
+        radius=float(rcfg.recharge_pad_radius),
+        rechargeable=True,
+    )
+    repair_pad = PadSpec(
+        center=(float(gp.center[0]), float(gp.center[1])),
+        radius=float(rcfg.repair_pad_radius),
+        repairable=True,
+    )
+    return _with_pads(course, [recharge_pad, repair_pad])
 
 
 def _fallback_course(
@@ -532,13 +649,15 @@ def _fallback_course(
     construction for every N in ``[1, 10]``. Draws nothing off any RNG, so it never perturbs
     the seeded stream. Guarded by an assertion against the same solvability predicate.
 
-    ``battery`` (UC-18): when the recharge axis is active the SAME zero-RNG
-    :func:`_place_recharge_pads` runs on the fallback before returning, so even the exhaustion
-    fallback honours the AC4 covering guarantee (closing the hole where a fallback could emit an
-    energy-constrained pad-less course). The evenly-spaced mid-altitude fallback covers for any
-    battery whose one-charge reach ≥ a single gate gap plus its vertical legs; if the placer
-    cannot cover it (``None``) the battery-aware solvability assert below fires — a documented,
-    fail-loud PRECONDITION, not a silent hole.
+    ``battery`` (UC-18; UC-24 single-pad model): when the recharge and/or repair axes are active the
+    SAME zero-RNG :func:`_place_service_pads` runs on the fallback before returning, so even the
+    exhaustion fallback carries its single recharge / repair feature pad(s). The fallback is
+    **obstacle-free**, so every gate is an eligible anchor and the placer never returns ``None``
+    (no deadlock). For N=1 with both axes active the two co-locate into a single dual-purpose pad.
+    The evenly-spaced mid-altitude fallback covers for any battery whose one-charge reach ≥ a single
+    gate gap plus its vertical legs; if a cranked-constrained battery makes the single recharge pad
+    insufficient the battery-aware solvability assert below fires — a documented, fail-loud
+    PRECONDITION (unreachable under the shipped default battery), not a silent hole.
     """
     n = max(1, int(n))
     floor_z = base_course.floor_z
@@ -568,10 +687,12 @@ def _fallback_course(
         floor_z=floor_z,
         ceiling_z=ceiling_z,
     )
-    # UC-18: honour the recharge covering on the fallback too (same zero-RNG placer).
+    # UC-24: place the single recharge / repair feature pad(s) on the fallback too (same zero-RNG
+    # placer). The fallback is obstacle-free ⇒ every gate is eligible ⇒ the placer never returns
+    # ``None`` here.
     recharge_active = rcfg.enable_recharge and battery is not None and battery.enabled
-    if recharge_active:
-        placed = _place_recharge_pads(course, rcfg, battery)
+    if recharge_active or rcfg.enable_repair:
+        placed = _place_service_pads(course, rcfg, battery)
         if placed is not None:
             course = placed
     assert is_course_solvable(course, rcfg, battery=battery if recharge_active else None), (

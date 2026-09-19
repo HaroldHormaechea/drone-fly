@@ -78,6 +78,86 @@ def _env_config(randomize: bool, randomize_dynamics: bool):
     )
 
 
+def _resolve_train_randomization(cfg):
+    """Resolve a train config's randomization into ``(env_config, obs_schema)`` (UC-24).
+
+    This is the ``train``-only randomization resolver; ``evaluate`` / ``prune-trained`` keep the
+    unchanged :func:`_env_config` (which sets only the course/dynamics axes). It threads the UC-24
+    full-course-by-default behaviour end to end:
+
+    * **Effective schema** — ``cfg.schema`` if explicitly set, else
+      ``"damage_proprioception_v4"`` when ``cfg.randomize`` is on, else ``None`` (legacy). Resolved
+      to an :class:`~drone_fly.controller.obs_schema.ObsSchema` (``None`` on the legacy path).
+    * **Schema-aware placement defaults** — each of the three placement toggles
+      (``randomize_obstacles`` / ``randomize_recharge_pads`` / ``randomize_repair_pads``) takes its
+      explicit value when set, else defaults to ``cfg.randomize AND the effective schema carries the
+      block that can sense the feature`` (``obstacle_vision`` → obstacles, ``battery`` → recharge,
+      ``damage`` → repair). So a bare ``randomize: true`` (⇒ ``damage_proprioception_v4``, which
+      carries all three) turns all three ON; a lighter explicit schema defaults placement to only
+      what it can sense; an explicit toggle always wins.
+    * **Coherence (fail-loud)** — a recharge pad is inert without a ``battery`` block and a repair
+      pad without a ``damage`` block (auto-enabling the physics would add their obs dims and break
+      the ``env.obs_width == obs_schema.total_width`` coupling). So an effective recharge toggle ON
+      without a battery-block schema — or repair ON without a damage-block schema — raises
+      :class:`~drone_fly.config.ConfigError` (exit 2). Schema-aware defaults make this unreachable
+      except on an explicit misconfiguration. Obstacle placement needs no such check (it does not
+      change the observation width).
+    * **Parity** — ``env_config`` is ``None`` (byte-identical to a fixed course) when neither
+      ``cfg.randomize`` nor ``cfg.randomize_dynamics`` is set; otherwise an :class:`EnvConfig` whose
+      :class:`RandomizationConfig` carries the resolved course/dynamics/placement toggles.
+    """
+    from drone_fly.config import ConfigError
+    from drone_fly.controller.obs_schema import resolve_schema
+
+    effective_schema_name = cfg.schema
+    if effective_schema_name is None and cfg.randomize:
+        effective_schema_name = "damage_proprioception_v4"
+    obs_schema = resolve_schema(effective_schema_name)
+
+    schema_blocks = {b.name for b in obs_schema.blocks} if obs_schema is not None else set()
+    has_obstacle_block = "obstacle_vision" in schema_blocks
+    has_battery_block = "battery" in schema_blocks
+    has_damage_block = "damage" in schema_blocks
+
+    def _toggle(explicit: bool | None, schema_has: bool) -> bool:
+        return bool(explicit) if explicit is not None else (cfg.randomize and schema_has)
+
+    enable_obstacles = _toggle(cfg.randomize_obstacles, has_obstacle_block)
+    enable_recharge = _toggle(cfg.randomize_recharge_pads, has_battery_block)
+    enable_repair = _toggle(cfg.randomize_repair_pads, has_damage_block)
+
+    # Coherence checks run UNCONDITIONALLY before building env_config: a pad the schema cannot sense
+    # would be a silent inert no-op (the UC-24 bug this fixes), so fail loud instead.
+    if enable_recharge and not has_battery_block:
+        raise ConfigError(
+            "train config: 'randomize_recharge_pads' requires a schema with a battery block "
+            "(e.g. schema: battery_hunger_v3 or damage_proprioception_v4); otherwise the recharge "
+            "pad is inert. Set a battery-capable schema or set randomize_recharge_pads: false."
+        )
+    if enable_repair and not has_damage_block:
+        raise ConfigError(
+            "train config: 'randomize_repair_pads' requires a schema with a damage block "
+            "(e.g. schema: damage_proprioception_v4); otherwise the repair pad is inert. Set a "
+            "damage-capable schema or set randomize_repair_pads: false."
+        )
+
+    if not (cfg.randomize or cfg.randomize_dynamics):
+        return None, obs_schema
+
+    from drone_fly.env.config import EnvConfig, RandomizationConfig
+
+    env_config = EnvConfig(
+        randomization=RandomizationConfig(
+            enable_course=cfg.randomize,
+            enable_dynamics=cfg.randomize_dynamics,
+            enable_obstacles=enable_obstacles,
+            enable_recharge=enable_recharge,
+            enable_repair=enable_repair,
+        )
+    )
+    return env_config, obs_schema
+
+
 def _warn_record_every_without_record(record_every: int | None, record: bool) -> None:
     """Warn when ``record_every`` is set without ``record`` (a silent no-op otherwise).
 
@@ -258,7 +338,6 @@ def main(argv: list[str] | None = None) -> int:
 def _run_train(config_path: str) -> int:
     """Load a train config, build the ``training/<name>/`` layout, and dispatch to ``train``."""
     from drone_fly.config import TrainRunConfig, load_yaml, run_layout
-    from drone_fly.controller.obs_schema import resolve_schema
     from drone_fly.train.config import TrainConfig
     from drone_fly.train.loop import train
 
@@ -269,8 +348,10 @@ def _run_train(config_path: str) -> int:
     record_every = cfg.record_every if cfg.record_every is not None else 1
     record_dir = cfg.record_dir if cfg.record_dir is not None else layout.recordings
     resume = _resolve_config_resume(cfg.resume, layout.checkpoints)
-    # UC-13: None (default) -> legacy single-projection run (AC7 parity); a named schema opts in.
-    obs_schema = resolve_schema(cfg.schema)
+    # UC-24: resolve the effective schema + schema-aware placement toggles together (full-course by
+    # default for a bare ``randomize: true``, coherence-checked). Returns (None, None) parity for a
+    # non-randomized run. ``_env_config`` stays the resolver for evaluate / prune-trained.
+    env_config, obs_schema = _resolve_train_randomization(cfg)
 
     # Route this run's checkpoints + logs under training/<name>/; every other TrainConfig
     # default is unchanged, so smoke-train (which never comes through here) stays identical.
@@ -279,7 +360,7 @@ def _run_train(config_path: str) -> int:
     train(
         train_cfg,
         connectome_path=cfg.connectome,
-        env_config=_env_config(cfg.randomize, cfg.randomize_dynamics),
+        env_config=env_config,
         adapter=cfg.adapter,
         device=cfg.device,
         resume=resume,
