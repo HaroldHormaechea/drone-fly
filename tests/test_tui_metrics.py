@@ -424,3 +424,85 @@ def test_dashboard_model_coerces_resolved_parallelism_types() -> None:
     assert m.n_envs == 4
     assert isinstance(m.n_envs, int)
     assert m.backend == "None" and isinstance(m.backend, str)
+
+
+# --------------------------------------------------------------------------- #
+# UC-30 — the intra-rollout heartbeat data seam: tick() + rollout_progress()
+# --------------------------------------------------------------------------- #
+
+
+def test_dashboard_model_defaults_rollout_counters_to_zero() -> None:
+    """A fresh model starts with no collecting progress (pre-UC-30 construction unchanged)."""
+    m = DashboardModel()
+    assert m.rollout_steps == 0
+    assert m.rollout_target == 0
+    assert m.rollout_progress() == (0, 0, 0.0)
+
+
+def test_tick_updates_live_fields_but_leaves_history_and_raw_untouched() -> None:
+    """The AC-4 isolation guarantee at the data layer: ``tick`` refreshes only the live clock +
+    collecting counters. It must touch NEITHER ``history`` NOR ``raw`` (unlike ``update``, whose
+    unconditional ``raw[...]`` writes would blank the values panel after the first rollout)."""
+    m = DashboardModel(scheduled_iters=488)
+    m.update(
+        n_updates=1,
+        elapsed_seconds=100.0,
+        ep_rew_mean=-1200.0,
+        ep_len_mean=210.0,
+        success_rate=0.1,
+        entropy_loss=-2.5,
+        std=0.5,
+        value_loss=51.2,
+        approx_kl=0.007,
+        explained_variance=0.63,
+    )
+    raw_before = dict(m.raw)
+    hist_before = {k: h.values() for k, h in m.history.items()}
+
+    m.tick(elapsed_seconds=999.0, rollout_steps=128, rollout_target=2048)
+
+    # snapshot preserved verbatim
+    assert m.raw == raw_before
+    assert {k: h.values() for k, h in m.history.items()} == hist_before
+    # but the live fields DID move
+    assert m.elapsed_seconds == 999.0
+    assert m.rollout_steps == 128
+    assert m.rollout_target == 2048
+
+
+def test_tick_coerces_its_argument_types() -> None:
+    m = DashboardModel()
+    m.tick(elapsed_seconds="12.5", rollout_steps="300", rollout_target="2048")  # type: ignore[arg-type]
+    assert m.elapsed_seconds == pytest.approx(12.5) and isinstance(m.elapsed_seconds, float)
+    assert m.rollout_steps == 300 and isinstance(m.rollout_steps, int)
+    assert m.rollout_target == 2048 and isinstance(m.rollout_target, int)
+
+
+def test_rollout_progress_math_clamps_and_guards_zero_target() -> None:
+    """AC-3/AC-7: the collecting fraction is steps/target, clamped to [0, 1], and 0 when the
+    target is unknown (pre-tick or missing attrs) — no div-by-zero."""
+    m = DashboardModel()
+
+    m.tick(elapsed_seconds=1.0, rollout_steps=512, rollout_target=2048)
+    steps, target, frac = m.rollout_progress()
+    assert (steps, target) == (512, 2048)
+    assert frac == pytest.approx(0.25)
+
+    # over-target clamps to 1.0 (last step can slightly overshoot n_steps × n_envs)
+    m.tick(elapsed_seconds=1.0, rollout_steps=9999, rollout_target=2048)
+    assert m.rollout_progress()[2] == 1.0
+
+    # unknown / zero target degrades to an empty (0-fraction) bar, never a ZeroDivisionError
+    m.tick(elapsed_seconds=1.0, rollout_steps=100, rollout_target=0)
+    assert m.rollout_progress() == (100, 0, 0.0)
+
+
+def test_tick_then_update_restores_the_snapshot_flow() -> None:
+    """A heartbeat mid-collection followed by the next rollout-end ``update`` must produce a
+    normal populated snapshot — tick does not corrupt the subsequent update path."""
+    m = DashboardModel(scheduled_iters=488)
+    m.tick(elapsed_seconds=5.0, rollout_steps=256, rollout_target=2048)
+    assert all(v is None for v in m.raw.values())  # tick alone leaves raw empty
+    m.update(ep_rew_mean=-1204.0, success_rate=0.1, n_updates=1)
+    assert m.raw["ep_rew"] == -1204.0
+    assert m.raw["success"] == pytest.approx(0.1)

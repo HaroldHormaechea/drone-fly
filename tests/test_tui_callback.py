@@ -16,10 +16,14 @@ training.
 
 from __future__ import annotations
 
+import io
 import math
 import types
 
+import pytest
+
 from drone_fly.train.tui.callback import TuiCallback
+from drone_fly.train.tui.metrics import DashboardModel
 
 
 class _RecordingDashboard:
@@ -150,3 +154,307 @@ def test_callback_disables_itself_on_error_never_crashes() -> None:
     assert cb._enabled is False
     # once disabled it is a no-op
     cb._on_rollout_end()
+
+
+# --------------------------------------------------------------------------- #
+# UC-30 — intra-rollout heartbeat (AC-1..AC-6)
+#
+# A fully synthetic harness: a fake SB3 model (``n_steps`` / ``get_env().num_envs`` /
+# ``num_timesteps``) plus an *injected* monotonic clock so the 0.25 s throttle is driven
+# deterministically — NO live Rich ``Live``, NO pty, NO ``time.sleep``. The private
+# ``_on_*`` hooks are called directly (as the UC-22 tests above do); ``num_timesteps`` is a
+# plain callback attribute (SB3 copies it from the model each real ``on_step``), so the harness
+# sets it explicitly to simulate step progression.
+# --------------------------------------------------------------------------- #
+
+
+class _FakeClock:
+    """A controllable monotonic source: advance it by hand, never sleep."""
+
+    def __init__(self, t: float = 0.0) -> None:
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
+
+
+class _FakeSB3Model:
+    """Minimal SB3 stand-in exposing what the heartbeat reads: ``n_steps``, ``get_env()``
+    (→ ``num_envs``), ``num_timesteps``, and (for the rollout-end path) the episode buffers +
+    logger. ``num_envs=None`` yields an env WITHOUT ``num_envs`` so the fallback to
+    ``model.n_envs`` (Dummy/Subproc-safe) can be exercised."""
+
+    def __init__(
+        self,
+        *,
+        n_steps: int = 2048,
+        num_envs: int | None = 1,
+        num_timesteps: int = 0,
+        model_n_envs: int | None = None,
+        ep_info=None,
+        ep_success=None,
+        name_to_value=None,
+    ) -> None:
+        self.n_steps = n_steps
+        self.num_timesteps = num_timesteps
+        if num_envs is None:
+            self._env = types.SimpleNamespace()  # no num_envs -> fallback to model.n_envs
+        else:
+            self._env = types.SimpleNamespace(num_envs=num_envs)
+        if model_n_envs is not None:
+            self.n_envs = model_n_envs
+        self.ep_info_buffer = ep_info
+        self.ep_success_buffer = ep_success
+        self.logger = types.SimpleNamespace(name_to_value=name_to_value or {})
+
+    def get_env(self):
+        return self._env
+
+
+class _RealModelDashboard:
+    """A dashboard backed by a REAL :class:`DashboardModel` (so ``tick`` / ``update`` /
+    ``raw`` behave exactly as in production) that only counts redraws."""
+
+    def __init__(self, *, scheduled_iters: int = 100, n_envs: int = 1, backend: str = "dummy"):
+        self.model = DashboardModel(scheduled_iters=scheduled_iters, n_envs=n_envs, backend=backend)
+        self.redraws = 0
+
+    def redraw(self) -> None:
+        self.redraws += 1
+
+
+def _render_to_str(renderable, *, width: int = 120) -> str:
+    from rich.console import Console
+
+    buf = io.StringIO()
+    Console(file=buf, width=width, legacy_windows=False).print(renderable)
+    return buf.getvalue()
+
+
+def _begin(cb: TuiCallback, model: _FakeSB3Model, clock: _FakeClock) -> None:
+    """Wire the model + clock and run training-start → rollout-start (baseline captured)."""
+    cb.model = model
+    cb.num_timesteps = model.num_timesteps
+    cb._on_training_start()
+    cb._on_rollout_start()
+
+
+def _step_at(cb: TuiCallback, timesteps: int) -> bool:
+    """Simulate SB3's per-step ``num_timesteps`` bump, then fire the heartbeat hook."""
+    cb.num_timesteps = timesteps
+    return cb._on_step()
+
+
+def test_ac1_heartbeat_is_live_during_collection_before_any_rollout_end() -> None:
+    """AC-1: before any ``_on_rollout_end``, a driven ``_on_step`` gives a non-zero elapsed +
+    a within-rollout step-progress value, with zero completed rollouts and ``raw`` untouched."""
+    clock = _FakeClock()
+    dash = _RealModelDashboard(n_envs=4, backend="subproc")
+    cb = TuiCallback(dash, now=clock)
+    model = _FakeSB3Model(n_steps=2048, num_envs=4, num_timesteps=0)
+    _begin(cb, model, clock)
+
+    clock.advance(3.0)
+    assert _step_at(cb, 256) is True
+
+    assert dash.redraws >= 1  # the heartbeat redrew
+    assert dash.model.elapsed_seconds == pytest.approx(3.0)  # live clock ticked, non-zero
+    assert dash.model.rollout_steps == 256  # within-rollout progress > 0
+    assert dash.model.rollout_target == 2048 * 4
+    # zero rollout-ends -> the values-panel snapshot is still all-None placeholders
+    assert all(v is None for v in dash.model.raw.values())
+    # and no trend history was fabricated
+    assert all(len(h) == 0 for h in dash.model.history.values())
+
+
+def test_ac2_heartbeat_is_throttled_via_the_injected_clock() -> None:
+    """AC-2: many rapid ``_on_step`` calls redraw at most ~4×/sec (the 0.25 s gate), asserted
+    through the fake clock — NOT real sleeps. 50 steps over 5 s must yield far fewer redraws."""
+    clock = _FakeClock()
+    dash = _RealModelDashboard()
+    cb = TuiCallback(dash, now=clock)
+    model = _FakeSB3Model(n_steps=2048, num_envs=1)
+    _begin(cb, model, clock)
+
+    ts = 0
+    for _ in range(50):  # advance 0.1 s each -> 5 s of simulated collection
+        clock.advance(0.1)
+        ts += 1
+        _step_at(cb, ts)
+
+    # theoretical ceiling over 5 s at a 0.25 s gate: 5.0 / 0.25 + 1 = 21
+    assert dash.redraws <= 21
+    assert dash.redraws < 50  # decisively throttled below the step count
+    assert dash.redraws >= 10  # still visibly live during the slow rollout
+
+
+def test_ac3_step_progress_target_and_reset_at_each_rollout_start() -> None:
+    """AC-3: current = num_timesteps - rollout_start; target = n_steps × n_envs; the counter
+    resets on a second ``_on_rollout_start``."""
+    clock = _FakeClock()
+    dash = _RealModelDashboard()
+    cb = TuiCallback(dash, now=clock)
+    model = _FakeSB3Model(n_steps=2048, num_envs=4, num_timesteps=1000)
+    _begin(cb, model, clock)  # baseline = 1000
+
+    clock.advance(1.0)
+    _step_at(cb, 1000 + 512)
+    steps, target, frac = dash.model.rollout_progress()
+    assert steps == 512
+    assert target == 2048 * 4
+    assert frac == pytest.approx(512 / (2048 * 4))
+
+    # a second rollout re-baselines: progress restarts from the new num_timesteps
+    cb.num_timesteps = 1000 + 2048 * 4
+    cb._on_rollout_start()
+    clock.advance(1.0)
+    _step_at(cb, 1000 + 2048 * 4 + 128)
+    steps2, _, _ = dash.model.rollout_progress()
+    assert steps2 == 128  # reset worked (not 512 + …)
+
+
+def test_ac3_n_envs_falls_back_to_model_when_env_lacks_num_envs() -> None:
+    """AC-3: ``n_envs`` reads ``training_env.num_envs`` first, else falls back to ``model.n_envs``
+    (Dummy/Subproc-safe) so the target is correct on either vec-env backend."""
+    clock = _FakeClock()
+    dash = _RealModelDashboard()
+    cb = TuiCallback(dash, now=clock)
+    model = _FakeSB3Model(n_steps=100, num_envs=None, model_n_envs=6)  # env has no num_envs
+    _begin(cb, model, clock)
+
+    clock.advance(0.5)
+    _step_at(cb, 50)
+    _, target, _ = dash.model.rollout_progress()
+    assert target == 100 * 6  # fell back to model.n_envs
+
+
+def test_ac4_heartbeat_never_blanks_the_rollout_end_snapshot() -> None:
+    """AC-4 (the KEY regression): after a full ``_on_rollout_end`` populates ``raw``, several
+    heartbeats in the next collection must leave ``raw`` byte-for-byte unchanged — every entry
+    still its last-rollout value, never blanked to a placeholder."""
+    clock = _FakeClock()
+    dash = _RealModelDashboard(n_envs=2)
+    cb = TuiCallback(dash, now=clock)
+    model = _FakeSB3Model(
+        n_steps=2048,
+        num_envs=2,
+        num_timesteps=8192,
+        ep_info=[{"r": -200.0, "l": 210}],
+        ep_success=[1.0],
+        name_to_value={
+            "train/entropy_loss": -2.5,
+            "train/std": 0.5,
+            "train/value_loss": 51.2,
+            "train/approx_kl": 0.007,
+            "train/explained_variance": 0.63,
+        },
+    )
+    _begin(cb, model, clock)
+
+    # complete a rollout: the full snapshot lands in raw
+    cb._on_rollout_end()
+    snapshot = dict(dash.model.raw)
+    assert snapshot["ep_rew"] == -200.0  # sanity: it really populated
+    assert snapshot["success"] == 1.0
+    assert snapshot["value_loss"] == 51.2
+    assert all(v is not None for v in snapshot.values())
+
+    # next collection: fire several heartbeats with an advancing clock
+    cb._on_rollout_start()
+    for i in range(5):
+        clock.advance(0.5)
+        _step_at(cb, 8192 + (i + 1) * 256)
+
+    assert dash.model.raw == snapshot  # UNCHANGED — tick() touched neither raw nor history
+    assert all(v is not None for v in dash.model.raw.values())
+    assert dash.model.elapsed_seconds > 0  # but the live clock did advance
+    assert dash.model.rollout_steps == 5 * 256  # and the collecting counter moved
+
+
+def test_ac5_heartbeat_disables_itself_on_error_and_never_raises() -> None:
+    """AC-5: an exception inside the heartbeat disables it (``_enabled=False``) and never
+    propagates into training; once disabled it is a fast no-op."""
+
+    class _BoomModel:
+        def tick(self, **kwargs) -> None:
+            raise RuntimeError("heartbeat boom")
+
+    class _BoomDashboard:
+        def __init__(self) -> None:
+            self.model = _BoomModel()
+            self.redraws = 0
+
+        def redraw(self) -> None:  # pragma: no cover - never reached (tick raises first)
+            self.redraws += 1
+
+    clock = _FakeClock()
+    dash = _BoomDashboard()
+    cb = TuiCallback(dash, now=clock)
+    model = _FakeSB3Model(n_steps=10, num_envs=1)
+    cb.model = model
+    cb.num_timesteps = 0
+    cb._on_training_start()
+    cb._on_rollout_start()
+
+    clock.advance(1.0)
+    assert cb._on_step() is True  # must not raise
+    assert cb._enabled is False
+    assert dash.redraws == 0  # blew up before the redraw
+
+    # once disabled, further steps short-circuit (no second tick attempt)
+    clock.advance(1.0)
+    assert _step_at(cb, 5) is True
+
+
+def test_ac6_heartbeat_redraw_refreshes_the_live_log_pane() -> None:
+    """AC-6: the heartbeat's ``dashboard.redraw()`` rebuilds the layout from the CURRENT log
+    scrollback, so lines captured mid-collection appear in the log pane before any rollout end.
+    Uses the real :class:`TrainingDashboard` with a fake ``Live`` + capture (no pty, no Live)."""
+    from drone_fly.train.tui.dashboard import TrainingDashboard
+
+    class _FakeLive:
+        def __init__(self) -> None:
+            self.renderables: list = []
+
+        def update(self, renderable) -> None:
+            self.renderables.append(renderable)
+
+    class _GrowingCapture:
+        def __init__(self) -> None:
+            self._lines: list[str] = []
+
+        def add(self, line: str) -> None:
+            self._lines.append(line)
+
+        def lines(self) -> list[str]:
+            return list(self._lines)
+
+    clock = _FakeClock()
+    dash = TrainingDashboard(scheduled_iters=100, capture=False, n_envs=1)
+    live = _FakeLive()
+    cap = _GrowingCapture()
+    dash._live = live  # inject a headless Live sink
+    dash._capture = cap  # inject a growing log source
+
+    cb = TuiCallback(dash, now=clock)
+    model = _FakeSB3Model(n_steps=64, num_envs=1)
+    cb.model = model
+    cb.num_timesteps = 0
+    cb._on_training_start()
+    cb._on_rollout_start()
+
+    cap.add("pybullet build")
+    clock.advance(0.5)
+    _step_at(cb, 16)
+
+    # a NEW log line arrives during collection (before any rollout end)
+    cap.add("Version = 3.2.5")
+    clock.advance(0.5)
+    _step_at(cb, 32)
+
+    out = _render_to_str(live.renderables[-1])
+    assert "Version = 3.2.5" in out  # the freshly captured line is live in the pane
+    assert "pybullet build" in out

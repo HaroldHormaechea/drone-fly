@@ -26,6 +26,7 @@ from drone_fly.train.tui.render import (
     SEVERITY_STYLE,
     build_layout,
     build_status_bar,
+    build_trends_panel,
     build_values_panel,
 )
 
@@ -174,3 +175,47 @@ def test_values_panel_shows_resolved_parallelism_for_a_serial_run() -> None:
     out = _render(build_values_panel(m))
     assert "envs" in out
     assert "1 (dummy)" in out
+
+
+# --------------------------------------------------------------------------- #
+# UC-30 — the intra-rollout collecting bar renders, distinct from the UC-22 bar
+# --------------------------------------------------------------------------- #
+
+
+def test_trends_panel_renders_both_the_iterations_and_collecting_bars() -> None:
+    """AC-7: the additive UC-30 'collecting' bar renders headlessly AND the UC-22 'iterations'
+    bar is still present — two DISTINCT labelled bars, so neither obscures the other."""
+    m = _populated_model()
+    m.tick(elapsed_seconds=123.0, rollout_steps=512, rollout_target=2048)
+    out = _render(build_trends_panel(m), width=200)
+    assert "iterations" in out  # UC-22 bar preserved
+    assert "collecting" in out  # UC-30 bar added
+    assert "512/2048" in out  # sourced from rollout_progress()
+    assert "25%" in out
+
+
+def test_collecting_bar_degrades_to_empty_when_target_unknown() -> None:
+    """A pre-tick / missing-attr rollout (target 0) still renders — an empty collecting bar,
+    no crash, 0%."""
+    m = M.DashboardModel(scheduled_iters=488)  # never ticked -> rollout_target == 0
+    out = _render(build_trends_panel(m), width=200)
+    assert "collecting" in out
+    assert "0/0" in out
+
+
+def test_heartbeat_tick_does_not_blank_the_values_panel_render() -> None:
+    """AC-4 at the render layer: after a populated rollout snapshot, a ``tick`` (live clock +
+    collecting counters) must NOT blank the six values-panel entries to the '—' placeholder —
+    the last rollout's values stay on screen, only the elapsed clock advances."""
+    m = _populated_model()  # 6 full updates -> raw fully populated
+    before = _render(build_values_panel(m))
+    assert M.PLACEHOLDER not in before  # every value present after the snapshot
+    assert "-1200" in before  # last ep_rew_mean (-1300 + 5*20)
+    assert "10m00s" in before  # last elapsed (100 * 6 = 600 s)
+
+    m.tick(elapsed_seconds=999.0, rollout_steps=100, rollout_target=2048)
+    after = _render(build_values_panel(m))
+
+    assert M.PLACEHOLDER not in after  # STILL no blanking — the snapshot persists
+    assert "-1200" in after  # the rollout value is unchanged
+    assert "16m39s" in after  # but the live elapsed clock advanced (999 s)
