@@ -35,6 +35,7 @@ dependencies = [
     # PyYAML unconditionally. It is a CORE dependency (CI installs `--extra dev` only and
     # never the `sim` extra), so it must sit here, not under an optional group.
     "pyyaml",
+    "rich==13.9.4",
 ]
 
 [project.optional-dependencies]

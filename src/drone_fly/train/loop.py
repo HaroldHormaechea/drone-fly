@@ -24,6 +24,7 @@ import glob
 import logging
 import os
 import re
+import sys
 from pathlib import Path
 
 from drone_fly.connectome import load_connectome
@@ -63,12 +64,19 @@ def build_policy_kwargs(connectome: ConnectomeData, cfg: TrainConfig, obs_schema
     }
 
 
-def _make_logger(logs_dir: str):
-    """SB3 logger writing stdout + TensorBoard + CSV (AC4 learning curve)."""
+def _make_logger(logs_dir: str, include_stdout: bool = True):
+    """SB3 logger writing stdout + TensorBoard + CSV (AC4 learning curve).
+
+    ``include_stdout`` (UC-22): when the live TUI is active it is ``False`` so SB3's ``stdout``
+    ``HumanOutputFormat`` is dropped — Rich's ``Live`` owns the screen and the two must not
+    fight over it (AC7). CSV + TensorBoard are always preserved, so the learning curve and the
+    ``--no-tui``/non-TTY path stay byte-identical to before.
+    """
     from stable_baselines3.common.logger import configure
 
     Path(logs_dir).mkdir(parents=True, exist_ok=True)
-    return configure(logs_dir, ["stdout", "csv", "tensorboard"])
+    formats = ["stdout", "csv", "tensorboard"] if include_stdout else ["csv", "tensorboard"]
+    return configure(logs_dir, formats)
 
 
 def _reconcile_obstacle_vision(env_config, obs_schema):
@@ -245,6 +253,7 @@ def train(
     obs_schema=None,
     strict_capacity: bool = False,
     capacity_floor: int | None = None,
+    tui: bool | None = None,
 ):
     """Run (or resume) PPO training; return the trained model.
 
@@ -294,6 +303,15 @@ def train(
         (:data:`~drone_fly.train.health.DEFAULT_CAPACITY_FLOOR`). ``None`` (default) uses the
         calibrated default. The guardrail + runtime :class:`~drone_fly.train.health_callback.
         HealthCallback` both use the resulting thresholds.
+    tui:
+        UC-22 live full-screen training dashboard. ``None`` (default) / ``True`` enable it
+        **only when stdout is an interactive TTY**; ``False`` forces it off. On a non-TTY /
+        piped / CI run it is auto-disabled and the run is byte-identical to before (SB3 stdout
+        logger, no fd capture, no live draw). When enabled, SB3's stdout logger is dropped
+        (CSV/TensorBoard kept), the existing :class:`~drone_fly.train.health_callback.
+        HealthCallback` gets ``on_verdict`` wired to the dashboard, a
+        :class:`~drone_fly.train.tui.callback.TuiCallback` is appended after it, and
+        ``model.learn`` runs inside the dashboard's live session.
     """
     from stable_baselines3 import PPO
     from stable_baselines3.common.callbacks import CheckpointCallback
@@ -302,6 +320,12 @@ def train(
     steps = total_timesteps if total_timesteps is not None else cfg.total_timesteps
     resolved_n_envs = n_envs if n_envs is not None else cfg.n_envs
     resolved_device = resolve_device(device)
+
+    # UC-22: the live TUI is default-on but ONLY on an interactive TTY; ``tui=False`` forces it
+    # off, and a non-TTY / piped / CI run auto-falls back to the plain SB3 logger (AC2). This
+    # gate is the single switch every TUI branch below keys off, so the disabled path is
+    # byte-identical to the pre-UC-22 run.
+    tui_enabled = (tui is not False) and sys.stdout.isatty()
 
     if connectome is None:
         connectome = load_connectome(connectome_path)
@@ -406,7 +430,18 @@ def train(
             policy_kwargs=build_policy_kwargs(connectome, cfg, obs_schema=obs_schema),
         )
 
-    model.set_logger(_make_logger(cfg.logs_dir))
+    # Drop SB3's stdout HumanOutputFormat when the TUI owns the screen (CSV/TensorBoard kept).
+    model.set_logger(_make_logger(cfg.logs_dir, include_stdout=not tui_enabled))
+
+    # UC-22: build the dashboard only when the TUI is active. Scheduled iterations mirror SB3's
+    # update cadence — one PPO update per ``n_steps * n_envs`` collected steps — for the
+    # iterations progress bar. Import is lazy so the disabled path never touches Rich.
+    dashboard = None
+    if tui_enabled:
+        from drone_fly.train.tui.dashboard import TrainingDashboard
+
+        scheduled_iters = max(1, steps // max(cfg.n_steps * max(resolved_n_envs, 1), 1))
+        dashboard = TrainingDashboard(scheduled_iters=scheduled_iters)
 
     checkpoint_cb = CheckpointCallback(
         save_freq=max(cfg.checkpoint_freq // max(resolved_n_envs, 1), 1),
@@ -457,14 +492,34 @@ def train(
     except CapacityAbort:
         venv.close()
         raise
-    callbacks.append(HealthCallback(thresholds=thresholds))
 
-    model.learn(
+    # UC-22: reuse the EXISTING UC-23 HealthCallback — inject ``on_verdict`` so its verdict
+    # flows to the dashboard status bar (no second assessment). Append the TuiCallback AFTER it
+    # so each rollout's verdict is fresh before the redraw. Both are no-ops when the TUI is off.
+    callbacks.append(
+        HealthCallback(
+            thresholds=thresholds,
+            on_verdict=dashboard.set_verdict if dashboard is not None else None,
+        )
+    )
+    if dashboard is not None:
+        from drone_fly.train.tui.callback import TuiCallback
+
+        callbacks.append(TuiCallback(dashboard))
+
+    learn_kwargs = dict(
         total_timesteps=steps,
         reset_num_timesteps=not resuming,
         callback=callbacks if len(callbacks) > 1 else checkpoint_cb,
         progress_bar=False,
     )
+    # The capacity-guard prompt (if any) already ran above, BEFORE fd capture engages, so the
+    # live session wraps only ``model.learn`` — no conflict between the prompt and the screen.
+    if dashboard is not None:
+        with dashboard.live_session():
+            model.learn(**learn_kwargs)
+    else:
+        model.learn(**learn_kwargs)
 
     # Persist a stable final model + canonical VecNormalize stats for eval/resume.
     final_model = os.path.join(cfg.models_dir, f"{CHECKPOINT_PREFIX}_final.zip")

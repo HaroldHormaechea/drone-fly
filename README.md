@@ -56,6 +56,14 @@ A *slice* is a pruned sensory→motor subcircuit of the connectome — smaller, 
 Resume is automatic: `resume: auto` in the train config continues from the newest checkpoint if
 one exists, else starts fresh.
 
+**Live training dashboard (UC-22).** On an interactive terminal `train` shows a full-screen
+Rich TUI: grouped TIME/TRAIN/ROLLOUT values, one sparkline + tendency (improving/worsening/flat)
+row per tracked metric with an iterations progress bar, a right-hand pane tailing the raw
+stdout/stderr (including pybullet's native prints), and a bottom health status bar. It is
+default-on for a TTY and disabled with `--no-tui`; a non-TTY / piped / CI run auto-falls back to
+the plain Stable-Baselines3 line logger, so CI and log files are unaffected. The CSV and
+TensorBoard learning curves are written either way.
+
 ## Other useful commands
 
 - **Sanity check** (offline, seconds): `uv run drone-fly smoke-train --connectome tests/fixtures`.
