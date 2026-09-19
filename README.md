@@ -162,6 +162,25 @@ it), and with no repairable pads/damage config an `EnvConfig()` is unchanged. En
 adds the 26th observation dim, so **pre-UC-19 checkpoints are invalidated** (retrain, or graft one
 step from `battery_hunger_v3` as above).
 
+### Grounded / no-progress early termination (UC-25)
+Training episodes used to waste almost the whole step budget with the drone lying motionless on the
+floor: the numpy adapter's floor collision is `position[2] <= floor_z`, but a resting drone
+asymptotes ~8 mm **above** the floor and never crosses it, so `collided`/`crash`/`terminated` never
+fire and the episode only ended by truncation at the inflated `max_steps`. `EarlyTerminationConfig`
+(the `EnvConfig.early_termination` block, **on by default**) adds two env-level detectors, evaluated
+each `step()`: a **grounded** detector (the drone sits within `floor_epsilon` above `floor_z` at speed
+`≤ rest_speed_epsilon`, and is not docked) and a **no-progress** detector (distance to the current
+target gate — or to the finish on the last leg — fails to drop by more than `progress_epsilon`,
+measured against the best distance reached so far). Either one persisting for `stuck_window`
+consecutive steps ends the episode as a **crash** (`terminated=True`, the existing collision penalty,
+and `info["collided"]=True`), with an additive `info["early_termination"]` key reporting `"grounded"`,
+`"stuck"`, or `None`. The legitimate UC-16 docked/servicing state is **exempt** while service is
+*productive* (battery or integrity strictly improving) — a drone that docks once then idles is still
+cut once improvement stops. Because the counters start at 0 and need a full window of qualifying
+steps, a normally-flying or promptly-crashing episode is byte-identical to before (no obs-schema,
+width, or checkpoint change); set `early_termination.enabled = false` to restore the legacy behaviour.
+All four thresholds are documented, tunable constants.
+
 ### Visualization & recording
 Enable recording in a train/evaluate config with `record: true` (tune cadence via `record_every`);
 frames land in that run's `training/<name>/recordings/`. Open `viz/viewer.html` in a browser

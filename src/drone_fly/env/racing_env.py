@@ -143,6 +143,24 @@ class RaceEnv(gym.Env):
         # the drone off the floor. No vestigial copy anywhere else in the env.
         self._docked = False
 
+        # Grounded / no-progress early-termination (UC-25). Cache the thresholds so ``step()``
+        # never re-reads the config each frame. The rule only affects the termination decision on
+        # genuinely grounded/stuck episodes (see :class:`EarlyTerminationConfig`); obs/RNG are
+        # untouched, so normal/crashing episodes stay byte-identical.
+        et = self.config.early_termination
+        self._et_enabled = bool(et.enabled)
+        self._et_floor_epsilon = float(et.floor_epsilon)
+        self._et_stuck_window = int(et.stuck_window)
+        self._et_progress_epsilon = float(et.progress_epsilon)
+        self._et_rest_speed_epsilon = float(et.rest_speed_epsilon)
+        # Per-episode counters / bookkeeping for the two detectors (initialised properly in
+        # reset(); declared here so they exist before the first step even if reset() is skipped).
+        self._grounded_counter = 0
+        self._stuck_counter = 0
+        self._best_dist = float("inf")
+        self._prev_battery = 1.0
+        self._prev_integrity = 1.0
+
     @property
     def obs_width(self) -> int:
         """Width of the emitted observation vector (UC-15).
@@ -246,6 +264,18 @@ class RaceEnv(gym.Env):
         # Fresh episode: not docked (UC-16). Recomputed every step; reset here for the pre-first-
         # step read and so ``info["docked"]`` is well-defined before step() runs.
         self._docked = False
+        # Fresh episode: reset the UC-25 early-termination bookkeeping. Counters start at 0 so
+        # neither detector can fire until it accumulates a full ``stuck_window`` of qualifying
+        # steps (the warm-up guard, AC5). ``_best_dist`` starts at +inf so the very first step's
+        # distance is always recorded as progress (no spurious stuck increment on step 1).
+        # ``_prev_battery`` / ``_prev_integrity`` seed the productive-service detector from the
+        # reset state (default-safe 1.0 when battery/damage physics are off). Pure bookkeeping —
+        # no observation / RNG effect.
+        self._grounded_counter = 0
+        self._stuck_counter = 0
+        self._best_dist = float("inf")
+        self._prev_battery = float(state.battery)
+        self._prev_integrity = float(state.integrity)
         # Effective step budget scales with the active course's gate count (UC-09): a longer
         # course gets proportionally more time so it stays completable. N=1 => 400 exactly.
         episode = self.config.episode
@@ -382,6 +412,71 @@ class RaceEnv(gym.Env):
                     new_integrity = self.adapter.repair(delta)
                     state = dataclasses.replace(state, integrity=new_integrity)
 
+        # UC-25 grounded / no-progress early termination. Evaluated here — AFTER dock/recharge/
+        # repair are resolved (so ``self._docked`` and the post-service ``state.battery`` /
+        # ``state.integrity`` are final) and BEFORE ``compute_reward`` — so a fired cut folds into
+        # ``crash`` and earns the existing collision penalty this same step. Nothing here touches
+        # the observation or the RNG stream: a flying / promptly-crashing episode never accumulates
+        # a full window, so its per-step outcomes stay byte-identical to UC-19 (AC5/AC6).
+        early_termination = None
+        if self._et_enabled:
+            floor_z = course.floor_z
+            # Productive-service flag (AC4 non-loophole): a dock exempts the episode ONLY while it
+            # is *actively improving* charge or integrity — not on mere pad presence. This closes
+            # the "dock once and idle forever" loophole: once battery/integrity stop rising (full
+            # or nothing to fix) the dwell is no longer productive and the counters resume climbing.
+            productive = self._docked and (
+                (self._battery_enabled and state.battery > self._prev_battery)
+                or (self._damage_enabled and state.integrity > self._prev_integrity)
+            )
+
+            # Grounded (resting) detector: airborne-frame off, sitting in the floor band at
+            # near-zero speed. Docked ⇒ never grounded (a pad on the floor must not trip it). The
+            # low-speed guard makes this a genuine "sitting on the ground" detector and prevents a
+            # low-but-progressing real-adapter flight (real speed ≫ epsilon) from being mis-cut.
+            grounded = (
+                (not self._docked)
+                and (floor_z <= state.position[2] <= floor_z + self._et_floor_epsilon)
+                and (float(np.linalg.norm(state.velocity)) <= self._et_rest_speed_epsilon)
+            )
+            if grounded:
+                self._grounded_counter += 1
+            else:
+                self._grounded_counter = 0
+
+            # No-progress (stuck) detector, measured against the best distance reached so far
+            # (robust to hover oscillation / jitter, not just consecutive-pair deltas). On a target
+            # change this step (a gate passed, or the finish crossed) the metric's reference jumps,
+            # so re-baseline to the new distance and clear the counter. ``dist_curr`` already tracks
+            # the finish plane once all gates are passed (geometry.current_target), so the last-leg
+            # pitfall is handled for free.
+            if event in ("gate", "finish"):
+                self._best_dist = dist_curr
+                self._stuck_counter = 0
+            elif dist_curr < self._best_dist - self._et_progress_epsilon:
+                self._best_dist = dist_curr
+                self._stuck_counter = 0
+            else:
+                self._stuck_counter += 1
+
+            # A productive service dwell stays fully alive: reset BOTH counters. When service stops
+            # being productive (full / idle) the counters climb again and cut after the window.
+            if productive:
+                self._grounded_counter = 0
+                self._stuck_counter = 0
+
+            # Fire: either counter reaching the window cuts the episode. Grounded takes priority in
+            # the reported reason if both happen to trip on the same step.
+            if self._grounded_counter >= self._et_stuck_window:
+                early_termination = "grounded"
+            elif self._stuck_counter >= self._et_stuck_window:
+                early_termination = "stuck"
+            # Fold the cut into ``crash`` so it flows unchanged into the reward (collision penalty,
+            # AC3), ``terminated``, and ``info["collided"]`` below — a grounded/stuck cut counts as
+            # a crash exactly like a floor/ceiling collision.
+            if early_termination is not None:
+                crash = True
+
         reward = compute_reward(
             dist_to_target_prev=dist_prev,
             dist_to_target_curr=dist_curr,
@@ -423,6 +518,11 @@ class RaceEnv(gym.Env):
             # World-frame drone position this step (UC-05 recording draws the flight path).
             # Additive key; existing tests assert membership, so this stays back-compatible.
             "position": state.position.copy(),
+            # UC-25: reason this episode was cut early — ``"grounded"`` (rested on the floor),
+            # ``"stuck"`` (no course progress for a full window), or ``None`` (not cut early).
+            # Additive key; ``info["collided"]`` is also True on a cut, so crash accounting is
+            # unchanged. Existing tests assert membership (not an exact dict), so this stays safe.
+            "early_termination": early_termination,
         }
         if terminated or truncated:
             info["completion_time"] = (
@@ -431,6 +531,11 @@ class RaceEnv(gym.Env):
             info["is_success"] = bool(completed)
 
         self._prev_pos = state.position.copy()
+        # UC-25: remember this step's post-service battery / integrity so next step's productive-
+        # service flag can detect a strict improvement (charge/integrity rising). Updated alongside
+        # ``_prev_pos``; default-safe (1.0) when the respective physics axis is off.
+        self._prev_battery = float(state.battery)
+        self._prev_integrity = float(state.integrity)
         return self._observation(state), float(reward), terminated, truncated, info
 
     def close(self) -> None:
