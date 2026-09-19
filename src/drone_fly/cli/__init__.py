@@ -441,11 +441,12 @@ def _run_fetch_connectome(args: argparse.Namespace) -> int:
 
     connectome_dir = ensure_full_connectome(args.connectome_dir, force=args.force)
 
-    # UC-27 (AC-2): provision positions for the base connectome when it is fetched, so a
-    # non-pruned recording run has them ready without train-time compute. Conditional on
-    # anatomy availability: at full-MaleCNS scale with no/partial anatomy the large-connectome
-    # guard inside resolve_positions WARNs and defers (no ``_positions.csv``) rather than
-    # building an infeasible dense spectral layout. Keyed off the fetched npz path.
+    # UC-27 (AC-2/AC-11): provision positions for the base connectome when it is fetched, so a
+    # non-pruned recording run has them ready without train-time compute. Real anatomy comes
+    # tokenlessly from the fetched connectome's OWN sibling meta ``somaLocation`` (no source_data
+    # needed — the artifact's meta carries the soma column), so the full ~161k graph gets real
+    # soma coordinates WITHOUT any dense eigh. Only genuinely soma-less afferents remain, and the
+    # large-connectome guard still defers the residual full-graph spectral layout. Keyed off npz.
     data = load_connectome(connectome_dir)
     npz_path = Path(connectome_dir) / DEST_NPZ_NAME
     resolve_positions(data, projection=DEFAULT_PROJECTION, artifact_npz=npz_path, persist=True)
@@ -494,13 +495,20 @@ def _run_prune_export(config_path: str) -> int:
     pruned = prune_to_subcircuit(data, k=cfg.prune_k, rule=cfg.prune_rule)
     npz_path, meta_path = save_connectome(pruned, cfg.out)
 
-    # UC-27 (AC-1, primary hook): provision neuron positions once, at slice time, and write the
-    # ``<stem>_positions.csv`` sidecar (plus ``<stem>_soma.csv`` when neuPrint anatomy is
-    # fetched) beside the just-saved artifact, keyed off the explicit npz path (never the
-    # pruned data.source). Training-with-recording then only LOADS these — no per-run compute.
+    # UC-27 (AC-1/AC-10, primary hook): provision neuron positions once, at slice time. Real
+    # anatomy comes tokenlessly from the SOURCE connectome's meta ``somaLocation`` (``source_data
+    # =data``, pre-prune — the pruned artifact's own meta carries no soma column), subset to the
+    # pruned bodyids and written as ``<stem>_soma.csv`` + ``<stem>_positions.csv`` beside the
+    # just-saved artifact (keyed off the explicit npz path). Training then only LOADS these.
     from drone_fly.record.coordinates import DEFAULT_PROJECTION, resolve_positions
 
-    resolve_positions(pruned, projection=DEFAULT_PROJECTION, artifact_npz=npz_path, persist=True)
+    resolve_positions(
+        pruned,
+        projection=DEFAULT_PROJECTION,
+        artifact_npz=npz_path,
+        source_data=data,
+        persist=True,
+    )
 
     prov_path = Path(cfg.out) / "PRUNE_PROVENANCE.md"
     prov_path.write_text(

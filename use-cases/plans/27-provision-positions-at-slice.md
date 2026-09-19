@@ -129,3 +129,48 @@ AC-2 is thus conditional on anatomy availability (documented). Hermetic CI exerc
 - **Write-side source mismatch:** handled by threading `artifact_npz` explicitly at all three hooks — never rely on the pruned `data.source` at write time.
 - **Full-connectome scale:** the refuse cap prevents an accidental 161k `eigh`; documented WARN/defer path.
 - **Concurrency:** worktree-isolated run; provisioning is main-process only and sidecar writes are the last, small, single-writer step — no contention with UC-26 parallelism.
+
+---
+
+# AMENDMENT (challenger-approved 2026-09-19) — real tokenless anatomy from the connectome meta CSV
+
+Folds **real, tokenless anatomy (connectome meta CSV `somaLocation`)** into the plan above as the PRIMARY anatomy tier, wired into all three write hooks. Everything above stands (orchestrator `resolve_positions`, positions/soma sidecars, node-set HIT rule, self-heal, `%.17g`, refuse cap). Only the anatomy SOURCE + precedence change. Adds AC-10 (real anatomy from meta CSV, primary, tokenless) and AC-11 (full connectome gets real anatomy without the giant eigendecomposition).
+
+## Decisive verified facts
+- `save_connectome` (loader.py) writes only `idx,bodyid,superclass,class,subclass,cell_type,top_nt,sign` — **NO `somaLocation`/xyz**; `ConnectomeData` has no soma field ⇒ a pruned artifact's own meta can never carry anatomy → prune/prune-trained must read the **SOURCE** anatomy and subset by pruned bodyids.
+- fetch-connectome downloads `mcns_all_neuron_meta.csv` → saved as `<npz-stem>_meta.csv`, which **does** carry `somaLocation` → fetch reads its own sibling meta.
+- `_mapping_from_frame`/`_parse_soma_location` already parse `somaLocation` OR `x,y,z` keyed on bodyid — no new parser.
+- Committed `mcns_fixture_meta.csv` has **no** `somaLocation` column → AC-10 test needs a NEW tiny DISTINCT meta fixture WITH a `somaLocation` column.
+
+## Anatomy precedence (documented + enforced at compute time)
+**meta `somaLocation` (tier-0) → `DRONE_FLY_SOMA_CSV` → `<stem>_soma.csv` → neuPrint → spectral.**
+
+## Design (for the developer)
+1. **`_resolve_meta_soma(data, source_data) -> dict[int, xyz]`** (tier-0 mapping, may be partial/empty):
+   - `base_npz = _base_npz_path(source_data)` if `source_data` given (prune/prune-trained), else `_base_npz_path(data)` (fetch/read). `_base_npz_path` strips `" [pruned:…]"`/`" [activation-pruned …]"` tags → recovers the real on-disk source npz.
+   - read `<base-stem>_meta.csv` with `usecols=["bodyid","somaLocation"]` (catch `ValueError` when the column is absent → fall through) → `_mapping_from_frame`. Meta-`somaLocation` is tier-0 on BOTH read and write sides.
+   - **soma-sidecar fallback scoped to the WRITE side only** (`source_data` given): fall to `<source-stem>_soma.csv` via `_load_soma_csv`. On the read side (`source_data=None`) do NOT fall back to the artifact's own `<stem>_soma.csv` here — let it resolve at its normal tier-2 in `_load_anatomical` (documented order holds).
+   - subset to `data.neuron_ids` via `_canonical_id`/`_is_int_like` (same canonicalization as the node-set HIT rule). Return int-keyed subset.
+2. Thread the mapping into the compute as contained optional kwargs (default `None` → output-identical, AC-8-safe):
+   - `_load_anatomical(data, *, override=None)` — non-empty override is tier-0, ahead of env-CSV/sidecar/neuPrint. Partial override → remaining soma-less neurons flow to the existing partial-anatomy fill.
+   - `provision_positions(data, *, projection, anatomy_override=None)` — passes override to `_load_anatomical`. Compute core otherwise untouched.
+   - `_anatomy_coverage(data, *, override=None)` — counts coverage from `_load_anatomical(data, override=override)`.
+3. **`resolve_positions`** gains `source_data` param; new step order:
+   1) fast path; 2a) `meta_map = _resolve_meta_soma(compute_data, source_data)`; 2b) if `meta_map` non-empty, (over)write `<stem>_soma.csv` from it (authoritative real anatomy; prevents a stale sidecar on later self-heal); 2c) `_maybe_persist_neuprint_soma` (only when `meta_map` empty + token); 3) refuse guard `if n>_spectral_cap() and _anatomy_coverage(compute_data, override=meta_map)<n: WARN+defer` (WARN reworded: real soma sidecar WAS written, full-graph layout deferred — set token / prune first); 4) `provision_positions(compute_data, projection, anatomy_override=meta_map)`; 5) persist positions.
+
+## Hook wiring
+- `_run_prune_export` → `resolve_positions(pruned, artifact_npz=npz_path, source_data=data, persist=True)` (`data` = SOURCE, pre-prune).
+- `prune_trained/workflow.py` (~:428) → `resolve_positions(pruned, artifact_npz=npz_path, source_data=base, persist=True)`.
+- `_run_fetch_connectome` — unchanged call; tier-0 auto-derives from the artifact's own sibling meta (has somaLocation).
+
+## AC-10 / AC-11 / AC-8
+- **AC-10:** central neurons get real somas from the meta; soma-less afferents flagged missing → partial-anatomy fill (never faked). Real `<stem>_soma.csv` written; zero neuPrint + zero spectral for soma-bearing.
+- **AC-11:** at fetch, step 2b writes real somas as a pure CSV subset (no eigh); refuse guard defers the full-graph positions layout; residual spectral guarded. Recording the full graph stays unsupported (prune first).
+- **AC-8:** numerical-identity holds (kwargs default None → identical); the change to which neurons get real vs fallback coords is the intended, documented consequence.
+
+## Test additions (qa)
+- NEW tiny meta fixture WITH `somaLocation`, DISTINCT from `mcns_fixture_meta.csv`.
+- `test_prune.py`/`test_cli.py`: prune → pruned `<stem>_soma.csv` has real subset coords for soma-bearing slice bodyids; zero neuPrint; zero spectral for soma-bearing (spy) [AC-1/AC-10].
+- `test_fetch.py`: small fetched connectome w/ somaLocation meta → real soma+positions sidecars, tokenless, no neuPrint/spectral for soma-bearing (AC-2/AC-10); large no-full-anatomy → real soma sidecar written + positions deferred + WARN (AC-11/d).
+- Also fix the two existing tests the baseline fetch-hook broke: `test_cli.py::test_fetch_connectome_downloads` and `::test_fetch_connectome_forwards_flags` (mock `load_connectome` + `resolve_positions`, or use a real fixture dir).
+- All other approved tests (AC-3..AC-9) stand. Docs: README/docstrings state the 5-level precedence, tokenless-by-default, soma-less afferents, full-connectome defer.

@@ -9,31 +9,47 @@ anatomical* so the map is never mistaken for biology.
 
 Source order (highest-fidelity first)
 -------------------------------------
-1. **Committed / local anatomical CSV** — tokenless, the CI/offline default:
+0. **Connectome meta ``somaLocation`` (tier-0, primary, tokenless)** — the MaleCNS download
+   already ships ``mcns_all_neuron_meta.csv`` (saved as ``<npz-stem>_meta.csv``) whose
+   ``somaLocation`` column holds real neuPrint MaleCNS 8 nm-voxel soma coordinates (CC-BY).
+   Provisioning reads it for the artifact's bodyids **before any network call** — real anatomy,
+   offline, by default (UC-27 AC-10). See :func:`_resolve_meta_soma`.
+1. **Committed / local anatomical CSV** — tokenless:
    * ``DRONE_FLY_SOMA_CSV`` (if set) pointing at either a plain ``bodyid,x,y,z`` CSV or a
      ``connectome_data_prep`` meta CSV carrying a ``somaLocation`` column
      (``"[x y z]"`` in neuPrint MaleCNS 8 nm voxel space); or
    * the **fixture sidecar** ``<connectome-stem>_soma.csv`` sitting beside the connectome
-     ``.npz`` (produced by ``scripts/fetch_soma_positions.py``). This is what makes the
-     committed fixture demo anatomical offline.
+     ``.npz`` (produced by ``scripts/fetch_soma_positions.py`` or persisted from tier-0). This
+     is what makes the committed fixture demo anatomical offline.
 2. **neuPrint** via ``neuprint-python`` + ``NEUPRINT_TOKEN`` — a dev-time, networked step
-   for arbitrary slices whose bodyids are not in a committed sidecar. Never required by
-   CI (guarded import; any failure degrades to the fallback).
+   for arbitrary slices whose bodyids are not in the meta or a committed sidecar. Never required
+   by CI (guarded import; any failure degrades to the fallback).
 3. **Deterministic spectral layout** — a seed-free spectral embedding of the (undirected,
-   magnitude-weighted) connectome graph, sign-canonicalised so it is bit-reproducible.
+   magnitude-weighted) connectome graph, sign-canonicalised so it is bit-reproducible. A
+   **last-resort** fallback only for neurons/connectomes with no ``somaLocation`` anywhere.
    Labelled ``"computed (NOT anatomical …)"``.
 
-Neurons that lack a real soma position are **flagged** (``has_position=False``) and
+Full precedence: **meta ``somaLocation`` → ``DRONE_FLY_SOMA_CSV`` → ``<stem>_soma.csv`` →
+neuPrint → spectral** (enforced in :func:`_load_anatomical`).
+
+Neurons that lack a real soma position anywhere — e.g. peripheral sensory afferents whose cell
+bodies sit outside the brain volume — are **flagged** (``has_position=False``) and
 fallback-placed — never dropped and never fabricated with a made-up anatomical value.
 
 Provisioning at slice time (UC-27)
 ----------------------------------
 Positions are provisioned **once, when a connectome artifact is created** — the ``prune``
 slice, the ``fetch-connectome`` base download, and the ``prune-trained`` subcircuit — and
-cached as a ``<connectome-stem>_positions.csv`` sidecar beside the ``.npz`` (and, when
-neuPrint anatomy is fetched, a ``<stem>_soma.csv`` sidecar). Recording-enabled training then
-only *loads* the sidecar: no per-run neuPrint fetch, no per-run spectral eigendecomposition.
-:func:`resolve_positions` is the single entry point for both sides.
+cached as a ``<connectome-stem>_positions.csv`` sidecar beside the ``.npz`` (plus a
+``<stem>_soma.csv`` sidecar carrying the real anatomy resolved from tier-0 meta
+``somaLocation``, tokenless — or from neuPrint when the meta lacks it). Recording-enabled
+training then only *loads* the sidecar: no per-run neuPrint fetch, no per-run spectral
+eigendecomposition. :func:`resolve_positions` is the single entry point for both sides.
+
+Because ``save_connectome`` does not copy ``somaLocation`` into a pruned artifact's own meta,
+the ``prune`` / ``prune-trained`` hooks pass the **source** connectome (``source_data``) so
+tier-0 anatomy is read from the source meta and subset to the artifact's bodyids;
+``fetch-connectome`` reads the fetched connectome's own sibling meta directly.
 
 * **Sidecar format.** One row per neuron, columns
   ``bodyid,has_position,x,y,z,u,v,source,projection`` (a verbatim serialisation of the
@@ -244,14 +260,89 @@ def _positions_sidecar_path(
     return None if p is None else p.with_name(f"{p.stem}_positions.csv")
 
 
+def _resolve_meta_soma(
+    data: ConnectomeData,
+    source_data: ConnectomeData | None = None,
+) -> dict[int, tuple[float, float, float]]:
+    """Tier-0 real anatomy: read ``somaLocation`` from the connectome's OWN meta CSV.
+
+    The MaleCNS download ships ``mcns_all_neuron_meta.csv`` (saved as ``<npz-stem>_meta.csv``)
+    whose ``somaLocation`` column holds real neuPrint 8 nm-voxel soma coordinates (CC-BY) —
+    tokenless, offline, the PRIMARY anatomy source (UC-27 AC-10). This returns a (possibly
+    partial/empty) ``bodyid -> (x, y, z)`` mapping subset to ``data.neuron_ids``.
+
+    Anchor selection:
+
+    * **Write side** (``source_data`` given — prune/prune-trained): a pruned artifact's own
+      ``save_connectome`` meta carries NO ``somaLocation`` (and ``ConnectomeData`` has no soma
+      field), so anatomy must come from the **SOURCE** connectome's meta. ``_base_npz_path``
+      strips the ``" [pruned:…]"`` / ``" [activation-pruned …]"`` provenance tag to recover the
+      real on-disk source ``.npz``, then reads its sibling ``_meta.csv``. As a WRITE-side-only
+      fallback (when the source meta lacks ``somaLocation``), the source's ``<stem>_soma.csv``
+      is used.
+    * **Read / fetch side** (``source_data=None``): the anchor is ``data`` itself — a freshly
+      fetched full connectome reads its own sibling meta (which has ``somaLocation``); a pruned
+      artifact's meta has none, so tier-0 is empty here and anatomy resolves at its normal
+      tier-2 ``<stem>_soma.csv`` (written at slice time) inside :func:`_load_anatomical`.
+
+    Empty/partial results are expected: soma-less peripheral afferents flow to the
+    partial-anatomy fill (never faked). Returns an int-keyed dict (``{}`` when nothing found).
+    """
+    anchor = source_data if source_data is not None else data
+    base_npz = _base_npz_path(anchor)
+    if base_npz is None:
+        return {}
+
+    mapping: dict[int, tuple[float, float, float]] = {}
+    meta_path = base_npz.with_name(f"{base_npz.stem}_meta.csv")
+    if meta_path.is_file():
+        try:
+            frame = pd.read_csv(meta_path, usecols=["bodyid", "somaLocation"], low_memory=False)
+        except ValueError:
+            frame = None  # no somaLocation column in this meta → tier-0 unavailable here
+        except OSError as exc:
+            logger.warning(
+                "Could not read meta CSV %s (%s); skipping tier-0 anatomy.", meta_path, exc
+            )
+            frame = None
+        if frame is not None:
+            mapping = _mapping_from_frame(frame)
+
+    # WRITE-side-only fallback: the source's own soma sidecar when its meta has no somaLocation.
+    if not mapping and source_data is not None:
+        soma_path = base_npz.with_name(f"{base_npz.stem}_soma.csv")
+        if soma_path.is_file():
+            mapping = _load_soma_csv(soma_path)
+
+    if not mapping:
+        return {}
+
+    # Subset to this artifact's neuron set (the meta may cover a superset, e.g. the full graph),
+    # using the same int canonicalization as the node-set HIT rule.
+    wanted = {int(b) for b in np.asarray(data.neuron_ids).tolist() if _is_int_like(b)}
+    return {bid: xyz for bid, xyz in mapping.items() if bid in wanted}
+
+
 def _load_anatomical(
     data: ConnectomeData,
+    *,
+    override: dict[int, tuple[float, float, float]] | None = None,
 ) -> tuple[dict[int, tuple[float, float, float]], str] | None:
     """Resolve anatomical soma positions via the documented source order.
 
-    Returns ``(mapping, source_label)`` for the first source that yields at least one
-    position, else ``None`` (caller then uses the computed fallback).
+    Precedence (highest first): meta ``somaLocation`` (tier-0, passed in as ``override``) →
+    ``DRONE_FLY_SOMA_CSV`` → ``<stem>_soma.csv`` sidecar → neuPrint → (caller's) spectral. A
+    non-empty ``override`` wins outright as tier-0; any neurons it does not cover flow to the
+    partial-anatomy fill in :func:`provision_positions` (they are not looked up in lower tiers —
+    once real meta anatomy is present it is authoritative). ``override=None`` (the default)
+    reproduces the historical order exactly, so numeric output is unchanged (AC-8).
+
+    Returns ``(mapping, source_label)`` for the first source that yields at least one position,
+    else ``None`` (caller then uses the computed fallback).
     """
+    if override:
+        return dict(override), "anatomical (connectome meta somaLocation)"
+
     env_csv = os.environ.get(SOMA_CSV_ENV)
     if env_csv:
         path = Path(env_csv)
@@ -380,7 +471,12 @@ def _scale_into_box(source: np.ndarray, reference: np.ndarray) -> np.ndarray:
     return out
 
 
-def provision_positions(data: ConnectomeData, *, projection: str = DEFAULT_PROJECTION) -> dict:
+def provision_positions(
+    data: ConnectomeData,
+    *,
+    projection: str = DEFAULT_PROJECTION,
+    anatomy_override: dict[int, tuple[float, float, float]] | None = None,
+) -> dict:
     """Provision soma positions + a top-down projection for every neuron (once).
 
     Returns a JSON-ready dict matching the recording schema's ``positions`` block::
@@ -393,10 +489,14 @@ def provision_positions(data: ConnectomeData, *, projection: str = DEFAULT_PROJE
           "has_position": [bool, ...],            # True iff a real anatomical soma
         }
 
-    Anatomical positions (source 1/2) are used where available; neurons missing a soma are
-    flagged ``has_position=False`` and fallback-placed inside the anatomical extent (their
-    ``coords3d`` is ``null`` — no fabricated 3-D anatomy). When no anatomy is reachable at
-    all, every neuron gets the deterministic spectral layout, labelled as *computed*.
+    Anatomical positions are used where available; neurons missing a soma are flagged
+    ``has_position=False`` and fallback-placed inside the anatomical extent (their ``coords3d``
+    is ``null`` — no fabricated 3-D anatomy). When no anatomy is reachable at all, every neuron
+    gets the deterministic spectral layout, labelled as *computed*.
+
+    ``anatomy_override`` (UC-27 AC-10) is the tier-0 meta-``somaLocation`` mapping; when non-empty
+    it is the authoritative anatomy source (see :func:`_load_anatomical`). ``None`` (default)
+    reproduces the historical output exactly (AC-8).
     """
     if projection not in PROJECTIONS:
         raise ValueError(
@@ -407,7 +507,7 @@ def provision_positions(data: ConnectomeData, *, projection: str = DEFAULT_PROJE
     n = data.neuron_count
     ids = np.asarray(data.neuron_ids).tolist()
 
-    anatomical = _load_anatomical(data)
+    anatomical = _load_anatomical(data, override=anatomy_override)
     if anatomical is not None:
         mapping, source = anatomical
         coords3d: list[list[float] | None] = []
@@ -662,16 +762,49 @@ def _load_positions_sidecar(
     }
 
 
+def _write_soma_sidecar(
+    soma_path: Path,
+    mapping: dict[int, tuple[float, float, float]],
+    *,
+    strict: bool,
+) -> None:
+    """Write a ``bodyid,x,y,z`` soma sidecar from an in-memory mapping.
+
+    This is the persisted, tokenless-reusable real-anatomy artifact (the existing tier-2
+    ``<stem>_soma.csv``). Coordinates are written at :data:`_FLOAT_FMT`. A write ``OSError`` is
+    raised when ``strict`` (write hooks), else logged and swallowed (recorder best-effort).
+    """
+    frame = pd.DataFrame(
+        [
+            {
+                "bodyid": bid,
+                "x": _FLOAT_FMT % float(xyz[0]),
+                "y": _FLOAT_FMT % float(xyz[1]),
+                "z": _FLOAT_FMT % float(xyz[2]),
+            }
+            for bid, xyz in mapping.items()
+        ]
+    )
+    try:
+        frame.to_csv(soma_path, index=False)
+    except OSError as exc:
+        if strict:
+            raise
+        logger.warning("Could not persist soma sidecar %s (%s); continuing.", soma_path, exc)
+        return
+    logger.info("Persisted %d real soma positions to %s.", len(mapping), soma_path)
+
+
 def _maybe_persist_neuprint_soma(
     data: ConnectomeData, soma_path: Path | None, *, strict: bool
 ) -> None:
     """Fetch real anatomy from neuPrint once and persist it as ``<stem>_soma.csv`` (AC-6).
 
+    Only reached when tier-0 meta ``somaLocation`` was empty (see :func:`resolve_positions`).
     A no-op unless ``NEUPRINT_TOKEN`` is set, ``DRONE_FLY_SOMA_CSV`` is NOT set (that tier-1
     override wins on its own), and the soma sidecar does not already exist. On success the
-    ``bodyid,x,y,z`` sidecar is written beside the artifact so later loads reuse it via the
-    existing tier-2 path with no further network calls — and so the subsequent compute finds
-    it (neuPrint preferred over the spectral fallback). Dev-time only; never hit by CI.
+    sidecar is written beside the artifact so later loads reuse it via tier-2 with no further
+    network calls (neuPrint preferred over the spectral fallback). Dev-time only; never hit by CI.
     """
     if soma_path is None or soma_path.is_file():
         return
@@ -682,28 +815,23 @@ def _maybe_persist_neuprint_soma(
     mapping = _load_from_neuprint(np.asarray(data.neuron_ids))
     if not mapping:  # pragma: no cover - dev-time networked path, not exercised in CI
         return
-    frame = pd.DataFrame(  # pragma: no cover - dev-time networked path, not exercised in CI
-        [{"bodyid": bid, "x": xyz[0], "y": xyz[1], "z": xyz[2]} for bid, xyz in mapping.items()]
-    )
-    try:  # pragma: no cover - dev-time networked path, not exercised in CI
-        frame.to_csv(soma_path, index=False)
-    except OSError as exc:
-        if strict:
-            raise
-        logger.warning("Could not persist soma sidecar %s (%s); continuing.", soma_path, exc)
-        return
-    logger.info(  # pragma: no cover - dev-time networked path, not exercised in CI
-        "Persisted %d neuPrint soma positions to %s.", len(mapping), soma_path
+    _write_soma_sidecar(  # pragma: no cover - dev-time networked path, not exercised in CI
+        soma_path, mapping, strict=strict
     )
 
 
-def _anatomy_coverage(data: ConnectomeData) -> int:
+def _anatomy_coverage(
+    data: ConnectomeData,
+    *,
+    override: dict[int, tuple[float, float, float]] | None = None,
+) -> int:
     """Count neurons for which :func:`_load_anatomical` yields a real soma position.
 
     Used only by the large-connectome guard to decide whether a compute would need the
-    spectral fallback. Returns 0 when no anatomy is reachable at all.
+    spectral fallback. ``override`` is the tier-0 meta mapping (so the full connectome's real
+    meta anatomy counts against the cap — AC-11). Returns 0 when no anatomy is reachable.
     """
-    anatomical = _load_anatomical(data)
+    anatomical = _load_anatomical(data, override=override)
     if anatomical is None:
         return 0
     mapping, _ = anatomical
@@ -716,6 +844,7 @@ def resolve_positions(
     *,
     projection: str = DEFAULT_PROJECTION,
     artifact_npz: str | os.PathLike[str] | None = None,
+    source_data: ConnectomeData | None = None,
     persist: bool = True,
     persist_strict: bool = True,
 ) -> dict | None:
@@ -726,18 +855,25 @@ def resolve_positions(
     recorder calls it on the read side (``artifact_npz=None``, keyed off ``data.source``) and
     self-heals older artifacts that predate the sidecar.
 
+    Anatomy precedence (AC-10): **meta ``somaLocation`` (tier-0) → ``DRONE_FLY_SOMA_CSV`` →
+    ``<stem>_soma.csv`` → neuPrint → spectral**. Real anatomy is tokenless by default: the
+    connectome's own meta CSV supplies real soma coordinates offline.
+
     Flow:
 
-    1. **Fast path** — a valid ``<stem>_positions.csv`` (see :func:`_load_positions_sidecar`)
-       returns immediately with **no** spectral eigendecomposition and **no** neuPrint fetch
-       (AC-4).
-    2. **neuPrint persist** — real anatomy is fetched once and cached as ``<stem>_soma.csv``
-       (AC-6), so the compute below finds it via tier-2 (neuPrint preferred over spectral).
-    3. **Large-connectome guard** — when a compute would need the dense spectral fallback for
-       ``n > _spectral_cap()`` neurons AND anatomy is absent/partial, do NOT build the giant
-       Laplacian: WARN, leave ``_positions.csv`` unwritten, and return ``None`` (defer). A
-       full connectome with COMPLETE real anatomy still provisions (no spectral needed).
-    4. **Compute** via :func:`provision_positions` (output-identical to today — AC-8).
+    1. **Fast path** — a valid ``<stem>_positions.csv`` returns immediately with **no** spectral
+       eigendecomposition and **no** neuPrint fetch (AC-4).
+    2a. **Tier-0 meta anatomy** — read real ``somaLocation`` for the artifact's bodyids from the
+        (source) connectome meta (:func:`_resolve_meta_soma`), tokenless (AC-10).
+    2b. **Persist real soma** — when tier-0 is non-empty, (over)write ``<stem>_soma.csv`` from it
+        so it is authoritative for later self-heal loads (never a stale sidecar).
+    2c. **neuPrint** — only when tier-0 is empty and a token is set (AC-6).
+    3. **Large-connectome guard** — when a compute would still need the dense spectral fallback
+       for ``n > _spectral_cap()`` neurons AND anatomy (incl. tier-0) is absent/partial, do NOT
+       build the giant Laplacian: WARN, leave ``_positions.csv`` unwritten, return ``None``. Real
+       anatomy from the meta means the full connectome provisions without an ``eigh`` (AC-11).
+    4. **Compute** via :func:`provision_positions` (``anatomy_override`` = tier-0 map; identical
+       output when the map is empty — AC-8).
     5. **Persist** the result to ``<stem>_positions.csv`` when ``persist`` (best-effort when
        ``persist_strict`` is false — the recorder's read-only-dir case).
 
@@ -746,8 +882,13 @@ def resolve_positions(
     artifact_npz:
         The just-saved connectome ``.npz`` (write hooks). Sidecars are keyed off it, never off
         the pruned ``data.source``. ``None`` on the read side (recorder).
+    source_data:
+        The SOURCE connectome the artifact was derived from (prune → the pre-prune ``data``;
+        prune-trained → ``base``). Its meta carries the real ``somaLocation``; a pruned
+        artifact's own meta does not. ``None`` on the read/fetch side (anatomy comes from the
+        artifact's own sibling meta / sidecar).
     persist / persist_strict:
-        Whether to write the positions sidecar, and whether a write ``OSError`` is fatal.
+        Whether to write the sidecars, and whether a write ``OSError`` is fatal.
 
     Returns
     -------
@@ -769,16 +910,25 @@ def resolve_positions(
     # (artifact_npz is None) compute_data is data unchanged.
     compute_data = data if artifact_npz is None else replace(data, source=str(Path(artifact_npz)))
 
-    # 2. Persist real anatomy once (dev-time neuPrint), preferred over spectral.
-    _maybe_persist_neuprint_soma(compute_data, soma_path, strict=persist_strict)
+    # 2a. Tier-0 real anatomy from the connectome meta CSV (tokenless, primary) — AC-10.
+    meta_map = _resolve_meta_soma(compute_data, source_data)
 
-    # 3. Large-connectome refuse guard — never build a full-MaleCNS-scale dense eigh.
+    # 2b. Persist tier-0 anatomy as the authoritative real soma sidecar (overwrite any stale one).
+    if persist and meta_map and soma_path is not None:
+        _write_soma_sidecar(soma_path, meta_map, strict=persist_strict)
+    # 2c. neuPrint only when the meta yielded no real anatomy (dev-time; preferred over spectral).
+    elif not meta_map:
+        _maybe_persist_neuprint_soma(compute_data, soma_path, strict=persist_strict)
+
+    # 3. Large-connectome refuse guard — never build a full-MaleCNS-scale dense eigh. Real meta
+    # anatomy (tier-0) counts toward coverage, so a full connectome with somaLocation provisions.
     n = data.neuron_count
-    if n > _spectral_cap() and _anatomy_coverage(compute_data) < n:
+    if n > _spectral_cap() and _anatomy_coverage(compute_data, override=meta_map) < n:
         logger.warning(
-            "No/partial anatomy for a %d-neuron connectome (> spectral cap %d): positions "
-            "were NOT provisioned (a dense spectral layout at this scale is infeasible). Set "
-            "%s or %s, or prune the connectome before recording.",
+            "No/partial anatomy for a %d-neuron connectome (> spectral cap %d): the real soma "
+            "sidecar (from any available somaLocation) WAS written, but the full-graph position "
+            "layout was NOT computed (a dense spectral layout at this scale is infeasible). "
+            "Provide anatomy (%s / %s) or prune the connectome before recording.",
             n,
             _spectral_cap(),
             "NEUPRINT_TOKEN",
@@ -786,15 +936,15 @@ def resolve_positions(
         )
         return None
 
-    # 4. Compute (output-identical to the historical path). On the read side a miss means the
-    # artifact predates the sidecar — WARN that we are provisioning on the fly (AC-5 self-heal).
+    # 4. Compute (output-identical to the historical path when meta_map is empty — AC-8). On the
+    # read side a miss means the artifact predates the sidecar — WARN (AC-5 self-heal).
     if artifact_npz is None:
         logger.warning(
             "No positions sidecar for this connectome (%s); provisioning positions on the fly "
             "and caching them beside the artifact so later runs load instead of recompute.",
             pos_path,
         )
-    result = provision_positions(compute_data, projection=projection)
+    result = provision_positions(compute_data, projection=projection, anatomy_override=meta_map)
 
     # 5. Persist for next time.
     if persist and pos_path is not None:
