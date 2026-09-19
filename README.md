@@ -193,6 +193,7 @@ What CI actually exercises versus what needs the native sim, recorded from a rea
 |------|--------|---------|
 | `simple` numpy adapter, loader, prune, config, viz contract | tested (CI) | runs hermetically offline |
 | `pybullet` full-physics adapter | untested in CI | needs a C/C++ toolchain; verified on macOS + Xcode CLT |
+| `pybullet` via macOS conda (`setup-sim-macos.sh`) | untested in CI | no macOS/conda runner in CI; uses prebuilt conda-forge pybullet — validated on a managed macOS 26 arm64 box |
 
 The gym-pybullet-drones pin is resolved with `git ls-remote` to a fixed commit SHA (never floating
 `main`); `scripts/train.sh` and the adapter share that SHA and verify `import pybullet` before training.
@@ -200,6 +201,42 @@ The gym-pybullet-drones pin is resolved with `git ls-remote` to a fixed commit S
 **Mastery goal & dynamics.** The target is **80**% waypoint **mastery** (course completion). Mastery
 runs use **fixed** environment dynamics (**no domain randomization**) for reproducibility; enable
 randomization explicitly only for robustness experiments.
+
+### macOS (Apple Silicon) real-physics sim setup (UC-20)
+On modern macOS (26 / Tahoe, Apple Silicon) the `scripts/train.sh` from-source `pybullet` build
+**cannot compile**: pybullet's vendored zlib (`zutil.h`'s `#define fdopen(fd,mode) NULL`) collides
+with the macOS SDK's `_stdio.h` `fdopen` declaration, so no from-source pybullet (3.2.6, or the 3.2.7
+that gym-pybullet-drones pins) builds — regardless of Xcode CLT / clang version. **From-source
+pybullet is therefore unsupported on modern macOS SDKs.** Use the prebuilt path instead:
+
+    ./scripts/setup-sim-macos.sh          # add --dry-run to print the plan without touching anything
+
+It provisions the sim from **prebuilt binaries only**:
+
+- **miniforge** — installed only after an explicit prompt (into `~/miniforge3`, user-space; never
+  `sudo`, never silent; decline and it installs nothing and exits non-zero);
+- a **`dronefly` conda env** (Python 3.12);
+- **conda-forge prebuilt `pybullet` (3.2.5**, the newest arm64 build on conda-forge) — the C/C++
+  compiler is never invoked for pybullet;
+- **`gym-pybullet-drones`** at the exact commit pinned in `scripts/train.sh` (single source of
+  truth — the SHA is read out of `train.sh`, never duplicated here), installed with
+  **`pip install --no-deps`** so pip does not pull in and source-build a newer pybullet, plus its
+  runtime deps installed explicitly;
+- `pip install -e ".[dev]"` and the `drone-fly` console script.
+
+**Why 3.2.5 + `--no-deps`:** gym-pybullet-drones pins `pybullet>3.2.7` conservatively, but the
+`CtrlAviary` / `DroneModel` / `Physics` symbols this project uses run fine against conda-forge's 3.2.5;
+`--no-deps` is what keeps pip from dragging in a source pybullet build. The explicit runtime-dep list
+is hand-maintained to track the validated recipe, with the script's post-install import check
+(`pybullet` + `gym-pybullet-drones` + `drone_fly`) as the backstop.
+
+Afterwards `./scripts/train.sh` **auto-detects macOS** and runs training through the `dronefly` env
+(it never attempts the doomed source build on macOS). If the prebuilt path cannot be satisfied, the
+script **fails fast** and prints a ready-to-run **Linux-container** command (Apple `container` /
+Docker) that installs the prebuilt manylinux `pybullet` wheel from PyPI — it never falls back to a
+source build. The macOS/conda path has no CI runner, so (like the `pybullet` boundary above) it is an
+**untested in CI** boundary; what CI *can* check is that the script is `shellcheck`-clean, parses under
+`bash -n`, and is safely `--dry-run`-able.
 
 ### Project layout & history
 Source under `src/drone_fly/` (connectome loader, controller/actor, adapter, env, train, evaluate,

@@ -43,6 +43,32 @@ cd "$REPO_ROOT"
 log() { printf '\033[1;34m[train.sh]\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m[train.sh] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# --- macOS (Darwin) dispatch (UC-20). -----------------------------------------------------
+# Modern macOS SDKs cannot source-build pybullet (its vendored zlib `zutil.h` `fdopen` macro
+# clashes with the SDK `_stdio.h`), so on macOS we run training through the PREBUILT-conda
+# `dronefly` env provisioned by ./scripts/setup-sim-macos.sh — never the from-source uv path
+# below. This branch is Darwin-only; Linux/CI never enters it, so the existing path is
+# byte-for-byte unchanged.
+if [ "$(uname -s)" = "Darwin" ]; then
+  MAC_CONDA_ENV="${DRONE_FLY_CONDA_ENV:-dronefly}"
+  MAC_CONDA_BIN=""
+  if command -v conda >/dev/null 2>&1; then
+    MAC_CONDA_BIN="$(command -v conda)"
+  elif [ -n "${CONDA_EXE:-}" ] && [ -x "${CONDA_EXE:-}" ]; then
+    MAC_CONDA_BIN="$CONDA_EXE"
+  elif [ -x "$HOME/miniforge3/bin/conda" ]; then
+    MAC_CONDA_BIN="$HOME/miniforge3/bin/conda"
+  fi
+  if [ -n "$MAC_CONDA_BIN" ] && "$MAC_CONDA_BIN" env list | awk '{print $1}' | grep -qx "$MAC_CONDA_ENV"; then
+    [ -f "$CONFIG" ] || fail "Config file not found: $CONFIG. Pass one as the first argument, or \
+copy configs/train/example.yaml and edit it."
+    log "macOS detected — training via the prebuilt conda env '$MAC_CONDA_ENV' (UC-20)."
+    exec "$MAC_CONDA_BIN" run --no-capture-output -n "$MAC_CONDA_ENV" drone-fly train --config "$CONFIG"
+  fi
+  fail "macOS detected but the prebuilt sim env '$MAC_CONDA_ENV' is not set up. Run \
+./scripts/setup-sim-macos.sh first (from-source pybullet cannot build on modern macOS SDKs — UC-20)."
+fi
+
 command -v uv >/dev/null 2>&1 || fail \
   "uv is required. Install it: https://docs.astral.sh/uv/  (curl -LsSf https://astral.sh/uv/install.sh | sh)"
 

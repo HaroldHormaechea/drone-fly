@@ -29,4 +29,4 @@ Statuses:
 | 17 | [use-cases/17-battery-drain-thrust-sense.md](use-cases/17-battery-drain-thrust-sense.md) | Battery drain + thrust impact + battery ("hunger") observation block | done | 2026-09-18 |
 | 18 | [use-cases/18-recharge-pads.md](use-cases/18-recharge-pads.md) | Recharge pads (dock-to-recharge, energy-constrained course variation) | done | 2026-09-18 |
 | 19 | [use-cases/19-damage-repair-pads.md](use-cases/19-damage-repair-pads.md) | Damage/integrity + repair pads + proprioceptive(damage) observation block | done | 2026-09-18 |
-| 20 | [use-cases/20-macos-sim-setup-automation.md](use-cases/20-macos-sim-setup-automation.md) | Automated macOS real-physics sim setup (prebuilt pybullet, no source build) | pending | 2026-09-18 |
+| 20 | [use-cases/20-macos-sim-setup-automation.md](use-cases/20-macos-sim-setup-automation.md) | Automated macOS real-physics sim setup (prebuilt pybullet, no source build) | done | 2026-09-19 |
