@@ -63,6 +63,12 @@ const COURSE_COLORS = {
   finish: "#ff5252",
   drone: "#ffffff",
   obstacle: "#ba68c8", // UC-15: floor-anchored pillar wireframes (purple, distinct from gates)
+  // UC-21: landing-pad floor discs, coloured by kind. Chosen distinct from the markers above:
+  // padRecharge green is a brighter shade than the start-green dot; padRepair is a deep orange
+  // distinct from gate-yellow and finish-red; padPlain is a neutral grey.
+  padRecharge: "#00e676",
+  padRepair: "#ff6d00",
+  padPlain: "#90a4ae",
 };
 
 // tiny vec3 helpers (plain arrays, no deps)
@@ -570,6 +576,10 @@ function buildFlightScene(doc) {
   // degradation — older files + no-obstacle runs draw no pillars).
   const obstacles = (course && course.obstacles) || [];
 
+  // Landing pads (UC-21), or [] when the recording has no `pads` field (graceful degradation —
+  // older files + no-pad runs draw no pads).
+  const pads = (course && course.pads) || [];
+
   // Anchor points that must always be inside the display extent — every gate centre plus
   // start and finish (and every pillar's footprint extents), so the floor/finish plane always
   // contain the whole course.
@@ -587,6 +597,13 @@ function buildFlightScene(doc) {
       const top = fz + (o.height || 0);
       anchors.push([o.center[0] - r, o.center[1] - r, fz]);
       anchors.push([o.center[0] + r, o.center[1] + r, top]);
+    }
+    // Pad footprints (UC-21) so the floor/bbox always contains every pad disc (floor-anchored).
+    for (const p of pads) {
+      if (!p || !p.center) continue;
+      const r = p.radius || 0;
+      anchors.push([p.center[0] - r, p.center[1] - r, fz]);
+      anchors.push([p.center[0] + r, p.center[1] + r, fz]);
     }
     if (course.finish && course.finish.x != null) {
       // finish anchor: use the LAST gate's lateral centre at the finish x so x-extent reaches
@@ -619,7 +636,7 @@ function buildFlightScene(doc) {
   const radius =
     0.5 * v3.len([bb.max[0] - bb.min[0], bb.max[1] - bb.min[1], bb.max[2] - bb.min[2]]) || 1;
 
-  return { path, course, gates, obstacles, bb, center, radius, floorZ, ceilZ };
+  return { path, course, gates, obstacles, pads, bb, center, radius, floorZ, ceilZ };
 }
 
 // Normalise a meta.course into an array of gate specs (UC-09 AC7). New recordings carry
@@ -825,6 +842,10 @@ function createFlight3D(canvas) {
       const cx = o.center[0], cy = o.center[1];
       const r = o.radius || 0;
       const top = fz + (o.height || 0);
+      // UC-21 visibility fix: draw a floor-anchored base ring + low-alpha filled disc so the
+      // pillar's footprint reads against the floor grid (the bare wireframe was near-invisible),
+      // and bump the wireframe stroke to 2px. Shares the DRY floorDisc helper with drawPads().
+      floorDisc(cx, cy, r, fz, COURSE_COLORS.obstacle, fillAlpha(COURSE_COLORS.obstacle, 0.15));
       const bottom = [], upper = [];
       for (let i = 0; i <= SEG; i++) {
         const a = (i / SEG) * Math.PI * 2;
@@ -832,13 +853,71 @@ function createFlight3D(canvas) {
         bottom.push([px, py, fz]);
         upper.push([px, py, top]);
       }
-      strokeProjected(bottom, COURSE_COLORS.obstacle, 1.5);
-      strokeProjected(upper, COURSE_COLORS.obstacle, 1.5);
+      strokeProjected(bottom, COURSE_COLORS.obstacle, 2);
+      strokeProjected(upper, COURSE_COLORS.obstacle, 2);
       for (let i = 0; i < EDGES; i++) {
         const a = (i / EDGES) * Math.PI * 2;
         const px = cx + r * Math.cos(a), py = cy + r * Math.sin(a);
-        line([px, py, fz], [px, py, top], COURSE_COLORS.obstacle, 1);
+        line([px, py, fz], [px, py, top], COURSE_COLORS.obstacle, 2);
       }
+    }
+  }
+
+  // UC-21: convert a #rrggbb palette colour to an rgba() string at a given alpha — used for the
+  // low-alpha filled floor discs (pads + obstacle footprints).
+  function fillAlpha(hex, a) {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return `rgba(${r},${g},${b},${a})`;
+  }
+
+  // UC-21: shared floor-anchored disc marker — a ring outline (2px) plus a low-alpha filled disc
+  // at world z. DRY helper used by both drawPads() (pad footprints) and drawObstacles() (the
+  // obstacle visibility base ring). Skips the fill when a vertex is behind the camera.
+  function floorDisc(cx, cy, r, z, strokeColor, fillColor) {
+    const SEG = 48;
+    const ring = [];
+    for (let i = 0; i <= SEG; i++) {
+      const a = (i / SEG) * Math.PI * 2;
+      ring.push([cx + r * Math.cos(a), cy + r * Math.sin(a), z]);
+    }
+    if (fillColor) {
+      const proj = ring.map(project);
+      if (proj.every(Boolean)) {
+        ctx.fillStyle = fillColor;
+        ctx.beginPath();
+        ctx.moveTo(proj[0].x, proj[0].y);
+        for (let i = 1; i < proj.length; i++) ctx.lineTo(proj[i].x, proj[i].y);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+    strokeProjected(ring, strokeColor, 2);
+  }
+
+  // UC-21: map a pad's serialised `kind` to its palette colour. Unknown/absent kinds (legacy
+  // recordings, or a pad missing the field) degrade to plain grey — no error.
+  function padColor(kind) {
+    if (kind === "recharge") return COURSE_COLORS.padRecharge;
+    if (kind === "repair") return COURSE_COLORS.padRepair;
+    return COURSE_COLORS.padPlain;
+  }
+
+  // UC-21: draw each landing pad as a floor-anchored disc coloured by kind (recharge green /
+  // repair deep-orange / plain grey). Guarded by `scene.pads || []` so a recording without the
+  // field draws nothing (graceful degradation, matching obstacles/markers). Every field read is
+  // optional-guarded so a legacy pad missing `kind`/`center`/`radius` degrades cleanly.
+  function drawPads() {
+    const pads = scene.pads || [];
+    if (!pads.length) return;
+    const fz = scene.floorZ;
+    for (const p of pads) {
+      if (!p || !p.center) continue;
+      const cx = p.center[0], cy = p.center[1];
+      const r = p.radius || 0;
+      const color = padColor(p.kind);
+      floorDisc(cx, cy, r, fz, color, fillAlpha(color, 0.18));
     }
   }
 
@@ -880,6 +959,7 @@ function createFlight3D(canvas) {
     drawFloorGrid();
     drawMarkers();
     drawObstacles();
+    drawPads();
     drawTrajectory();
   }
 

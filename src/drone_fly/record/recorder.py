@@ -345,14 +345,29 @@ def _course_meta(course: CourseConfig) -> dict:
     # UC-16: landing/takeoff pads stamped **additively** and presence-guarded exactly like the
     # obstacles block above — the key is emitted only when the course actually has pads, so no-pad
     # runs and every pre-UC-16 recording stay byte-for-byte unchanged (the viewer degrades
-    # gracefully when the field is absent; ``drawPads`` is deferred to a later UC). Floor-anchored:
-    # a pad sits on ``floor_z`` with a horizontal disc of ``radius`` about ``center``.
+    # gracefully when the field is absent). Floor-anchored: a pad sits on ``floor_z`` with a
+    # horizontal disc of ``radius`` about ``center``.
+    #
+    # UC-21: each pad additionally carries a display-only ``kind`` derived from the real
+    # ``PadSpec.rechargeable`` / ``repairable`` flags so the viewer can colour pad kinds apart.
+    # Precedence is **display-only** (repair wins over recharge for the marker) — env behaviour is
+    # unchanged (a both-flags pad still recharges *and* repairs). The mapping: repairable (incl.
+    # both flags) → ``"repair"``; rechargeable-only → ``"recharge"``; neither → ``"plain"``. It is
+    # appended after ``radius`` within the already-presence-guarded pads block, so no-pad courses
+    # and every pre-UC-21 recording stay byte-for-byte unchanged.
     pads = getattr(course, "pads", ())
     if pads:
         meta["pads"] = [
             {
                 "center": [float(p.center[0]), float(p.center[1])],
                 "radius": float(p.radius),
+                "kind": (
+                    "repair"
+                    if getattr(p, "repairable", False)
+                    else "recharge"
+                    if getattr(p, "rechargeable", False)
+                    else "plain"
+                ),
             }
             for p in pads
         ]
