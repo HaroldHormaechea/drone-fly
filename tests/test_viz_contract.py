@@ -113,6 +113,21 @@ def test_recorded_file_satisfies_viewer_contract(recorded_doc: dict) -> None:
     assert positions["projection"] in {"xz", "xy", "yz"}
     assert np.isfinite(np.asarray(positions["coords2d"], dtype=float)).all()
 
+    # (a2) UC-28 full-coverage fields: placement / region / display3d are additive, full-length,
+    # and display3d is finite for EVERY neuron so the viewer renders all N on any plane (AC-2).
+    assert set(positions) >= {"placement", "region", "display3d"}
+    assert len(positions["placement"]) == n
+    assert len(positions["region"]) == n
+    assert len(positions["display3d"]) == n
+    assert set(positions["placement"]) <= {"anatomical", "schematic", "computed"}
+    assert np.isfinite(np.asarray(positions["display3d"], dtype=float)).all()
+    assert all(len(p) == 3 for p in positions["display3d"])
+
+    # (a3) UC-28 modality tag (AC-7): one tag per neuron, from the fixed recorded set (or "").
+    modality = doc["meta"]["modality"]
+    assert len(modality) == n
+    assert set(modality) <= {"vision", "proprioceptive", "hunger", ""}
+
     # (b) heatmap panel — one role per neuron for row ordering/colour (AC9).
     roles = doc["meta"]["roles"]
     assert len(roles) == n
@@ -200,6 +215,10 @@ def test_viewer_js_references_contract_fields_and_avoids_network() -> None:
         "activations",
         "actions",
         "drone_position",
+        # UC-28 additive contract fields.
+        "display3d",
+        "placement",
+        "modality",
     ):
         assert field in js, f"viewer.js does not reference contract field {field!r}"
     # No network: the file is read locally (FileReader / DecompressionStream), never fetched.
@@ -666,3 +685,71 @@ def test_viewer_assets_pass_node_check(asset: str) -> None:
         text=True,
     )
     assert result.returncode == 0, f"`node --check {asset}` failed:\n{result.stderr}"
+
+
+# --- UC-28: full-coverage body-schematic render + modality overlay (static viewer checks) ------
+def test_viewer_js_renders_display3d_full_coverage() -> None:
+    """AC-1/AC-2: viewer.js prefers ``display3d`` (full-coverage finite render coords) for points.
+
+    Static assertion (CI is headless): the point projector consumes ``positions.display3d`` so
+    every neuron — real soma or schematic body — is placed on any plane, and the fixed-mode
+    transform is widened to the UNION of the registered outline bbox and the display3d extent so
+    body clusters placed outside the brain bbox are not clipped off-canvas.
+    """
+    js = (_VIZ / "viewer.js").read_text()
+    assert "display3d" in js, "viewer.js must consume positions.display3d for full coverage"
+    # Fixed-mode transform widened to outline.bbox3d ∪ display3d extent (else clusters clip).
+    assert "bbox3d" in js
+    assert "Math.min(" in js and "Math.max(" in js  # the union widening arithmetic
+
+
+def test_viewer_js_distinguishes_schematic_from_anatomical() -> None:
+    """AC-6: schematic (body) neurons are rendered distinguishably from real-anatomy neurons.
+
+    Static assertion: the viewer reads ``positions.placement`` and stamps ``"schematic"`` splats
+    at a reduced weight (a named constant) so a schematic dot never reads as bright as a real
+    soma — visual distinction on top of the spatial separation the placement gives.
+    """
+    js = (_VIZ / "viewer.js").read_text()
+    assert "placement" in js
+    assert '"schematic"' in js or "'schematic'" in js
+    assert "SCHEMATIC_SPLAT_WEIGHT" in js, "viewer.js must down-weight schematic splats (AC-6)"
+
+
+def test_viewer_js_has_modality_overlay_toggle() -> None:
+    """AC-7: viewer.js draws a modality-tag overlay ON TOP of the activation colormap, as a toggle.
+
+    Static assertion: a ``drawModalityOverlay`` routine reads the ``modality-tag-select`` control
+    and the per-neuron ``meta.modality`` tags, colouring exactly the recorded set
+    (vision / proprioceptive / hunger). It overlays rings — it does not replace the hot colormap.
+    """
+    js = (_VIZ / "viewer.js").read_text()
+    assert "drawModalityOverlay" in js
+    assert "modality-tag-select" in js
+    assert "MODALITY_COLORS" in js
+    for name in ("vision", "proprioceptive", "hunger"):
+        assert name in js, f"viewer.js modality overlay must know {name!r}"
+    # `damage` is documented as unavailable (no MaleCNS nociceptive label) — never faked.
+    assert "damage" in js.lower()
+
+
+def test_viewer_html_has_modality_tag_select_off_default() -> None:
+    """AC-7: viewer.html offers the modality toggle with 'off' the default (never overrides colour).
+
+    Anchored on the ``modality-tag-select`` element (mirrors the map-view/map-norm assertion
+    style) so a bare text grep elsewhere can't produce a false positive.
+    """
+    html = (_VIZ / "viewer.html").read_text()
+    body = _extract_select(html, "modality-tag-select")
+    values = [v for v, _ in _options(body)]
+    assert values == ["off", "vision", "proprioceptive", "hunger"], (
+        f"modality-tag-select option values wrong: {values}"
+    )
+    selected = [v for v, sel in _options(body) if sel]
+    assert selected == ["off"], f"modality overlay must default to 'off'; got {selected}"
+
+
+def test_viewer_html_documents_damage_unavailable() -> None:
+    """AC-7 honesty: the viewer legend documents damage/nociception as unavailable (no fake tag)."""
+    html = (_VIZ / "viewer.html").read_text().lower()
+    assert "damage" in html and "unavailable" in html
