@@ -14,3 +14,6 @@ commands:
   # UC-15: the dependency-free viewer (viz/viewer.js) is syntax-checked with `node --check`
   # (developer gate + QA's viz-contract checks). Node runs no project runtime — check only.
   - node
+  # UC-20: scripts/setup-sim-macos.sh (+ train.sh) are lint-gated with `shellcheck` where the
+  # tool is installed (developer gate + QA's bootstrap-doc check, which skips if absent).
+  - shellcheck
