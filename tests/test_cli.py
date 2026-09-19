@@ -254,6 +254,41 @@ def test_train_dispatch_n_envs_defaults_none(tmp_path, monkeypatch) -> None:
     assert captured["n_envs"] is None
 
 
+# --------------------------------------------------------------------------- #
+# UC-22 — the `--no-tui` flag: parses, defaults off, and threads tui=not no_tui
+# --------------------------------------------------------------------------- #
+
+
+def test_train_no_tui_flag_defaults_false() -> None:
+    """The TUI is default-on; ``--no-tui`` is opt-out, so the flag defaults to False (AC2)."""
+    args = build_parser().parse_args(["train", "--config", "x.yaml"])
+    assert args.no_tui is False
+
+
+def test_train_no_tui_flag_parses_true() -> None:
+    args = build_parser().parse_args(["train", "--config", "x.yaml", "--no-tui"])
+    assert args.no_tui is True
+
+
+def test_train_dispatch_forwards_tui_true_by_default(tmp_path, monkeypatch) -> None:
+    """Without ``--no-tui`` the loop is asked to enable the TUI (``tui=True``); the loop itself
+    still auto-disables on a non-TTY run, so this is a soft-on, not a hard-on (AC2)."""
+    captured: dict = {}
+    monkeypatch.setattr("drone_fly.train.loop.train", lambda *a, **k: captured.update(k))
+    cfg = _write_config(tmp_path, {"name": "r", "adapter": "simple"})
+    assert main(["train", "--config", cfg]) == 0
+    assert captured["tui"] is True
+
+
+def test_train_dispatch_forwards_tui_false_with_no_tui(tmp_path, monkeypatch) -> None:
+    """``--no-tui`` is a hard off switch: the loop is asked to disable the TUI (``tui=False``)."""
+    captured: dict = {}
+    monkeypatch.setattr("drone_fly.train.loop.train", lambda *a, **k: captured.update(k))
+    cfg = _write_config(tmp_path, {"name": "r", "adapter": "simple"})
+    assert main(["train", "--config", cfg, "--no-tui"]) == 0
+    assert captured["tui"] is False
+
+
 def test_train_explicit_record_dir_overrides_layout(tmp_path, monkeypatch) -> None:
     captured: dict = {}
     monkeypatch.setattr("drone_fly.train.loop.train", lambda *a, **k: captured.update(k))

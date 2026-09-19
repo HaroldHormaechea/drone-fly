@@ -570,7 +570,7 @@ def build_vec_env(
         If given, load saved VecNormalize stats from this path (checkpoint resume / eval)
         instead of starting fresh.
     """
-    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor, VecNormalize
 
     cfg = config or EnvConfig()
     norm_reward = training if norm_reward is None else norm_reward
@@ -581,6 +581,16 @@ def build_vec_env(
     venv = DummyVecEnv([_factory for _ in range(max(1, n_envs))])
     if seed is not None:
         venv.seed(seed)
+
+    # UC-22: wrap the training env in VecMonitor so SB3's ``ep_info_buffer`` /
+    # ``ep_success_buffer`` are populated and ``rollout/{ep_rew_mean,ep_len_mean,success_rate}``
+    # are collected into the existing CSV/TensorBoard outputs (the data the live TUI needs).
+    # It sits INSIDE VecNormalize (wraps the raw episodes, before both the ``.load`` and fresh
+    # branches) so reported episode reward/length are UN-normalised, and is gated on
+    # ``training`` so eval/non-training construction stays byte-identical (no Monitor, no stat
+    # change). Seeding stays on the raw env above — no RNG/obs change.
+    if training:
+        venv = VecMonitor(venv, info_keywords=("is_success",))
 
     if vecnormalize_path is not None:
         venv = VecNormalize.load(vecnormalize_path, venv)

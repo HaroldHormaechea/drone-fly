@@ -204,6 +204,13 @@ def build_parser() -> argparse.ArgumentParser:
     train_p.add_argument(
         "--config", required=True, help="Path to the training YAML config (see README)."
     )
+    train_p.add_argument(
+        "--no-tui",
+        action="store_true",
+        help="Disable the full-screen live training dashboard and use the plain SB3 stdout "
+        "logger. The TUI is default-on for an interactive terminal; it is auto-disabled on a "
+        "non-TTY / piped / CI run regardless of this flag.",
+    )
 
     smoke_p = sub.add_parser("smoke-train", help="A few-step CI/correctness run (numpy backend).")
     smoke_p.add_argument("--timesteps", type=int, default=None, help="Override smoke timesteps.")
@@ -291,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "train":
-            return _run_train(args.config)
+            return _run_train(args.config, no_tui=args.no_tui)
 
         if args.command == "smoke-train":
             from drone_fly.train.loop import smoke_train
@@ -335,8 +342,12 @@ def main(argv: list[str] | None = None) -> int:
     return 1  # pragma: no cover - argparse requires a subcommand
 
 
-def _run_train(config_path: str) -> int:
-    """Load a train config, build the ``training/<name>/`` layout, and dispatch to ``train``."""
+def _run_train(config_path: str, *, no_tui: bool = False) -> int:
+    """Load a train config, build the ``training/<name>/`` layout, and dispatch to ``train``.
+
+    ``no_tui`` (UC-22) forwards to ``train(tui=not no_tui)``; the loop still auto-disables the
+    dashboard on a non-TTY run, so ``--no-tui`` is a hard off switch, not a hard on switch.
+    """
     from drone_fly.config import TrainRunConfig, load_yaml, run_layout
     from drone_fly.train.config import TrainConfig
     from drone_fly.train.loop import train
@@ -374,6 +385,7 @@ def _run_train(config_path: str) -> int:
         obs_schema=obs_schema,
         strict_capacity=cfg.strict_capacity,
         capacity_floor=cfg.capacity_floor,
+        tui=not no_tui,
     )
     return 0
 
