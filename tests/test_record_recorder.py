@@ -51,6 +51,7 @@ _DOC_META_KEYS = {
     "superclass",
     "roles",
     "positions",
+    "modality",  # UC-28: per-neuron modality tag for the viewer overlay (AC-7)
     "episode_index",
     "seed",
     "checkpoint",
@@ -62,7 +63,17 @@ _DOC_META_KEYS = {
     "activation_scale",
     "activation_offset",
 }
-_DOC_POSITION_KEYS = {"source", "projection", "coords3d", "coords2d", "has_position"}
+# UC-28: positions gained the always-present placement / region / display3d full-coverage fields.
+_DOC_POSITION_KEYS = {
+    "source",
+    "projection",
+    "coords3d",
+    "coords2d",
+    "has_position",
+    "placement",
+    "region",
+    "display3d",
+}
 _DOC_OUTCOME_KEYS = {"completed", "completion_time", "total_reward", "steps"}
 
 
@@ -136,6 +147,12 @@ def test_recorded_file_has_full_documented_schema(
     assert meta["activation_scale"] == ACTIVATION_SCALE
     assert meta["activation_offset"] == ACTIVATION_OFFSET
     assert set(meta["positions"]) == _DOC_POSITION_KEYS
+    # UC-28 additive full-coverage / modality fields are per-neuron and index-aligned (AC-2/AC-7).
+    assert len(meta["positions"]["display3d"]) == n
+    assert len(meta["positions"]["placement"]) == n
+    assert len(meta["positions"]["region"]) == n
+    assert len(meta["modality"]) == n
+    assert set(meta["modality"]) <= {"vision", "proprioceptive", "hunger", ""}
 
     frames = doc["frames"]
     assert set(frames) == {"activations", "actions", "drone_position"}

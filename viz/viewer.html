@@ -58,6 +58,15 @@
                 <option value="global">global</option>
               </select>
             </label>
+            <label class="axes">
+              modality
+              <select id="modality-tag-select">
+                <option value="off" selected>off</option>
+                <option value="vision">vision</option>
+                <option value="proprioceptive">proprioceptive</option>
+                <option value="hunger">hunger</option>
+              </select>
+            </label>
           </div>
         </div>
         <canvas id="brain-canvas" width="440" height="440"></canvas>
@@ -66,6 +75,15 @@
           <span class="intensity-ramp" aria-hidden="true"></span>
           low <span class="hint">→</span> high · summed activation of neurons whose somas fall
           there, over a static registered brain outline
+        </div>
+        <div class="legend">
+          real-anatomy (brain) neurons render brighter; <em>schematic</em> body neurons
+          (soma-less afferents placed around the brain) are fainter and spatially separated.
+          Modality overlay rings tagged neurons:
+          <span class="dot mod-vision"></span> vision
+          <span class="dot mod-proprioceptive"></span> proprioceptive
+          <span class="dot mod-hunger"></span> hunger ·
+          <span class="hint">damage/nociception: unavailable (no MaleCNS label)</span>
         </div>
       </section>
 

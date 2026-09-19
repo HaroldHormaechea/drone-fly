@@ -35,6 +35,7 @@ import numpy as np
 
 from drone_fly.connectome.loader import ConnectomeData
 from drone_fly.controller.encoding import ACTION_DIM, ACTION_LAYOUT
+from drone_fly.controller.modality import ModalityError, select_modality
 from drone_fly.env.config import CourseConfig
 from drone_fly.record.coordinates import DEFAULT_PROJECTION, neuron_roles, resolve_positions
 
@@ -43,6 +44,15 @@ logger = logging.getLogger(__name__)
 #: Recording schema version. Bump on any breaking layout change so the viewer can refuse
 #: incompatible files loudly rather than mis-render them.
 SCHEMA_VERSION = 1
+
+#: Modalities tagged per-neuron in ``meta.modality`` for the viewer's UC-28 modality overlay
+#: (AC-7). This is exactly the set of UC-13 modality rules that both *exist* and *resolve* over
+#: a recorded slice: ``vision`` (superclass), ``proprioceptive`` (class), and ``hunger``
+#: (cell_type, approximate). ``damage`` / nociception is **deliberately absent**: MaleCNS ships
+#: no nociceptive label and there is no modality rule for it, so it is documented as unavailable
+#: (here, in the README, and in the viewer legend) rather than silently faked. Order is the
+#: tie-break precedence when a neuron matches more than one modality (first wins).
+RECORDED_MODALITIES: tuple[str, ...] = ("vision", "proprioceptive", "hunger")
 
 #: Default output directory for recorded episodes (relative to the working directory).
 DEFAULT_RECORD_DIR = "artifacts/activations"
@@ -130,6 +140,10 @@ class ActivationRecorder:
             else ["unknown"] * self.n_neurons
         )
         self.roles = neuron_roles(data)
+        # UC-28: per-neuron modality tag for the viewer's modality overlay (AC-7), computed once
+        # here from the connectome's biological labels. Fail-soft — an absent modality is simply
+        # not tagged, never a crash (see _resolve_modalities).
+        self.modality = self._resolve_modalities(data)
         # UC-27: positions are provisioned at slice/artifact time and only LOADED here (fast
         # path). If this artifact predates the sidecar (older slice), self-heal: compute once,
         # WARN, and persist it beside the connectome (best-effort — a read-only dir must not
@@ -149,6 +163,28 @@ class ActivationRecorder:
             )
         self.positions = positions
         self._reset_episode_state()
+
+    def _resolve_modalities(self, data: ConnectomeData) -> list[str]:
+        """Return one modality tag per neuron (index-aligned; ``""`` when none) — AC-7.
+
+        For each modality in :data:`RECORDED_MODALITIES` (in precedence order), resolve its
+        neuron population via :func:`drone_fly.controller.modality.select_modality` and tag the
+        matched indices — first match wins, so a neuron in two populations keeps the earlier
+        one. Any :class:`ModalityError` (absent population, missing label column) is caught and
+        that modality is simply skipped: recording never fails because a modality is not present
+        in this slice (fail-soft). Read-only w.r.t. the connectome — no training/checkpoint side
+        effects (AC-9).
+        """
+        tags = [""] * self.n_neurons
+        for name in RECORDED_MODALITIES:
+            try:
+                selection = select_modality(data, name)
+            except ModalityError:
+                continue
+            for idx in selection.indices.tolist():
+                if tags[idx] == "":
+                    tags[idx] = name
+        return tags
 
     # -- episode lifecycle --------------------------------------------------------------
     def _reset_episode_state(self) -> None:
@@ -254,6 +290,7 @@ class ActivationRecorder:
             "neuron_ids": self.neuron_ids,
             "superclass": self.superclass,
             "roles": self.roles,
+            "modality": self.modality,
             "positions": self.positions,
             "episode_index": self._episode_index,
             "seed": self._seed,

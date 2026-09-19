@@ -264,6 +264,32 @@ computed-layout **fallback** (clearly labelled). The committed fixture ships rea
 tokenlessly; arbitrary user slices may need a `NEUPRINT_TOKEN` (see `.env.example`), and
 `uv run python scripts/fetch_soma_positions.py` refreshes the committed soma sidecar.
 
+**Complete coverage on real coordinates (UC-28).** The heatmap renders **every** neuron at real
+coordinates with none silently dropped. Neurons with a real soma (the central "brain") render at
+their true anatomy and are the visually dominant element. Genuinely soma-less peripheral afferents
+(cell bodies outside the imaged brain) are placed in a **schematic fly body around the brain**,
+grouped by their real categorical body-region label — `subclass` for limbs (`leg`, `haltere`,
+`campaniform`) and `superclass` for the coarse groups (`vnc_sensory` → `vnc`, `sensory_ascending`
+→ `ascending`), with any generic/unrecognised label falling to a neutral `torso` group (never a
+specific limb). The label rules (`REGION_LABEL_RULES`, limb `subclass` wins over coarse
+`superclass`) and cluster offsets (`REGION_CLUSTER_OFFSETS`) live in
+`src/drone_fly/record/coordinates.py`. Placement is **deterministic** (a neuron's exact spot in
+its cluster is a `zlib.crc32` function of its bodyid — bit-reproducible across processes, never
+`hash()`) and **honest**: no fabricated precise xyz — `coords3d` stays real-or-null and the
+schematic render coords live in a separate always-finite `display3d` field, flagged
+`placement="schematic"`. A **brain-scale guardrail** keeps the brain dominant: body clusters are
+offset by a bounded multiple of the brain's own bounding box (`MAX_BODY_OFFSET_FACTOR` +
+`REGION_CLUSTER_RADIUS_FRAC`), so the brain stays ≥ `BRAIN_DOMINANCE_MIN_FRACTION` of the total
+rendered extent. In the viewer, schematic (body) neurons are drawn fainter than real-anatomy
+neurons and are spatially separated, so a schematic dot is never mistaken for a real soma.
+
+**Modality toggle (UC-28).** The brain-map panel has a **modality** selector that overlays rings
+on the UC-13 modality populations — `vision`, `proprioceptive`, and `hunger` — on top of the hot
+activation colormap (it does not replace the colours). The populations are the real biological
+labels tagged per-neuron in `meta.modality` at record time (fail-soft: a modality absent from the
+slice is simply not tagged). `damage`/nociception is **unavailable** — MaleCNS ships no nociceptive
+label and there is no modality rule for it — so it is documented as absent rather than faked.
+
 **Positions are provisioned at slice time, not per training run (UC-27).** When a connectome
 artifact is created — by `prune` (the slice), `fetch-connectome` (the base download), or
 `prune-trained` (the post-training subcircuit) — neuron positions are computed once and cached as a
@@ -281,9 +307,12 @@ fetch and no per-run spectral eigendecomposition. Key points:
   spectral layout is a last resort for neurons with no `somaLocation` anywhere. Anatomically soma-less
   neurons (peripheral sensory afferents whose cell bodies sit outside the brain volume) are flagged
   missing and handled by the partial-anatomy fill — never faked.
-- **Format.** One row per neuron: `bodyid,has_position,x,y,z,u,v,source,projection`. `x/y/z` are
-  blank when a neuron has no 3-D anatomy; `has_position` is an independent flag. Floats are written
-  at full `%.17g` precision, so a load reproduces the original compute exactly.
+- **Format.** One row per neuron:
+  `bodyid,has_position,x,y,z,u,v,source,projection,placement,region,x3d,y3d,z3d`. `x/y/z` are
+  blank when a neuron has no 3-D anatomy; `x3d/y3d/z3d` (the UC-28 full-coverage `display3d`
+  render coords) are always finite; `has_position` is an independent flag. Floats are written at
+  full `%.17g` precision, so a load reproduces the original compute exactly. A sidecar written
+  before UC-28 lacks the last five columns, so it is treated as a miss and recomputed (self-heal).
 - **Node-set binding.** A sidecar is reused only when its neuron-id set and projection match the
   loaded connectome exactly; otherwise it is recomputed. A pruned subcircuit never picks up the full
   connectome's positions, and a stale/corrupt sidecar is never applied to the wrong neurons.
