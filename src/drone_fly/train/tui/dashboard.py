@@ -31,8 +31,17 @@ _REFRESH_PER_SECOND = 4
 class TrainingDashboard:
     """Own the model + fd-capture + Rich Live, and expose ``set_verdict`` / ``redraw``."""
 
-    def __init__(self, *, scheduled_iters: int = 0, capture: bool = True) -> None:
-        self.model = DashboardModel(scheduled_iters=scheduled_iters)
+    def __init__(
+        self,
+        *,
+        scheduled_iters: int = 0,
+        capture: bool = True,
+        n_envs: int = 1,
+        backend: str = "dummy",
+    ) -> None:
+        # UC-26 AC-11: forward the resolved rollout parallelism into the pure model so the
+        # values panel can render it (static per run).
+        self.model = DashboardModel(scheduled_iters=scheduled_iters, n_envs=n_envs, backend=backend)
         self._capture = FdLogCapture() if capture else None
         self._live = None
         self._console = None

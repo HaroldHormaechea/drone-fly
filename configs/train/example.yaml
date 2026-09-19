@@ -26,7 +26,19 @@ resume: auto
 
 # --- Optional keys (shown with their defaults; delete any you don't need) ---
 # device: cpu            # cpu | cuda | mps; omit for the auto-policy
-# n_envs: 1              # parallel rollout envs (>= 1)
+# n_envs: 8              # rollout worker count. The vec-env backend is chosen automatically
+#                        # (UC-26): SubprocVecEnv (one OS process per env → real cross-core
+#                        # parallelism) is used iff the resolved adapter is `pybullet` AND
+#                        # n_envs > 1; otherwise DummyVecEnv (serial, in-process). The `simple`
+#                        # adapter ALWAYS stays serial on DummyVecEnv — subprocess IPC would
+#                        # only add overhead for the cheap numpy model (an explicit n_envs > 1
+#                        # on `simple` warns and stays serial). Workers use the `spawn` start
+#                        # method (safe on macOS + native libs like pybullet); each rebuilds its
+#                        # env from cheap config. When omitted on a parallel (pybullet) run,
+#                        # n_envs defaults to 8. Sweet-spot ≈ the machine's PERFORMANCE-core
+#                        # count (8 = the M4 Pro's 8 P-cores); going past the P-cores onto
+#                        # efficiency cores oversubscribes and yields little. The non-parallel
+#                        # path (unset + simple, or explicit 1) keeps the old default of 1.
 # prune: false           # reduce to the sensory->motor subcircuit (UC-04) before training
 # prune_k: 2             # corridor slack for prune
 # record: false          # capture per-frame activations for the viz/ viewer (UC-05)

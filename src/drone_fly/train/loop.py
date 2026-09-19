@@ -32,7 +32,7 @@ from drone_fly.connectome.loader import ConnectomeData
 from drone_fly.connectome.prune import DEFAULT_PRUNE_K, prune_to_subcircuit
 from drone_fly.controller.sb3 import ConnectomeFeaturesExtractor
 from drone_fly.env.config import EnvConfig
-from drone_fly.env.racing_env import build_vec_env
+from drone_fly.env.racing_env import build_vec_env, resolve_vec_env
 from drone_fly.train.config import TrainConfig
 from drone_fly.train.device import resolve_device
 
@@ -318,7 +318,12 @@ def train(
 
     cfg = cfg or TrainConfig()
     steps = total_timesteps if total_timesteps is not None else cfg.total_timesteps
-    resolved_n_envs = n_envs if n_envs is not None else cfg.n_envs
+    # UC-26: resolve the adapter, the effective worker count, and the vec-env backend in one
+    # place. ``resolve_vec_env`` preserves the pre-UC-26 fallback (unset n_envs + non-parallel
+    # adapter → cfg.n_envs) while auto-selecting SubprocVecEnv (default 8 workers) for a
+    # parallel-capable pybullet run. The resolved trio drives build_vec_env, the scheduled-iters
+    # / save-freq math (unchanged formulas), the AC-11 startup log, and the TUI panel.
+    resolved_adapter, resolved_n_envs, vec_backend = resolve_vec_env(adapter, n_envs, cfg.n_envs)
     resolved_device = resolve_device(device)
 
     # UC-22: the live TUI is default-on but ONLY on an interactive TTY; ``tui=False`` forces it
@@ -388,13 +393,24 @@ def train(
         obs_schema,
     )
 
+    # UC-26 AC-11: surface the resolved parallelism once at startup. This is the canonical
+    # record for TUI-off runs (the TUI mirrors the same values in its values panel).
+    logger.info(
+        "rollout: n_envs=%d backend=%s (adapter=%s)",
+        resolved_n_envs,
+        vec_backend,
+        resolved_adapter,
+    )
+
     venv = build_vec_env(
         config=env_config,
-        adapter=adapter,
+        adapter=resolved_adapter,
         n_envs=resolved_n_envs,
         seed=cfg.seed,
         training=True,
         vecnormalize_path=stats_path,
+        vec_backend=vec_backend,
+        suppress_worker_output=tui_enabled,
     )
 
     # UC-15 fail-loud env↔schema width coupling: the env's observation width MUST equal the
@@ -441,7 +457,11 @@ def train(
         from drone_fly.train.tui.dashboard import TrainingDashboard
 
         scheduled_iters = max(1, steps // max(cfg.n_steps * max(resolved_n_envs, 1), 1))
-        dashboard = TrainingDashboard(scheduled_iters=scheduled_iters)
+        dashboard = TrainingDashboard(
+            scheduled_iters=scheduled_iters,
+            n_envs=resolved_n_envs,
+            backend=vec_backend,
+        )
 
     checkpoint_cb = CheckpointCallback(
         save_freq=max(cfg.checkpoint_freq // max(resolved_n_envs, 1), 1),
