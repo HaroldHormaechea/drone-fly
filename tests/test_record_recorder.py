@@ -30,7 +30,13 @@ import pytest
 
 from drone_fly.connectome.loader import ConnectomeData
 from drone_fly.controller.encoding import ACTION_DIM
-from drone_fly.env.config import CourseConfig, GateSpec, ObstacleSpec, single_gate_course
+from drone_fly.env.config import (
+    CourseConfig,
+    GateSpec,
+    ObstacleSpec,
+    PadSpec,
+    single_gate_course,
+)
 from drone_fly.record.recorder import (
     ACTIVATION_OFFSET,
     ACTIVATION_SCALE,
@@ -481,3 +487,57 @@ def test_meta_course_omits_obstacles_when_course_has_none(
     """AC7 back-compat: a no-obstacle course emits NO ``obstacles`` key (viewer degrades)."""
     block = _record_with_course(connectome, tmp_path / "act", CourseConfig())["meta"]["course"]
     assert "obstacles" not in block
+
+
+# ===========================================================================
+# UC-21 AC1 — pads carry a display-only ``kind`` (recharge / repair / plain),
+# derived from the real PadSpec flags, stamped additively + presence-guarded.
+# ===========================================================================
+def test_meta_course_stamps_pad_kind_from_padspec_flags(
+    connectome: ConnectomeData, tmp_path: Path
+) -> None:
+    """AC1: each serialised pad grows a ``kind`` read from the real ``PadSpec`` flags.
+
+    A course carrying a recharge-only pad, a repair-only pad, and a plain pad round-trips the
+    correct ``kind`` (``recharge`` / ``repair`` / ``plain``) alongside the existing floor-anchored
+    ``center`` / ``radius`` geometry. Values are read from the actual config, never hardcoded.
+    """
+    course = CourseConfig(
+        pads=(
+            PadSpec(center=(1.0, 0.5), radius=0.4, rechargeable=True),
+            PadSpec(center=(2.0, -0.5), radius=0.3, repairable=True),
+            PadSpec(center=(3.0, 0.0), radius=0.2),
+        )
+    )
+    block = _record_with_course(connectome, tmp_path / "act", course)["meta"]["course"]
+    assert block["pads"] == [
+        {"center": [1.0, 0.5], "radius": 0.4, "kind": "recharge"},
+        {"center": [2.0, -0.5], "radius": 0.3, "kind": "repair"},
+        {"center": [3.0, 0.0], "radius": 0.2, "kind": "plain"},
+    ]
+    # The pre-UC-21 course fields stay unchanged by the additive key.
+    assert block["start"] == [0.0, 0.0, 1.0]
+    assert len(block["gates"]) == 3
+
+
+def test_meta_course_pad_kind_precedence_repair_wins_over_recharge(
+    connectome: ConnectomeData, tmp_path: Path
+) -> None:
+    """AC1 edge case: a pad flagged BOTH rechargeable and repairable serialises ``kind=="repair"``.
+
+    The precedence is **display-only** — env behaviour is unchanged (a both-flags pad still both
+    recharges and repairs); only the viewer marker resolves to a single colour, and repair wins.
+    """
+    course = CourseConfig(
+        pads=(PadSpec(center=(1.5, 0.0), radius=0.35, rechargeable=True, repairable=True),)
+    )
+    block = _record_with_course(connectome, tmp_path / "act", course)["meta"]["course"]
+    assert block["pads"] == [{"center": [1.5, 0.0], "radius": 0.35, "kind": "repair"}]
+
+
+def test_meta_course_omits_pads_when_course_has_none(
+    connectome: ConnectomeData, tmp_path: Path
+) -> None:
+    """AC5 back-compat: a no-pad course emits NO ``pads`` key (byte-identical to pre-UC-21)."""
+    block = _record_with_course(connectome, tmp_path / "act", CourseConfig())["meta"]["course"]
+    assert "pads" not in block

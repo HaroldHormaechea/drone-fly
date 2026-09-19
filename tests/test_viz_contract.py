@@ -45,7 +45,7 @@ import numpy as np
 import pytest
 
 from drone_fly.connectome.loader import ConnectomeData
-from drone_fly.env.config import CourseConfig, ObstacleSpec
+from drone_fly.env.config import CourseConfig, ObstacleSpec, PadSpec
 from drone_fly.record.recorder import ActivationRecorder
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -308,6 +308,112 @@ def test_viewer_js_draws_obstacle_pillars_with_graceful_degradation() -> None:
     )
     # drawObstacles is actually invoked from the render path.
     assert "drawObstacles()" in js
+
+
+# --- UC-21: pads carry a kind + the viewer draws pad discs and a visible obstacle footprint ---
+@pytest.fixture
+def recorded_doc_with_pads(connectome: ConnectomeData, tmp_path: Path) -> dict:
+    """A recorded episode whose course carries recharge / repair / plain pads (meta.course.pads)."""
+    course = CourseConfig(
+        pads=(
+            PadSpec(center=(1.0, 0.5), radius=0.4, rechargeable=True),
+            PadSpec(center=(2.0, -0.5), radius=0.3, repairable=True),
+            PadSpec(center=(3.0, 0.0), radius=0.2),
+        )
+    )
+    return _record(connectome, tmp_path / "act_pads", course=course)
+
+
+def test_recorded_pads_carry_kind(recorded_doc_with_pads: dict) -> None:
+    """AC1: a pad-carrying recording documents each pad's floor geometry + display ``kind``."""
+    pads = recorded_doc_with_pads["meta"]["course"]["pads"]
+    assert isinstance(pads, list)
+    assert len(pads) == 3
+    for pad in pads:
+        assert set(pad) >= {"center", "radius", "kind"}
+        assert len(pad["center"]) == 2  # (x, y); floor-anchored, z is course floor_z
+    assert [pad["kind"] for pad in pads] == ["recharge", "repair", "plain"]
+
+
+def test_recorded_file_without_pads_omits_field(recorded_doc_with_course: dict) -> None:
+    """AC5 back-compat: a course without pads omits ``pads`` (viewer draws none, no error)."""
+    assert "pads" not in recorded_doc_with_course["meta"]["course"]
+
+
+def test_viewer_js_draws_pads_by_kind_with_graceful_degradation() -> None:
+    """AC2/AC3: viewer.js defines ``drawPads`` reading ``course.pads`` (guarded) + colours by kind.
+
+    Static assertion (CI is headless): the viewer defines a pad draw routine, reads the additive
+    ``course.pads`` array with a ``|| []`` guard so a field-absent file draws nothing, resolves a
+    pad's ``kind`` to a colour, and is actually invoked from the render path.
+    """
+    js = (_VIZ / "viewer.js").read_text()
+    assert "drawPads" in js, "viewer.js must define a pad draw routine"
+    # Graceful degradation: buildFlightScene reads course.pads with a `|| []` guard.
+    normalised = re.sub(r"\s+", "", js)
+    assert "course.pads)||[]" in normalised, (
+        "viewer.js must guard course.pads with `|| []` for graceful degradation"
+    )
+    # The pad's serialised `kind` is read to pick a colour.
+    assert "kind" in js, "viewer.js must read each pad's `kind` to colour it"
+    # drawPads is actually invoked from the render path.
+    assert "drawPads()" in js
+
+
+def test_viewer_js_pad_kind_colors_are_defined_and_distinct() -> None:
+    """AC3: three distinct, documented pad-kind colours exist in the palette (+ obstacle colour)."""
+    js = (_VIZ / "viewer.js").read_text()
+    for token in ("padRecharge", "padRepair", "padPlain"):
+        assert token in js, f"viewer.js palette must define {token!r}"
+    # The chosen hexes, synced with the legend + README (distinct from start/gate/finish).
+    for hex_color in ("#00e676", "#ff6d00", "#90a4ae"):
+        assert hex_color in js, f"viewer.js must define pad colour {hex_color}"
+    # Three distinct pad colours (no accidental collision).
+    assert len({"#00e676", "#ff6d00", "#90a4ae"}) == 3
+
+
+def test_viewer_js_shares_floordisc_between_pads_and_obstacles() -> None:
+    """AC4: a shared ``floorDisc`` helper is invoked from BOTH draw routines (visibility fix).
+
+    The user's "obstacles not shown" complaint is a visibility issue — the fix adds a
+    floor-anchored base ring + filled disc (the shared ``floorDisc`` helper) to both pads and
+    obstacles so both read against the floor grid. Assert the helper exists and both call it.
+    """
+    js = (_VIZ / "viewer.js").read_text()
+    assert "function floorDisc" in js, "viewer.js must define the shared floorDisc helper"
+    # floorDisc is invoked (>= 2 call sites: drawPads + drawObstacles), beyond its definition.
+    assert js.count("floorDisc(") >= 2, "floorDisc must be invoked from both draw routines"
+    # Both draw bodies reference the shared helper.
+    draw_pads = js[js.index("function drawPads") :]
+    assert "floorDisc(" in draw_pads[: draw_pads.index("\n  }")], "drawPads must call floorDisc"
+    draw_obstacles = js[js.index("function drawObstacles") :]
+    obstacle_body = draw_obstacles[: draw_obstacles.index("\n  }")]
+    assert "floorDisc(" in obstacle_body, "drawObstacles must call floorDisc (visibility fix)"
+
+
+def test_viewer_html_legend_has_pad_kinds_and_obstacle() -> None:
+    """AC3/AC4: the flight-3d legend gains a recharge / repair / plain pad + obstacle entry.
+
+    Scoped to the ``#flight-3d-legend`` block so a colour appearing elsewhere can't false-positive.
+    Colours + labels are synced to ``COURSE_COLORS`` in viewer.js.
+    """
+    html = (_VIZ / "viewer.html").read_text()
+    m = re.search(
+        r'<div[^>]*\bid="flight-3d-legend"[^>]*>(.*?)</div>',
+        html,
+        re.DOTALL,
+    )
+    assert m is not None, 'no <div id="flight-3d-legend"> in viewer.html'
+    legend = m.group(1)
+    # Three pad-kind swatches + labels, plus the obstacle swatch + label.
+    for hex_color, label in (
+        ("#00e676", "recharge"),
+        ("#ff6d00", "repair"),
+        ("#90a4ae", "plain"),
+        ("#ba68c8", "obstacle"),
+    ):
+        assert hex_color in legend, f"flight-3d-legend missing swatch {hex_color}"
+        assert label in legend, f"flight-3d-legend missing {label!r} label"
 
 
 def test_viewer_js_anatomical_dots_and_beat_removed() -> None:

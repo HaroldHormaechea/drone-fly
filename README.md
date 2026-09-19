@@ -173,6 +173,16 @@ intensity toggle), and a **3D flight view** driven by the recorded `meta.course`
 controls: **drag** to **rotate**, mouse **wheel** to **zoom**, the same view presets, and a `0.25`×
 slow-inspection speed. Regenerate the outline with `uv run python scripts/build_brain_outline.py`.
 
+The 3D flight view renders the course's **landing pads** and **obstacles** as floor-anchored discs,
+each with a legend entry. Pads are coloured by kind — **recharge** pads are green (`#00e676`),
+**repair** pads deep orange (`#ff6d00`), and **plain** landing pads neutral grey (`#90a4ae`); a pad
+that is *both* rechargeable and repairable renders with the **repair** colour (a display-only
+precedence — the underlying pad still both recharges and repairs; env behaviour is unchanged).
+Obstacles keep the existing purple (`#ba68c8`) pillar wireframe but now also draw a floor base ring +
+filled disc so they read clearly against the floor grid. The pad kind is recorded additively in
+`meta.course` (`pads[].kind`); legacy recordings without pads, obstacles, or the new kind field still
+load and render unchanged (each new field read is guarded — graceful degradation).
+
 Neuron coordinates use real MaleCNS **soma** positions; a neuron lacking one uses a deterministic
 computed-layout **fallback** (clearly labelled). The committed fixture ships real anatomy
 tokenlessly; arbitrary user slices may need a `NEUPRINT_TOKEN` (see `.env.example`), and
