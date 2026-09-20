@@ -397,13 +397,73 @@ def test_randomization_config_repair_axis_defaults() -> None:
 
 
 def test_randomization_repair_fields_appended_last_in_order() -> None:
-    """UC-24 AC1: the two repair fields (``enable_repair``, ``repair_pad_radius``) are appended
-    LAST — after the whole UC-18 recharge block — so every UC-15/16/17/18 positional/keyword
-    construction of ``RandomizationConfig`` is unshifted and byte-identical."""
+    """UC-24/UC-35 field-order (AC5/AC6/AC7): the two UC-24 repair fields (``enable_repair``,
+    ``repair_pad_radius``) follow the whole UC-18 recharge block, and the UC-35 placement-geometry
+    fields are appended LAST (after the repair block). Every UC-15/16/17/18/24 positional/keyword
+    construction of ``RandomizationConfig`` therefore stays unshifted and byte-identical, and a
+    disabled-axis / non-randomized RNG stream is unperturbed."""
     fields = [f.name for f in dataclasses.fields(RandomizationConfig)]
-    assert fields[-2:] == ["enable_repair", "repair_pad_radius"]
-    # The repair fields follow the last recharge field.
+    # UC-24 repair block follows the last recharge field, in order.
     assert fields.index("recharge_energy_margin") < fields.index("enable_repair")
+    i = fields.index("enable_repair")
+    assert fields[i : i + 2] == ["enable_repair", "repair_pad_radius"]
+    # UC-35 places its placement-geometry fields as the tail, AFTER the repair block, in order.
+    assert fields.index("repair_pad_radius") < fields.index("pad_min_gate_distance")
+    assert fields[-7:] == [
+        "pad_min_gate_distance",
+        "drone_radius",
+        "obstacle_evasion_margin",
+        "obstacle_corridor_half_width",
+        "obstacle_gate_clearance",
+        "min_obstacle_separation",
+        "obstacle_along_margin_frac",
+    ]
+
+
+def test_randomization_uc35_placement_geometry_defaults() -> None:
+    """UC-35 AC8: the new placement-geometry params ship sane, documented, configurable defaults.
+
+    ``pad_min_gate_distance`` (``R_pad``) is the min horizontal pad↔gate distance; the obstacle
+    corridor / evasion / separation knobs bound the forced-but-evadable pillar placement. The
+    gate-passability invariant ``obstacle_gate_clearance >= drone_radius + obstacle_evasion_margin``
+    must hold (see the plan's developer-Minor)."""
+    r = RandomizationConfig()
+    assert r.pad_min_gate_distance == 1.0
+    assert r.drone_radius == 0.15
+    assert r.obstacle_evasion_margin == 0.2
+    assert r.obstacle_corridor_half_width == 0.75
+    assert r.obstacle_gate_clearance == 0.5
+    assert r.min_obstacle_separation == 0.3
+    assert 0.0 < r.obstacle_along_margin_frac < 0.5
+    # gate-passability invariant: the sampler-side clearance floor admits the radius-aware bound.
+    assert r.obstacle_gate_clearance >= r.drone_radius + r.obstacle_evasion_margin
+    # every knob is a positive, configurable float.
+    for value in (
+        r.pad_min_gate_distance,
+        r.drone_radius,
+        r.obstacle_evasion_margin,
+        r.obstacle_corridor_half_width,
+        r.obstacle_gate_clearance,
+        r.min_obstacle_separation,
+    ):
+        assert value > 0.0
+    # configurable — an override takes effect and does not perturb equality of two same overrides.
+    custom = RandomizationConfig(pad_min_gate_distance=1.5, obstacle_corridor_half_width=0.9)
+    assert custom.pad_min_gate_distance == 1.5
+    assert custom.obstacle_corridor_half_width == 0.9
+    assert custom == RandomizationConfig(
+        pad_min_gate_distance=1.5, obstacle_corridor_half_width=0.9
+    )
+
+
+def test_default_env_config_is_stable_under_uc35_placement_fields() -> None:
+    """UC-35 AC7: with the new placement-geometry fields at their defaults, a default
+    ``RandomizationConfig()`` / ``EnvConfig()`` frozen-dataclass equality (a byte-identity proxy)
+    still holds — the UC-35 fields perturb nothing by default."""
+    assert RandomizationConfig() == RandomizationConfig()
+    assert EnvConfig().randomization == RandomizationConfig()
+    assert EnvConfig().course.pads == ()
+    assert EnvConfig().course.obstacles == ()
 
 
 def test_default_env_config_is_stable_under_uc24_repair_fields() -> None:

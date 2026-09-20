@@ -163,9 +163,10 @@ Courses may carry cylindrical **pillar obstacles** (floor-anchored: `center`, `r
 `height`). A drone↔pillar contact each step applies a severe, **non-terminating** penalty
 (`RewardConfig.obstacle_penalty`, default 50, edge-triggered once per contact) — only
 floor/ceiling/out-of-bounds crashes end an episode, so the drone can recover aerially and still
-finish. The randomizer (under the course-randomize axis) samples solvability-guarded pillars,
-and the 3D viewer draws them as wireframe cylinders. See `default_obstacle_course()` for the
-fixed manually-placed default set.
+finish. The randomizer (under the course-randomize axis) samples solvability-guarded pillars —
+**as of UC-35** placed *between consecutive waypoints* so the drone is forced to evade them (see
+"Course placement geometry" below) — and the 3D viewer draws them as wireframe cylinders. See
+`default_obstacle_course()` for the fixed manually-placed default set.
 
 ### Recharge pads (UC-18)
 A landing pad tagged `rechargeable` is a **recharge pad**: while the drone is *fully docked* on
@@ -175,7 +176,7 @@ full). The rate exceeds the docked drain, so a dwell nets a gain. This reuses UC
 observation block — **no new observation dim, so checkpoints are not invalidated**. To make a
 recharge worth the detour without a shaping reward, recharge is a **course-variation axis**
 (`RandomizationConfig.enable_recharge`). **As of UC-24** the randomizer places **exactly one**
-recharge pad per randomized course at an eligible gate anchor **regardless** of whether the course
+recharge pad per randomized course at an eligible anchor **regardless** of whether the course
 is energy-constrained (feature presence, not a variable cover — before UC-24 pads were placed only
 on over-budget courses, so under the shipped default battery *none* were ever produced). The
 battery-aware solvability guard still holds: under the default battery a course is unconstrained and
@@ -225,6 +226,41 @@ schema — or `randomize_repair_pads` without a damage-block schema — is a **f
 (exit 2), not a silent no-op. When both recharge and repair are on and the course has only one
 eligible gate anchor (e.g. a 1-gate course), the two co-locate into a single dual-purpose pad. The
 non-randomized path (`randomize: false`/unset) is byte-identical to before (no schema, no placement).
+
+### Course placement geometry (UC-35)
+Two corrections to how randomized courses are laid out, both **placement-geometry only** — no change
+to the observation schema, reward, connectome, or dynamics, and a non-randomized / disabled-axis run
+still reproduces bit-for-bit (AC-5/6/7):
+
+- **Pads off waypoints.** A recharge/repair pad is never placed on a gate column any more (docking on
+  the point the drone already flies through was degenerate). The placer offsets each pad off its
+  anchor gate — perpendicular to the local path first, then axial — to the first fixed candidate
+  position that stays ≥ `pad_min_gate_distance` (`R_pad`) from **every** gate centre, inside the
+  lateral corridor, and clear of every pillar's descend column. The search draws **no RNG**, so it
+  only ever appends a pad and never shifts the sampled geometry.
+- **Obstacles between waypoints, forced-but-evadable.** Pillars are sampled inside a perpendicular
+  corridor around a waypoint→waypoint segment (including start→first-gate), close enough that the
+  straight path passes within the pillar so the drone must deviate — while the solvability guard
+  guarantees the course stays feasible (each pillar keeps gate-passability clearance from every
+  waypoint, leaves an escape lane within `±lateral_bound`, and never forms an unevadable wall with a
+  neighbour). Each pillar consumes a fixed number of draws whether placed or skipped, so the
+  configured `obstacle_count_range` is an **upper bound** (a course may carry fewer, even zero on
+  pathologically short courses).
+
+New `RandomizationConfig` fields (all documented, sane defaults, tunable):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `pad_min_gate_distance` | `1.0` | `R_pad` — min horizontal distance a placed pad keeps from every gate centre |
+| `drone_radius` | `0.15` | generation-time drone body buffer for clearance maths (not read by the sim collision test) |
+| `obstacle_evasion_margin` | `0.2` | extra slack beyond `drone_radius` for squeezing past a pillar / off gates / off other pillars |
+| `obstacle_corridor_half_width` | `0.75` | max perpendicular offset of a pillar axis from its segment centreline |
+| `obstacle_gate_clearance` | `0.5` | sampler-side band kept from segment endpoints; eligible-segment half-length floor |
+| `min_obstacle_separation` | `0.3` | extra pillar↔pillar spacing beyond `2·(drone_radius + evasion_margin)` |
+| `obstacle_along_margin_frac` | `0.3` | fraction of each segment trimmed per end when drawing a pillar's along-position |
+
+The pre-UC-35 `obstacle_lateral_offset_range` is retained (unshifted) but no longer read by the
+sampler; `obstacle_clearance` is retained as the pad descend-column margin.
 
 **Retrain note:** defaulting randomized runs to the 26-d schema changes the observation width, so
 pre-UC-24 randomized-run checkpoints are invalidated and need a fresh retrain (same class of change
