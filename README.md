@@ -342,6 +342,7 @@ What CI actually exercises versus what needs the native sim, recorded from a rea
 | `simple` numpy adapter, loader, prune, config, viz contract | tested (CI) | runs hermetically offline |
 | `pybullet` full-physics adapter | untested in CI | needs a C/C++ toolchain; verified on macOS + Xcode CLT |
 | `pybullet` via macOS conda (`setup-sim-macos.sh`) | untested in CI | no macOS/conda runner in CI; uses prebuilt conda-forge pybullet — validated on a managed macOS 26 arm64 box |
+| Windows CUDA via `setup-sim-windows.ps1` | untested in CI | no Windows/GPU runner in CI; opt-in CUDA 12.4 torch wheel index — the real GPU run is a documented manual step (verified on an RTX 3050, 8 GB, Ampere/sm_86) |
 
 The gym-pybullet-drones pin is resolved with `git ls-remote` to a fixed commit SHA (never floating
 `main`); `scripts/train.sh` and the adapter share that SHA and verify `import pybullet` before training.
@@ -385,6 +386,58 @@ Docker) that installs the prebuilt manylinux `pybullet` wheel from PyPI — it n
 source build. The macOS/conda path has no CI runner, so (like the `pybullet` boundary above) it is an
 **untested in CI** boundary; what CI *can* check is that the script is `shellcheck`-clean, parses under
 `bash -n`, and is safely `--dry-run`-able.
+
+### Windows (NVIDIA CUDA) real-physics training (UC-31)
+On a Windows PC with an NVIDIA GPU (e.g. an RTX 3050, 8 GB, Ampere/sm_86) you can train the large
+connectome slice on the **GPU** instead of the CPU. Unlike the Mac's MPS backend, CUDA has real
+sparse-tensor support, so the sparse connectome propagation (the bottleneck) runs on the GPU. The
+runtime already targets CUDA — `resolve_device()` auto-selects `"cuda"` when `torch.cuda.is_available()`,
+and `device: cuda` in the train config forces it — so this is environment setup + docs only; training
+dynamics, the observation schema, the connectome, reward, and checkpoints are unchanged.
+
+Provision it with the PowerShell mirror of the macOS script:
+
+    ./scripts/setup-sim-windows.ps1              # add -DryRun to print the plan without touching anything
+    ./scripts/setup-sim-windows.ps1 -Help        # usage
+
+It runs entirely in **user space (no admin)** and:
+
+- prompts before installing **uv** (into your user profile; decline and it installs nothing and exits
+  non-zero);
+- checks the NVIDIA driver via `nvidia-smi` and **fails with an actionable message if the reported CUDA
+  version is older than 12.x** (the torch wheel targets CUDA 12.4);
+- creates/reuses an isolated **`.venv-cuda`** venv (Python 3.12 — gym-pybullet-drones needs ≥ 3.12);
+- installs a **pinned CUDA 12.4 PyTorch wheel** (`torch==2.6.0`) from the PyTorch CUDA wheel index
+  (`--index-url https://download.pytorch.org/whl/cu124`), with the index **scoped to the torch line
+  only** — it never becomes the global resolver;
+- installs `pybullet==3.2.6` + `numpy<2` + the `drone-fly` project (`-e ".[dev]"`) in a single PyPI
+  resolve (so the `numpy<2` ABI co-satisfies pybullet), then `gym-pybullet-drones` at the exact commit
+  pinned in `scripts/train.sh` (single source of truth) with `--no-deps` plus its runtime deps
+  explicitly — `--no-deps` keeps its `pybullet>3.2.7` pin from clobbering the pinned `3.2.6`;
+- verifies `torch.cuda.is_available()`, prints the GPU name, imports `pybullet` / `gym_pybullet_drones`
+  / `drone_fly`, and asserts `resolve_device() == "cuda"`.
+
+Then train / benchmark on the GPU (device comes from the config, not a CLI flag):
+
+    # in your train config: set `device: cuda` (or omit it for the auto-policy) and a small `timesteps`
+    .venv-cuda\Scripts\drone-fly train --config configs\train\example.yaml
+
+The startup log prints the resolved `device=cuda`, and Stable-Baselines3 emits per-iteration
+`time_elapsed` / `fps` — compare one iteration to the ~821 s CPU and ~2.57 s-per-iter MPS baselines.
+
+**8 GB VRAM tuning.** 8 GB is tight for the ~122k-neuron slice. On a **CUDA out-of-memory** error, lower
+`n_envs` and/or `batch_size` in the train config (and/or train a smaller pruned slice); halve them until
+the run fits, then tune back up. The same guidance (`CUDA_OOM_HINT`) is logged whenever CUDA is selected
+and printed by the setup script's verification step.
+
+**Isolation & CI.** The CUDA torch index and pin live **only** in `setup-sim-windows.ps1` — `pyproject.toml`
+and `uv.lock` are untouched, so the default Linux/macOS install and the hermetic Linux CI resolve are
+byte-for-byte unchanged (this is an opt-in Windows path). Like the macOS/conda boundary above, the
+Windows/GPU path has no CI runner and the real GPU run is a **documented manual step**; what CI *can*
+check is the monkeypatched CUDA device branch and (where PSScriptAnalyzer / `pwsh` are available) that the
+script is analyzer-clean and parses. **Note:** `pybullet==3.2.6` ships no Windows/py3.12 wheel, so on
+Windows it builds from source — if that step fails, install **Microsoft C++ Build Tools** ("Desktop
+development with C++") and re-run; the script surfaces this hint on failure.
 
 ### Project layout & history
 Source under `src/drone_fly/` (connectome loader, controller/actor, adapter, env, train, evaluate,

@@ -11,7 +11,7 @@ Exports the training entrypoints, the config dataclass, and the device resolver.
 from __future__ import annotations
 
 from drone_fly.train.config import TrainConfig
-from drone_fly.train.device import APPLE_SILICON_NOTE, resolve_device
+from drone_fly.train.device import APPLE_SILICON_NOTE, CUDA_OOM_HINT, resolve_device
 from drone_fly.train.loop import (
     build_policy_kwargs,
     find_latest_checkpoint,
@@ -23,6 +23,7 @@ __all__ = [
     "TrainConfig",
     "resolve_device",
     "APPLE_SILICON_NOTE",
+    "CUDA_OOM_HINT",
     "train",
     "smoke_train",
     "build_policy_kwargs",
