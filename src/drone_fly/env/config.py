@@ -581,6 +581,32 @@ class RewardConfig:
     # progressing hover, plus the forgone per-gate and completion bonuses. The bound in (b) is
     # anchored to the default 800-step budget.
     airborne_bonus: float = 0.1
+    # UC-39 — Dense potential-based CLIMB reward (default on). Pays positive signal on every
+    # step of upward progress from a floor start toward ``climb_target_height``, so the first
+    # increments of a takeoff earn reward immediately (before/independent of any later crash),
+    # making PPO's per-action advantage for "throttle up" positive even on an attempt that later
+    # crashes. Implemented in :func:`drone_fly.env.reward.compute_reward` as potential-based
+    # shaping (Ng et al. 1999): Φ(h) = ``climb_weight`` · min(max(h, 0), ``climb_target_height``);
+    # per-step term F = ``climb_gamma`` · Φ(curr) − Φ(prev). Because it telescopes:
+    #   * a round trip (climb then descend the same amount) nets ≈0 (non-farmable, no loiter optimum);
+    #   * the per-episode maximum ≈ ``climb_gamma`` · ``climb_weight`` · ``climb_target_height`` = 1.98,
+    #     far below ``completion_bonus`` (100) and at/below a normalised ``gate_bonus`` — AC1/AC2/AC5;
+    #   * it CAPS at ``climb_target_height`` so there is no incentive to climb into the ceiling (AC1).
+    # Appended **last** (after ``airborne_bonus``) so every positional ``RewardConfig`` call is
+    # unshifted.
+    climb_weight: float = 2.0
+    # Target hover altitude ABOVE the floor (metres) at which the climb potential saturates. Set to
+    # 1.0 m — it aligns with the first gate's height (z ≈ 0.9–1.3) and sits safely below the ceiling
+    # (2.5), so the drone is rewarded for climbing to a useful flying altitude, not into the roof.
+    climb_target_height: float = 1.0
+    # Discount used in the potential-based climb term. IMPORTANT COUPLING (Note 4): for the shaping
+    # to be **policy-invariant** (Ng et al. 1999) this MUST equal the TRAINING discount γ
+    # (:attr:`drone_fly.train.config.TrainConfig.gamma`, currently 0.99). If a future change alters
+    # the training γ, this value MUST be updated in lockstep or the shaping stops being
+    # return-invariant (it would add a real, farmable bias). Kept as an explicit constant here (not
+    # silently sourced) so the coupling is visible; the value is deliberately identical to the train
+    # default γ = 0.99.
+    climb_gamma: float = 0.99
 
 
 @dataclass(frozen=True)

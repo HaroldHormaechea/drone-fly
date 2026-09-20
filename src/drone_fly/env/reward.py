@@ -37,6 +37,8 @@ def compute_reward(
     num_gates: int = 1,
     obstacle_contact: bool = False,
     airborne: bool = False,
+    height_above_floor_prev: float = 0.0,
+    height_above_floor_curr: float = 0.0,
 ) -> float:
     """Return the scalar step reward.
 
@@ -78,6 +80,21 @@ def compute_reward(
         sitting on the ground earns nothing and the only path to reward is to take off and stay up.
         The env raises this flag only when the drone's altitude exceeds ``floor_z + floor_epsilon``.
         Default ``False`` keeps every pre-UC-37 caller byte-identical (no survival term).
+    height_above_floor_prev, height_above_floor_curr:
+        Drone altitude ABOVE the course floor (``position[2] − floor_z``) before and after the
+        step (UC-39 AC1/AC2). They drive a **dense potential-based climb reward** that pays for
+        upward progress toward ``cfg.climb_target_height`` on the very step altitude is gained —
+        before and independent of any later crash — so PPO's per-action advantage for the initial
+        "throttle up" actions of a takeoff is positive even when the attempt later crashes. The term
+        is potential-based (Ng et al. 1999): Φ(h) = ``cfg.climb_weight`` · min(max(h, 0),
+        ``cfg.climb_target_height``); the per-step contribution is
+        F = ``cfg.climb_gamma`` · Φ(curr) − Φ(prev). Consequences (all unit-testable): it telescopes
+        so a climb-then-descend round trip nets ≈0 (non-farmable, no loiter optimum); the
+        per-episode total is bounded by ≈ ``climb_gamma`` · ``climb_weight`` · ``climb_target_height``
+        ≪ ``completion_bonus``; it is ≈0 on the floor (h ≈ 0 ⇒ Φ ≈ 0) and ≈0 for steps taken above
+        the target (Φ saturates ⇒ no ceiling-seeking). ``cfg.climb_gamma`` MUST equal the training γ
+        for the invariance to hold (see :class:`~drone_fly.env.config.RewardConfig`). Both default to
+        ``0.0`` ⇒ Φ_prev = Φ_curr = 0 ⇒ F = 0, so every pre-UC-39 caller is byte-identical.
     """
     reward = -cfg.time_penalty
     reward += cfg.progress_weight * (dist_to_target_prev - dist_to_target_curr)
@@ -91,4 +108,9 @@ def compute_reward(
         reward -= cfg.obstacle_penalty
     if airborne:
         reward += cfg.airborne_bonus
+    # UC-39: dense potential-based climb shaping (F = γΦ' − Φ, Φ = w·min(max(h,0), target)).
+    # Telescoping ⇒ non-farmable; capped at the target ⇒ no ceiling-seeking; ≈0 on the floor.
+    phi_prev = cfg.climb_weight * min(max(height_above_floor_prev, 0.0), cfg.climb_target_height)
+    phi_curr = cfg.climb_weight * min(max(height_above_floor_curr, 0.0), cfg.climb_target_height)
+    reward += cfg.climb_gamma * phi_curr - phi_prev
     return float(reward)

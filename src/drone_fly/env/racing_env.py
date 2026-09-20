@@ -168,6 +168,31 @@ class RaceEnv(gym.Env):
         # properly from the spawn state in reset(); declared here for the reset()-skipped path.
         self._took_off = False
 
+        # UC-39: training-time crash-cliff relief. When not None, this value TEMPORARILY overrides
+        # ``config.reward.collision_penalty`` for the reward computation only (applied via
+        # ``dataclasses.replace`` in ``step``), so a training curriculum can ramp the genuine
+        # floor/ceiling/OOB penalty from a low value (while the drone learns to fly) up to the full
+        # value (for precision) WITHOUT changing the env's default ``RewardConfig`` (which stays
+        # 100). Default ``None`` ⇒ the reward path is byte-identical to pre-UC-39; termination
+        # semantics are never affected (a genuine crash still terminates and is still penalised,
+        # just at the active curriculum value). Set from the training loop via
+        # :meth:`set_collision_penalty`.
+        self._collision_penalty_override: float | None = None
+
+    def set_collision_penalty(self, value: float | None) -> None:
+        """Override the genuine-collision penalty used in reward shaping (UC-39 crash-cliff relief).
+
+        Called by the training-time collision curriculum (see
+        :class:`drone_fly.train.collision_curriculum.CollisionCurriculumCallback`) to ramp the
+        penalty over training. ``value`` is the collision penalty to apply from now on; ``None``
+        clears the override and restores the env default (``config.reward.collision_penalty``, 100).
+        Reward-only: it never changes termination — a genuine crash still ends the episode and is
+        still penalised, just at the supplied magnitude. Idempotent and cheap; safe to call every
+        rollout. Reachable through the SB3 wrapper stack via ``VecEnv.env_method`` (VecNormalize →
+        VecMonitor → DummyVecEnv/SubprocVecEnv delegate ``env_method`` down to this base env).
+        """
+        self._collision_penalty_override = None if value is None else float(value)
+
     @property
     def obs_width(self) -> int:
         """Width of the emitted observation vector (UC-15).
@@ -545,6 +570,17 @@ class RaceEnv(gym.Env):
         # trap). The termination reason is reported independently via ``info["early_termination"]``.
         penalize_collision = crash or (early_termination == "grounded")
 
+        # UC-39: crash-cliff relief. When the training curriculum has set an override (via
+        # ``set_collision_penalty``), apply it for THIS step's reward only by cloning the reward
+        # config with the ramped ``collision_penalty``. Default None ⇒ ``reward_cfg is
+        # self.config.reward`` (byte-identical); the env default (100) is never mutated and
+        # termination is untouched.
+        reward_cfg = self.config.reward
+        if self._collision_penalty_override is not None:
+            reward_cfg = dataclasses.replace(
+                reward_cfg, collision_penalty=self._collision_penalty_override
+            )
+
         reward = compute_reward(
             dist_to_target_prev=dist_prev,
             dist_to_target_curr=dist_curr,
@@ -554,12 +590,17 @@ class RaceEnv(gym.Env):
             # timeout do not. A raw floor/ceiling contact still eats collision_penalty as before.
             collided=penalize_collision,
             completed=completed,
-            cfg=self.config.reward,
+            cfg=reward_cfg,
             num_gates=course.num_gates,
             obstacle_contact=obstacle_contact,
             # UC-37 (AC5): pay the survival bonus only while airborne (above the floor band); zero
             # on/at the floor, so sitting on the ground earns nothing.
             airborne=airborne,
+            # UC-39 (AC1/AC2): dense potential-based climb reward. Altitude above the floor at this
+            # step's START (``self._prev_pos``, set at the end of the previous step) and END
+            # (``state.position``). Reuses existing sensing — no new observation.
+            height_above_floor_prev=float(self._prev_pos[2] - course.floor_z),
+            height_above_floor_curr=float(state.position[2] - course.floor_z),
         )
 
         # UC-16/UC-25/UC-38: a dock does NOT terminate. An episode ends on a valid completion, a
