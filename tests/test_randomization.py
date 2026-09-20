@@ -40,8 +40,10 @@ from drone_fly.env.config import (
     PadSpec,
     RandomizationConfig,
 )
+from drone_fly.env.obstacles import point_in_cylinder
 from drone_fly.env.randomization import (
     _BATTERY_BUDGET,
+    _course_segments,
     _eligible_gate_indices,
     _fallback_course,
     _path_energy,
@@ -50,6 +52,7 @@ from drone_fly.env.randomization import (
     _place_single_repair_pad,
     _recharge_covering_valid,
     _reference_path,
+    _segment_axis_distance_2d,
     is_course_solvable,
     sample_course,
     sample_dynamics,
@@ -460,18 +463,27 @@ def test_obstacle_on_the_finish_is_unsolvable() -> None:
     assert is_course_solvable(blocked, RandomizationConfig()) is False
 
 
-def test_obstacle_on_the_polyline_fails_clearance() -> None:
-    """A pillar sitting on a start→gate segment (not on an anchor) fails polyline clearance (AC3).
+def test_on_corridor_obstacle_is_solvable_but_forces_evasion() -> None:
+    """UC-35 AC3/AC4 contract reversal: a pillar sitting ON a start→gate segment is now SOLVABLE.
 
-    The start (0,0,1)→g0 (2.5,0,1) segment runs along y=0; a pillar centred at (1.25, 0) with
-    the segment inside its z-band violates the ``radius + obstacle_clearance`` margin even
-    though it covers no gate/start/finish *anchor* — this is the ≥1-collision-free-path guard.
+    UC-15 *forbade* on-route pillars (polyline far-clearance guard); UC-35 wants pillars near the
+    nominal path so the drone is FORCED to evade, and instead enforces an *evadability* model. The
+    start (0,0,1)→g0 (2.5,0,1) segment runs along y=0; a pillar centred at (1.25, 0) with clearance
+    to every anchor and an escape lane is now flyable — yet the straight path passes within the
+    pillar's radius of its axis, so the drone must deviate (forced evasion).
     """
     base = CourseConfig()
     on_line = dataclasses.replace(
         base, obstacles=(ObstacleSpec(center=(1.25, 0.0), radius=0.3, height=2.5),)
     )
-    assert is_course_solvable(on_line, RandomizationConfig()) is False
+    rcfg = RandomizationConfig()
+    # Reversed contract: on-corridor-but-evadable ⇒ solvable (was False under UC-15).
+    assert is_course_solvable(on_line, rcfg) is True
+    # FORCED: the straight start→g0 path passes within the pillar radius of the pillar axis.
+    start_xy = np.asarray(base.start, dtype=np.float64)
+    g0 = base.gates[0].position
+    axis = np.asarray([1.25, 0.0], dtype=np.float64)
+    assert _segment_axis_distance_2d(start_xy, g0, axis) < 0.3
 
 
 def test_off_corridor_obstacle_is_solvable() -> None:
@@ -499,32 +511,61 @@ def test_obstacle_below_the_polyline_z_band_does_not_block() -> None:
 # =====================================================================================
 # UC-15 AC3 — obstacle SAMPLING: presence rate, solvability, obstacle-free fallback
 # =====================================================================================
-def test_enabled_obstacle_axis_produces_pillars_at_a_healthy_rate() -> None:
-    """With the obstacle axis on, off-corridor placement clears the guard on the vast majority.
+def _obstacle_maps_to_a_corridor_segment(
+    course: CourseConfig, obstacle: ObstacleSpec, rcfg: RandomizationConfig, tol: float = 1e-6
+) -> bool:
+    """True iff ``obstacle`` sits within the perpendicular corridor of some waypoint→waypoint
+    segment (incl. start→first-gate) AND the straight path passes within ``radius + drone_radius``
+    of its axis (forced evasion) — the UC-35 AC3/AC4 "between-waypoints, threatens-the-route" test.
+    """
+    start_xy = np.asarray(course.start, dtype=np.float64)[:2]
+    axis = np.asarray(obstacle.center, dtype=np.float64)
+    forced_gap = float(obstacle.radius) + rcfg.drone_radius
+    for p, q in _course_segments(start_xy, course.gates):
+        d = _segment_axis_distance_2d(p, q, axis)
+        if d <= rcfg.obstacle_corridor_half_width + tol and d <= forced_gap + tol:
+            return True
+    return False
 
-    The lateral off-corridor bias means sampled pillars almost always survive the solvability
-    reject-resample, so obstacles are present at a healthy rate (not rare) (AC3).
+
+def test_enabled_obstacle_axis_produces_pillars_at_a_healthy_rate() -> None:
+    """UC-35 AC3/AC4: the obstacle axis places pillars BETWEEN consecutive waypoints, in-corridor.
+
+    (a) ≥60% of sampled courses carry ≥1 pillar (a healthy rate, not rare); (b) every sampled
+    obstacle course is still flyable (``is_course_solvable``); (c) every placed pillar maps to an
+    inter-waypoint segment within the corridor and the straight path passes within
+    ``radius + drone_radius`` of its axis (forced evasion).
     """
     rcfg = RandomizationConfig(enable_course=True, enable_obstacles=True)
     base = CourseConfig()
     rng = np.random.default_rng(0)
     courses = [sample_course(rng, rcfg, base) for _ in range(300)]
     with_obstacles = sum(1 for c in courses if c.obstacles)
-    assert with_obstacles > 250, f"obstacles too rare when enabled: {with_obstacles}/300"
-    # And every sampled obstacle course is still flyable.
+    assert with_obstacles >= 180, f"healthy-rate floor not met: {with_obstacles}/300 (<60%)"
     for c in courses:
+        # (b) every obstacle course is flyable.
         assert is_course_solvable(c, rcfg)
+        # (c) every placed pillar threatens an inter-waypoint segment within the corridor.
+        for obs in c.obstacles:
+            assert _obstacle_maps_to_a_corridor_segment(c, obs, rcfg), (
+                f"pillar {obs.center} does not map to a corridor segment"
+            )
 
 
 def test_sampled_obstacle_counts_respect_the_configured_range() -> None:
-    """Drawn pillar counts stay within ``obstacle_count_range`` (AC3)."""
+    """UC-35 AC3: ``obstacle_count_range`` is now an UPPER BOUND on the realised pillar count.
+
+    Each drawn pillar consumes a fixed number of RNG draws but may be *skipped* if it fails the
+    evadability accept test, so the realised count is ``⊆ {0, .., hi}`` — never above ``hi``, and
+    possibly zero on pathologically short courses.
+    """
     rcfg = RandomizationConfig(
         enable_course=True, enable_obstacles=True, obstacle_count_range=(1, 3)
     )
     base = CourseConfig()
     rng = np.random.default_rng(1)
     counts = {len(sample_course(rng, rcfg, base).obstacles) for _ in range(300)}
-    assert counts <= {1, 2, 3}
+    assert counts <= {0, 1, 2, 3}  # upper bound: skips can drop the count, never raise it
     assert max(counts) >= 1  # at least some courses carry pillars
 
 
@@ -621,6 +662,21 @@ def _pad_xy(pad: PadSpec) -> tuple[float, float]:
     return (round(float(pad.center[0]), 6), round(float(pad.center[1]), 6))
 
 
+def _min_pad_gate_distance(pad: PadSpec, course: CourseConfig) -> float:
+    """Smallest horizontal distance from ``pad`` to any gate centre (UC-35 AC1 R_pad check)."""
+    p = np.asarray(pad.center, dtype=np.float64)
+    return min(
+        float(np.linalg.norm(p - np.asarray(g.center, dtype=np.float64)[:2])) for g in course.gates
+    )
+
+
+def _pad_off_every_gate(pad: PadSpec, course: CourseConfig, rcfg: RandomizationConfig) -> bool:
+    """UC-35 AC1: a placed pad keeps ≥ ``R_pad`` from EVERY gate centre and stays in-corridor."""
+    if abs(float(pad.center[1])) > rcfg.lateral_bound:
+        return False
+    return _min_pad_gate_distance(pad, course) >= rcfg.pad_min_gate_distance - 1e-9
+
+
 # --- AC2: recharge placement is reachable — exactly ONE pad under the DEFAULT battery ------
 def test_enable_recharge_places_exactly_one_pad_under_default_battery() -> None:
     """AC2 (the fix): with the recharge axis on and the SHIPPED DEFAULT battery, EVERY sampled
@@ -634,8 +690,10 @@ def test_enable_recharge_places_exactly_one_pad_under_default_battery() -> None:
         assert len(pads) == 1, f"seed {seed}: expected exactly one recharge pad, got {len(pads)}"
         # Non-constrained under the default battery ⇒ the lone pad is a valid bonus, still solvable.
         assert is_course_solvable(course, rcfg, battery=_DEFAULT_BATTERY)
-        # The pad anchors on a gate column (x, y matches some gate centre).
-        assert _pad_xy(pads[0]) in _gate_centers_xy(course)
+        # UC-35 AC1: the pad is placed OFF every gate column (≥ R_pad from every gate centre),
+        # NOT under a waypoint — and within the lateral corridor.
+        assert _pad_off_every_gate(pads[0], course, rcfg)
+        assert _pad_xy(pads[0]) not in _gate_centers_xy(course)
         # Recharge-only axis ⇒ no repair pad.
         assert not _repairable_pads(course)
 
@@ -652,7 +710,9 @@ def test_enable_repair_places_exactly_one_repairable_pad() -> None:
         pads = _repairable_pads(course)
         assert len(pads) == 1, f"seed {seed}: expected exactly one repair pad, got {len(pads)}"
         assert is_course_solvable(course, rcfg)
-        assert _pad_xy(pads[0]) in _gate_centers_xy(course)
+        # UC-35 AC1: repair pad is placed OFF every gate column too.
+        assert _pad_off_every_gate(pads[0], course, rcfg)
+        assert _pad_xy(pads[0]) not in _gate_centers_xy(course)
         assert not _rechargeable_pads(course)  # repair-only axis
 
 
@@ -673,6 +733,16 @@ def test_both_axes_place_one_recharge_and_one_repair_at_distinct_anchors() -> No
         assert len(course.pads) == 2
         assert _pad_xy(recharge[0]) != _pad_xy(repair[0])
         assert not (recharge[0].rechargeable and recharge[0].repairable)
+        # UC-35 AC1: both pads are placed OFF every gate column, and ≥ R_pad from each other.
+        assert _pad_off_every_gate(recharge[0], course, rcfg)
+        assert _pad_off_every_gate(repair[0], course, rcfg)
+        sep = float(
+            np.linalg.norm(
+                np.asarray(recharge[0].center, dtype=np.float64)
+                - np.asarray(repair[0].center, dtype=np.float64)
+            )
+        )
+        assert sep >= rcfg.pad_min_gate_distance - 1e-9
         assert is_course_solvable(course, rcfg, battery=_DEFAULT_BATTERY)
 
 
@@ -808,29 +878,45 @@ def test_service_placement_is_deterministic_for_a_fixed_seed_and_battery() -> No
 
 
 # --- AC1: eligibility — descend-column-clear is respected; no clear anchor ⇒ None ----------
-def test_eligibility_excludes_gates_whose_descend_column_clips_a_pillar() -> None:
-    """AC1: a service pad forces a floor→gate descend column, so a gate whose column comes within
-    ``radius + obstacle_clearance`` of a pillar is NOT an eligible anchor; a clear gate is."""
+def test_eligibility_admits_gates_whose_column_clips_a_pillar_via_offset() -> None:
+    """UC-35 AC1 redefinition: eligibility is now "an OFF-gate pad position exists near the anchor",
+    not "the gate column is clear". A pillar sitting on g0's column no longer disqualifies g0 — the
+    pad is placed OFF the column (dodging the pillar), so BOTH gates are eligible and the placed pad
+    is off every gate centre and descend-column-clear of the pillar."""
     rcfg = RandomizationConfig(enable_course=True, enable_recharge=True, enable_repair=True)
     g0 = GateSpec(center=(2.5, 0.0, 1.0), aperture=0.6)
     g1 = GateSpec(center=(4.0, 0.0, 1.3), aperture=0.6)
-    # A pillar sitting on g0's (x, y) column blocks g0 only; g1 is 1.5 m away ⇒ clear.
+    # A pillar sitting on g0's (x, y) column: under UC-15 this excluded g0; UC-35 offsets the pad.
     blocker = ObstacleSpec(center=(2.5, 0.0), radius=0.6, height=2.0)
     course = CourseConfig(gates=(g0, g1), obstacles=(blocker,), finish_x=6.0)
-    assert _eligible_gate_indices(course, rcfg) == [1]
+    # Both gates now admit an off-gate pad position ⇒ both eligible ([0, 1], not [1]).
+    assert _eligible_gate_indices(course, rcfg) == [0, 1]
     placed = _place_single_recharge_pad(course, rcfg, _DEFAULT_BATTERY)
     assert placed is not None
     pads = _rechargeable_pads(placed)
-    assert len(pads) == 1 and _pad_xy(pads[0]) == (4.0, 0.0)
+    assert len(pads) == 1
+    # The pad is OFF every gate column (not on a gate centre) and dodges the pillar.
+    assert _pad_off_every_gate(pads[0], placed, rcfg)
+    assert _pad_xy(pads[0]) not in _gate_centers_xy(placed)
 
 
 def test_no_clear_anchor_returns_none_for_every_placer() -> None:
-    """AC1: when NO gate's descend column is clear, every placer returns ``None`` (→ the sampler
-    reject-resamples), rather than placing an unsafe pad."""
+    """AC1: when NO off-gate pad position exists near ANY gate, every placer returns ``None`` (→ the
+    sampler reject-resamples) rather than placing an unsafe pad.
+
+    UC-35: a single pillar on the sole gate's column no longer suffices — the pad can dodge it off
+    the column. A genuine no-anchor case needs a stricter blocker: here wall pillars surround the
+    lone gate on the -x/+y/-y rays (the +x ray is cut off by ``finish_x=4.0``), so the fixed
+    off-gate candidate ring has no feasible, descend-column-clear position anywhere."""
     rcfg = RandomizationConfig(enable_course=True, enable_recharge=True, enable_repair=True)
     gate = GateSpec(center=(3.0, 0.0, 1.0), aperture=0.6)
-    blocker = ObstacleSpec(center=(3.0, 0.0), radius=0.6, height=2.0)  # on the sole gate's column
-    course = CourseConfig(gates=(gate,), obstacles=(blocker,), finish_x=5.0)
+    blockers = (
+        ObstacleSpec(center=(3.0, 1.6), radius=0.6, height=2.5),  # +y ray
+        ObstacleSpec(center=(3.0, -1.6), radius=0.6, height=2.5),  # -y ray
+        ObstacleSpec(center=(1.6, 0.0), radius=0.6, height=2.5),  # -x ray (far half)
+        ObstacleSpec(center=(0.4, 0.0), radius=0.6, height=2.5),  # -x ray (near half)
+    )
+    course = CourseConfig(gates=(gate,), obstacles=blockers, finish_x=4.0)
     assert _eligible_gate_indices(course, rcfg) == []
     assert _place_single_recharge_pad(course, rcfg, _DEFAULT_BATTERY) is None
     assert _place_single_repair_pad(course, rcfg) is None
@@ -883,3 +969,241 @@ def test_sample_course_exhaustion_returns_a_fallback_with_one_pad() -> None:
     assert result == expected  # the exact zero-RNG fallback
     assert len(_rechargeable_pads(result)) == 1
     assert is_course_solvable(result, rcfg, battery=_DEFAULT_BATTERY)
+
+
+# =====================================================================================
+# UC-35 — course randomization placement: pads OFF waypoints, obstacles BETWEEN waypoints
+# =====================================================================================
+# The end-to-end acceptance-criteria suite for UC-35, exercising the sampler across many seeds:
+#   AC-1 no pad within R_pad of any gate; AC-2 exactly-one-each + in-bounds + toggle; AC-3 every
+#   obstacle maps to an inter-waypoint corridor segment; AC-4 the min-clearance / evadability
+#   invariant; AC-5 same-seed identical placement; AC-6 toggles gate each feature; AC-7 byte-
+#   identity for disabled axes / non-randomized configs; plus the cranked-battery covering
+#   re-derived against the OFF-gate recharge pad's actual (x, y).
+
+
+def _assert_obstacle_clearance_invariant(course: CourseConfig, rcfg: RandomizationConfig) -> None:
+    """AC-4: assert the full evadability invariant on every pillar of ``course`` (mirrors, and is at
+    least as strict as, the obstacle branch of :func:`is_course_solvable`)."""
+    obstacles = course.obstacles
+    if not obstacles:
+        return
+    floor_z = course.floor_z
+    last = course.gates[-1]
+    finish_pt = np.asarray([course.finish_x, last.center[1], last.center[2]], dtype=np.float64)
+    anchors = [course.start, *(g.position for g in course.gates), finish_pt]
+    anchors_xy = [np.asarray(a, dtype=np.float64)[:2] for a in anchors]
+    for i, obs in enumerate(obstacles):
+        axis = np.asarray(obs.center, dtype=np.float64)
+        radius = float(obs.radius)
+        gate_req = radius + rcfg.drone_radius + rcfg.obstacle_evasion_margin
+        # (i) no anchor inside the pillar, and every anchor keeps gate-passability clearance.
+        for pt in anchors:
+            assert not point_in_cylinder(pt, obs, floor_z), (
+                f"anchor {pt} inside pillar {obs.center}"
+            )
+        for a_xy in anchors_xy:
+            assert float(np.linalg.norm(axis - a_xy)) >= gate_req - 1e-9
+        # (ii) an escape lane on the wider side within the lateral corridor.
+        ay = float(axis[1])
+        lane = max(rcfg.lateral_bound - (ay + radius), (ay - radius) + rcfg.lateral_bound)
+        assert lane >= rcfg.drone_radius + rcfg.obstacle_evasion_margin - 1e-9
+        # (iii) pairwise separation — no unevadable multi-pillar wall.
+        for j in range(i + 1, len(obstacles)):
+            other = obstacles[j]
+            oaxis = np.asarray(other.center, dtype=np.float64)
+            need = radius + float(other.radius) + 2.0 * (
+                rcfg.drone_radius + rcfg.obstacle_evasion_margin
+            )
+            assert float(np.linalg.norm(axis - oaxis)) >= need - 1e-9
+
+
+# --- AC-1: no pad within R_pad of any gate centre, across many seeds -----------------------
+def test_uc35_ac1_no_pad_within_r_pad_of_any_gate_across_many_seeds() -> None:
+    """AC-1: with recharge + repair (and obstacles) on, EVERY placed pad keeps ≥ ``R_pad`` from
+    EVERY gate centre — no pad under a waypoint — across many seeds and gate counts."""
+    rcfg = RandomizationConfig(
+        enable_course=True, enable_obstacles=True, enable_recharge=True, enable_repair=True
+    )
+    base = CourseConfig()
+    for seed in range(120):
+        course = sample_course(np.random.default_rng(seed), rcfg, base, battery=_DEFAULT_BATTERY)
+        assert course.pads, f"seed {seed}: expected service pads"
+        for pad in course.pads:
+            d = _min_pad_gate_distance(pad, course)
+            assert d >= rcfg.pad_min_gate_distance - 1e-9, (
+                f"seed {seed}: pad {pad.center} only {d:.3f} m from nearest gate (< R_pad)"
+            )
+        assert is_course_solvable(course, rcfg, battery=_DEFAULT_BATTERY)
+
+
+# --- AC-2: exactly one of each, in bounds, and each feature is toggle-gated -----------------
+def test_uc35_ac2_exactly_one_each_in_bounds_and_toggle_gated() -> None:
+    """AC-2: pad placement stays valid — exactly one recharge + one repair pad, each within the
+    course bounds — and the per-feature toggles still gate whether each pad is placed."""
+    base = CourseConfig()
+    # Both axes on (≥2 gates ⇒ distinct pads): exactly one of each, all in-bounds.
+    both = RandomizationConfig(
+        enable_course=True, enable_recharge=True, enable_repair=True, num_gates_range=(3, 6)
+    )
+    for seed in range(60):
+        course = sample_course(np.random.default_rng(seed), both, base, battery=_DEFAULT_BATTERY)
+        assert len(_rechargeable_pads(course)) == 1
+        assert len(_repairable_pads(course)) == 1
+        for pad in course.pads:
+            px, py = float(pad.center[0]), float(pad.center[1])
+            assert abs(py) <= both.lateral_bound + 1e-9
+            assert float(course.start[0]) <= px <= course.finish_x + 1e-9
+    # Toggle gating: recharge-only ⇒ no repair pad; repair-only ⇒ no recharge pad.
+    rc_only = RandomizationConfig(enable_course=True, enable_recharge=True, enable_repair=False)
+    rp_only = RandomizationConfig(enable_course=True, enable_recharge=False, enable_repair=True)
+    for seed in range(30):
+        c_rc = sample_course(np.random.default_rng(seed), rc_only, base, battery=_DEFAULT_BATTERY)
+        assert len(_rechargeable_pads(c_rc)) == 1 and not _repairable_pads(c_rc)
+        c_rp = sample_course(np.random.default_rng(seed), rp_only, base, battery=_DEFAULT_BATTERY)
+        assert len(_repairable_pads(c_rp)) == 1 and not _rechargeable_pads(c_rp)
+
+
+# --- AC-3: every obstacle maps to an inter-waypoint corridor segment, many seeds ------------
+def test_uc35_ac3_every_obstacle_maps_to_a_corridor_segment_across_many_seeds() -> None:
+    """AC-3: across many seeds, every generated pillar lies within the along-span AND perpendicular
+    corridor of some waypoint→waypoint segment (incl. start→first-gate) — i.e. it threatens the
+    route (the straight path passes within ``radius + drone_radius`` of the axis)."""
+    rcfg = RandomizationConfig(enable_course=True, enable_obstacles=True)
+    base = CourseConfig()
+    saw_any = False
+    for seed in range(150):
+        course = sample_course(np.random.default_rng(seed), rcfg, base)
+        for obs in course.obstacles:
+            saw_any = True
+            assert _obstacle_maps_to_a_corridor_segment(course, obs, rcfg), (
+                f"seed {seed}: pillar {obs.center} not within any segment corridor"
+            )
+    assert saw_any, "expected at least some pillars to be sampled across 150 seeds"
+
+
+# --- AC-4: the min-clearance / evadability invariant holds on every sampled course ----------
+def test_uc35_ac4_min_clearance_invariant_holds_across_many_seeds() -> None:
+    """AC-4: every sampled obstacle course is evadable — no anchor inside a pillar, every anchor
+    keeps ``radius + drone_radius + evasion_margin`` clearance, an escape lane exists on the wider
+    side within the corridor, and no two pillars form an unevadable wall. Verified directly (not via
+    ``is_course_solvable``) across many seeds, then cross-checked against the solvability guard."""
+    rcfg = RandomizationConfig(enable_course=True, enable_obstacles=True)
+    base = CourseConfig()
+    for seed in range(150):
+        course = sample_course(np.random.default_rng(seed), rcfg, base)
+        _assert_obstacle_clearance_invariant(course, rcfg)
+        assert is_course_solvable(course, rcfg)
+
+
+def test_uc35_ac4_multi_pillar_wall_is_unsolvable() -> None:
+    """AC-4: two pillars packed closer than the pairwise-separation bound form an unevadable wall →
+    the course is rejected by the clearance invariant (guards a hand-built infeasible set)."""
+    base = CourseConfig()
+    rcfg = RandomizationConfig()
+    # Two fat pillars almost touching, straddling the corridor between start and g0.
+    wall = dataclasses.replace(
+        base,
+        obstacles=(
+            ObstacleSpec(center=(1.25, 0.2), radius=0.6, height=2.5),
+            ObstacleSpec(center=(1.25, -0.2), radius=0.6, height=2.5),
+        ),
+    )
+    assert is_course_solvable(wall, rcfg) is False
+
+
+# --- AC-5: same seed → identical pad AND obstacle placement --------------------------------
+def test_uc35_ac5_same_seed_reproduces_identical_placement() -> None:
+    """AC-5: placement is a pure function of (seed, rcfg, battery) — the same seed reproduces the
+    same course including its off-gate pads and between-waypoint pillars; other seeds differ."""
+    rcfg = RandomizationConfig(
+        enable_course=True, enable_obstacles=True, enable_recharge=True, enable_repair=True
+    )
+    base = CourseConfig()
+    for seed in range(20):
+        a = sample_course(np.random.default_rng(seed), rcfg, base, battery=_DEFAULT_BATTERY)
+        b = sample_course(np.random.default_rng(seed), rcfg, base, battery=_DEFAULT_BATTERY)
+        assert a == b  # frozen-dataclass equality: pads + obstacles + gates all identical
+        assert a.pads == b.pads
+        assert a.obstacles == b.obstacles
+    # A different seed produces a different course stream.
+    s1 = sample_course(np.random.default_rng(1), rcfg, base, battery=_DEFAULT_BATTERY)
+    s2 = sample_course(np.random.default_rng(2), rcfg, base, battery=_DEFAULT_BATTERY)
+    assert s1 != s2
+
+
+# --- AC-6: independent toggles gate each feature -------------------------------------------
+def test_uc35_ac6_toggles_independently_gate_each_feature() -> None:
+    """AC-6: the obstacle / recharge / repair toggles each gate ONLY their own feature — turning one
+    on never places another's pad/pillar, and all-off places nothing."""
+    base = CourseConfig()
+    all_off = RandomizationConfig(enable_course=True)
+    for seed in range(20):
+        c = sample_course(np.random.default_rng(seed), all_off, base, battery=_DEFAULT_BATTERY)
+        assert c.pads == () and c.obstacles == ()
+    obs_only = RandomizationConfig(enable_course=True, enable_obstacles=True)
+    for seed in range(20):
+        c = sample_course(np.random.default_rng(seed), obs_only, base, battery=_DEFAULT_BATTERY)
+        assert c.pads == ()  # obstacle axis never places pads
+    rc_only = RandomizationConfig(enable_course=True, enable_recharge=True)
+    for seed in range(20):
+        c = sample_course(np.random.default_rng(seed), rc_only, base, battery=_DEFAULT_BATTERY)
+        assert c.obstacles == () and not _repairable_pads(c)  # recharge axis: no pillars/repair
+
+
+# --- AC-7: byte-identity for disabled axes / non-randomized (UC-35 fields perturb nothing) --
+def test_uc35_ac7_disabled_axes_leave_the_stream_byte_identical() -> None:
+    """AC-7: two configs differing ONLY in their UC-35 placement-geometry fields, with the obstacle
+    and service axes OFF, yield a byte-identical course sequence — the UC-35 fields are read only by
+    the (inactive) samplers/placers, so a disabled-axis / non-randomized run is unperturbed."""
+    base = CourseConfig()
+    plain = RandomizationConfig(enable_course=True)
+    tweaked = RandomizationConfig(
+        enable_course=True,
+        pad_min_gate_distance=1.7,
+        drone_radius=0.25,
+        obstacle_evasion_margin=0.4,
+        obstacle_corridor_half_width=0.9,
+        obstacle_gate_clearance=0.7,
+        min_obstacle_separation=0.5,
+        obstacle_along_margin_frac=0.15,
+    )
+
+    def sequence(rcfg: RandomizationConfig, seed: int = 5, k: int = 8) -> list[CourseConfig]:
+        rng = np.random.default_rng(seed)
+        return [sample_course(rng, rcfg, base, battery=_DEFAULT_BATTERY) for _ in range(k)]
+
+    assert sequence(plain) == sequence(tweaked)
+
+
+def test_uc35_ac7_disabled_obstacle_axis_draws_no_pillars() -> None:
+    """AC-7: with the obstacle axis off, no course carries pillars regardless of UC-35 corridor
+    settings — the new sampler is never entered, so its draws never perturb the gate stream."""
+    base = CourseConfig()
+    rcfg = RandomizationConfig(
+        enable_course=True, enable_obstacles=False, obstacle_corridor_half_width=0.9
+    )
+    rng = np.random.default_rng(3)
+    assert all(sample_course(rng, rcfg, base).obstacles == () for _ in range(200))
+
+
+# --- Cranked-battery covering re-derived against the OFF-gate recharge pad ------------------
+def test_uc35_cranked_battery_covering_valid_against_offset_pads() -> None:
+    """UC-35 + UC-24 AC4: under a cranked battery where the full path often exceeds one charge, the
+    single recharge pad is placed OFF the gate columns, yet the covering check (which now models the
+    detour through the pad's ACTUAL (x, y)) still re-derives as valid for constrained courses."""
+    rcfg = RandomizationConfig(enable_course=True, enable_recharge=True, num_gates_range=(2, 2))
+    base = CourseConfig()
+    saw_constrained = False
+    for seed in range(60):
+        course = sample_course(np.random.default_rng(seed), rcfg, base, battery=_TUNED_BATTERY)
+        pads = _rechargeable_pads(course)
+        assert len(pads) == 1
+        # The recharge pad is OFF every gate column (UC-35 AC1), not under a waypoint.
+        assert _pad_off_every_gate(pads[0], course, rcfg)
+        assert is_course_solvable(course, rcfg, battery=_TUNED_BATTERY)
+        if _path_energy(_reference_path(course), rcfg, _TUNED_BATTERY) > _BATTERY_BUDGET:
+            saw_constrained = True
+            # Covering re-derives against the pad's real (off-gate) position.
+            assert _recharge_covering_valid(course, rcfg, _TUNED_BATTERY, pads)
+    assert saw_constrained, "the tuned drain must produce at least one constrained course"
