@@ -36,6 +36,7 @@ def compute_reward(
     cfg: RewardConfig,
     num_gates: int = 1,
     obstacle_contact: bool = False,
+    airborne: bool = False,
 ) -> float:
     """Return the scalar step reward.
 
@@ -71,6 +72,12 @@ def compute_reward(
         reward signal — it NEVER feeds episode termination (the env owns that), so a penalised
         drone may recover aerially and still complete the course. Default ``False`` keeps every
         pre-UC-15 caller byte-identical.
+    airborne:
+        Whether the drone is above the floor band this step (UC-37 AC5). When ``True`` the per-step
+        ``cfg.airborne_bonus`` survival reward is added; it is exactly zero on/at the floor, so
+        sitting on the ground earns nothing and the only path to reward is to take off and stay up.
+        The env raises this flag only when the drone's altitude exceeds ``floor_z + floor_epsilon``.
+        Default ``False`` keeps every pre-UC-37 caller byte-identical (no survival term).
     """
     reward = -cfg.time_penalty
     reward += cfg.progress_weight * (dist_to_target_prev - dist_to_target_curr)
@@ -82,4 +89,6 @@ def compute_reward(
         reward -= cfg.collision_penalty
     if obstacle_contact:
         reward -= cfg.obstacle_penalty
+    if airborne:
+        reward += cfg.airborne_bonus
     return float(reward)
