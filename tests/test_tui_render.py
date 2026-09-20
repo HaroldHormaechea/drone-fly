@@ -24,10 +24,13 @@ from drone_fly.train.health import HealthReason, HealthVerdict
 from drone_fly.train.tui import metrics as M
 from drone_fly.train.tui.render import (
     SEVERITY_STYLE,
+    STATUS_BORDER_OVERHEAD,
+    STATUS_MAX_CONTENT_LINES,
     build_layout,
     build_status_bar,
     build_trends_panel,
     build_values_panel,
+    status_region_size,
 )
 
 
@@ -273,3 +276,96 @@ def test_values_panel_steps_line_not_clipped_in_full_layout() -> None:
     out = _render(build_layout(m, ["log line"]), width=200)
     assert "steps" in out
     assert "26,624" in out
+
+
+# --------------------------------------------------------------------------- #
+# UC-33 Item 1 — bottom status-region autosize (status_region_size)
+#
+# Headless, pure function: given (message, width) it returns the Rich Layout height for the
+# status region. No live terminal draw (AC-4). Height == content rows + STATUS_BORDER_OVERHEAD.
+# --------------------------------------------------------------------------- #
+
+
+def test_status_region_baseline_single_line_is_size_3() -> None:
+    """AC-3: a one-line verdict (no width given) yields 1 content row + border overhead == the
+    historical hardcoded ``size=3``, so the common case has zero visual regression."""
+    assert STATUS_BORDER_OVERHEAD == 2
+    assert status_region_size("Training progressing normally.") == 1 + STATUS_BORDER_OVERHEAD
+    assert status_region_size("Training progressing normally.") == 3
+
+
+@pytest.mark.parametrize("k", [1, 2, 3, 4, 5, 6])
+def test_status_region_k_logical_lines_grows_to_min_k_plus_overhead(k: int) -> None:
+    """AC-1: a K-line message (split on ``\\n``, no width) allocates min(K, MAX) content rows +
+    overhead, so a multi-line health warning renders all its lines instead of clipping to one."""
+    message = "\n".join(f"line {i}" for i in range(k))
+    expected = min(k, STATUS_MAX_CONTENT_LINES) + STATUS_BORDER_OVERHEAD
+    assert status_region_size(message) == expected
+
+
+def test_status_region_empty_message_still_has_one_content_row() -> None:
+    """An empty message clamps to a minimum of one content row (never a zero-height region)."""
+    assert status_region_size("") == 1 + STATUS_BORDER_OVERHEAD
+
+
+def test_status_region_clamps_oversized_message_to_max() -> None:
+    """AC-2: a pathologically long message (far more than the cap of logical lines) clamps to
+    STATUS_MAX_CONTENT_LINES content rows + overhead — it can never grow to swallow the terminal."""
+    huge = "\n".join(f"line {i}" for i in range(STATUS_MAX_CONTENT_LINES * 5))
+    assert status_region_size(huge) == STATUS_MAX_CONTENT_LINES + STATUS_BORDER_OVERHEAD
+
+
+def test_status_region_width_aware_wrap_grows_a_long_single_line() -> None:
+    """AC-1: a single logical line longer than the inner content width wraps to multiple rows when
+    a width is supplied, so the region grows to show the wrapped text (not just 1 row)."""
+    # One long logical line (no embedded newline), rendered against a narrow width so it must wrap.
+    message = "word " * 40  # ~200 chars of word-wrappable text
+    narrow = status_region_size(message, width=30)
+    # With a width it wraps to >1 content row -> taller than the no-width (logical-line) baseline.
+    assert narrow > 1 + STATUS_BORDER_OVERHEAD
+    # Still bounded by the documented cap (AC-2).
+    assert narrow <= STATUS_MAX_CONTENT_LINES + STATUS_BORDER_OVERHEAD
+
+
+def test_status_region_wider_width_wraps_to_fewer_rows_than_narrow() -> None:
+    """Width-aware wrapping is monotonic: the same message needs no more rows at a wider width."""
+    message = "word " * 40
+    assert status_region_size(message, width=200) <= status_region_size(message, width=30)
+
+
+def test_status_region_is_deterministic_for_fixed_message_and_width() -> None:
+    """AC-5: 'platform-independent' == deterministic given a fixed (message, width) pair, NOT
+    identical runtime widths across OSes. Repeated calls return the same height."""
+    message = "actor entropy flat & 0% success\nvalue loss trending up\ncheck the connectome slice"
+    first = status_region_size(message, width=80)
+    for _ in range(5):
+        assert status_region_size(message, width=80) == first
+
+
+def test_status_region_narrow_width_does_not_undercount_wrapped_line() -> None:
+    """Challenger rec: Rich-native (word-aware) wrap measurement must not UNDER-count. A single
+    logical line that clearly exceeds the inner width reports at least 2 content rows."""
+    inner = 20
+    message = "x" * (inner * 3)  # 3x the inner content width -> must wrap to multiple rows
+    # width = inner + STATUS_PANEL_CHROME_WIDTH(4); the helper subtracts chrome internally.
+    size = status_region_size(message, width=inner + 4)
+    assert size - STATUS_BORDER_OVERHEAD >= 2
+
+
+def test_status_region_width_none_uses_logical_line_count() -> None:
+    """A single (unwrapped) logical line with width=None counts as exactly one content row,
+    regardless of how long the string is — the no-width path never wraps."""
+    long_single_line = "x" * 500
+    assert status_region_size(long_single_line, width=None) == 1 + STATUS_BORDER_OVERHEAD
+
+
+def test_layout_status_region_autosizes_for_a_multiline_verdict() -> None:
+    """End-to-end at the layout level: a multi-line verdict makes build_layout allocate a taller
+    status region (still renders headlessly, AC-4). Uses a message with embedded newlines so the
+    height derives from the verdict rather than a hardcoded size."""
+    m = _populated_model()
+    m.set_verdict(HealthVerdict(status="warning", message="line one\nline two\nline three"))
+    # width=None path: 3 logical lines -> 3 + overhead.
+    assert status_region_size("line one\nline two\nline three") == 3 + STATUS_BORDER_OVERHEAD
+    out = _render(build_layout(m), width=120)
+    assert out.strip()  # assembles + renders without raising

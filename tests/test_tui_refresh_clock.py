@@ -187,7 +187,11 @@ def test_timer_starts_on_win32(monkeypatch) -> None:
     started = {"n": 0}
     monkeypatch.setattr(dash, "_start_windows_capture", lambda: None)
     monkeypatch.setattr(dash, "_install_logbridge", lambda: None)
-    monkeypatch.setattr(dash, "_build_windows_console", lambda display: object())
+    # UC-33 Item 1: _start now reads self._console.width to autosize the status region, so the
+    # fake console must expose a realistic width (a real Rich Console always has one).
+    monkeypatch.setattr(
+        dash, "_build_windows_console", lambda display: type("_FakeConsole", (), {"width": 120})()
+    )
     monkeypatch.setattr(dash, "_start_timer", lambda: started.__setitem__("n", started["n"] + 1))
 
     dash._start()

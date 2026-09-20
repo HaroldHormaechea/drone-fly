@@ -42,7 +42,7 @@ Statuses:
 | 30 | [use-cases/30-tui-intra-rollout-heartbeat.md](use-cases/30-tui-intra-rollout-heartbeat.md) | Live training TUI must tick during a rollout (intra-rollout heartbeat) | done | 2026-09-19 |
 | 31 | [use-cases/31-windows-cuda-training-setup.md](use-cases/31-windows-cuda-training-setup.md) | Automated Windows + NVIDIA CUDA training setup | done | 2026-09-20 |
 | 32 | [use-cases/32-windows-tui-parallel-training.md](use-cases/32-windows-tui-parallel-training.md) | Windows: full-screen live TUI with per-second updates, logs pane, and crash-free parallel training | done | 2026-09-20 |
-| 33 | [use-cases/33-tui-autosize-and-config-accuracy.md](use-cases/33-tui-autosize-and-config-accuracy.md) | TUI status-box autosize + Windows full-screen/resize + accurate OOM & test-command guidance | pending | 2026-09-20 |
+| 33 | [use-cases/33-tui-autosize-and-config-accuracy.md](use-cases/33-tui-autosize-and-config-accuracy.md) | TUI status-box autosize + Windows full-screen/resize + accurate OOM & test-command guidance | done | 2026-09-20 |
 | 34 | [use-cases/34-viewer-drop-time-heatmap.md](use-cases/34-viewer-drop-time-heatmap.md) | Viewer: remove the neurons×time heatmap (anatomical brain map is the only heatmap) | done | 2026-09-20 |
 | 35 | [use-cases/35-course-randomization-placement.md](use-cases/35-course-randomization-placement.md) | Course randomization placement — pads off waypoints, obstacles between waypoints | done | 2026-09-20 |
 | 36 | [use-cases/36-grounded-episode-early-termination.md](use-cases/36-grounded-episode-early-termination.md) | End grounded / no-progress episodes early (recording & eval, not just training) | done | 2026-09-20 |
