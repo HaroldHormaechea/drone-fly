@@ -164,3 +164,68 @@ def test_cuda_torch_index_does_not_leak_into_pyproject_or_lock() -> None:
             f"{path.name} must NOT reference the CUDA wheel index — it keeps the CUDA path opt-in "
             "and the Linux CI resolve hermetic (AC-7)"
         )
+
+
+# --- cu124 torch-clobber fix (Restore-CudaTorch) regression guard. -----------------------
+# A PyPI resolve (steps 5 / 7) re-resolves torch from PyPI — on Windows a CPU-only wheel —
+# silently clobbering the cu124 build from step 4, so step 8's torch.cuda.is_available()
+# assertion fails. The fix adds a Restore-CudaTorch helper that re-pins the CUDA wheel with
+# `--reinstall-package torch` (load-bearing: without it uv treats the installed +cpu build as
+# satisfying torch==2.6.0 and skips the swap), called after the PyPI resolves. This test is
+# hermetic — a static/structural read of the ps1 text, no CUDA / GPU / pwsh execution.
+
+_RESTORE_HELPER = "Restore-CudaTorch"
+_RESTORE_DEF_LINE = "function Restore-CudaTorch"
+
+
+def _restore_cuda_torch_call_lines(lines: list[str]) -> list[int]:
+    """Indices of lines that *call* Restore-CudaTorch (its definition line excluded)."""
+    return [
+        i
+        for i, line in enumerate(lines)
+        if _RESTORE_HELPER in line and _RESTORE_DEF_LINE not in line
+    ]
+
+
+def test_setup_sim_windows_reinstalls_torch_to_defeat_cpu_clobber() -> None:
+    """The fix hinges on `--reinstall-package torch`: without it uv keeps the CPU build."""
+    text = SETUP_SIM_WINDOWS_PS1.read_text()
+    assert "--reinstall-package torch" in text, (
+        "ps1 must re-pin the CUDA torch wheel with `--reinstall-package torch` — otherwise uv "
+        "treats a PyPI-resolved +cpu build as satisfying torch==2.6.0 and skips the cu124 swap"
+    )
+
+
+def test_setup_sim_windows_restore_cuda_torch_defined_and_called() -> None:
+    """`Restore-CudaTorch` must be both DEFINED and CALLED — a definition alone is inert."""
+    text = SETUP_SIM_WINDOWS_PS1.read_text()
+    assert _RESTORE_DEF_LINE in text, (
+        "ps1 must define the Restore-CudaTorch helper (function Restore-CudaTorch)"
+    )
+    call_lines = _restore_cuda_torch_call_lines(text.splitlines())
+    assert call_lines, (
+        "Restore-CudaTorch is defined but never called — the cu124 re-pin never runs"
+    )
+
+
+def test_setup_sim_windows_restore_called_after_dev_pypi_resolve() -> None:
+    """Ordering guard: a Restore-CudaTorch *call* must follow the `-e '.[dev]'` PyPI resolve.
+
+    The clobber happens *during* the PyPI resolves (step 5's `-e '.[dev]'` and step 7's
+    runtime deps), so the re-pin only helps if it runs AFTER them. We key the ordering on the
+    step-5 dev-resolve line — NOT on the `--index-url`/cu12x literal, which lives only in the
+    helper/config near the top of the file and would false-fail correct code.
+    """
+    lines = SETUP_SIM_WINDOWS_PS1.read_text().splitlines()
+    dev_resolve_lines = [i for i, line in enumerate(lines) if "-e '.[dev]'" in line]
+    assert dev_resolve_lines, (
+        "could not find the step-5 `-e '.[dev]'` PyPI resolve line to anchor the ordering guard"
+    )
+    dev_resolve_idx = dev_resolve_lines[0]
+    call_lines = _restore_cuda_torch_call_lines(lines)
+    assert any(i > dev_resolve_idx for i in call_lines), (
+        "a Restore-CudaTorch call must appear AFTER the step-5 `-e '.[dev]'` PyPI resolve — "
+        "otherwise the CPU-torch clobber from the resolve is never undone before step 8's "
+        f"torch.cuda check (dev-resolve at line {dev_resolve_idx + 1}, calls at "
+        f"{[i + 1 for i in call_lines]})"
+    )
