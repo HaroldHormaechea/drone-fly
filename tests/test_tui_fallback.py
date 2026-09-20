@@ -85,17 +85,30 @@ class _FakeDashboard:
     instances = 0
 
     def __init__(
-        self, *, scheduled_iters: int = 0, n_envs: int = 1, backend: str = "dummy"
+        self,
+        *,
+        scheduled_iters: int = 0,
+        n_envs: int = 1,
+        backend: str = "dummy",
+        total_steps: int = 0,
+        logs_dir: str | None = None,
     ) -> None:
         type(self).instances += 1
         self.scheduled_iters = scheduled_iters
         self.n_envs = n_envs  # UC-26 AC-11: resolved rollout parallelism forwarded by train()
         self.backend = backend
+        # UC-32: the total env-step budget (TIME panel steps line) and the run logs dir (Windows
+        # native.log target) train() now forwards into the dashboard.
+        self.total_steps = total_steps
+        self.logs_dir = logs_dir
         self.redraws = 0
         self.verdicts: list[object] = []
 
         class _Model:
             def update(self, **kwargs) -> None:
+                pass
+
+            def tick(self, **kwargs) -> None:
                 pass
 
             def set_verdict(self, verdict) -> None:
@@ -105,6 +118,13 @@ class _FakeDashboard:
 
     def set_verdict(self, verdict) -> None:
         self.verdicts.append(verdict)
+
+    # UC-32: the callback now drives the lock-guarded tick/update (mutation+redraw atomic).
+    def tick(self, **kwargs) -> None:
+        self.redraws += 1
+
+    def update(self, **kwargs) -> None:
+        self.redraws += 1
 
     @contextmanager
     def live_session(self):

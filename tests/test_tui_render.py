@@ -219,3 +219,57 @@ def test_heartbeat_tick_does_not_blank_the_values_panel_render() -> None:
     assert M.PLACEHOLDER not in after  # STILL no blanking — the snapshot persists
     assert "-1200" in after  # the rollout value is unchanged
     assert "16m39s" in after  # but the live elapsed clock advanced (999 s)
+
+
+# --------------------------------------------------------------------------- #
+# UC-32 Addendum — the TIME panel's cross-platform 'steps current/total' line
+# --------------------------------------------------------------------------- #
+#
+# A DELIBERATE cross-platform display change (shown on macOS/Linux AND Windows): the TIME panel
+# gains a ``steps current/total`` line (thousands-separated) from SB3 ``num_timesteps`` and the
+# configured ``total_timesteps``. Per the Addendum this is NOT an AC-9 regression — verify it
+# renders (on this non-win32 CI host too) with the correct values.
+
+
+def test_values_panel_renders_the_steps_line_thousands_separated() -> None:
+    """Addendum: the TIME panel shows ``steps 26,624 / 1,000,000`` with thousands separators."""
+    m = M.DashboardModel(scheduled_iters=488, total_steps=1_000_000)
+    m.update(n_updates=1, elapsed_seconds=10.0, current_steps=26_624)
+    out = _render(build_values_panel(m), width=200)
+    assert "steps" in out
+    assert "26,624" in out  # current (thousands-separated)
+    assert "1,000,000" in out  # total (thousands-separated)
+
+
+def test_steps_line_updates_via_both_tick_and_update() -> None:
+    """Addendum: the steps line tracks ``current_steps`` fed by BOTH the heartbeat tick and the
+    rollout-end update (it is not frozen between iterations)."""
+    m = M.DashboardModel(scheduled_iters=488, total_steps=500_000)
+    m.tick(elapsed_seconds=5.0, rollout_steps=100, rollout_target=2048, current_steps=12_000)
+    out_tick = _render(build_values_panel(m), width=200)
+    assert "12,000" in out_tick  # fed by tick
+
+    m.update(n_updates=2, elapsed_seconds=20.0, current_steps=48_000)
+    out_update = _render(build_values_panel(m), width=200)
+    assert "48,000" in out_update  # fed by update
+
+
+def test_steps_line_is_untouched_by_tick_clock() -> None:
+    """Addendum: the Windows ~1 Hz clock tick advances elapsed only — the steps line keeps its
+    last real value (the timer observed no new steps)."""
+    m = M.DashboardModel(scheduled_iters=488, total_steps=1_000_000)
+    m.update(n_updates=1, elapsed_seconds=10.0, current_steps=26_624)
+    m.tick_clock(999.0)
+    out = _render(build_values_panel(m), width=200)
+    assert "26,624" in out  # steps unchanged by a pure clock tick
+    assert "1,000,000" in out
+
+
+def test_values_panel_steps_line_not_clipped_in_full_layout() -> None:
+    """Addendum: the values panel height was bumped (7→8) for the extra steps line — assert the
+    steps line survives inside the full four-region layout (i.e. not clipped by the panel size)."""
+    m = M.DashboardModel(scheduled_iters=488, total_steps=1_000_000)
+    m.update(n_updates=1, elapsed_seconds=10.0, current_steps=26_624)
+    out = _render(build_layout(m, ["log line"]), width=200)
+    assert "steps" in out
+    assert "26,624" in out

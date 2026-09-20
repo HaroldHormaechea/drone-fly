@@ -224,3 +224,80 @@ def test_forced_subproc_reset_and_step_are_finite_and_correct_shape() -> None:
 def test_subproc_uses_the_spawn_start_method_constant() -> None:
     """AC-4/AC-10: the multiprocessing start method is the named 'spawn' constant."""
     assert VEC_ENV_START_METHOD == "spawn"
+
+
+# =========================================================================== #
+# UC-32 — per-worker output files (AC-2) + the workers/ dir prune (AC-2)
+# =========================================================================== #
+#
+# The redirect target is a per-worker FILE under ``worker_log_dir`` (Windows-safe, inspectable),
+# not devnull; the dir is pruned + recreated at build so stale files from a higher previous
+# ``n_envs`` don't linger. All hermetic on the numpy ``simple`` adapter (no pybullet).
+
+
+def test_subproc_creates_one_log_file_per_worker(tmp_path) -> None:
+    """AC-2: with suppression on + a worker_log_dir, each spawned worker writes to its own
+    ``worker_<idx>.log`` under that dir (files are inspectable after a run)."""
+    worker_dir = tmp_path / "logs" / "workers"
+    venv = build_vec_env(
+        adapter="simple",
+        n_envs=3,
+        training=True,
+        seed=0,
+        vec_backend="subproc",
+        suppress_worker_output=True,
+        worker_log_dir=str(worker_dir),
+    )
+    try:
+        venv.reset()
+    finally:
+        venv.close()
+    for idx in range(3):
+        assert (worker_dir / f"worker_{idx}.log").exists()
+
+
+def test_subproc_prunes_stale_worker_files_at_build(tmp_path) -> None:
+    """AC-2: a stale worker file from a higher previous n_envs is removed at build so it can't
+    confuse a later failure diagnosis. The dir is pruned + recreated when we will write to it."""
+    worker_dir = tmp_path / "workers"
+    worker_dir.mkdir(parents=True)
+    stale = worker_dir / "worker_99.log"  # from a hypothetical earlier n_envs=100 run
+    stale.write_text("stale traceback from a previous run\n")
+
+    venv = build_vec_env(
+        adapter="simple",
+        n_envs=2,
+        training=True,
+        seed=0,
+        vec_backend="subproc",
+        suppress_worker_output=True,
+        worker_log_dir=str(worker_dir),
+    )
+    try:
+        venv.reset()
+    finally:
+        venv.close()
+
+    assert not stale.exists()  # pruned at build (AC-2)
+    assert (worker_dir / "worker_0.log").exists()  # fresh files for the current n_envs
+    assert (worker_dir / "worker_1.log").exists()
+
+
+def test_subproc_without_worker_log_dir_creates_no_files(tmp_path) -> None:
+    """AC-10: suppression on but NO worker_log_dir means no redirect at all (the pre-UC-26
+    leak-to-parent behaviour) — so no worker files/dir are created."""
+    worker_dir = tmp_path / "workers"
+    venv = build_vec_env(
+        adapter="simple",
+        n_envs=2,
+        training=True,
+        seed=0,
+        vec_backend="subproc",
+        suppress_worker_output=True,
+        worker_log_dir=None,
+    )
+    try:
+        venv.reset()
+    finally:
+        venv.close()
+    assert not worker_dir.exists()

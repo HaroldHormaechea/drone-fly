@@ -506,3 +506,41 @@ def test_tick_then_update_restores_the_snapshot_flow() -> None:
     m.update(ep_rew_mean=-1204.0, success_rate=0.1, n_updates=1)
     assert m.raw["ep_rew"] == -1204.0
     assert m.raw["success"] == pytest.approx(0.1)
+
+
+# --------------------------------------------------------------------------- #
+# UC-32 Addendum — cumulative step count for the TIME panel's steps line
+# --------------------------------------------------------------------------- #
+
+
+def test_total_steps_defaults_to_zero_and_current_starts_at_zero() -> None:
+    m = DashboardModel(scheduled_iters=10)
+    assert m.total_steps == 0
+    assert m.current_steps == 0
+    assert m.steps_progress() == (0, 0)
+
+
+def test_total_steps_is_static_and_current_is_fed_by_update() -> None:
+    """``total_steps`` is the configured budget (static per run); ``current_steps`` tracks SB3
+    ``num_timesteps`` fed via ``update``."""
+    m = DashboardModel(scheduled_iters=10, total_steps=1_000_000)
+    m.update(n_updates=1, current_steps=26_624)
+    assert m.steps_progress() == (26_624, 1_000_000)
+    assert m.total_steps == 1_000_000  # unchanged by update
+
+
+def test_current_steps_is_fed_by_tick_too() -> None:
+    """The heartbeat tick also advances the cumulative step count (liveness during a collection)."""
+    m = DashboardModel(scheduled_iters=10, total_steps=500_000)
+    m.tick(elapsed_seconds=1.0, rollout_steps=100, rollout_target=2048, current_steps=12_000)
+    assert m.steps_progress() == (12_000, 500_000)
+
+
+def test_update_and_tick_without_current_steps_leave_it_unchanged() -> None:
+    """Omitting ``current_steps`` (None) must not reset the counter — it only moves when fed."""
+    m = DashboardModel(scheduled_iters=10, total_steps=500_000)
+    m.update(n_updates=1, current_steps=30_000)
+    m.update(n_updates=2)  # no current_steps -> keep last
+    assert m.current_steps == 30_000
+    m.tick(elapsed_seconds=1.0, rollout_steps=1, rollout_target=2)  # no current_steps -> keep last
+    assert m.current_steps == 30_000
