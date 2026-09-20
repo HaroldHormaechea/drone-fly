@@ -280,3 +280,107 @@ def test_start_fails_fast_before_engaging_capture_on_incapable_windows(monkeypat
     assert touched["capture"] is False  # never redirected fds / engaged the screen
     assert touched["console"] is False
     assert dash._live is None
+
+
+# --------------------------------------------------------------------------- #
+# UC-33 Item 4 — Windows terminal-size resolution (hermetic, AC-18)
+#
+# The size-resolution helper is called directly with a sentinel saved fd (no sys.platform
+# dependency): it must read the SAVED real terminal fd (not the redirected bare fd 1), degrade
+# gracefully to None on failure, and never lock a fixed size on the constructed Console.
+# --------------------------------------------------------------------------- #
+_SENTINEL_SAVED_FD = 987654  # a distinctive value that is unmistakably NOT the bare fd 1
+
+
+def test_resolve_win_size_reads_the_saved_fd_not_bare_fd_1(monkeypatch) -> None:
+    """AC-15/AC-18: the helper queries ``os.get_terminal_size(self._win_saved_fd1)`` — the SAVED
+    real terminal fd — not the bare fd 1 (which UC-32 repointed at native.log)."""
+    calls: list = []
+
+    def _fake_get_terminal_size(fd):
+        calls.append(fd)
+        return os.terminal_size((203, 51))
+
+    monkeypatch.setattr(os, "get_terminal_size", _fake_get_terminal_size)
+
+    dash = TrainingDashboard(capture=False)
+    dash._win_saved_fd1 = _SENTINEL_SAVED_FD
+    size = dash._resolve_win_terminal_size()
+
+    assert size == (203, 51)  # (columns, lines)
+    assert calls == [_SENTINEL_SAVED_FD]  # queried the saved fd exactly once...
+    assert 1 not in calls  # ...and never the bare, redirected fd 1
+
+
+def test_resolve_win_size_degrades_to_none_on_oserror(monkeypatch) -> None:
+    """AC-18 graceful degrade: if ``os.get_terminal_size`` on the saved fd raises OSError (e.g. the
+    fd is not a tty), the helper returns None so callers fall back to Rich self-detection, not a
+    crash."""
+
+    def _raise(fd):
+        raise OSError("not a tty")
+
+    monkeypatch.setattr(os, "get_terminal_size", _raise)
+
+    dash = TrainingDashboard(capture=False)
+    dash._win_saved_fd1 = _SENTINEL_SAVED_FD
+    assert dash._resolve_win_terminal_size() is None
+
+
+def test_resolve_win_size_returns_none_when_saved_fd_missing(monkeypatch) -> None:
+    """AC-18: with no saved fd (helper never captured one), the helper returns None WITHOUT even
+    calling ``os.get_terminal_size`` — it never falls back to probing the bare fd 1."""
+    called = {"n": 0}
+
+    def _fake(fd):
+        called["n"] += 1
+        return os.terminal_size((80, 25))
+
+    monkeypatch.setattr(os, "get_terminal_size", _fake)
+
+    dash = TrainingDashboard(capture=False)
+    dash._win_saved_fd1 = None
+    assert dash._resolve_win_terminal_size() is None
+    assert called["n"] == 0  # never probed any fd
+
+
+def test_build_windows_console_applies_size_without_locking_a_fixed_size(monkeypatch) -> None:
+    """AC-16/AC-18: the Windows Console is built WITHOUT a locking ``width``/``height`` kwarg (which
+    would freeze the size so resizes aren't followed); the resolved size is applied afterwards via
+    the mutable ``console.size`` property instead."""
+    import rich.console as rc
+
+    captured: dict = {}
+    real_console_cls = rc.Console
+
+    class _SpyConsole(real_console_cls):
+        def __init__(self, *args, **kwargs):
+            captured["kwargs"] = dict(kwargs)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(rc, "Console", _SpyConsole)
+    monkeypatch.setattr(os, "get_terminal_size", lambda fd: os.terminal_size((177, 44)))
+
+    dash = TrainingDashboard(capture=False)
+    dash._win_saved_fd1 = _SENTINEL_SAVED_FD
+    console = dash._build_windows_console(display=None)
+
+    # No locking fixed size passed to the constructor...
+    assert "width" not in captured["kwargs"]
+    assert "height" not in captured["kwargs"]
+    # ...but force_terminal is still engaged (so screen=True works over the saved fd).
+    assert captured["kwargs"].get("force_terminal") is True
+    # ...and the resolved size was applied via the mutable property afterwards.
+    assert console.size == (177, 44)
+
+
+def test_build_windows_console_leaves_size_to_rich_when_unresolved(monkeypatch) -> None:
+    """AC-18: if the size can't be resolved (no saved fd), the console is built with no fixed size —
+    Rich self-detects rather than being locked to a wrong value."""
+    monkeypatch.setattr(os, "get_terminal_size", lambda fd: os.terminal_size((80, 25)))
+
+    dash = TrainingDashboard(capture=False)
+    dash._win_saved_fd1 = None  # helper -> None
+    console = dash._build_windows_console(display=None)
+    # Constructed successfully; size was NOT forced from our helper (it returned None).
+    assert console is not None

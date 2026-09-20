@@ -113,9 +113,28 @@ def test_cuda_oom_hint_logged_on_override_cuda_path(caplog, patch_backends) -> N
     )
 
 
-def test_cuda_oom_hint_mentions_vram_knobs() -> None:  # UC-31
-    # AC-4: the hint tells the user which knobs to lower on a CUDA OOM.
+def test_cuda_oom_hint_mentions_vram_knobs() -> None:  # UC-31, amended by UC-33
+    # AC-4 (UC-31): the hint tells the user which knobs to lower on a CUDA OOM.
+    # UC-33 AC-6/AC-8: those knobs must be levers that ACTUALLY exist. ``batch_size`` used to be
+    # named here, but it is not a validated train-config key (see the both-directions test below);
+    # the real VRAM lever is a smaller pruned slice, so assert that one is present instead.
     hint = device_mod.CUDA_OOM_HINT
     assert "n_envs" in hint
-    assert "batch_size" in hint
+    assert "prune" in hint  # prune / prune_k — a smaller connectome slice, a real VRAM lever
     assert "OOM" in hint or "out-of-memory" in hint.lower()
+
+
+# --- UC-33 Item 2b (AC-6/AC-8): the OOM hint names only levers that actually exist ---------
+def test_cuda_oom_hint_names_only_real_levers() -> None:
+    """AC-6/AC-8 (both directions): the corrected message references only actionable levers that
+    exist today (``n_envs``, a smaller pruned slice ``prune``/``prune_k``, ``device: cpu``) and
+    mentions NEITHER ``batch_size`` NOR ``n_steps`` — neither is a validated YAML train-config key,
+    so recommending them pointed users at knobs a train config rejects as unknown."""
+    hint = device_mod.CUDA_OOM_HINT
+    # (positive) every real lever is named
+    assert "n_envs" in hint
+    assert "prune" in hint  # covers both "prune" and "prune_k"
+    assert "cpu" in hint  # device: cpu fallback
+    # (negative) the non-existent knobs are gone, in BOTH directions
+    assert "batch_size" not in hint
+    assert "n_steps" not in hint
