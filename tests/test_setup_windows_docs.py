@@ -203,9 +203,7 @@ def test_setup_sim_windows_restore_cuda_torch_defined_and_called() -> None:
         "ps1 must define the Restore-CudaTorch helper (function Restore-CudaTorch)"
     )
     call_lines = _restore_cuda_torch_call_lines(text.splitlines())
-    assert call_lines, (
-        "Restore-CudaTorch is defined but never called — the cu124 re-pin never runs"
-    )
+    assert call_lines, "Restore-CudaTorch is defined but never called — the cu124 re-pin never runs"
 
 
 def test_setup_sim_windows_restore_called_after_dev_pypi_resolve() -> None:
