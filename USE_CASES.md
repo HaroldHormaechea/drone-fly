@@ -48,3 +48,4 @@ Statuses:
 | 36 | [use-cases/36-grounded-episode-early-termination.md](use-cases/36-grounded-episode-early-termination.md) | End grounded / no-progress episodes early (recording & eval, not just training) | done | 2026-09-20 |
 | 37 | [use-cases/37-floor-start-and-survival-reward.md](use-cases/37-floor-start-and-survival-reward.md) | Floor start + airborne survival reward (learn to take off and stay up) | done | 2026-09-20 |
 | 38 | [use-cases/38-decouple-early-term-from-crash-penalty.md](use-cases/38-decouple-early-term-from-crash-penalty.md) | Decouple no-progress/timeout early-termination from the crash penalty | done | 2026-09-20 |
+| 39 | [use-cases/39-takeoff-bootstrap-crash-relief-and-climb-reward.md](use-cases/39-takeoff-bootstrap-crash-relief-and-climb-reward.md) | Takeoff bootstrap — relieve the crash cliff + dense upward-progress reward | pending | 2026-09-20 |
