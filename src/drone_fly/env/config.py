@@ -698,8 +698,12 @@ class EarlyTerminationConfig:
       the grounded band — a drone parked AT a gate is never mis-read as "grounded".
     * ``stuck_window >= ~65`` for byte-identity with the committed golden fixtures (baseline 24,
       reproducibility 50, dynamics 30 steps): the window must exceed every committed fixture length
-      so the rule cannot fire within them. Don't lower the default below this without regenerating
-      the fixtures via ``scripts/regen_uc08_baseline.py``.
+      so the **no-progress** detector cannot fire within them. Don't lower the default below this
+      without regenerating the fixtures via ``scripts/regen_uc08_baseline.py``. This byte-identity
+      floor applies to ``stuck_window`` ONLY — **not** to ``grounded_window`` (UC-36): the
+      committed fixtures never enter the grounded state (they touch the floor band for at most 2
+      consecutive steps, and the velocity guard excludes even those), so a short
+      ``grounded_window`` cannot fire in any fixture and byte-identity is preserved regardless.
 
     ``EnvConfig.early_termination`` is appended **last** with an all-default value; because the
     rule only fires on genuinely grounded/stuck episodes (counters start at 0 and need a full
@@ -707,7 +711,10 @@ class EarlyTerminationConfig:
     """
 
     floor_epsilon: float = 0.05  # m — band above floor_z counted as "on the ground" (8–14 mm rest)
-    stuck_window: int = 100  # consecutive grounded/no-progress steps that cut (5 s @ 20 Hz)
+    stuck_window: int = 100  # consecutive NO-PROGRESS steps that cut (5 s @ 20 Hz)
+    grounded_window: int = 10  # consecutive GROUNDED steps that cut (0.5 s @ 20 Hz; UC-36) — shorter
+    # than stuck_window because a floored drone is unambiguously dead and needn't linger; unlike
+    # stuck_window it has no fixture byte-identity floor (see the invariant note above).
     progress_epsilon: float = 0.01  # m — min drop in dist-to-target for a step to count as progress
     rest_speed_epsilon: float = 0.05  # m/s — max speed in the floor band still counted as "resting"
     enabled: bool = True  # ON by default (the fix); explicit off-switch restores legacy behaviour

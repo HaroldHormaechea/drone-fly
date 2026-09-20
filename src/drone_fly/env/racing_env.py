@@ -151,7 +151,8 @@ class RaceEnv(gym.Env):
         et = self.config.early_termination
         self._et_enabled = bool(et.enabled)
         self._et_floor_epsilon = float(et.floor_epsilon)
-        self._et_stuck_window = int(et.stuck_window)
+        self._et_stuck_window = int(et.stuck_window)  # no-progress detector window
+        self._et_grounded_window = int(et.grounded_window)  # grounded detector window (UC-36; shorter)
         self._et_progress_epsilon = float(et.progress_epsilon)
         self._et_rest_speed_epsilon = float(et.rest_speed_epsilon)
         # Per-episode counters / bookkeeping for the two detectors (initialised properly in
@@ -466,9 +467,12 @@ class RaceEnv(gym.Env):
                 self._grounded_counter = 0
                 self._stuck_counter = 0
 
-            # Fire: either counter reaching the window cuts the episode. Grounded takes priority in
-            # the reported reason if both happen to trip on the same step.
-            if self._grounded_counter >= self._et_stuck_window:
+            # Fire: either counter reaching its window cuts the episode. The grounded detector uses
+            # its own short ``grounded_window`` (UC-36) — a floored drone is unambiguously dead and
+            # needn't run the full ``stuck_window`` — while the no-progress detector keeps the more
+            # lenient ``stuck_window``. Grounded takes priority in the reported reason if both trip
+            # on the same step.
+            if self._grounded_counter >= self._et_grounded_window:
                 early_termination = "grounded"
             elif self._stuck_counter >= self._et_stuck_window:
                 early_termination = "stuck"

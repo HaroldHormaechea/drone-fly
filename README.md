@@ -230,7 +230,7 @@ non-randomized path (`randomize: false`/unset) is byte-identical to before (no s
 pre-UC-24 randomized-run checkpoints are invalidated and need a fresh retrain (same class of change
 as the UC-13/15/17/19 schema extensions). See `configs/train/example.yaml` for the documented keys.
 
-### Grounded / no-progress early termination (UC-25)
+### Grounded / no-progress early termination (UC-25, UC-36)
 Training episodes used to waste almost the whole step budget with the drone lying motionless on the
 floor: the numpy adapter's floor collision is `position[2] <= floor_z`, but a resting drone
 asymptotes ~8 mm **above** the floor and never crosses it, so `collided`/`crash`/`terminated` never
@@ -239,15 +239,21 @@ fire and the episode only ended by truncation at the inflated `max_steps`. `Earl
 each `step()`: a **grounded** detector (the drone sits within `floor_epsilon` above `floor_z` at speed
 `≤ rest_speed_epsilon`, and is not docked) and a **no-progress** detector (distance to the current
 target gate — or to the finish on the last leg — fails to drop by more than `progress_epsilon`,
-measured against the best distance reached so far). Either one persisting for `stuck_window`
-consecutive steps ends the episode as a **crash** (`terminated=True`, the existing collision penalty,
-and `info["collided"]=True`), with an additive `info["early_termination"]` key reporting `"grounded"`,
+measured against the best distance reached so far). Each detector has its **own** firing window: the
+grounded detector fires after `grounded_window` consecutive grounded steps (default **10** = 0.5 s @
+20 Hz — a floored drone is unambiguously dead, so its recording/eval episode is cut promptly instead
+of dragging to the horizon, UC-36), while the no-progress detector keeps the more lenient
+`stuck_window` (default **100** = 5 s @ 20 Hz) so a slow-but-recovering flight isn't cut prematurely.
+Either one reaching its window ends the episode as a **crash** (`terminated=True`, the existing
+collision penalty, and `info["collided"]=True`), with an additive `info["early_termination"]` key reporting `"grounded"`,
 `"stuck"`, or `None`. The legitimate UC-16 docked/servicing state is **exempt** while service is
 *productive* (battery or integrity strictly improving) — a drone that docks once then idles is still
 cut once improvement stops. Because the counters start at 0 and need a full window of qualifying
 steps, a normally-flying or promptly-crashing episode is byte-identical to before (no obs-schema,
-width, or checkpoint change); set `early_termination.enabled = false` to restore the legacy behaviour.
-All four thresholds are documented, tunable constants.
+width, or checkpoint change — the shorter `grounded_window` still can't fire in the never-grounded
+golden fixtures); set `early_termination.enabled = false` to restore the legacy behaviour.
+All five thresholds (`floor_epsilon`, `stuck_window`, `grounded_window`, `progress_epsilon`,
+`rest_speed_epsilon`) are documented, tunable constants.
 
 ### Visualization & recording
 Enable recording in a train/evaluate config with `record: true` (tune cadence via `record_every`);

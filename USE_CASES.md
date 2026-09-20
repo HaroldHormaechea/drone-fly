@@ -45,4 +45,4 @@ Statuses:
 | 33 | [use-cases/33-tui-autosize-and-config-accuracy.md](use-cases/33-tui-autosize-and-config-accuracy.md) | TUI status-box autosize + Windows full-screen/resize + accurate OOM & test-command guidance | pending | 2026-09-20 |
 | 34 | [use-cases/34-viewer-drop-time-heatmap.md](use-cases/34-viewer-drop-time-heatmap.md) | Viewer: remove the neurons×time heatmap (anatomical brain map is the only heatmap) | pending | 2026-09-20 |
 | 35 | [use-cases/35-course-randomization-placement.md](use-cases/35-course-randomization-placement.md) | Course randomization placement — pads off waypoints, obstacles between waypoints | pending | 2026-09-20 |
-| 36 | [use-cases/36-grounded-episode-early-termination.md](use-cases/36-grounded-episode-early-termination.md) | End grounded / no-progress episodes early (recording & eval, not just training) | pending | 2026-09-20 |
+| 36 | [use-cases/36-grounded-episode-early-termination.md](use-cases/36-grounded-episode-early-termination.md) | End grounded / no-progress episodes early (recording & eval, not just training) | in-progress | 2026-09-20 |
