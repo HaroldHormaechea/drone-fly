@@ -12,6 +12,8 @@ accelerator required. The rule under test (deliberately **not** a naive cuda→m
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 import torch
 
@@ -37,7 +39,7 @@ def patch_backends(monkeypatch):
 
 
 # --- explicit overrides -------------------------------------------------------------
-def test_override_cuda_wins_even_without_hardware(patch_backends) -> None:
+def test_override_cuda_wins_even_without_hardware(patch_backends) -> None:  # UC-31
     patch_backends(cuda=False, mps=False)
     assert resolve_device("cuda") == "cuda"
 
@@ -67,7 +69,7 @@ def test_override_is_case_insensitive(patch_backends) -> None:
 
 
 # --- auto policy --------------------------------------------------------------------
-def test_auto_prefers_cuda_when_available(patch_backends) -> None:
+def test_auto_prefers_cuda_when_available(patch_backends) -> None:  # UC-31
     patch_backends(cuda=True, mps=True)
     assert resolve_device(None) == "cuda"
 
@@ -88,3 +90,32 @@ def test_apple_silicon_note_is_documented() -> None:
     note = device_mod.APPLE_SILICON_NOTE
     assert "MPS" in note
     assert "CPU" in note or "cpu" in note
+
+
+# --- UC-31: CUDA VRAM/OOM guidance surfaced whenever CUDA is selected (AC-4) ---------
+def test_cuda_oom_hint_logged_on_auto_cuda_path(caplog, patch_backends) -> None:  # UC-31
+    # Auto-selection lands on CUDA -> the OOM/VRAM hint must be logged.
+    patch_backends(cuda=True, mps=False)
+    with caplog.at_level(logging.INFO, logger="drone_fly.train.device"):
+        assert resolve_device(None) == "cuda"
+    assert device_mod.CUDA_OOM_HINT in caplog.text, (
+        "CUDA_OOM_HINT must be logged when CUDA is auto-selected"
+    )
+
+
+def test_cuda_oom_hint_logged_on_override_cuda_path(caplog, patch_backends) -> None:  # UC-31
+    # Explicit device="cuda" override (even without hardware) -> same hint must be logged.
+    patch_backends(cuda=False, mps=False)
+    with caplog.at_level(logging.INFO, logger="drone_fly.train.device"):
+        assert resolve_device("cuda") == "cuda"
+    assert device_mod.CUDA_OOM_HINT in caplog.text, (
+        "CUDA_OOM_HINT must be logged when device='cuda' is passed as an override"
+    )
+
+
+def test_cuda_oom_hint_mentions_vram_knobs() -> None:  # UC-31
+    # AC-4: the hint tells the user which knobs to lower on a CUDA OOM.
+    hint = device_mod.CUDA_OOM_HINT
+    assert "n_envs" in hint
+    assert "batch_size" in hint
+    assert "OOM" in hint or "out-of-memory" in hint.lower()
