@@ -42,3 +42,4 @@ Statuses:
 | 30 | [use-cases/30-tui-intra-rollout-heartbeat.md](use-cases/30-tui-intra-rollout-heartbeat.md) | Live training TUI must tick during a rollout (intra-rollout heartbeat) | done | 2026-09-19 |
 | 31 | [use-cases/31-windows-cuda-training-setup.md](use-cases/31-windows-cuda-training-setup.md) | Automated Windows + NVIDIA CUDA training setup | done | 2026-09-20 |
 | 32 | [use-cases/32-windows-tui-parallel-training.md](use-cases/32-windows-tui-parallel-training.md) | Windows: full-screen live TUI with per-second updates, logs pane, and crash-free parallel training | done | 2026-09-20 |
+| 33 | [use-cases/33-tui-autosize-and-config-accuracy.md](use-cases/33-tui-autosize-and-config-accuracy.md) | TUI status-box autosize + accurate OOM & test-command guidance | pending | 2026-09-20 |
