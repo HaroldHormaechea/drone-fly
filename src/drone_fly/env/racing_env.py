@@ -464,10 +464,12 @@ class RaceEnv(gym.Env):
 
         # UC-25 grounded / no-progress early termination. Evaluated here — AFTER dock/recharge/
         # repair are resolved (so ``self._docked`` and the post-service ``state.battery`` /
-        # ``state.integrity`` are final) and BEFORE ``compute_reward`` — so a fired cut folds into
-        # ``crash`` and earns the existing collision penalty this same step. Nothing here touches
-        # the observation or the RNG stream: a flying / promptly-crashing episode never accumulates
-        # a full window, so its per-step outcomes stay byte-identical to UC-19 (AC5/AC6).
+        # ``state.integrity`` are final) and BEFORE ``compute_reward``. UC-38: a fired cut no longer
+        # blanket-folds into ``crash``; only the reward-side ``penalize_collision`` (computed below)
+        # decides the penalty — a grounded cut pays it, a no-progress ("stuck") cut does not.
+        # Nothing here touches the observation or the RNG stream: a flying / promptly-crashing
+        # episode never accumulates a full window, so its per-step outcomes stay byte-identical to
+        # UC-19 (AC5/AC6).
         early_termination = None
         if self._et_enabled:
             floor_z = course.floor_z
@@ -529,20 +531,28 @@ class RaceEnv(gym.Env):
                 early_termination = "grounded"
             elif self._stuck_counter >= self._et_stuck_window:
                 early_termination = "stuck"
-            # Fold the cut into ``crash`` so it flows unchanged into the reward (collision penalty,
-            # AC3), ``terminated``, and ``info["collided"]`` below — a grounded/stuck cut counts as
-            # a crash exactly like a floor/ceiling collision.
-            if early_termination is not None:
-                crash = True
+
+        # UC-38: decouple the no-progress/timeout cut from the collision penalty. ``crash`` keeps
+        # its narrow meaning — a GENUINE floor/ceiling/OOB collision (raw ``state.collided`` and
+        # not a controlled dock, pre-takeoff-suppressed above) — and is the ONLY signal that eats
+        # ``collision_penalty`` on its own. ``penalize_collision`` is the reward-side flag: a real
+        # crash always pays the penalty (and dominates a same-step stuck cut, since ``crash`` wins
+        # here regardless of ``early_termination``), and the GROUNDED cut also pays it (AC-3: a
+        # post-takeoff drop back onto the floor is a failed flight). The no-progress ("stuck") cut
+        # and a pure ``max_steps`` timeout are penalty-free — "stayed airborne but ran out of time /
+        # stopped progressing" must not be punished like smashing into the floor, or UC-37's
+        # +airborne_bonus survival gradient is swamped by the −collision_penalty terminal (the −105
+        # trap). The termination reason is reported independently via ``info["early_termination"]``.
+        penalize_collision = crash or (early_termination == "grounded")
 
         reward = compute_reward(
             dist_to_target_prev=dist_prev,
             dist_to_target_curr=dist_curr,
             event=event,
-            # UC-16: pass the CRASH flag, not the raw contact flag — a controlled dock earns the
-            # neutral (no collision_penalty) reward while every other floor/ceiling contact still
-            # eats collision_penalty. No new reward term (docking is unincentivised this UC).
-            collided=crash,
+            # UC-16/UC-38: pass ``penalize_collision`` — a genuine crash OR a grounded cut earns
+            # the collision_penalty; a controlled dock, a no-progress ("stuck") cut, and a pure
+            # timeout do not. A raw floor/ceiling contact still eats collision_penalty as before.
+            collided=penalize_collision,
             completed=completed,
             cfg=self.config.reward,
             num_gates=course.num_gates,
@@ -552,18 +562,24 @@ class RaceEnv(gym.Env):
             airborne=airborne,
         )
 
-        # UC-16: a dock does NOT terminate — only a valid completion or a (non-dock) crash does.
-        terminated = bool(completed or crash)
+        # UC-16/UC-25/UC-38: a dock does NOT terminate. An episode ends on a valid completion, a
+        # genuine (non-dock) crash, OR any early-termination cut (grounded/stuck) — control flow is
+        # byte-for-byte as before UC-38 (both cuts still set ``terminated=True``); only the reward
+        # magnitude and ``info["collided"]`` on a stuck cut changed (a pure timeout is truncated).
+        terminated = bool(completed or crash or early_termination is not None)
         truncated = bool(not terminated and self._step_count >= self._max_steps)
 
         info = {
             "phase": self._phase_str(),
             "backend": self.backend,
             "event": event,
-            # UC-16: ``collided`` now reports the CRASH (terminating floor/ceiling contact), i.e.
-            # a controlled dock is NOT reported as a collision. A dock is surfaced separately via
-            # ``docked`` below; no downstream consumer reads ``collided``, so this stays safe.
-            "collided": bool(crash),
+            # UC-16/UC-38: ``collided`` reports whether the collision penalty was charged — True
+            # for a genuine floor/ceiling/OOB crash AND for a grounded (post-takeoff drop) cut,
+            # False for a controlled dock, a no-progress ("stuck") cut, and a pure timeout. It no
+            # longer falsely claims a collision for a no-progress cut (AC-4); the authoritative
+            # termination reason is ``info["early_termination"]``. No downstream consumer reads
+            # ``collided`` (only ``is_success``), so flipping it on stuck cuts is safe.
+            "collided": bool(penalize_collision),
             # UC-16: authoritative docked flag, surfaced via ``info`` ONLY (the observation vector
             # is byte-identical — no obs-schema block, no checkpoint invalidation, AC6). LEVEL/
             # every-step so it stays True across dwell steps (AC4) and clears on takeoff (AC5).
@@ -579,10 +595,12 @@ class RaceEnv(gym.Env):
             # World-frame drone position this step (UC-05 recording draws the flight path).
             # Additive key; existing tests assert membership, so this stays back-compatible.
             "position": state.position.copy(),
-            # UC-25: reason this episode was cut early — ``"grounded"`` (rested on the floor),
-            # ``"stuck"`` (no course progress for a full window), or ``None`` (not cut early).
-            # Additive key; ``info["collided"]`` is also True on a cut, so crash accounting is
-            # unchanged. Existing tests assert membership (not an exact dict), so this stays safe.
+            # UC-25/UC-38: reason this episode was cut early — ``"grounded"`` (rested on the floor
+            # after takeoff), ``"stuck"`` (no course progress for a full window), or ``None`` (not
+            # cut early — includes a pure ``max_steps`` timeout, which reports ``truncated=True``).
+            # This is the AUTHORITATIVE termination-reason field: ``info["collided"]`` is True only
+            # when the collision penalty was charged (genuine crash or grounded cut), NOT on a
+            # stuck cut. Additive key; existing tests assert membership, so this stays safe.
             "early_termination": early_termination,
         }
         if terminated or truncated:

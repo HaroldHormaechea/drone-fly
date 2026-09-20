@@ -759,10 +759,16 @@ class EarlyTerminationConfig:
       consecutive steps, measured against the best distance reached so far (robust to hover
       oscillation / jitter).
 
-    Either detector firing is folded into ``crash`` (``terminated=True`` + the existing collision
-    penalty + ``info["collided"]=True``); an additive ``info["early_termination"]`` key reports
-    ``"grounded"`` / ``"stuck"`` / ``None``. The legitimate UC-16 docked/servicing state is exempt
-    while service is **productive** (battery or integrity strictly improving).
+    Either detector firing ends the episode (``terminated=True``); an additive
+    ``info["early_termination"]`` key reports ``"grounded"`` / ``"stuck"`` / ``None`` and is the
+    authoritative termination reason. UC-38 decoupled the *penalty* from the *cut*: the **grounded**
+    cut (a previously-airborne drone that dropped back onto the floor — a failed flight) keeps the
+    collision penalty and reports ``info["collided"]=True``, but the **no-progress ("stuck")** cut
+    and a pure ``max_steps`` timeout terminate WITHOUT the collision penalty and report
+    ``info["collided"]=False`` — distinguished from a genuine crash only by
+    ``info["early_termination"]``. This keeps UC-37's airborne-survival gradient from being swamped
+    by a −collision_penalty terminal on a peaceful timeout. The legitimate UC-16 docked/servicing
+    state is exempt while service is **productive** (battery or integrity strictly improving).
 
     Invariants (do not violate without re-reasoning the whole rule):
 
