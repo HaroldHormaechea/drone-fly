@@ -78,6 +78,22 @@ Env overrides:
 '@
 }
 
+function Restore-CudaTorch {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
+        Justification = 'Delegates user-facing output to Write-SetupLog/Write-Fail.')]
+    param()
+    # A preceding PyPI resolve (steps 5/7) can re-resolve torch from PyPI - on Windows that is
+    # a CPU-only wheel - silently clobbering the cu124 build from step 4. Re-pin the CUDA wheel
+    # here. --reinstall-package torch is load-bearing: without it uv treats the installed +cpu
+    # build as satisfying torch==2.6.0 and skips the swap. Reuses $TorchPin/$TorchIndex (no
+    # second literal); the CUDA index stays scoped to torch ONLY (AC-7).
+    Write-SetupLog "Re-pinning CUDA torch ($TorchPin via $TorchIndex; --reinstall-package torch) in case a PyPI resolve pulled a CPU build ..."
+    & uv pip install --python $Venv $TorchPin --index-url $TorchIndex --reinstall-package torch
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "Failed to re-pin $TorchPin from $TorchIndex. A prior PyPI resolve may have left a CPU torch; re-run, or install it manually with: uv pip install --python $Venv $TorchPin --index-url $TorchIndex --reinstall-package torch"
+    }
+}
+
 if ($Help) { Show-Usage; exit 0 }
 
 # --- Config + env overrides. ------------------------------------------------------------
@@ -129,9 +145,11 @@ if ($DryRun) {
     Write-SetupLog '  2. check the NVIDIA driver via nvidia-smi (reported CUDA Version must be >= 12)'
     Write-SetupLog "  3. create/reuse the uv venv '$Venv' (Python $SimPython)"
     Write-SetupLog "  4. uv pip install $TorchPin --index-url $TorchIndex   (CUDA index scoped to torch ONLY)"
-    Write-SetupLog '  5. uv pip install "pybullet==3.2.6" "numpy<2" -e ".[dev]"   (one PyPI resolve; numpy<2 ABI co-satisfied; torch already installed)'
+    Write-SetupLog '  5. uv pip install "pybullet==3.2.6" "numpy<2" -e ".[dev]"   (one PyPI resolve; numpy<2 ABI co-satisfied; may re-resolve torch to a CPU wheel)'
+    Write-SetupLog "  5a. re-pin CUDA torch ($TorchPin via $TorchIndex, --reinstall-package torch)   (defensive; step 7a re-pins regardless)"
     Write-SetupLog "  6. uv pip install --no-deps $DronesGit   (so its pybullet>3.2.7 pin never clobbers 3.2.6)"
-    Write-SetupLog '  7. uv pip install <gym-pybullet-drones runtime deps>   (explicit; numpy<2 pinned)'
+    Write-SetupLog '  7. uv pip install <gym-pybullet-drones runtime deps>   (explicit; numpy<2 pinned; SB3 re-resolves torch to a CPU wheel)'
+    Write-SetupLog "  7a. re-pin CUDA torch ($TorchPin via $TorchIndex, --reinstall-package torch)   (load-bearing; nothing installs before step 8)"
     Write-SetupLog '  8. verify: torch.cuda.is_available(), GPU name, import pybullet/gym_pybullet_drones/drone_fly, resolve_device()=="cuda"'
     Write-SetupLog '  NOTE: pyproject.toml / uv.lock are never touched - the CUDA path stays opt-in (AC-7).'
     Write-SetupLog '  NOTE: pybullet 3.2.6 ships no Windows/py3.12 wheel, so it builds from source; install Microsoft C++ Build Tools if it fails.'
@@ -214,6 +232,10 @@ Write-SetupLog 'Installing pybullet==3.2.6 + numpy<2 + drone-fly (editable, [dev
 if ($LASTEXITCODE -ne 0) {
     Write-Fail 'Failed the unified PyPI install. pybullet 3.2.6 has no Windows/py3.12 wheel, so it builds from source: install "Microsoft C++ Build Tools" (Desktop development with C++) and re-run. See the README Windows/CUDA section.'
 }
+# Defensive re-pin: this PyPI resolve can pull a CPU torch. Step 7 re-clobbers regardless, so
+# this call is NOT load-bearing for step 8 - it upholds the "torch is always cu124" invariant
+# and fails fast here rather than letting a CPU build linger between steps.
+Restore-CudaTorch
 
 # --- 6. gym-pybullet-drones with --no-deps (keeps our pinned pybullet 3.2.6). ------------
 Write-SetupLog "Installing gym-pybullet-drones @ $DronesRef with --no-deps (so its pybullet>3.2.7 pin never clobbers 3.2.6) ..."
@@ -228,6 +250,10 @@ Write-SetupLog 'Installing gym-pybullet-drones runtime deps explicitly (hand-mai
 if ($LASTEXITCODE -ne 0) {
     Write-Fail 'Failed to install the explicit gym-pybullet-drones runtime deps.'
 }
+# Load-bearing re-pin: @RuntimeDeps (stable-baselines3 etc.) re-resolves torch from PyPI and
+# would leave a CPU build going into step 8. Nothing installs between here and the verify, so
+# this call MUST stay - it is what makes step 8's torch.cuda.is_available() assertion pass.
+Restore-CudaTorch
 
 # --- 8. Verify torch.cuda + the sim actually import (AC-2 backstop). ---------------------
 Write-SetupLog 'Verifying torch.cuda + sim imports (torch.cuda.is_available, GPU name, pybullet, gym-pybullet-drones, drone_fly, resolve_device) ...'
