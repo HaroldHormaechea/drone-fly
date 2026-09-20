@@ -92,12 +92,14 @@ class TuiCallback(BaseCallback):
             )
             target = n_steps * n_envs
             elapsed = self._now() - self._start_time if self._start_time is not None else 0.0
-            self.dashboard.model.tick(
+            # UC-32: route through the dashboard's lock-guarded tick (mutation+redraw atomic) so
+            # the SB3 callback thread and the Windows refresh timer never race on build_layout.
+            self.dashboard.tick(
                 elapsed_seconds=elapsed,
                 rollout_steps=current,
                 rollout_target=target,
+                current_steps=self.num_timesteps,
             )
-            self.dashboard.redraw()
         except Exception as exc:  # noqa: BLE001 - never crash training over the TUI
             logger.warning("TuiCallback heartbeat disabled after error: %s", exc)
             self._enabled = False
@@ -124,7 +126,8 @@ class TuiCallback(BaseCallback):
 
             elapsed = time.monotonic() - self._start_time if self._start_time is not None else 0.0
 
-            self.dashboard.model.update(
+            # UC-32: lock-guarded update (mutation+redraw atomic) — see _on_step note.
+            self.dashboard.update(
                 n_updates=self._n_updates,
                 elapsed_seconds=elapsed,
                 ep_rew_mean=ep_rew,
@@ -135,8 +138,8 @@ class TuiCallback(BaseCallback):
                 value_loss=name_to_value.get(_VLOSS_KEY),
                 approx_kl=name_to_value.get(_KL_KEY),
                 explained_variance=name_to_value.get(_EV_KEY),
+                current_steps=self.num_timesteps,
             )
-            self.dashboard.redraw()
         except Exception as exc:  # noqa: BLE001 - never crash training over the TUI
             logger.warning("TuiCallback disabled after error: %s", exc)
             self._enabled = False

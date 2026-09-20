@@ -27,10 +27,16 @@ from drone_fly.train.tui.metrics import DashboardModel
 
 
 class _RecordingDashboard:
-    """Captures the kwargs fed to ``model.update`` and counts redraws."""
+    """Captures the kwargs fed to the lock-guarded ``update`` / ``tick`` and counts redraws.
+
+    UC-32 rewired the callback to call the dashboard's lock-guarded ``update`` / ``tick`` (each of
+    which mutates the model AND redraws atomically under the single lock) rather than poking
+    ``model.update`` + ``redraw`` separately — so this harness mirrors that shape.
+    """
 
     def __init__(self) -> None:
         self.updates: list[dict] = []
+        self.ticks: list[dict] = []
         self.redraws = 0
 
         parent = self
@@ -39,7 +45,18 @@ class _RecordingDashboard:
             def update(self, **kwargs) -> None:
                 parent.updates.append(kwargs)
 
+            def tick(self, **kwargs) -> None:
+                parent.ticks.append(kwargs)
+
         self.model = _Model()
+
+    def update(self, **kwargs) -> None:
+        self.model.update(**kwargs)
+        self.redraws += 1
+
+    def tick(self, **kwargs) -> None:
+        self.model.tick(**kwargs)
+        self.redraws += 1
 
     def redraw(self) -> None:
         self.redraws += 1
@@ -143,7 +160,12 @@ def test_callback_disables_itself_on_error_never_crashes() -> None:
 
             self.model = _Model()
 
-        def redraw(self) -> None:
+        def update(self, **kwargs) -> None:
+            # UC-32: the callback calls the lock-guarded dashboard.update (mutation+redraw); a
+            # failure here (e.g. a redraw explosion) must disable the callback, never crash.
+            raise RuntimeError("render exploded")
+
+        def redraw(self) -> None:  # pragma: no cover - not called under the UC-32 wiring
             raise RuntimeError("render exploded")
 
     cb = TuiCallback(_BoomDashboard())
@@ -221,6 +243,14 @@ class _RealModelDashboard:
     def __init__(self, *, scheduled_iters: int = 100, n_envs: int = 1, backend: str = "dummy"):
         self.model = DashboardModel(scheduled_iters=scheduled_iters, n_envs=n_envs, backend=backend)
         self.redraws = 0
+
+    def tick(self, **kwargs) -> None:
+        self.model.tick(**kwargs)
+        self.redraws += 1
+
+    def update(self, **kwargs) -> None:
+        self.model.update(**kwargs)
+        self.redraws += 1
 
     def redraw(self) -> None:
         self.redraws += 1
@@ -387,6 +417,11 @@ def test_ac5_heartbeat_disables_itself_on_error_and_never_raises() -> None:
             self.model = _BoomModel()
             self.redraws = 0
 
+        def tick(self, **kwargs) -> None:
+            # UC-32: lock-guarded tick mutates the model then redraws; the mutation raises here.
+            self.model.tick(**kwargs)
+            self.redraws += 1  # pragma: no cover - never reached (tick raises first)
+
         def redraw(self) -> None:  # pragma: no cover - never reached (tick raises first)
             self.redraws += 1
 
@@ -458,3 +493,50 @@ def test_ac6_heartbeat_redraw_refreshes_the_live_log_pane() -> None:
     out = _render_to_str(live.renderables[-1])
     assert "Version = 3.2.5" in out  # the freshly captured line is live in the pane
     assert "pybullet build" in out
+
+
+# --------------------------------------------------------------------------- #
+# UC-32 — the callback drives the dashboard's lock-guarded tick/update and feeds
+# the cumulative num_timesteps into the model's steps line (Addendum).
+# --------------------------------------------------------------------------- #
+
+
+def test_uc32_heartbeat_routes_through_the_lock_guarded_tick() -> None:
+    """UC-32: a heartbeat calls ``dashboard.tick`` (mutation+redraw atomic under the lock) rather
+    than poking ``model.tick`` + ``redraw`` separately — so the callback can never mutate the model
+    outside the lock the Windows refresh timer also contends for."""
+    clock = _FakeClock()
+    dash = _RecordingDashboard()
+    cb = TuiCallback(dash, now=clock)
+    model = _FakeSB3Model(n_steps=2048, num_envs=2, num_timesteps=4096)
+    _begin(cb, model, clock)
+
+    clock.advance(1.0)
+    _step_at(cb, 4096 + 512)
+
+    assert len(dash.ticks) == 1  # went through the lock-guarded tick
+    assert dash.updates == []  # a heartbeat is not a rollout-end update
+
+
+def test_uc32_current_steps_is_fed_on_both_tick_and_update() -> None:
+    """Addendum: the model's cumulative step count (for the TIME panel's ``steps`` line) is fed
+    from SB3 ``num_timesteps`` by BOTH the heartbeat tick and the rollout-end update."""
+    clock = _FakeClock()
+    dash = _RealModelDashboard(n_envs=2)
+    cb = TuiCallback(dash, now=clock)
+    model = _FakeSB3Model(
+        n_steps=2048,
+        num_envs=2,
+        num_timesteps=0,
+        ep_info=[{"r": -200.0, "l": 210}],
+        ep_success=[1.0],
+    )
+    _begin(cb, model, clock)
+
+    clock.advance(1.0)
+    _step_at(cb, 26_624)  # a heartbeat mid-collection
+    assert dash.model.current_steps == 26_624  # tick fed num_timesteps
+
+    cb.num_timesteps = 40_960
+    cb._on_rollout_end()  # a rollout-end snapshot
+    assert dash.model.current_steps == 40_960  # update fed num_timesteps too
