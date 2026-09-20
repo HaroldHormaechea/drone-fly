@@ -164,6 +164,12 @@ def test_env_config_early_termination_is_last_field() -> None:
     assert fields.index("battery") == fields.index("damage") - 1
     assert fields.index("dock") == fields.index("battery") - 1
     assert fields.index("obstacle_vision") == fields.index("dock") - 1
+    # UC-36: the new ``grounded_window`` knob lives INSIDE ``EarlyTerminationConfig`` — it must not
+    # leak up to ``EnvConfig`` (that would shift every positional call and break byte-identity).
+    from drone_fly.env.config import EarlyTerminationConfig
+
+    assert "grounded_window" not in fields
+    assert "grounded_window" in [f.name for f in dataclasses.fields(EarlyTerminationConfig)]
 
 
 def test_env_config_default_course_has_no_pads() -> None:

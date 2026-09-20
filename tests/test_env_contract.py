@@ -1733,12 +1733,16 @@ def test_ac7_light_course_completable_without_repair() -> None:
 # ===========================================================================
 # UC-25 — grounded / no-progress early termination (AC1–AC7)
 # ===========================================================================
-# The two detectors need a full ``stuck_window`` of consecutive qualifying steps to fire, so the
-# committed golden fixtures (baseline 24, reproducibility 50, dynamics 30 steps) are untouched by
-# the default ``stuck_window=100`` (AC6). The tests below drive the rule with a small window so the
-# scripted trajectories stay short and readable (challenger's non-blocking note). Scripted adapters
-# hardcode ``velocity=zeros`` — perfect for the grounded/stuck cuts, but the low-but-progressing
-# case (AC5) MUST use the REAL ``simple`` adapter, whose flight velocity is far above the rest band.
+# Each detector needs a full window of consecutive qualifying steps to fire. UC-36 split the two
+# windows: the no-progress (stuck) detector keeps ``stuck_window`` (default 100), while the grounded
+# detector now has its own shorter ``grounded_window`` (default 10). The committed golden fixtures
+# (baseline 24, reproducibility 50, dynamics 30 steps) are untouched by BOTH defaults — the
+# no-progress window exceeds every fixture length (AC6), and the fixtures never enter the grounded
+# state, so the short grounded window cannot fire in them either. The tests below drive the rule
+# with small windows so the scripted trajectories stay short and readable (challenger's non-blocking
+# note). Scripted adapters hardcode ``velocity=zeros`` — perfect for the grounded/stuck cuts, but
+# the low-but-progressing case (AC5) MUST use the REAL ``simple`` adapter, whose flight velocity is
+# far above the rest band.
 
 
 def test_uc25_grounded_episode_is_cut_as_a_crash() -> None:
@@ -1746,9 +1750,12 @@ def test_uc25_grounded_episode_is_cut_as_a_crash() -> None:
     crash well under the step budget (grounded detector), not run to ``_max_steps``."""
     # Fall from spawn, then rest inside the floor band (z=0.008 < floor_epsilon=0.05) at zero speed.
     positions = [(0.0, 0.0, 1.0), (0.0, 0.0, 0.3)] + [(0.0, 0.0, 0.008)] * 8
+    # UC-36: the grounded detector now has its OWN window; match it to the legacy UC-25 value of 4
+    # so this test's timing is preserved. ``stuck_window`` is set equally but is irrelevant here —
+    # a grounded drone fires on ``grounded_window`` first (grounded priority).
     env = _env_with(
         _ScriptedAdapter(positions),
-        EnvConfig(early_termination=EarlyTerminationConfig(stuck_window=4)),
+        EnvConfig(early_termination=EarlyTerminationConfig(stuck_window=4, grounded_window=4)),
     )
     env.reset()
     terminated = truncated = False
@@ -1816,7 +1823,8 @@ def test_uc25_grounded_cut_applies_the_collision_penalty() -> None:
     """AC3: a grounded/stuck cut earns the EXISTING collision penalty in the reward, exactly like a
     floor/ceiling crash — the cut step's reward is dominated by ``collision_penalty`` (100)."""
     positions = [(0.0, 0.0, 1.0)] + [(0.0, 0.0, 0.008)] * 8
-    cfg = EnvConfig(early_termination=EarlyTerminationConfig(stuck_window=3))
+    # UC-36: match the grounded window to the legacy value of 3 (grounded fires first anyway).
+    cfg = EnvConfig(early_termination=EarlyTerminationConfig(stuck_window=3, grounded_window=3))
     env = _env_with(_ScriptedAdapter(positions), cfg)
     env.reset()
     reward = 0.0
@@ -1912,8 +1920,10 @@ def test_uc25_normal_flight_is_byte_identical_to_rule_disabled() -> None:
 
 def test_uc25_committed_baseline_still_matches_with_no_regen() -> None:
     """AC6: with the rule ON by default, the committed seed-42 golden rollout still reproduces
-    byte-for-byte (window=100 cannot fire in the 24-step baseline) and the obs width stays 12 — no
-    fixture regeneration, no observation-schema/checkpoint impact."""
+    byte-for-byte and the obs width stays 12 — no fixture regeneration, no observation-schema/
+    checkpoint impact. Neither detector fires: stuck_window=100 exceeds the 24-step baseline, and
+    the default grounded_window=10 cannot fire either because the never-grounded baseline never
+    enters the floor band (UC-36)."""
     golden = np.load(_BASELINE_ROLLOUT)
     actions = list(golden["actions"])
     obs_trace, _r, _t, _tr, _rng = _full_stream(EnvConfig(), seed=42, actions=actions)
@@ -1963,21 +1973,27 @@ def test_uc25_config_defaults_are_named_and_documented() -> None:
     et = EarlyTerminationConfig()
     assert et.floor_epsilon == 0.05
     assert et.stuck_window == 100
+    assert et.grounded_window == 10  # UC-36: grounded detector's own shorter window (0.5 s @ 20 Hz)
     assert et.progress_epsilon == 0.01
     assert et.rest_speed_epsilon == 0.05
     assert et.enabled is True
     assert EnvConfig().early_termination == et, "early_termination is appended with all defaults"
 
 
-def test_uc25_stuck_window_tunes_cut_timing() -> None:
-    """AC7: shrinking ``stuck_window`` cuts a grounded episode sooner — the window length is a live,
-    tunable knob on the cut timing."""
+def test_uc36_grounded_window_tunes_cut_timing() -> None:
+    """AC3/UC-36: shrinking ``grounded_window`` cuts a grounded episode sooner — the grounded
+    detector's own window (independent of ``stuck_window``) is a live, tunable knob on the cut
+    timing. (Was UC-25's ``stuck_window`` tuning test; UC-36 gave the grounded detector its own
+    window, so the grounded cut is now driven by ``grounded_window``.)"""
     positions = [(0.0, 0.0, 1.0)] + [(0.0, 0.0, 0.008)] * 20
 
     def cut_step(window: int) -> int:
         env = _env_with(
             _ScriptedAdapter(positions),
-            EnvConfig(early_termination=EarlyTerminationConfig(stuck_window=window)),
+            # A large ``stuck_window`` proves the cut is driven by ``grounded_window`` alone.
+            EnvConfig(
+                early_termination=EarlyTerminationConfig(grounded_window=window, stuck_window=100)
+            ),
         )
         env.reset()
         for i in range(1, 25):
@@ -1989,7 +2005,40 @@ def test_uc25_stuck_window_tunes_cut_timing() -> None:
 
     assert cut_step(2) == 2
     assert cut_step(6) == 6
-    assert cut_step(2) < cut_step(6), "a smaller window cuts sooner (tunable)"
+    assert cut_step(2) < cut_step(6), "a smaller grounded window cuts sooner (tunable)"
+
+
+def test_uc36_stuck_window_tunes_no_progress_timing() -> None:
+    """AC3/UC-36: the no-progress (stuck) detector still has its own independently-tunable window.
+    An airborne drone hovering statically above the floor band (never grounded) is cut purely by
+    ``stuck_window``; shrinking it cuts sooner. This keeps the no-progress tuning coverage that the
+    converted grounded test above no longer provides."""
+    # Airborne static hover at z=1.0 (well above the floor band), never moving, never closing on the
+    # gate. ``_best_dist`` starts at +inf, so the very first step always registers "progress" (the
+    # warm-up guard) and the no-progress counter only starts climbing on step 2 ⇒ the cut lands on
+    # step ``window + 1``.
+    positions = [(0.0, 0.0, 1.0)] * 21
+
+    def cut_step(window: int) -> int:
+        env = _env_with(
+            _ScriptedAdapter(positions),
+            # A large ``grounded_window`` (irrelevant — the drone is airborne) proves the cut is
+            # driven by ``stuck_window`` alone.
+            EnvConfig(
+                early_termination=EarlyTerminationConfig(stuck_window=window, grounded_window=100)
+            ),
+        )
+        env.reset()
+        for i in range(1, 25):
+            _obs, _r, terminated, truncated, info = env.step(HOVER)
+            if terminated or truncated:
+                assert info["early_termination"] == "stuck"
+                return i
+        raise AssertionError("expected a stuck cut")
+
+    assert cut_step(2) == 3  # warm-up step + 2 no-progress steps
+    assert cut_step(6) == 7  # warm-up step + 6 no-progress steps
+    assert cut_step(2) < cut_step(6), "a smaller stuck window cuts sooner (tunable)"
 
 
 def test_uc25_floor_epsilon_tunes_the_grounded_band() -> None:
@@ -2002,8 +2051,10 @@ def test_uc25_floor_epsilon_tunes_the_grounded_band() -> None:
         env = _env_with(
             _ScriptedAdapter(positions),
             EnvConfig(
+                # UC-36: keep grounded and stuck windows equal (=3) so the classification (grounded
+                # vs. stuck) — not a window-length race — is what the widened band changes.
                 early_termination=EarlyTerminationConfig(
-                    stuck_window=3, floor_epsilon=floor_epsilon
+                    stuck_window=3, grounded_window=3, floor_epsilon=floor_epsilon
                 )
             ),
         )
@@ -2016,3 +2067,126 @@ def test_uc25_floor_epsilon_tunes_the_grounded_band() -> None:
 
     assert cut_reason(0.05) == "stuck", "z=0.1 is above the default band ⇒ not grounded"
     assert cut_reason(0.2) == "grounded", "a widened band captures z=0.1 as grounded"
+
+
+# ===========================================================================
+# UC-36 — grounded early termination reaches the recording / eval path
+# ===========================================================================
+# UC-36 extends UC-25. The bug it fixes: the grounded detector reused ``stuck_window`` (100) as its
+# firing window, so a drone that floors at ~frame 12 would only be cut at ~frame 112 — past the
+# ~101-frame recording horizon — leaving a recording that is ~87 % dead drone on the floor. Giving
+# the grounded detector its own short ``grounded_window`` (default 10) cuts the recording near the
+# crash. The recording/eval loop already honours ``terminated`` (``record_rollout`` loops on
+# ``while not (terminated or truncated)``), so no loop change is needed; the window shrink suffices.
+
+# The recording drone floors at this frame and stays there (matches the reported failure recording).
+_UC36_FLOOR_FRAME = 12
+_UC36_DEFAULT_GROUNDED_WINDOW = 10  # EarlyTerminationConfig.grounded_window default
+
+
+def test_uc36_recording_is_bounded_near_crash_not_horizon(connectome, tmp_path: Path) -> None:
+    """AC2: a recorded episode of a drone that floors at ~frame 12 ends near the crash (frame 12 +
+    ``grounded_window``), NOT at the ~400-step horizon. End-to-end through the REAL recording
+    driver (:func:`record_rollout`) on the hermetic numpy stack — the same path the failing Drive
+    recording used. Proves the fix reaches recording, not just training."""
+    import json
+
+    import torch  # noqa: F401  (imported for parity with the record stack; kept local + hermetic)
+
+    from drone_fly.controller.actor import ConnectomeActorNetwork
+    from drone_fly.record.recorder import ActivationRecorder
+    from drone_fly.record.rollout import record_rollout
+
+    # Fall straight down from z=1.0 (frames 0..11, all above the 0.05 floor band), then rest on the
+    # floor from frame 12 onward (the scripted adapter clamps to its last position). Velocity is
+    # zeros ⇒ the grounded speed guard is satisfied ⇒ the grounded detector arms at frame 12.
+    descend = [(0.0, 0.0, round(1.0 - 0.08 * k, 4)) for k in range(_UC36_FLOOR_FRAME)]
+    positions = descend + [(0.0, 0.0, 0.008)]
+    assert positions[_UC36_FLOOR_FRAME - 1][2] > 0.05  # last airborne frame is above the band
+    assert positions[_UC36_FLOOR_FRAME][2] <= 0.05  # floored from frame 12
+
+    # Default EnvConfig ⇒ grounded_window=10, and a large (default 400) horizon to fall back to.
+    env = _env_with(_ScriptedAdapter(positions), EnvConfig())
+    horizon = env._max_steps
+    assert horizon >= 100, "the horizon must dwarf the crash frame for the assertion to matter"
+
+    torch.manual_seed(0)
+    actor = ConnectomeActorNetwork(connectome)  # raw actor; the scripted adapter ignores its action
+    recorder = ActivationRecorder(connectome, tmp_path / "act", backend="simple", dt=0.05)
+    written = record_rollout(actor, env, recorder, n_episodes=1, seed=0, record_every=1)
+
+    assert len(written) == 1
+    doc = json.loads(written[0].read_text())
+    steps = doc["outcome"]["steps"]
+    n_frames = doc["meta"]["n_frames"]
+
+    assert n_frames == steps, "one captured activation frame per env step"
+    assert doc["outcome"]["completed"] is False, "a drone resting on the floor never completes"
+    # Bounded near the crash: the episode is cut a full grounded_window after flooring, plus a tiny
+    # slack — emphatically NOT run out to the horizon (the ~101-frame bug the UC reported).
+    assert steps >= _UC36_FLOOR_FRAME, "the cut cannot precede the drone reaching the floor"
+    assert steps <= _UC36_FLOOR_FRAME + _UC36_DEFAULT_GROUNDED_WINDOW + 2, (
+        "the recording must be bounded near crash + grounded_window (0.5 s grace), not the horizon"
+    )
+    assert steps < horizon, "the recorded episode is cut well before the full step budget"
+
+
+def test_uc36_healthy_flight_is_not_clipped_by_short_grounded_window(connectome) -> None:
+    """AC5: the new short default ``grounded_window=10`` does NOT clip a legitimately-flying
+    episode. A real-adapter healthy flight (the committed seed-42 golden actions) is never cut by
+    the grounded/no-progress detector, and it ends at exactly the same step — via the same
+    natural event — as the identical flight with the rule turned OFF. The short grounded window
+    changes nothing about a healthy episode's length."""
+    golden = np.load(_BASELINE_ROLLOUT)
+    actions = list(golden["actions"])
+
+    def run(config):
+        env = make_env(config, adapter="simple")
+        env.reset(seed=42)
+        reasons, steps = [], 0
+        terminated = truncated = False
+        for a in actions:
+            _obs, _r, terminated, truncated, info = env.step(np.asarray(a, dtype=np.float32))
+            reasons.append(info["early_termination"])
+            steps += 1
+            if terminated or truncated:
+                break
+        return steps, terminated, truncated, reasons
+
+    # Rule ON with the UC-36 default grounded_window=10; real ``simple`` adapter (real velocities).
+    on_steps, on_term, on_trunc, on_reasons = run(EnvConfig())
+    # Rule fully OFF — the reference "before UC-25/36" behaviour.
+    off_steps, off_term, off_trunc, _ = run(
+        EnvConfig(early_termination=EarlyTerminationConfig(enabled=False))
+    )
+
+    assert all(r is None for r in on_reasons), (
+        "a healthy flight is never cut by the grounded/no-progress detector (short window and all)"
+    )
+    assert (on_steps, on_term, on_trunc) == (off_steps, off_term, off_trunc), (
+        "the short grounded window does not shorten or alter the end of a healthy episode"
+    )
+
+
+def test_uc36_short_grounded_window_preserves_baseline_byte_identity(connectome) -> None:
+    """AC6: the UC-36 default ``grounded_window=10`` is byte-identical to the legacy long window on
+    the committed baseline — the shorter grounded window introduced by UC-36 perturbs nothing. The
+    seed-42 golden flight never enters the grounded state, so shrinking the grounded window from 100
+    to 10 leaves the obs / reward / termination / RNG streams bit-for-bit unchanged (no fixture
+    regeneration, no checkpoint/schema impact)."""
+    golden = np.load(_BASELINE_ROLLOUT)
+    actions = list(golden["actions"])
+
+    short = _full_stream(EnvConfig(), seed=42, actions=actions)  # UC-36 default grounded_window=10
+    legacy = _full_stream(
+        EnvConfig(early_termination=EarlyTerminationConfig(grounded_window=100)),
+        seed=42,
+        actions=actions,
+    )
+    np.testing.assert_array_equal(short[0], legacy[0])  # observation stream
+    assert short[1] == legacy[1]  # reward stream
+    assert short[2] == legacy[2]  # terminated stream
+    assert short[3] == legacy[3]  # truncated stream
+    assert short[4] == legacy[4]  # final RNG state
+    # And it still matches the committed golden fixture exactly.
+    np.testing.assert_array_equal(short[0], golden["env_trace"])
