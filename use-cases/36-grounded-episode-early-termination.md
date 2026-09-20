@@ -1,0 +1,22 @@
+# Use Case 36: End grounded / no-progress episodes early (recording & eval, not just training)
+
+## Summary
+A grounded or no-progress drone should end its episode promptly, but a real recording (Drive file, 2026-09-20) showed an episode running the **full 101 frames** while the drone was floored and motionless from ~frame 12. Evidence from that recording: the drone falls straight down (x/y fixed at ~0.041, −0.608), reaches `z=0.013` (on the floor) by frame 12, and never moves again; the last positional change is frame 11; `outcome = {completed:false, steps:101, reward:−9.69}`. So **~88 of 101 frames (87 %) are a dead drone sitting on the floor.** UC-25 ("ground/no-progress episode early termination", marked done) is **not effective in the recording/eval path** — either that code path runs a fixed horizon and ignores the env's `terminated` signal, or the ground/no-progress threshold is far too lenient. This UC fixes early termination so a grounded/no-progress drone ends its episode quickly in **training, evaluation, AND recording**, cutting the dead frames — which shortens recordings, saves compute, and makes recorded playback meaningful (and mostly cures the "static heatmap" symptom in UC-34 by removing the frozen tail).
+
+## Acceptance Criteria
+1. When the drone is **grounded** (height below a small configurable threshold) and/or shows **no positional progress** for a configurable window of `N` consecutive steps, the episode terminates (the env signals `terminated`/`done`). A unit/integration test simulating a floored, static trajectory asserts termination fires within the expected window.
+2. Early termination is honored on the **recording/eval path**, not only training: a recorded episode of a drone that floors at ~frame 12 ends at ~frame 12–13 (plus a small documented grace), **not** at the max horizon. A test (or the recording command on a deterministic seed reproducing this failure) confirms the recorded `n_frames` / `outcome.steps` is bounded near the crash point, not ~101.
+3. The termination thresholds (ground height, no-progress distance + window) are **sane, configurable, and documented**, and are not so aggressive that a briefly-hovering or slow-but-progressing drone is killed prematurely.
+4. `outcome` reporting reflects the early termination consistently with the existing schema (`steps` = actual step count, `completed:false`); no schema change.
+5. A legitimately-flying episode (making progress) is **unaffected** — it runs to completion/horizon exactly as before (no early cut).
+6. Determinism preserved; non-grounded episodes' behavior (reward, dynamics, seeding) is unchanged apart from the termination signal that UC-25 already defines. Existing training runs for healthy episodes reproduce as before.
+
+## Potential Pitfalls & Open Questions
+- **Ambiguity (root cause)** — the dev-team must first determine whether the recording/eval loop **ignores** the env's `terminated`/`done` (runs a fixed horizon) or whether UC-25's threshold is simply too lenient. The fix differs: honor the termination signal in the recording/eval loop vs. tighten the condition (possibly both).
+- **Risk** — too-aggressive termination could cut episodes that dip near the ground and recover (a bounce or low pass near a pad). The no-progress window must allow brief recovery; grounded detection should combine low height with genuinely stalled progress, not height alone.
+- **Edge case** — an episode that never leaves the ground (fails at step 0–1): should terminate quickly but after a minimal grace so a normal takeoff isn't misread as grounded.
+- **Edge case** — near-ground operations that are intended (landing/takeoff pad docking, UC-16): grounded-termination must not kill a legitimate controlled landing on a pad.
+- **Assumption / reference** — UC-25 already exists (done); this is most likely **extending/fixing UC-25** rather than net-new. Reference it and reuse its condition where possible rather than duplicating.
+
+## Original Description
+User, 2026-09-20: "When a drone falls like a rock and at frame 13 it is still on the floor without doing 'anything', the recording still goes to the frame 100, wasting a lot of time." Confirmed from a supplied recording: floored at `z=0.013` by frame 12, motionless from frame 11, ran the full 101 steps, `outcome.reward = −9.69`, `completed=false`. ~87 % of the recording is a dead drone on the floor. UC-25's early termination did not cut it in this path.
