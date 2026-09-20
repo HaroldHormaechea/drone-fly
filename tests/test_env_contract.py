@@ -2510,3 +2510,87 @@ def test_uc38_airborne_survival_return_beats_floor_sit_and_is_positive() -> None
     assert hover_return > 0.0, (
         "the airborne survival return is now strictly positive — the −105 trap is gone (AC5)"
     )
+
+
+# --- UC-39 AC4: a genuine crash still terminates + is penalised at the ACTIVE penalty --
+def _scripted_ceiling_crash(cp_override):
+    """Drive a scripted takeoff-then-crash; return (crash-step reward, terminated, info).
+
+    Step 0 spawns airborne (z=2.0) so the takeoff latch is set; the drone climbs to z=2.4 and the
+    adapter flags a genuine collision on the last step (a ceiling crash — the env keys on
+    ``state.collided``, so floor vs ceiling is immaterial to the crash contract). Both airborne
+    endpoints sit ABOVE the climb target (1.0 m), so the potential-based climb term is the SAME
+    constant (≈ −0.02) in every run — isolating the collision penalty in the reward comparison.
+    ``cp_override`` (the training curriculum value) is applied via ``set_collision_penalty`` before
+    stepping; ``None`` leaves the env default (100) in force.
+    """
+    positions = [(0.0, 0.0, 2.0), (0.0, 0.0, 2.2), (0.0, 0.0, 2.4)]
+    env = _env_with(_ScriptedAdapter(positions, collide_at=2))
+    env.reset(seed=0)
+    if cp_override is not None:
+        env.set_collision_penalty(cp_override)
+    reward = 0.0
+    terminated = False
+    info: dict = {}
+    for _ in range(3):
+        _obs, reward, terminated, _tr, info = env.step(HOVER)
+        if terminated:
+            break
+    return reward, terminated, info
+
+
+def test_uc39_genuine_crash_terminates_and_reports_collided() -> None:
+    """AC4: whatever the curriculum value, a genuine floor/ceiling/OOB collision still TERMINATES
+    the episode with ``terminated=True`` and ``info["collided"]=True`` (and is not a completion).
+    Asserted at both the default penalty and a low override — termination is penalty-independent."""
+    for cp in (None, 10.0):
+        reward, terminated, info = _scripted_ceiling_crash(cp)
+        assert terminated is True, f"a genuine crash must terminate (cp={cp})"
+        assert info["collided"] is True, f"a genuine crash reports collided=True (cp={cp})"
+        assert info["completed"] is False
+        assert info["early_termination"] is None, "a real crash is not an early-termination cut"
+        assert reward < 0.0
+
+
+def test_uc39_crash_penalty_tracks_the_active_curriculum_value() -> None:
+    """AC4: the crash penalty applied in the reward is the ACTIVE curriculum value, not a fixed 100.
+    Everything but the collision penalty is identical across the two runs (same trajectory, same
+    airborne + climb terms), so the crash-step reward difference is EXACTLY the penalty difference —
+    the default eats −100 while a curriculum override of 10 eats only −10."""
+    r_default, _, _ = _scripted_ceiling_crash(None)  # env default collision_penalty = 100
+    r_low, _, _ = _scripted_ceiling_crash(10.0)  # curriculum start value
+    default_cp = EnvConfig().reward.collision_penalty
+    assert default_cp == pytest.approx(100.0)
+    # The reward difference isolates the penalty: (−10) − (−100) = +90.
+    assert r_low - r_default == pytest.approx(default_cp - 10.0)
+    assert r_low - r_default == pytest.approx(90.0)
+    # And the magnitudes bracket the cliff: the full penalty dominates, the relieved one does not.
+    assert r_default < -50.0, "the default run eats the full −100 crash cliff"
+    assert r_low > -50.0, "the curriculum-relieved run eats only −10 — the cliff is relieved"
+
+
+def test_uc39_stuck_cut_stays_penalty_free_even_with_curriculum_override() -> None:
+    """AC4 (UC-38 preserved): the no-progress ("stuck") cut remains DECOUPLED from the collision
+    penalty even when the training curriculum has set an override. The override only ever changes a
+    GENUINE crash's magnitude — it must not leak a penalty into a stuck/timeout cut. The cut reports
+    ``collided=False`` and its reward carries no −collision_penalty term."""
+    positions = [(0.0, 0.0, 1.0)] + [(0.5, 0.0, 1.0)] * 12  # airborne hover, never closes on g0
+    env = _env_with(
+        _ScriptedAdapter(positions),
+        EnvConfig(early_termination=EarlyTerminationConfig(stuck_window=4)),
+    )
+    env.reset()
+    env.set_collision_penalty(10.0)  # curriculum active during this rollout
+    reward = 0.0
+    terminated = truncated = False
+    info: dict = {}
+    for _ in range(env._max_steps + 1):
+        _obs, reward, terminated, truncated, info = env.step(HOVER)
+        if terminated or truncated:
+            break
+    assert terminated is True and truncated is False
+    assert info["collided"] is False, (
+        "a stuck cut is not a crash — no penalty even with an override"
+    )
+    assert info["early_termination"] == "stuck"
+    assert reward > -1.0, "no −collision_penalty (10 or 100) leaks into a decoupled stuck cut"

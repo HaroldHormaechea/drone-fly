@@ -370,6 +370,70 @@ committed rollouts store observations/actions, not rewards, and the seed-42 base
 Paired with a small exploration bump, `TrainConfig.ent_coef` default **0.0 → 0.01**, to sustain
 exploration long enough for the policy to discover takeoff before entropy decays.
 
+### Takeoff bootstrap: crash-cliff relief & climb reward (UC-39)
+After UC-37/38 the "no learning signal" pathology was fixed and hovering was made net-positive, yet
+training still converged to a non-flying policy (`ep_len` ≈ 101, 0 % success, `ep_rew` ≈ −5): the
+drone spawned, sat, and was cut by the no-progress detector. The `sit`-vs-`hover` *terminal* ordering
+was already correct (hover ≈ +5 > sit ≈ −5), so the blocker was **not** that sitting is too
+comfortable — it was that **every path from sitting to hovering runs through a genuine floor/ceiling
+collision** (`collision_penalty` = 100). PPO propagates that −100 (discounted by γ) back onto the
+"throttle up" actions that begin any takeoff, so those correct actions receive **negative advantage**
+and the policy learns "attempting flight leads to disaster — don't". UC-39 attacks that barrier
+directly with two coupled levers.
+
+**Reward table (single source of truth).** Every term the env applies, with its shipped
+`RewardConfig` value and when it fires:
+
+| Action | Reward | Condition |
+|---|---|---|
+| Progress | +1.0 × Δdist | per step, for closing distance to the current target waypoint (`progress_weight`) |
+| Climb | potential-based, weight 2.0, target 1.0 m | per step of upward progress toward the hover target; `F = γ·Φ(curr) − Φ(prev)`, `Φ(h) = 2.0·min(max(h, 0), 1.0)` (`climb_weight` / `climb_target_height` / `climb_gamma`) |
+| Hover / airborne | +0.1 | per step while above the floor band (`airborne_bonus`) |
+| Time penalty | −0.05 | every step (`time_penalty`) |
+| Gate passed | +10 / N | on a validly passed gate, normalised by gate count N (`gate_bonus`) |
+| Course completed | +100 | on a valid all-gates-then-finish (`completion_bonus`) |
+| Collision (floor/ceiling/OOB) | −100 | on a genuine crash; terminates the episode (`collision_penalty` — see the training curriculum below) |
+| Obstacle contact | −50 | edge-triggered once per distinct pillar contact; non-terminating (`obstacle_penalty`) |
+| No-progress / timeout cut | 0 | penalty-free (UC-38) |
+
+The reward-column values are the env **defaults** (`RewardConfig` constants); keep this table in sync
+with any future reward change.
+
+- **Lever 1 — dense potential-based climb reward (`RewardConfig.climb_weight` = 2.0,
+  `climb_target_height` = 1.0 m, `climb_gamma` = 0.99; default on).** A small per-step reward pays for
+  upward progress from a floor start toward the hover target, on the very step altitude is gained —
+  *before and independent of* any later crash — so the per-action advantage of the initial "throttle
+  up" actions is positive even on a takeoff that later crashes. It is **potential-based** shaping (Ng
+  et al. 1999): `Φ(h) = climb_weight · min(max(h, 0), climb_target_height)` and the per-step
+  contribution is `F = climb_gamma · Φ(curr) − Φ(prev)`, where `h` is altitude above the floor. This
+  form is deliberate: it **telescopes**, so a climb-then-descend round trip nets ≈ 0 (it cannot be
+  farmed into a loiter optimum by bobbing); its per-episode total is bounded by ≈ `climb_gamma ·
+  climb_weight · climb_target_height` = **1.98**, far below `completion_bonus` (100) and at/below a
+  normalised `gate_bonus`; it is ≈ 0 on the floor; and it **caps at the target height**, so there is
+  no incentive to climb into the ceiling. **Coupling note:** `climb_gamma` **must** equal the training
+  discount γ (`TrainConfig.gamma`, 0.99) for the shaping to stay policy-invariant — if you change the
+  training γ, update `climb_gamma` in lockstep.
+- **Lever 2 — crash-cliff relief via a training-time collision-penalty curriculum (default on).**
+  During training the genuine floor/ceiling/OOB collision penalty is ramped **linearly from
+  `TrainConfig.collision_penalty_start` (10) up to `collision_penalty_end` (100)** over the first
+  `collision_curriculum_warmup_fraction` (0.5) of `total_timesteps`, then held at the full value. A
+  low early penalty removes the crash barrier while the drone learns to fly; ramping it back to full
+  strength restores precision so it does not learn permanently-sloppy floor/ceiling-clipping flight.
+  The ramp is implemented as an SB3 callback (`drone_fly.train.collision_curriculum`) that pushes the
+  current value into the training envs each rollout via `env_method("set_collision_penalty", …)`; the
+  schedule is a pure function of `num_timesteps`, so a resumed run continues it correctly. Crucially,
+  this is **training-only**: the env's *default* `RewardConfig.collision_penalty` stays **100** (the
+  value in the table above), and termination is never affected — a genuine crash still terminates the
+  episode and is still penalised, just at the active curriculum magnitude. Set
+  `collision_curriculum_enabled = False` to train at the constant default. `ent_coef` stays at the
+  UC-38 value (0.01).
+
+Together these make the first increments of flight net-positive in expected advantage instead of
+punished, without breaking any UC-03/16/37/38 reward ordering: completion still dominates loitering,
+a floor-shortcut still loses to a valid completion (the end-value penalty stays 100), hover still
+beats sit, and a full hovering episode still beats a takeoff-then-immediate-crash episode even at the
+curriculum's lowest endpoint (there is no grounded penalty, so no suicide optimum).
+
 ### Visualization & recording
 Enable recording in a train/evaluate config with `record: true` (tune cadence via `record_every`);
 frames land in that run's `training/<name>/recordings/`. Open `viz/viewer.html` in a browser

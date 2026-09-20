@@ -62,6 +62,37 @@ def _step_air(
     )
 
 
+def _step_climb(
+    *,
+    h_prev=0.0,
+    h_curr=0.0,
+    airborne=False,
+    progress_prev=0.0,
+    progress_curr=0.0,
+    collided=False,
+    completed=False,
+    event=None,
+    cfg=CFG,
+) -> float:
+    """UC-39 helper: a step with the two climb heights (above the floor) threaded through."""
+    return compute_reward(
+        dist_to_target_prev=progress_prev,
+        dist_to_target_curr=progress_curr,
+        event=event,
+        collided=collided,
+        completed=completed,
+        cfg=cfg,
+        airborne=airborne,
+        height_above_floor_prev=h_prev,
+        height_above_floor_curr=h_curr,
+    )
+
+
+def _climb_contribution(h_prev: float, h_curr: float) -> float:
+    """The climb term ALONE for a height transition: (step with heights) − (step at h=0)."""
+    return _step_climb(h_prev=h_prev, h_curr=h_curr) - _step_climb(h_prev=0.0, h_curr=0.0)
+
+
 def test_time_penalty_applied_every_step() -> None:
     # An idle step (no progress, no events) costs exactly the time penalty.
     assert _step() == -CFG.time_penalty
@@ -308,9 +339,12 @@ def test_net_per_airborne_step_is_strictly_positive() -> None:
 
 
 def test_max_episode_survival_reward_is_below_completion_bonus() -> None:
-    """AC6b: over the DEFAULT 3-gate step budget, the maximum survival reward accruable
-    (``airborne_bonus × budget``) is strictly below ``completion_bonus``, so a policy that merely
-    loiters airborne scores worse than one that reaches gates and finishes.
+    """UC-37 AC6b + UC-39 AC5 (extended): over the DEFAULT 3-gate step budget, the maximum
+    NON-completion reward accruable — airborne survival (``airborne_bonus × budget``) PLUS the whole
+    climb reward attainable in one episode (``climb_gamma × climb_weight × climb_target_height`` =
+    1.98, since the climb term telescopes and caps at the target) — is STILL strictly below
+    ``completion_bonus``. So even a policy that loiters airborne AND farms every last drop of climb
+    reward scores worse than one that reaches gates and finishes (UC-39 Note 3).
 
     The budget is computed exactly as :class:`RaceEnv` does at reset
     (``max_steps + steps_per_gate × (num_gates − 1)``) for the shipped default env, so this bound
@@ -324,8 +358,14 @@ def test_max_episode_survival_reward_is_below_completion_bonus() -> None:
     assert budget == 800  # 400 + 200 × (3 − 1): the default 3-gate budget the plan anchors AC6b to
     max_survival = CFG.airborne_bonus * budget
     assert max_survival == pytest.approx(80.0)
+    # UC-39: the per-episode climb bound (telescoping ⇒ ≈ γ·w·target, reached by a from-floor jump
+    # to the target height) is the MOST climb reward any single episode can accrue.
+    max_climb = CFG.climb_gamma * CFG.climb_weight * CFG.climb_target_height
+    assert max_climb == pytest.approx(1.98)
+    combined_max_non_completion = max_survival + max_climb
+    assert combined_max_non_completion == pytest.approx(81.98)  # 80 + 1.98 (UC-39 Note 3)
     assert CFG.completion_bonus == pytest.approx(100.0)
-    assert max_survival < CFG.completion_bonus  # loitering < completing (AC6b)
+    assert combined_max_non_completion < CFG.completion_bonus  # loiter+climb < completing (AC5)
 
 
 # --- UC-38 AC1: no-progress / timeout cut carries no collision penalty ----------------
@@ -356,3 +396,156 @@ def test_uc38_stuck_or_timeout_cut_reward_has_no_collision_penalty() -> None:
     # Sanity: a GENUINE collision (collided=True) still eats the full penalty (contrast, AC2).
     genuine = _step(progress_prev=1.0, progress_curr=1.0, collided=True)
     assert genuine == pytest.approx(-CFG.time_penalty - CFG.collision_penalty)
+
+
+# --- UC-39 AC1: dense potential-based climb reward -----------------------------------
+def test_uc39_from_floor_climb_yields_positive_contribution() -> None:
+    """AC1: a step that climbs (a substantial amount) from a floor start toward the target height
+    yields a POSITIVE climb contribution, paid on the very step altitude is gained — before/indep.
+    of any later crash. Uses a substantial climb (0 → 0.3 m), not a sub-1% knife-edge, so the
+    positive signal is unambiguous."""
+    contrib = _climb_contribution(h_prev=0.0, h_curr=0.3)
+    assert contrib > 0.0
+    # F = γ·Φ(0.3) − Φ(0) = 0.99·(2.0·0.3) − 0 = 0.594.
+    assert contrib == pytest.approx(0.99 * (CFG.climb_weight * 0.3), abs=1e-9)
+    assert contrib == pytest.approx(0.594, abs=1e-6)
+
+
+def test_uc39_resting_on_floor_yields_no_climb_reward() -> None:
+    """AC1: a step resting on the floor (no altitude gained, h ≈ 0) yields ≈0 climb reward, so
+    sitting on the ground earns nothing from the climb term."""
+    assert _climb_contribution(h_prev=0.0, h_curr=0.0) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_uc39_step_above_target_yields_no_additional_climb_reward() -> None:
+    """AC1: a step taken entirely ABOVE the target height yields ≤0 additional climb reward — the
+    potential saturates at ``climb_target_height`` so there is no incentive to climb into the
+    ceiling. Both a flat above-target step and a climb-higher-above-target step are capped."""
+    # Both endpoints above target ⇒ Φ saturates ⇒ F = (γ − 1)·w·target = −0.02 ≤ 0.
+    flat_above = _climb_contribution(h_prev=1.2, h_curr=1.5)
+    assert flat_above <= 0.0
+    assert flat_above == pytest.approx((CFG.climb_gamma - 1.0) * CFG.climb_weight, abs=1e-9)
+    # Climbing FROM the target further UP into the ceiling earns nothing extra (also capped ≤ 0).
+    into_ceiling = _climb_contribution(h_prev=1.0, h_curr=2.4)
+    assert into_ceiling <= 0.0
+
+
+# --- UC-39 AC2: not farmable (telescoping) + per-episode bound -----------------------
+def test_uc39_climb_round_trip_nets_approximately_zero() -> None:
+    """AC2a: a round trip — climb by X then descend the same X — nets ≈0 climb reward (telescoping,
+    so bobbing up and down cannot be farmed into a loiter optimum). The tiny residual is the γ<1
+    discount and is ≤ 0 (never a positive farmable gain)."""
+    up = _climb_contribution(h_prev=0.0, h_curr=0.5)
+    down = _climb_contribution(h_prev=0.5, h_curr=0.0)
+    round_trip = up + down
+    assert round_trip == pytest.approx(0.0, abs=0.05)
+    assert round_trip <= 0.0, "the γ<1 residual makes a round trip non-positive — not farmable"
+
+
+def test_uc39_per_episode_climb_reward_is_bounded_below_completion_and_gate() -> None:
+    """AC2b: the maximum total climb reward accruable over any single episode is
+    ``climb_gamma × climb_weight × climb_target_height`` = 1.98 (a from-floor jump to the target;
+    any further step at/above target pays ≤0, any descent pays negative). It is strictly below
+    ``completion_bonus`` and at/below a single normalised 3-gate ``gate_bonus`` (3.33)."""
+    # The single largest climb step (floor → target in one step) realises the whole bound.
+    max_single_step = _climb_contribution(h_prev=0.0, h_curr=CFG.climb_target_height)
+    bound = CFG.climb_gamma * CFG.climb_weight * CFG.climb_target_height
+    assert max_single_step == pytest.approx(bound)
+    assert bound == pytest.approx(1.98)
+    # A further step held at the target adds ≤ 0 (standing tax), so 1.98 really is the ceiling.
+    assert _climb_contribution(h_prev=1.0, h_curr=1.0) <= 0.0
+    assert bound < CFG.completion_bonus  # ≪ completion (100)
+    assert bound <= CFG.gate_bonus / 3  # ≤ normalised gate bonus on the default 3-gate course
+
+
+# --- UC-39 AC6: floor-shortcut still loses to a valid completion ---------------------
+def test_uc39_floor_shortcut_still_loses_to_valid_completion_even_with_climb() -> None:
+    """AC6: a trajectory that dives through the floor to reach the finish still scores worse
+    than a valid completion — even when the shortcut is credited the airborne survival bonus AND the
+    maximum climb reward on that step. It eats ``collision_penalty`` and never earns
+    ``completion_bonus``; the small climb/airborne credits cannot offset a 100-point crash."""
+    # A valid completion at a useful altitude: earns the completion bonus, no collision.
+    valid = _step_climb(
+        progress_prev=1.0,
+        progress_curr=0.0,
+        event="finish",
+        completed=True,
+        h_prev=0.7,
+        h_curr=1.0,
+        airborne=True,
+    )
+    # A floor-shortcut that ALSO banks a full from-floor climb + airborne bonus, then crashes.
+    shortcut = _step_climb(
+        progress_prev=1.0,
+        progress_curr=0.0,
+        collided=True,
+        completed=False,
+        h_prev=0.0,
+        h_curr=1.0,
+        airborne=True,
+    )
+    assert valid > shortcut
+    assert shortcut < 0 < valid
+
+
+# --- UC-39 AC7: hover-at-target still beats sitting (climb "standing tax" accounted) -
+def test_uc39_hover_at_target_nets_above_sitting_on_floor() -> None:
+    """AC7: taking off and hovering AT the target height still returns strictly more per step than
+    sitting on the floor — even after the potential-based climb term's tiny standing tax
+    ((1−γ)·w·target = 0.02/step) is subtracted. Hover net = airborne_bonus − time_penalty − tax =
+    0.1 − 0.05 − 0.02 = +0.03/step > sit = −time_penalty = −0.05/step."""
+    hover_at_target = _step_climb(h_prev=1.0, h_curr=1.0, airborne=True)
+    sit_on_floor = _step_climb(h_prev=0.0, h_curr=0.0, airborne=False)
+    assert hover_at_target == pytest.approx(0.03, abs=1e-9)
+    assert sit_on_floor == pytest.approx(-CFG.time_penalty)
+    assert hover_at_target > sit_on_floor
+
+
+# --- UC-39 AC8: anti-suicide (hover episode beats takeoff-then-immediate-crash) ------
+def test_uc39_hover_episode_beats_takeoff_then_immediate_crash_at_worst_case_cp() -> None:
+    """AC8: a full hovering episode must return strictly MORE than a take-off-then-immediately-crash
+    episode, so the policy is never incentivised to end an episode early via a deliberate crash. The
+    guarantee is tightest at the LOW curriculum endpoint (``collision_penalty_start`` = 10), so this
+    test evaluates the crash episode at CP = 10 — the worst case for anti-suicide.
+
+    Both episodes share an identical takeoff prefix (climb floor→target over K steps); they diverge
+    only afterwards, so the comparison reduces to (continue hovering) vs (crash once at CP=10)."""
+    from drone_fly.env.config import RewardConfig
+    from drone_fly.train.config import TrainConfig
+
+    cp_low = TrainConfig().collision_penalty_start
+    assert cp_low == pytest.approx(10.0)
+    crash_cfg = RewardConfig(collision_penalty=cp_low)  # worst-case low curriculum endpoint
+
+    target = CFG.climb_target_height
+
+    def _takeoff_prefix_return(steps: int) -> float:
+        """Climb from the floor to the target over ``steps`` equal increments (airborne)."""
+        total = 0.0
+        prev = 0.0
+        for k in range(1, steps + 1):
+            curr = target * k / steps
+            total += _step_climb(h_prev=prev, h_curr=curr, airborne=True)
+            prev = curr
+        return total
+
+    k = 5
+    prefix = _takeoff_prefix_return(k)
+
+    # Suicide episode: takeoff prefix, then a deliberate crash back to the floor at CP = 10.
+    crash_step = _step_climb(
+        h_prev=target, h_curr=0.0, airborne=False, collided=True, cfg=crash_cfg
+    )
+    suicide_return = prefix + crash_step
+
+    # Hover episode: same takeoff prefix, then keep hovering at the target for M steps (no crash).
+    m = 20
+    hover_tail = sum(_step_climb(h_prev=target, h_curr=target, airborne=True) for _ in range(m))
+    hover_return = prefix + hover_tail
+
+    assert hover_return > suicide_return, (
+        "hovering must beat a deliberate crash (anti-suicide, AC8)"
+    )
+    # And the crash episode is genuinely worse than even a SINGLE further hover step after takeoff.
+    one_more_hover = prefix + _step_climb(h_prev=target, h_curr=target, airborne=True)
+    assert one_more_hover > suicide_return
