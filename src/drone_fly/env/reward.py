@@ -88,13 +88,14 @@ def compute_reward(
         "throttle up" actions of a takeoff is positive even when the attempt later crashes. The term
         is potential-based (Ng et al. 1999): Φ(h) = ``cfg.climb_weight`` · min(max(h, 0),
         ``cfg.climb_target_height``); the per-step contribution is
-        F = ``cfg.climb_gamma`` · Φ(curr) − Φ(prev). Consequences (all unit-testable): it telescopes
-        so a climb-then-descend round trip nets ≈0 (non-farmable, no loiter optimum); the
-        per-episode total is bounded by ≈ ``climb_gamma`` · ``climb_weight`` · ``climb_target_height``
-        ≪ ``completion_bonus``; it is ≈0 on the floor (h ≈ 0 ⇒ Φ ≈ 0) and ≈0 for steps taken above
-        the target (Φ saturates ⇒ no ceiling-seeking). ``cfg.climb_gamma`` MUST equal the training γ
-        for the invariance to hold (see :class:`~drone_fly.env.config.RewardConfig`). Both default to
-        ``0.0`` ⇒ Φ_prev = Φ_curr = 0 ⇒ F = 0, so every pre-UC-39 caller is byte-identical.
+        F = ``cfg.climb_gamma`` · Φ(curr) − Φ(prev). Consequences (all unit-testable): it
+        telescopes so a climb-then-descend round trip nets ≈0 (non-farmable, no loiter optimum);
+        the per-episode total is bounded by ≈ ``climb_gamma`` · ``climb_weight`` ·
+        ``climb_target_height`` ≪ ``completion_bonus``; it is ≈0 on the floor (h ≈ 0 ⇒ Φ ≈ 0) and
+        ≈0 for steps taken above the target (Φ saturates ⇒ no ceiling-seeking). ``cfg.climb_gamma``
+        MUST equal the training γ for the invariance to hold (see
+        :class:`~drone_fly.env.config.RewardConfig`). Both default to ``0.0`` ⇒ Φ_prev = Φ_curr = 0
+        ⇒ F = 0, so every pre-UC-39 caller is byte-identical.
     """
     reward = -cfg.time_penalty
     reward += cfg.progress_weight * (dist_to_target_prev - dist_to_target_curr)

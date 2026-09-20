@@ -59,6 +59,26 @@ class TrainConfig:
     # (paired with the UC-38 decoupling that restores the +airborne_bonus survival gradient).
     ent_coef: float = 0.01
 
+    # UC-39 — training-time collision-penalty CURRICULUM (crash-cliff relief, default on). The
+    # genuine floor/ceiling/OOB collision penalty is ramped LINEARLY from
+    # ``collision_penalty_start``
+    # to ``collision_penalty_end`` over the first ``collision_curriculum_warmup_fraction`` of
+    # ``total_timesteps``, then held at the end value. Rationale: PPO propagates the −100 crash
+    # terminal back onto the "throttle up" actions that begin any takeoff, giving them negative
+    # advantage; starting the penalty low (10) while the policy learns to fly removes that barrier,
+    # and ramping it back to full strength (100) restores precision so the drone doesn't learn
+    # permanently-sloppy floor/ceiling-clipping flight. Applied at rollout time via the env's
+    # ``set_collision_penalty`` — the env DEFAULT ``RewardConfig.collision_penalty`` (100) is never
+    # changed, so every reward test that asserts 100 is unaffected (minimal test blast radius). The
+    # schedule is a function of ``num_timesteps`` only (stateless), so it is resume-correct. End
+    # value 100 keeps AC6 (floor-shortcut still loses to completion) and AC8 holds at every value
+    # (start 10 ≥ any hover net). Set ``collision_curriculum_enabled=False`` to train at the
+    # constant env default (byte-identical to pre-UC-39).
+    collision_penalty_start: float = 10.0
+    collision_penalty_end: float = 100.0
+    collision_curriculum_warmup_fraction: float = 0.5
+    collision_curriculum_enabled: bool = True
+
     seed: int = 0
     vf_arch: list[int] = field(default_factory=lambda: [64, 64])
 

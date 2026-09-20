@@ -588,10 +588,10 @@ class RewardConfig:
     # crashes. Implemented in :func:`drone_fly.env.reward.compute_reward` as potential-based
     # shaping (Ng et al. 1999): Φ(h) = ``climb_weight`` · min(max(h, 0), ``climb_target_height``);
     # per-step term F = ``climb_gamma`` · Φ(curr) − Φ(prev). Because it telescopes:
-    #   * a round trip (climb then descend the same amount) nets ≈0 (non-farmable, no loiter optimum);
-    #   * the per-episode maximum ≈ ``climb_gamma`` · ``climb_weight`` · ``climb_target_height`` = 1.98,
-    #     far below ``completion_bonus`` (100) and at/below a normalised ``gate_bonus`` — AC1/AC2/AC5;
-    #   * it CAPS at ``climb_target_height`` so there is no incentive to climb into the ceiling (AC1).
+    #   * a round trip (climb then descend the same amount) nets ≈0 (non-farmable, no loiter opt);
+    #   * the per-episode max ≈ ``climb_gamma`` · ``climb_weight`` · ``climb_target_height`` = 1.98,
+    #     far below ``completion_bonus`` (100) and at/below a normalised ``gate_bonus`` (AC1/2/5);
+    #   * it CAPS at ``climb_target_height`` so there is no incentive to climb into the ceiling.
     # Appended **last** (after ``airborne_bonus``) so every positional ``RewardConfig`` call is
     # unshifted.
     climb_weight: float = 2.0
