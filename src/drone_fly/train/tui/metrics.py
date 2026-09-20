@@ -400,6 +400,18 @@ class DashboardModel:
         self.rollout_steps = int(rollout_steps)
         self.rollout_target = int(rollout_target)
 
+    def tick_clock(self, elapsed_seconds) -> None:
+        """Advance ONLY the live elapsed clock (and hence ETA) — no counters, no history (UC-32).
+
+        Fed by the Windows ~1 Hz refresh timer (AC-5) so the elapsed timer and ETA keep ticking
+        during ``PPO.train()``, which fires no ``on_step``. Deliberately narrower than
+        :meth:`tick`: it must **not** move the collecting-progress counters (``rollout_steps`` /
+        ``rollout_target``) — the timer has observed no new steps, so fabricating progress would
+        be wrong — and it touches neither ``history`` nor ``raw`` (so the last rollout-end
+        snapshot persists). Uncontended on macOS/Linux, where no timer runs (AC-9).
+        """
+        self.elapsed_seconds = float(elapsed_seconds)
+
     def set_verdict(self, verdict) -> None:
         """Store the latest health verdict (the UC-23 seam the status bar renders)."""
         self.latest_verdict = verdict
