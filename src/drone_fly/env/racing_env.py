@@ -152,7 +152,7 @@ class RaceEnv(gym.Env):
         self._et_enabled = bool(et.enabled)
         self._et_floor_epsilon = float(et.floor_epsilon)
         self._et_stuck_window = int(et.stuck_window)  # no-progress detector window
-        self._et_grounded_window = int(et.grounded_window)  # grounded detector window (UC-36; shorter)
+        self._et_grounded_window = int(et.grounded_window)  # grounded window (UC-36; shorter)
         self._et_progress_epsilon = float(et.progress_epsilon)
         self._et_rest_speed_epsilon = float(et.rest_speed_epsilon)
         # Per-episode counters / bookkeeping for the two detectors (initialised properly in

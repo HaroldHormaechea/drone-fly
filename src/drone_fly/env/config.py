@@ -712,9 +712,9 @@ class EarlyTerminationConfig:
 
     floor_epsilon: float = 0.05  # m — band above floor_z counted as "on the ground" (8–14 mm rest)
     stuck_window: int = 100  # consecutive NO-PROGRESS steps that cut (5 s @ 20 Hz)
-    grounded_window: int = 10  # consecutive GROUNDED steps that cut (0.5 s @ 20 Hz; UC-36) — shorter
-    # than stuck_window because a floored drone is unambiguously dead and needn't linger; unlike
-    # stuck_window it has no fixture byte-identity floor (see the invariant note above).
+    grounded_window: int = 10  # consecutive GROUNDED steps that cut (0.5 s @ 20 Hz; UC-36).
+    # Shorter than stuck_window because a floored drone is unambiguously dead and needn't linger;
+    # unlike stuck_window it has no fixture byte-identity floor (see the invariant note above).
     progress_epsilon: float = 0.01  # m — min drop in dist-to-target for a step to count as progress
     rest_speed_epsilon: float = 0.05  # m/s — max speed in the floor band still counted as "resting"
     enabled: bool = True  # ON by default (the fix); explicit off-switch restores legacy behaviour
