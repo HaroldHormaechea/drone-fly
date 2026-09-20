@@ -1012,8 +1012,10 @@ def _assert_obstacle_clearance_invariant(course: CourseConfig, rcfg: Randomizati
         for j in range(i + 1, len(obstacles)):
             other = obstacles[j]
             oaxis = np.asarray(other.center, dtype=np.float64)
-            need = radius + float(other.radius) + 2.0 * (
-                rcfg.drone_radius + rcfg.obstacle_evasion_margin
+            need = (
+                radius
+                + float(other.radius)
+                + 2.0 * (rcfg.drone_radius + rcfg.obstacle_evasion_margin)
             )
             assert float(np.linalg.norm(axis - oaxis)) >= need - 1e-9
 
