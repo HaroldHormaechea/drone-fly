@@ -405,3 +405,16 @@ def test_prune_trained_accepts_optional_inert_name() -> None:
 def test_prune_trained_invalid_name_still_validated() -> None:
     with pytest.raises(ConfigError, match="name"):
         PruneTrainedRunConfig.from_mapping({"checkpoint": "c.zip", "out": "o", "name": "../x"})
+
+
+# --------------------------------------------------------------------------- #
+# UC-38 AC8 — training entropy-coefficient default bump (0.0 → 0.01)
+# --------------------------------------------------------------------------- #
+def test_uc38_train_config_ent_coef_default_is_positive_exploration_bump() -> None:
+    """UC-38 AC8: the PPO entropy-coefficient default is bumped from 0.0 to 0.01 to sustain
+    exploration long enough for the policy to discover takeoff (with ent_coef=0 the action
+    distribution collapses before throttle-up is found). The default must be strictly > 0."""
+    from drone_fly.train.config import TrainConfig
+
+    assert TrainConfig().ent_coef == 0.01, "ent_coef default is the UC-38 exploration bump"
+    assert TrainConfig().ent_coef > 0.0, "AC8 requires a strictly positive default"

@@ -280,9 +280,14 @@ grounded detector fires after `grounded_window` consecutive grounded steps (defa
 20 Hz — a floored drone is unambiguously dead, so its recording/eval episode is cut promptly instead
 of dragging to the horizon, UC-36), while the no-progress detector keeps the more lenient
 `stuck_window` (default **100** = 5 s @ 20 Hz) so a slow-but-recovering flight isn't cut prematurely.
-Either one reaching its window ends the episode as a **crash** (`terminated=True`, the existing
-collision penalty, and `info["collided"]=True`), with an additive `info["early_termination"]` key reporting `"grounded"`,
-`"stuck"`, or `None`. The legitimate UC-16 docked/servicing state is **exempt** while service is
+Either one reaching its window ends the episode (`terminated=True`), with an additive
+`info["early_termination"]` key reporting `"grounded"`, `"stuck"`, or `None` as the authoritative
+reason. **UC-38 decoupled the penalty from the cut** (see the UC-38 note below): a genuine
+floor/ceiling/out-of-bounds collision and the **grounded** cut (a previously-airborne drone that
+dropped back onto the floor — a failed flight) keep the `collision_penalty` and set
+`info["collided"]=True`; the **no-progress ("stuck")** cut and a pure `max_steps` timeout terminate
+**penalty-free** with `info["collided"]=False`, so a peaceful airborne timeout is no longer punished
+like a crash. The legitimate UC-16 docked/servicing state is **exempt** while service is
 *productive* (battery or integrity strictly improving) — a drone that docks once then idles is still
 cut once improvement stops. Because the counters start at 0 and need a full window of qualifying
 steps, a normally-flying or promptly-crashing episode is byte-identical to before (no obs-schema,
@@ -334,6 +339,36 @@ This UC intentionally changes default training dynamics, so the committed seed-4
 (`tests/data/uc08_baseline_rollout.npz`, regenerated via `scripts/regen_uc08_baseline.py`) legitimately
 reflects the new floor-start default; airborne-start reward/termination paths and determinism are
 preserved.
+
+### Decoupled early-termination penalty (UC-38)
+Even with UC-37's survival reward, training still converged to a non-flying policy (`ep_rew` pinned
+near **−105**, 0 % success): a floor-sitting or non-progressing drone was cut by the no-progress
+detector, and `racing_env.py` folded **every** early-termination cut into `crash=True`, so the cut
+ate the full `collision_penalty` (100) — scoring ≈ −5 − 100, identical to a genuine floor crash. The
++airborne survival differential (≈ +10 over a 100-step hover) was swamped by the −100 terminal, so
+takeoff never out-scored sitting. UC-38 **decouples the no-progress/timeout cut from the collision
+penalty**:
+
+- **No-progress ("stuck") cut and pure `max_steps` timeout are penalty-free.** The episode still
+  ends (stuck → `terminated=True`; timeout → `truncated=True`), but the step reward carries **no**
+  `collision_penalty` and `info["collided"]=False`. The reason is reported via
+  `info["early_termination"]` (`"stuck"` or `None`) — `info["collided"]` no longer falsely claims a
+  collision for a no-progress cut.
+- **Genuine collisions and the grounded cut still pay the penalty.** A real floor/ceiling/OOB
+  contact (raw `state.collided`, not a controlled dock) is byte-for-byte unchanged, and the
+  **grounded** cut (a previously-airborne drone that dropped back onto the floor) keeps the penalty
+  and `info["collided"]=True` — a post-takeoff drop to the floor is a failed flight. A genuine
+  collision that coincides with a stuck cut on the same step still pays the penalty (the real
+  collision dominates).
+
+This restores a clean positive gradient — hovering 100 steps then being cut (≈ +5) now beats sitting
+on the floor for the same window (≈ −5) — without weakening the crash / floor-shortcut ordering, and
+without rewarding loitering (a valid completion's +`completion_bonus` still dominates the bounded
+loiter return). Control flow is byte-for-byte as before UC-38; only reward magnitude and
+`info["collided"]` on a stuck/timeout cut changed, so no golden fixture regeneration is needed (the
+committed rollouts store observations/actions, not rewards, and the seed-42 baseline fires no cut).
+Paired with a small exploration bump, `TrainConfig.ent_coef` default **0.0 → 0.01**, to sustain
+exploration long enough for the policy to discover takeoff before entropy decays.
 
 ### Visualization & recording
 Enable recording in a train/evaluate config with `record: true` (tune cadence via `record_every`);

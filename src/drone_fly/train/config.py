@@ -53,7 +53,11 @@ class TrainConfig:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2
-    ent_coef: float = 0.0
+    # UC-38 (AC8): bumped 0.0 -> 0.01 to sustain exploration during takeoff discovery. With
+    # ent_coef=0 the policy's entropy/std collapse before it discovers throttle-up, so a small
+    # positive coefficient keeps the action distribution exploring long enough to find takeoff
+    # (paired with the UC-38 decoupling that restores the +airborne_bonus survival gradient).
+    ent_coef: float = 0.01
 
     seed: int = 0
     vf_arch: list[int] = field(default_factory=lambda: [64, 64])
