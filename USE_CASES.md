@@ -46,4 +46,4 @@ Statuses:
 | 34 | [use-cases/34-viewer-drop-time-heatmap.md](use-cases/34-viewer-drop-time-heatmap.md) | Viewer: remove the neurons×time heatmap (anatomical brain map is the only heatmap) | done | 2026-09-20 |
 | 35 | [use-cases/35-course-randomization-placement.md](use-cases/35-course-randomization-placement.md) | Course randomization placement — pads off waypoints, obstacles between waypoints | done | 2026-09-20 |
 | 36 | [use-cases/36-grounded-episode-early-termination.md](use-cases/36-grounded-episode-early-termination.md) | End grounded / no-progress episodes early (recording & eval, not just training) | done | 2026-09-20 |
-| 37 | [use-cases/37-floor-start-and-survival-reward.md](use-cases/37-floor-start-and-survival-reward.md) | Floor start + airborne survival reward (learn to take off and stay up) | in-progress | 2026-09-20 |
+| 37 | [use-cases/37-floor-start-and-survival-reward.md](use-cases/37-floor-start-and-survival-reward.md) | Floor start + airborne survival reward (learn to take off and stay up) | done | 2026-09-20 |

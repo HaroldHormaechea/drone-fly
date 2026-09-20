@@ -65,7 +65,12 @@ def test_training_time_recording_is_safe_under_subproc_backend(connectome, tmp_p
         seed=0,
     )
     record_dir = tmp_path / "acts"
-    ecfg = EnvConfig(episode=EpisodeConfig(max_steps=5))  # short episodes -> files appear fast
+    # short episodes -> files appear fast. floor_start=False (legacy mid-air start): this test is
+    # about the RECORDING plumbing under the subproc backend, orthogonal to UC-37's floor start.
+    # With the floored default an untrained policy rests on the floor and no episode ends within
+    # the tiny training budget (a never-took-off drone is bounded only by the ~100-step stuck
+    # detector, not a fast crash), so no recordings would be written; mid-air keeps episodes short.
+    ecfg = EnvConfig(episode=EpisodeConfig(max_steps=5), floor_start=False)
 
     model = loop.train(
         cfg,

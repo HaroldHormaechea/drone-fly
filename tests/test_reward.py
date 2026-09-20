@@ -44,6 +44,24 @@ def _step(
     )
 
 
+def _step_air(
+    *,
+    progress_prev=0.0,
+    progress_curr=0.0,
+    airborne=False,
+) -> float:
+    """UC-37 helper: a bare step with the ``airborne`` survival flag threaded through."""
+    return compute_reward(
+        dist_to_target_prev=progress_prev,
+        dist_to_target_curr=progress_curr,
+        event=None,
+        collided=False,
+        completed=False,
+        cfg=CFG,
+        airborne=airborne,
+    )
+
+
 def test_time_penalty_applied_every_step() -> None:
     # An idle step (no progress, no events) costs exactly the time penalty.
     assert _step() == -CFG.time_penalty
@@ -252,3 +270,59 @@ def test_obstacle_contact_does_not_grant_or_block_completion_bonus() -> None:
     assert completed_clean - completed_grazing == CFG.obstacle_penalty
     # Even after the severe penalty a completion still nets strongly positive.
     assert completed_grazing > 0
+
+
+# --- UC-37 AC5/AC6: airborne-only survival reward ------------------------------------
+def test_airborne_step_yields_the_bonus_grounded_step_yields_none() -> None:
+    """AC5: an airborne step adds exactly ``airborne_bonus``; a grounded (on/at-floor) step adds
+    nothing — the survival reward is paid ONLY while off the ground, so sitting still earns zero."""
+    airborne = _step_air(airborne=True)
+    grounded = _step_air(airborne=False)
+    assert airborne - grounded == pytest.approx(CFG.airborne_bonus)
+    # A grounded step earns nothing beyond the usual time penalty (bonus is exactly zero on floor).
+    assert grounded == pytest.approx(-CFG.time_penalty)
+    assert airborne == pytest.approx(-CFG.time_penalty + CFG.airborne_bonus)
+
+
+def test_airborne_defaults_to_grounded_for_pre_uc37_callers() -> None:
+    """AC5/backward-compat: ``airborne`` defaults to False, so every pre-UC-37 caller (which never
+    passes it) is byte-identical — no survival term leaks into the existing reward paths."""
+    default_call = compute_reward(
+        dist_to_target_prev=1.0,
+        dist_to_target_curr=1.0,
+        event=None,
+        collided=False,
+        completed=False,
+        cfg=CFG,
+    )
+    explicit_grounded = _step_air(progress_prev=1.0, progress_curr=1.0, airborne=False)
+    assert default_call == explicit_grounded
+
+
+def test_net_per_airborne_step_is_strictly_positive() -> None:
+    """AC6a: the net per-airborne-step reward (``airborne_bonus − time_penalty``) is strictly
+    positive, so staying airborne beats sinking/crashing and there is a gradient toward takeoff."""
+    net = CFG.airborne_bonus - CFG.time_penalty
+    assert net > 0
+    assert net == pytest.approx(0.05)  # 0.10 − 0.05, the shipped constants
+
+
+def test_max_episode_survival_reward_is_below_completion_bonus() -> None:
+    """AC6b: over the DEFAULT 3-gate step budget, the maximum survival reward accruable
+    (``airborne_bonus × budget``) is strictly below ``completion_bonus``, so a policy that merely
+    loiters airborne scores worse than one that reaches gates and finishes.
+
+    The budget is computed exactly as :class:`RaceEnv` does at reset
+    (``max_steps + steps_per_gate × (num_gates − 1)``) for the shipped default env, so this bound
+    tracks the real default rather than a hard-coded magic number.
+    """
+    from drone_fly.env.config import EnvConfig, EpisodeConfig
+
+    ep = EpisodeConfig()
+    course = EnvConfig().course
+    budget = ep.max_steps + ep.steps_per_gate * (course.num_gates - 1)
+    assert budget == 800  # 400 + 200 × (3 − 1): the default 3-gate budget the plan anchors AC6b to
+    max_survival = CFG.airborne_bonus * budget
+    assert max_survival == pytest.approx(80.0)
+    assert CFG.completion_bonus == pytest.approx(100.0)
+    assert max_survival < CFG.completion_bonus  # loitering < completing (AC6b)

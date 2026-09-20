@@ -31,6 +31,7 @@ from drone_fly.env.config import (
     ObstacleSpec,
     PadSpec,
     RandomizationConfig,
+    RewardConfig,
     default_obstacle_course,
     default_pad_course,
     default_repair_course,
@@ -152,24 +153,42 @@ def test_env_config_has_default_dock() -> None:
     assert EnvConfig().dock == DockConfig()
 
 
-def test_env_config_early_termination_is_last_field() -> None:
-    """UC-25 (retargets the UC-19 last-field test): ``early_termination`` is appended **after**
-    ``damage`` (itself after ``battery`` / ``dock`` / ``obstacle_vision``), so every UC-15..19
-    positional/keyword call is unshifted and ``EnvConfig()`` stays byte-identical. ``damage`` is
-    now second-to-last."""
+def test_env_config_floor_start_is_last_field() -> None:
+    """UC-37 (retargets the UC-25 last-field test): ``floor_start`` is appended **after**
+    ``early_termination`` (itself after ``damage`` / ``battery`` / ``dock`` / ``obstacle_vision``),
+    so every UC-15..36 positional/keyword ``EnvConfig`` call is unshifted. ``early_termination`` is
+    now second-to-last; ``floor_start`` (the intended default-dynamics change) is last."""
     fields = [f.name for f in dataclasses.fields(EnvConfig)]
-    assert fields[-1] == "early_termination"
-    # The append-last chain is preserved: early_termination ← damage ← battery ← dock ← obstacle.
+    assert fields[-1] == "floor_start"
+    # The append-last chain is preserved: floor_start ← early_termination ← damage ← battery ← ...
+    assert fields.index("early_termination") == fields.index("floor_start") - 1
     assert fields.index("damage") == fields.index("early_termination") - 1
     assert fields.index("battery") == fields.index("damage") - 1
     assert fields.index("dock") == fields.index("battery") - 1
     assert fields.index("obstacle_vision") == fields.index("dock") - 1
-    # UC-36: the new ``grounded_window`` knob lives INSIDE ``EarlyTerminationConfig`` — it must not
+    # UC-36: the ``grounded_window`` knob lives INSIDE ``EarlyTerminationConfig`` — it must not
     # leak up to ``EnvConfig`` (that would shift every positional call and break byte-identity).
     from drone_fly.env.config import EarlyTerminationConfig
 
     assert "grounded_window" not in fields
     assert "grounded_window" in [f.name for f in dataclasses.fields(EarlyTerminationConfig)]
+
+
+def test_reward_config_airborne_bonus_is_last_field() -> None:
+    """UC-37: ``RewardConfig.airborne_bonus`` is appended **last** (after ``obstacle_penalty``), so
+    every pre-UC-37 positional ``RewardConfig`` call stays unshifted."""
+    fields = [f.name for f in dataclasses.fields(RewardConfig)]
+    assert fields[-1] == "airborne_bonus"
+    assert fields.index("obstacle_penalty") == fields.index("airborne_bonus") - 1
+
+
+def test_uc37_floor_start_and_airborne_bonus_defaults() -> None:
+    """UC-37 AC1/AC5/AC6a: the shipped defaults — floor start ON, and a small survival bonus that is
+    strictly net-positive against the per-step time penalty (a gradient toward takeoff)."""
+    assert EnvConfig().floor_start is True  # floor start is the new default (AC1)
+    rc = RewardConfig()
+    assert rc.airborne_bonus == pytest.approx(0.1)  # the shipped survival bonus (AC5)
+    assert rc.airborne_bonus > rc.time_penalty  # net per airborne step is positive (AC6a)
 
 
 def test_env_config_default_course_has_no_pads() -> None:
