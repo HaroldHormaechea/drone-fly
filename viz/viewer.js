@@ -1,9 +1,9 @@
 "use strict";
 /* drone-fly activation playback viewer — vanilla JS, no build step.
  * Loads a recorded episode file (plain JSON or gzip) picked from disk (FileReader /
- * DecompressionStream, so it works from file:// with no server) and renders three panels
+ * DecompressionStream, so it works from file:// with no server) and renders two panels
  * synced on one timeline: an anatomical brain map rendered as an MRI/fMRI-style activation
- * heatmap over a static registered brain outline (UC-12), a neurons×time heatmap, and a
+ * heatmap over a static registered brain outline (UC-12), and a
  * flight panel (4 action traces + an orbitable 3D flight scene). See use-cases/05, 06 & 12
  * and the recorder schema.
  *
@@ -12,13 +12,6 @@
  * optional: if absent the panel degrades to auto-fit splats with no outline (never a
  * ReferenceError). Regenerate the asset with scripts/build_brain_outline.py. */
 
-const ROLE_COLORS = {
-  sensory: [79, 195, 247],
-  interneuron: [176, 182, 208],
-  motor: [255, 112, 67],
-};
-const FALLBACK_COLOR = [107, 112, 137];
-const ROLE_RANK = { sensory: 0, interneuron: 1, motor: 2 };
 const PROJECTIONS = { xz: [0, 2], xy: [0, 1], yz: [1, 2] };
 // Anatomical brain-map view presets → projection plane. Only top/xz is anatomically pinned
 // (dorsal/top-down, per record/coordinates.py); front↔side is a reversible labeling convention.
@@ -115,8 +108,6 @@ const state = {
   frame: 0,
   playing: false,
   speed: 1,
-  rowOrder: null, // neuron indices ordered sensory->inter->motor (heatmap rows)
-  heatmap: null, // offscreen canvas (n_frames x n_neurons)
   mapNorm: "frame", // brain-map intensity normalization: "frame" (per-frame) | "global" (AC5)
   mapCache: null, // per-view brain-map cache (screen positions, transform, global peak) — see ensureMapCache
   lastTs: 0,
@@ -171,8 +162,6 @@ function loadDocument(doc, name) {
   state.data = doc;
   state.frame = 0;
   state.playing = false;
-  state.rowOrder = computeRowOrder(doc.meta.roles);
-  state.heatmap = buildHeatmap(doc, state.rowOrder);
   state.mapCache = null; // rebuilt lazily by ensureMapCache() on the next brain-map draw
   const normSel = el("map-norm-select");
   state.mapNorm = normSel && normSel.value === "global" ? "global" : "frame";
@@ -238,43 +227,6 @@ function renderOutcome(outcome) {
     `<span><b>steps</b> ${o.steps ?? "—"}</span>`;
 }
 
-// ---- heatmap precompute ---------------------------------------------------------------
-function computeRowOrder(roles) {
-  const idx = roles.map((_, i) => i);
-  idx.sort((a, b) => {
-    const ra = ROLE_RANK[roles[a]] ?? 1;
-    const rb = ROLE_RANK[roles[b]] ?? 1;
-    return ra - rb || a - b;
-  });
-  return idx;
-}
-
-function buildHeatmap(doc, rowOrder) {
-  const frames = doc.frames.activations;
-  const nFrames = frames.length;
-  const nNeurons = doc.meta.n_neurons;
-  const off = document.createElement("canvas");
-  off.width = Math.max(1, nFrames);
-  off.height = Math.max(1, nNeurons);
-  const ctx = off.getContext("2d");
-  const img = ctx.createImageData(off.width, off.height);
-  const roles = doc.meta.roles;
-  for (let row = 0; row < nNeurons; row++) {
-    const n = rowOrder[row];
-    const color = ROLE_COLORS[roles[n]] || FALLBACK_COLOR;
-    for (let f = 0; f < nFrames; f++) {
-      const b = frames[f][n] / 255; // uint8 -> [0,1]
-      const p = (row * off.width + f) * 4;
-      img.data[p] = color[0] * b;
-      img.data[p + 1] = color[1] * b;
-      img.data[p + 2] = color[2] * b;
-      img.data[p + 3] = 255;
-    }
-  }
-  ctx.putImageData(img, 0, 0);
-  return off;
-}
-
 // ---- rendering ------------------------------------------------------------------------
 function renderAll() {
   if (!state.data) return;
@@ -282,7 +234,6 @@ function renderAll() {
   const n = state.data.frames.activations.length;
   el("frame-label").textContent = `frame ${state.frame} / ${Math.max(0, n - 1)}`;
   drawBrainMap();
-  drawHeatmap();
   drawActions();
   if (flight) flight.render();
 }
@@ -571,24 +522,6 @@ function drawModalityOverlay(cache) {
     ctx.stroke();
   }
   ctx.restore();
-}
-
-function drawHeatmap() {
-  const canvas = el("heatmap-canvas");
-  const ctx = canvas.getContext("2d");
-  const W = canvas.width, H = canvas.height;
-  ctx.clearRect(0, 0, W, H);
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(state.heatmap, 0, 0, W, H);
-  // playhead
-  const nFrames = state.data.frames.activations.length;
-  const x = nFrames > 1 ? (state.frame / (nFrames - 1)) * (W - 1) : 0;
-  ctx.strokeStyle = "rgba(255,255,255,0.85)";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(x + 0.5, 0);
-  ctx.lineTo(x + 0.5, H);
-  ctx.stroke();
 }
 
 function drawActions() {
