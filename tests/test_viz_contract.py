@@ -4,10 +4,12 @@ The static viewer (``viz/``) runs in a browser (no browser/JS runtime in CI), so
 behaviour is validated **statically** — the JSON contract it consumes plus source-file
 assertions on ``viz/*`` and ``README.md`` — never by executing it (AC10). Verified:
 
-* **AC5/AC8/AC9** — a recorded file carries every field the three synced panels read: the
-  spatial brain map (``positions.{coords2d,coords3d,has_position,source,projection}``), the
-  role-ordered heatmap (``meta.roles``), and the flight panel (``frames.actions`` +
-  ``frames.drone_position`` + ``meta.action_layout``), all on one frame timeline.
+* **AC5/AC8/AC9** — a recorded file carries every field the two rendered panels read: the
+  spatial brain map (``positions.{coords2d,coords3d,has_position,source,projection}``) and
+  the flight panel (``frames.actions`` + ``frames.drone_position`` + ``meta.action_layout``),
+  all on one frame timeline. ``meta.roles`` is retained in the recording contract for
+  back-compat but is no longer consumed by the viewer (the neurons×time heatmap it fed was
+  removed in UC-34).
 * **UC-06 AC8** — a course-carrying recording adds the additive ``meta.course`` block
   (start / gate / finish / floor / ceiling + axis conventions); a file without it still
   loads (back-compat).
@@ -128,7 +130,9 @@ def test_recorded_file_satisfies_viewer_contract(recorded_doc: dict) -> None:
     assert len(modality) == n
     assert set(modality) <= {"vision", "proprioceptive", "hunger", ""}
 
-    # (b) heatmap panel — one role per neuron for row ordering/colour (AC9).
+    # (b) meta.roles — one role per neuron, retained in the recording contract for
+    # back-compat (AC9). No longer consumed by the viewer: UC-34 removed the neurons×time
+    # heatmap panel that used it. The recorder still emits the field, so it stays validated.
     roles = doc["meta"]["roles"]
     assert len(roles) == n
     assert set(roles) <= {"sensory", "interneuron", "motor"}
@@ -203,14 +207,15 @@ def test_viewer_html_uses_local_file_picker_and_no_npm() -> None:
 
 def test_viewer_js_references_contract_fields_and_avoids_network() -> None:
     js = (_VIZ / "viewer.js").read_text()
-    # Reads exactly the schema fields the recorder writes (AC5/AC8/AC9).
+    # Reads the schema fields it renders (AC5/AC8/AC9). ``meta.roles`` is intentionally
+    # absent: UC-34 removed the neurons×time heatmap that consumed it, so viewer.js no longer
+    # references the field (the recorder still emits it — see the JSON-contract check above).
     for field in (
         "schema_version",
         "positions",
         "coords2d",
         "coords3d",
         "has_position",
-        "roles",
         "action_layout",
         "activations",
         "actions",
@@ -226,6 +231,36 @@ def test_viewer_js_references_contract_fields_and_avoids_network() -> None:
     assert "XMLHttpRequest" not in js
     assert "https://" not in js and "http://" not in js
     assert "DecompressionStream" in js  # gzip handled in-browser
+
+
+def test_viewer_has_no_neurons_by_time_heatmap() -> None:
+    """UC-34 AC1/AC4: the neurons×time heatmap panel is fully gone — no lingering symbol in
+    ``viewer.js`` and no panel/canvas in ``viewer.html``. The anatomical ``drawBrainMap`` MRI
+    heatmap and its ``hotColormap`` are a *different* feature and must survive, so this guard
+    targets the specific removed symbols (a bare ``heatmap`` grep would false-positive on the
+    surviving anatomical-map code)."""
+    js = (_VIZ / "viewer.js").read_text()
+    html = (_VIZ / "viewer.html").read_text()
+    for symbol in (
+        "drawHeatmap",
+        "buildHeatmap",
+        "computeRowOrder",
+        "state.heatmap",
+        "state.rowOrder",
+        "rowOrder",
+        "ROLE_COLORS",
+        "ROLE_RANK",
+        "FALLBACK_COLOR",
+        "roles",  # only the heatmap consumed meta.roles; viewer.js no longer references it
+    ):
+        assert symbol not in js, f"viewer.js still references removed heatmap symbol {symbol!r}"
+    assert "heatmap-canvas" not in html
+    # The removed panel's header/label is gone (its wording described neurons × time). Other
+    # "neurons" mentions in the anatomical-map panel copy are legitimate and left intact.
+    assert "activation heatmap" not in html.lower()
+    assert "neurons × time" not in html and "neurons x time" not in html.lower()
+    # The anatomical brain map (a different feature) must remain wired up.
+    assert "drawBrainMap" in js
 
 
 # --- UC-06 AC1-6,9: the 3D flight panel + neuron beat live in viewer.js -----------------
