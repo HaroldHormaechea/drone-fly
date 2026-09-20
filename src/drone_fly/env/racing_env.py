@@ -33,6 +33,7 @@ import numpy as np
 
 from drone_fly.adapter import make_adapter, pybullet_available
 from drone_fly.controller.encoding import ACTION_DIM, OBS_DIM
+from drone_fly.env import worker_output
 from drone_fly.env.config import DynamicsParams, EnvConfig
 from drone_fly.env.docking import evaluate_dock, pad_under
 from drone_fly.env.geometry import advance, current_target
@@ -607,6 +608,37 @@ def resolve_vec_env(
     return resolved_adapter, resolved_n_envs, vec_backend
 
 
+def _worker_startup_error(
+    exc: BaseException,
+    suppressed: bool,
+    worker_log_dir: str | None,
+    n_envs: int,
+) -> worker_output.WorkerStartupError:
+    """Build a fail-loud :class:`WorkerStartupError` from an opaque SubprocVecEnv death (AC-3).
+
+    When worker output was suppressed to per-worker files, tail those files back into the
+    message so the operator sees the *real* worker traceback instead of the opaque
+    ``EOFError`` / ``BrokenPipeError``. Without suppression (``--no-tui``) the worker printed its
+    traceback to the console already, so we just say so.
+    """
+    lines = [
+        f"A parallel-rollout worker failed during startup ({type(exc).__name__}: {exc}).",
+    ]
+    if suppressed and worker_log_dir is not None:
+        paths = [worker_output.worker_log_path(worker_log_dir, i) for i in range(n_envs)]
+        detail = worker_output.read_worker_errors(paths)
+        if detail:
+            lines.append("Real worker output (per-worker logs):\n" + detail)
+        else:
+            lines.append(f"Per-worker logs (if any) are under {worker_log_dir!r}.")
+    else:
+        lines.append(
+            "The worker's own traceback was printed to the console above "
+            "(no TUI output suppression was active)."
+        )
+    return worker_output.WorkerStartupError("\n".join(lines))
+
+
 def build_vec_env(
     *,
     config: EnvConfig | None = None,
@@ -618,6 +650,7 @@ def build_vec_env(
     vecnormalize_path: str | None = None,
     vec_backend: str = "auto",
     suppress_worker_output: bool = False,
+    worker_log_dir: str | None = None,
 ):
     """Build a ``VecNormalize``-wrapped vectorised env for SB3 (AC4/AC6).
 
@@ -639,10 +672,18 @@ def build_vec_env(
         explicit ``"dummy"``/``"subproc"`` values are internal test hooks and, unlike the
         auto path, forcing subproc on a non-parallel adapter does NOT warn.
     suppress_worker_output:
-        Subproc-only. When ``True``, each spawned worker redirects its own native
-        ``stdout``/``stderr`` (fd 1/2) to ``os.devnull`` *before* building its env, so worker
-        native spew can't corrupt the live TUI display (UC-26 AC-13). The redirect runs ONLY
-        inside spawned workers — never the main process — and only for the subproc backend.
+        Subproc-only. When ``True`` **and** ``worker_log_dir`` is set, each spawned worker
+        redirects its own native ``stdout``/``stderr`` (fd 1/2) to a per-worker log FILE
+        *before* building its env, so worker native spew can't corrupt the live TUI display
+        (UC-26 AC-13) yet survives Windows ``spawn`` and stays inspectable (UC-32 AC-1/AC-2).
+        The redirect runs ONLY inside spawned workers — never the main process — and only for
+        the subproc backend.
+    worker_log_dir:
+        UC-32. Directory the per-worker log files are written to when
+        ``suppress_worker_output`` is set (subproc backend only). ``None`` (default) means no
+        file redirect at all — the pre-UC-26 leak-to-parent behaviour — so the ``suppress`` gate
+        is a no-op without a target dir. The directory is pruned and recreated at build so stale
+        files from a higher previous ``n_envs`` don't linger (AC-2).
     """
     import os
 
@@ -662,26 +703,49 @@ def build_vec_env(
     def _factory():
         return make_env(cfg, adapter=adapter)
 
-    # Worker-only factory (subproc backend): the devnull redirect executes only inside spawned
+    # Per-index worker factory (subproc backend): the file redirect executes only inside spawned
     # workers (never the main process — a main-process dup2 would kill logging/the TUI) and only
-    # when suppress_worker_output is set. Otherwise it is byte-identical to the dummy factory.
-    def _subproc_factory():
-        if suppress_worker_output:
-            devnull_fd = os.open(os.devnull, os.O_WRONLY)
-            try:
-                os.dup2(devnull_fd, 1)
-                os.dup2(devnull_fd, 2)
-            finally:
-                os.close(devnull_fd)
-        return make_env(cfg, adapter=adapter)
+    # when suppress_worker_output is set AND a worker_log_dir is given. Each worker gets a DISTINCT
+    # log path so tracebacks never collide (UC-32 AC-2). Otherwise it is byte-identical to the
+    # dummy factory (leak-to-parent, the pre-UC-26 default).
+    def _make_subproc_factory(idx: int):
+        log_path = (
+            worker_output.worker_log_path(worker_log_dir, idx)
+            if (suppress_worker_output and worker_log_dir is not None)
+            else None
+        )
+
+        def _worker_factory():
+            if log_path is not None:
+                worker_output.redirect_worker_fds(log_path)
+            return make_env(cfg, adapter=adapter)
+
+        return _worker_factory
 
     if vec_backend == "subproc":
         from stable_baselines3.common.vec_env import SubprocVecEnv
 
-        venv = SubprocVecEnv(
-            [_subproc_factory for _ in range(max(1, n_envs))],
-            start_method=VEC_ENV_START_METHOD,
-        )
+        # Prune + recreate the workers dir so stale files from a higher previous n_envs don't
+        # linger and confuse a later failure diagnosis (AC-2). Only when we will actually write.
+        if suppress_worker_output and worker_log_dir is not None:
+            import shutil
+
+            shutil.rmtree(worker_log_dir, ignore_errors=True)
+            os.makedirs(worker_log_dir, exist_ok=True)
+
+        factories = [_make_subproc_factory(i) for i in range(max(1, n_envs))]
+        # Fail-loud (AC-3): a worker that dies during construction surfaces in SB3 as an opaque
+        # EOFError / BrokenPipeError [WinError 109] at the first inter-process recv inside
+        # SubprocVecEnv.__init__. Catch it and re-raise a WorkerStartupError enriched with the
+        # real per-worker tracebacks (when suppression wrote them to files), or a clear pointer
+        # to the console output (--no-tui, no suppression). The success path is untouched, so the
+        # --no-tui path stays byte-identical (AC-10).
+        try:
+            venv = SubprocVecEnv(factories, start_method=VEC_ENV_START_METHOD)
+        except (EOFError, OSError) as exc:
+            raise _worker_startup_error(
+                exc, suppress_worker_output, worker_log_dir, max(1, n_envs)
+            ) from exc
     else:
         venv = DummyVecEnv([_factory for _ in range(max(1, n_envs))])
     if seed is not None:
