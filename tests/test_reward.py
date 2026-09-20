@@ -326,3 +326,33 @@ def test_max_episode_survival_reward_is_below_completion_bonus() -> None:
     assert max_survival == pytest.approx(80.0)
     assert CFG.completion_bonus == pytest.approx(100.0)
     assert max_survival < CFG.completion_bonus  # loitering < completing (AC6b)
+
+
+# --- UC-38 AC1: no-progress / timeout cut carries no collision penalty ----------------
+def test_uc38_stuck_or_timeout_cut_reward_has_no_collision_penalty() -> None:
+    """UC-38 AC1: a no-progress ("stuck") cut or a pure ``max_steps`` timeout is decoupled from the
+    collision penalty at the reward level. The env passes ``collided=False`` for those cuts (only a
+    genuine crash or a grounded drop passes True), so the step reward is the ORDINARY non-collision
+    reward — time penalty + progress + any airborne survival bonus — with NO −collision_penalty
+    term. This is the reward-side pin for the −105-trap fix."""
+    # Airborne no-progress hover at the moment of the stuck cut: no progress, no event, airborne ⇒
+    # survival bonus; collided is False because the cut is decoupled from the crash penalty.
+    stuck_cut = compute_reward(
+        dist_to_target_prev=1.0,
+        dist_to_target_curr=1.0,
+        event=None,
+        collided=False,
+        completed=False,
+        cfg=CFG,
+        airborne=True,
+    )
+    assert stuck_cut == pytest.approx(-CFG.time_penalty + CFG.airborne_bonus)
+    assert stuck_cut > -CFG.collision_penalty, "no −collision_penalty on a decoupled stuck cut"
+    # A pure timeout truncation step (here on/at the floor, no bonus) likewise carries no penalty —
+    # it is just the per-step time penalty, nowhere near the −collision_penalty terminal.
+    timeout_cut = _step(progress_prev=1.0, progress_curr=1.0)  # collided defaults False
+    assert timeout_cut == pytest.approx(-CFG.time_penalty)
+    assert timeout_cut > -CFG.collision_penalty
+    # Sanity: a GENUINE collision (collided=True) still eats the full penalty (contrast, AC2).
+    genuine = _step(progress_prev=1.0, progress_curr=1.0, collided=True)
+    assert genuine == pytest.approx(-CFG.time_penalty - CFG.collision_penalty)

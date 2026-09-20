@@ -219,18 +219,26 @@ def test_single_gate_course_completes_like_a_one_gate_race() -> None:
 
 
 def test_terminates_on_collision() -> None:
-    env = make_env(adapter="simple")
+    # UC-37/38: use the legacy mid-air start (``floor_start=False``) so zero thrust makes the drone
+    # FALL and genuinely crash into the floor — a real, post-takeoff collision. Under the UC-37
+    # floor-start default the drone would instead spawn resting on the floor, never take off, and be
+    # bounded by the no-progress (stuck) detector (which UC-38 correctly reports as collided=False,
+    # early_termination="stuck" — a decoupled cut, NOT a collision). This test asserts the genuine-
+    # collision contract (AC2: a real crash still terminates with collided=True), so it must drive
+    # an actual fall, not a no-progress cut.
+    env = make_env(EnvConfig(floor_start=False), adapter="simple")
     env.reset(seed=0)
     terminated = False
     info = {}
     for _ in range(500):
         _obs, _r, terminated, truncated, info = env.step(
-            np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32)  # no thrust → hits the floor
+            np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32)  # no thrust → falls → hits the floor
         )
         if terminated or truncated:
             break
     assert terminated is True
-    assert info["collided"] is True
+    assert info["collided"] is True, "a genuine floor crash still reports collided=True (UC-38 AC2)"
+    assert info["early_termination"] is None, "a real crash is not an early-termination cut"
     assert info["completed"] is False
 
 
@@ -1802,9 +1810,12 @@ def test_uc25_grounded_episode_is_cut_as_a_crash() -> None:
     assert steps < env._max_steps, "the cut is well under the full step budget"
 
 
-def test_uc25_no_progress_episode_is_cut_as_a_crash() -> None:
-    """AC2: an airborne drone that hovers in place — never reducing its distance to the target
-    gate for a full window — is cut as a crash by the no-progress (stuck) detector."""
+def test_uc38_no_progress_episode_is_cut_without_the_collision_penalty() -> None:
+    """UC-38 AC1/AC4 (was UC-25 ``..._is_cut_as_a_crash``): an airborne drone that hovers in place —
+    never reducing its distance to the target gate for a full window — is still CUT by the
+    no-progress (stuck) detector, but the cut is now DECOUPLED from the collision penalty. It
+    reports ``collided=False`` and the cut step's reward carries NO −collision_penalty; the reason
+    is surfaced independently via ``info["early_termination"] == "stuck"``."""
     # Airborne hover (z=1.0, above the floor band) that never closes on gate g0.
     positions = [(0.0, 0.0, 1.0)] + [(0.5, 0.0, 1.0)] * 10
     env = _env_with(
@@ -1813,15 +1824,19 @@ def test_uc25_no_progress_episode_is_cut_as_a_crash() -> None:
     )
     env.reset()
     terminated = truncated = False
+    reward = 0.0
     info: dict = {}
     for _ in range(env._max_steps + 1):
-        _obs, _r, terminated, truncated, info = env.step(HOVER)
+        _obs, reward, terminated, truncated, info = env.step(HOVER)
         if terminated or truncated:
             break
-    assert terminated is True and truncated is False
-    assert info["collided"] is True, "a stuck cut is reported as a crash collision (AC3)"
-    assert info["early_termination"] == "stuck"
+    assert terminated is True and truncated is False, "a stuck cut still ends the episode (AC4)"
+    assert info["collided"] is False, "a no-progress cut is NOT a crash collision (UC-38 AC1/AC4)"
+    assert info["early_termination"] == "stuck", "the termination reason is reported independently"
     assert info["completed"] is False
+    # The cut step's reward must NOT include the −collision_penalty (100): it is the ordinary
+    # non-collision reward (time penalty + airborne survival bonus), nowhere near −100 (AC1).
+    assert reward > -1.0, "the no-progress cut carries no −collision_penalty (UC-38 AC1)"
 
 
 def test_uc25_closing_path_is_not_cut() -> None:
@@ -1846,8 +1861,15 @@ def test_uc25_closing_path_is_not_cut() -> None:
 
 
 def test_uc25_grounded_cut_applies_the_collision_penalty() -> None:
-    """AC3: a grounded/stuck cut earns the EXISTING collision penalty in the reward, exactly like a
-    floor/ceiling crash — the cut step's reward is dominated by ``collision_penalty`` (100)."""
+    """AC3: a GROUNDED cut earns the EXISTING collision penalty in the reward, exactly like a
+    floor/ceiling crash — the cut step's reward is dominated by ``collision_penalty`` (100).
+
+    UC-38 note: this is the deliberate, documented AC-3 choice — a *grounded* cut (a drone that
+    took off then dropped back and rests on the floor = a failed flight) KEEPS the penalty, while
+    the no-progress ("stuck") cut and a pure timeout are decoupled from it (see
+    ``test_uc38_no_progress_episode_is_cut_without_the_collision_penalty``). This test pins the
+    grounded half of that split; ``penalize_collision = crash or (early_termination=='grounded')``
+    is what preserves it."""
     positions = [(0.0, 0.0, 1.0)] + [(0.0, 0.0, 0.008)] * 8
     # UC-36: match the grounded window to the legacy value of 3 (grounded fires first anyway).
     cfg = EnvConfig(early_termination=EarlyTerminationConfig(stuck_window=3, grounded_window=3))
@@ -1920,7 +1942,10 @@ def test_uc25_docked_exemption_is_two_sided_and_non_vacuous() -> None:
     )
     assert docked_frames > 4, "the drone stays docked for more than a window before the cut"
     assert terminated is True, "once the battery clamps, the idle dock is cut (loophole closed)"
-    assert cut_info["collided"] is True
+    # UC-38: the idle-after-full dwell is cut by the no-progress (stuck) detector, which is now
+    # decoupled from the collision penalty — so this stuck cut reports collided=False (it was True
+    # pre-UC-38). It remains a genuine termination, still docked, reason "stuck".
+    assert cut_info["collided"] is False
     assert cut_info["docked"] is True, "the cut happens while still docked — it is the idle-cut"
     assert cut_info["early_termination"] == "stuck", "the idle-after-full cut is a stuck cut"
 
@@ -2350,3 +2375,138 @@ def test_uc37_floor_start_is_deterministic_same_seed() -> None:
     b_trace, b_r, b_term, b_trunc = rollout()
     np.testing.assert_array_equal(a_trace, b_trace)  # identical reset + trajectory obs
     assert a_r == b_r and a_term == b_term and a_trunc == b_trunc
+
+
+# ===========================================================================
+# UC-38 — decouple no-progress / timeout early termination from the crash penalty
+# ===========================================================================
+# UC-38 splits "a cut fired" from "the collision penalty was charged". Pre-UC-38 every
+# early-termination cut folded into ``crash=True`` (so a hover-then-stuck cut scored ≈ −105,
+# identical to a real floor crash, swamping UC-37's +airborne survival gradient — the −105 trap).
+# The fix: ``penalize_collision = crash or (early_termination == "grounded")`` decides the penalty,
+# so a GENUINE collision and a GROUNDED (post-takeoff drop) cut still pay −collision_penalty, while
+# a no-progress ("stuck") cut and a pure ``max_steps`` timeout are penalty-free. Control flow
+# (``terminated``/``truncated``) is byte-for-byte as before; only reward magnitude and
+# ``info["collided"]`` on stuck cuts change. ``_ScriptedAdapter`` starts airborne (z=1.0) ⇒ took off
+# at step 0, so pre-takeoff floor suppression never masks a genuine collision below.
+
+
+def test_uc38_genuine_crash_still_eats_the_collision_penalty() -> None:
+    """AC2: a real floor/ceiling/OOB collision (raw ``state.collided`` on a drone that HAS taken
+    off, not a controlled dock) still applies ``collision_penalty`` and still terminates — byte-for-
+    byte as before UC-38. Only the decoupled stuck/timeout cut changed."""
+    # Airborne throughout (z=1.0 ⇒ took_off at step 0); a genuine collision is scripted on step 2,
+    # well before any stuck window could accumulate (default stuck_window=100).
+    positions = [(0.0, 0.0, 1.0)] * 6
+    cfg = EnvConfig()
+    env = _env_with(_ScriptedAdapter(positions, collide_at=2), cfg)
+    env.reset()
+    reward = 0.0
+    terminated = False
+    info: dict = {}
+    for _ in range(env._max_steps + 1):
+        _obs, reward, terminated, _tr, info = env.step(HOVER)
+        if terminated:
+            break
+    assert terminated is True, "a genuine collision still terminates the episode (AC2)"
+    assert info["collided"] is True, "a genuine collision still reports collided=True (AC2)"
+    assert info["early_termination"] is None, "a genuine crash is not an early-termination cut"
+    # The collision step's reward is dominated by the −collision_penalty (100), exactly as before.
+    assert reward <= -cfg.reward.collision_penalty + 1.0, (
+        "a genuine crash step must still eat the full collision penalty (AC2)"
+    )
+
+
+def test_uc38_pure_timeout_truncation_carries_no_penalty() -> None:
+    """AC1/AC4: an episode that simply runs out of steps (``max_steps`` truncation) ends with
+    ``truncated=True``, ``terminated=False``, ``collided=False`` and NO ``early_termination``
+    reason string — deliberately there is no "timeout" reason (AC-4 is satisfied by
+    ``collided=False``). Its final step reward carries no −collision_penalty (AC1)."""
+    # Airborne static hover with the early-termination rule OFF, so nothing cuts it — it truncates
+    # cleanly at the small step budget. steps_per_gate=0 pins the budget to max_steps regardless of
+    # the default 3-gate course.
+    positions = [(0.0, 0.0, 1.0)] * 12
+    cfg = EnvConfig(
+        episode=EpisodeConfig(dt=0.05, max_steps=5, steps_per_gate=0),
+        early_termination=EarlyTerminationConfig(enabled=False),
+    )
+    env = _env_with(_ScriptedAdapter(positions), cfg)
+    env.reset()
+    reward = 0.0
+    terminated = truncated = False
+    info: dict = {}
+    for _ in range(20):
+        _obs, reward, terminated, truncated, info = env.step(HOVER)
+        if terminated or truncated:
+            break
+    assert truncated is True and terminated is False, "a pure timeout truncates, never terminates"
+    assert info["collided"] is False, "a timeout must not falsely claim a collision (AC4)"
+    assert info["early_termination"] is None, "a pure timeout has no reason string (no 'timeout')"
+    assert info["completed"] is False
+    assert reward > -1.0, "the timeout step carries no −collision_penalty (AC1)"
+
+
+def test_uc38_genuine_collision_dominates_a_same_step_stuck_cut() -> None:
+    """Major (challenger-required): when a drone is GENUINELY colliding (raw ``state.collided``,
+    airborne so pre-takeoff suppression does not apply, not a dock) AND the no-progress counter
+    reaches its window on the SAME step, the genuine collision dominates — the penalty is still
+    charged (``collided=True``, reward eats −collision_penalty) even though the reported reason is
+    the stuck cut. Pins ``penalize_collision = crash or grounded`` so a decoupled stuck cut can
+    never launder away a real crash."""
+    # Static airborne hover ⇒ the stuck detector fires on step (stuck_window + 1) = 4 for window=3
+    # (warm-up step + 3 no-progress steps). Script a genuine collision on that exact step.
+    positions = [(0.0, 0.0, 1.0)] * 8
+    cfg = EnvConfig(early_termination=EarlyTerminationConfig(stuck_window=3, grounded_window=100))
+    env = _env_with(_ScriptedAdapter(positions, collide_at=4), cfg)
+    env.reset()
+    reward = 0.0
+    terminated = False
+    info: dict = {}
+    for _ in range(env._max_steps + 1):
+        _obs, reward, terminated, _tr, info = env.step(HOVER)
+        if terminated:
+            break
+    assert terminated is True
+    assert info["early_termination"] == "stuck", "the reported reason is the same-step stuck cut"
+    assert info["collided"] is True, "a genuine collision dominates a decoupled stuck cut"
+    assert reward <= -cfg.reward.collision_penalty + 1.0, (
+        "the genuine collision still charges −collision_penalty despite the stuck cut"
+    )
+
+
+def test_uc38_airborne_survival_return_beats_floor_sit_and_is_positive() -> None:
+    """AC5: with the shipped constants, an episode that takes off and stays airborne for the full
+    no-progress window before being cut returns STRICTLY MORE than one that sits on the floor for
+    the same duration before being cut — and, unlike pre-UC-38 (where both scored ≈ −105 and the
+    survival bonus was cancelled by the terminal penalty), the airborne return is now strictly
+    POSITIVE. Both cuts are decoupled stuck cuts (neither took off into a grounded drop), so neither
+    pays −collision_penalty; the difference is purely UC-37's +airborne_bonus survival gradient."""
+    window = 4
+
+    def total_return(positions) -> tuple[float, dict]:
+        env = _env_with(
+            _ScriptedAdapter(positions),
+            EnvConfig(early_termination=EarlyTerminationConfig(stuck_window=window)),
+        )
+        env.reset()
+        ret = 0.0
+        info: dict = {}
+        for _ in range(env._max_steps + 1):
+            _obs, r, terminated, truncated, info = env.step(HOVER)
+            ret += r
+            if terminated or truncated:
+                break
+        return ret, info
+
+    # Airborne hover well above the floor band (survival bonus every step), never progressing.
+    hover_return, hover_info = total_return([(0.0, 0.0, 1.0)] * (window + 4))
+    # Sitting on the floor from spawn (never took off ⇒ stuck-cut, no grounded penalty), no bonus.
+    sit_return, sit_info = total_return([(0.0, 0.0, 0.01)] * (window + 4))
+
+    # Both are decoupled stuck cuts — neither pays the collision penalty (the whole point).
+    assert hover_info["early_termination"] == "stuck" and hover_info["collided"] is False
+    assert sit_info["early_termination"] == "stuck" and sit_info["collided"] is False
+    assert hover_return > sit_return, "hovering airborne out-returns sitting on the floor (AC5)"
+    assert hover_return > 0.0, (
+        "the airborne survival return is now strictly positive — the −105 trap is gone (AC5)"
+    )
