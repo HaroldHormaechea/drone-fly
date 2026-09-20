@@ -39,6 +39,17 @@ APPLE_SILICON_NOTE = (
     "fall back to CPU rather than erroring)."
 )
 
+#: CUDA VRAM guidance (UC-31), surfaced in logs, the README, and the Windows setup script.
+#: 8 GB (an RTX 3050) is tight for the large connectome slice (~122k neurons), so on a CUDA
+#: out-of-memory error the user trades throughput for a smaller VRAM footprint via the config
+#: knobs below. Logged whenever CUDA is selected (auto or explicit override).
+CUDA_OOM_HINT = (
+    "CUDA note: 8 GB VRAM is tight for the large connectome slice (~122k neurons). On a CUDA "
+    "out-of-memory error, lower n_envs and/or batch_size in your train config (and/or train a "
+    "smaller pruned slice); halve them until the run fits, then tune back up. These knobs trade "
+    "throughput for a smaller VRAM footprint and do not otherwise change training dynamics."
+)
+
 
 def _cuda_available() -> bool:
     try:
@@ -76,12 +87,14 @@ def resolve_device(override: str | None = None) -> str:
                 "device='mps' (explicit opt-in); set PYTORCH_ENABLE_MPS_FALLBACK=1. %s",
                 APPLE_SILICON_NOTE,
             )
+        elif override == "cuda":
+            logger.info("device='cuda' (explicit override). %s", CUDA_OOM_HINT)
         else:
             logger.info("device=%r (explicit override).", override)
         return override
 
     if _cuda_available():
-        logger.info("device='cuda' (auto: CUDA available).")
+        logger.info("device='cuda' (auto: CUDA available). %s", CUDA_OOM_HINT)
         return "cuda"
 
     if _mps_available():

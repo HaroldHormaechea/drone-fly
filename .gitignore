@@ -8,6 +8,7 @@ dist/
 
 # Virtual environments / uv
 .venv/
+.venv*/
 venv/
 uv.lock.tmp
 

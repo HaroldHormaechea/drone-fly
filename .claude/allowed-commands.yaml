@@ -17,3 +17,7 @@ commands:
   # UC-20: scripts/setup-sim-macos.sh (+ train.sh) are lint-gated with `shellcheck` where the
   # tool is installed (developer gate + QA's bootstrap-doc check, which skips if absent).
   - shellcheck
+  # UC-31: scripts/setup-sim-windows.ps1 is lint/parse-gated with PowerShell (`pwsh`) +
+  # PSScriptAnalyzer where installed (developer gate + QA's setup-windows-doc check, which
+  # skips if absent — no Windows/pwsh runner in the Linux CI).
+  - pwsh

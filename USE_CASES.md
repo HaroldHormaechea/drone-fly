@@ -40,3 +40,4 @@ Statuses:
 | 28 | [use-cases/28-heatmap-real-coords-full-coverage.md](use-cases/28-heatmap-real-coords-full-coverage.md) | Heatmap on real coordinates with complete, body-schematic neuron coverage | done | 2026-09-19 |
 | 29 | [use-cases/29-partial-anatomy-position-cap-fix.md](use-cases/29-partial-anatomy-position-cap-fix.md) | Partial-anatomy connectomes above the spectral cap must still provision positions | done | 2026-09-19 |
 | 30 | [use-cases/30-tui-intra-rollout-heartbeat.md](use-cases/30-tui-intra-rollout-heartbeat.md) | Live training TUI must tick during a rollout (intra-rollout heartbeat) | done | 2026-09-19 |
+| 31 | [use-cases/31-windows-cuda-training-setup.md](use-cases/31-windows-cuda-training-setup.md) | Automated Windows + NVIDIA CUDA training setup | done | 2026-09-20 |
