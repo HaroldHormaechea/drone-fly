@@ -119,37 +119,74 @@ def is_course_solvable(
     if course.finish_x - float(gates[-1].center[0]) < rcfg.min_gate_finish_gap:
         return False
 
-    # -- obstacle solvability (UC-15 AC3) -----------------------------------------------
-    # A course with pillars is flyable iff (a) no start / gate centre / finish sits inside a
-    # pillar, and (b) the start→gates→finish polyline clears every pillar horizontally by at
-    # least ``radius + obstacle_clearance`` wherever the segment's z-range overlaps the pillar
-    # band. (b) constructively guarantees ≥1 collision-free path exists. Pillars are checked
-    # regardless of ``enable_obstacles`` — the flag governs *sampling*, not what makes a
-    # given course (which already carries obstacles) solvable.
+    # -- obstacle evadability (UC-15 AC3, rewritten for UC-35 AC3/AC4) -------------------
+    # UC-35 replaces UC-15's "polyline must stay FAR from every pillar" guard (which forbade
+    # on-route pillars) with a **forced-but-evadable** model: pillars are meant to sit near the
+    # nominal path so the drone must deviate, yet the course must stay feasible. A course with
+    # pillars is flyable iff, for every pillar: (i) no start / gate centre / finish sits inside
+    # it AND every such anchor keeps ``radius + drone_radius + evasion_margin`` horizontal
+    # clearance (gate passability — the drone can still reach each waypoint); (ii) an escape lane
+    # at least ``drone_radius + evasion_margin`` wide exists on the wider side of the pillar within
+    # ``±lateral_bound`` (the pillar never fully blocks the corridor); and (iii) no two pillars sit
+    # within ``r_i + r_j + 2·(drone_radius + evasion_margin)`` of each other (no unevadable multi-
+    # pillar wall). Together these constructively guarantee ≥1 collision-free deviated path exists.
+    # Checked regardless of ``enable_obstacles`` — the flag governs *sampling*, not what makes a
+    # course (which already carries obstacles) solvable.
     obstacles = getattr(course, "obstacles", ())
     if obstacles:
         floor_z = course.floor_z
         last = gates[-1]
         finish_pt = np.asarray([course.finish_x, last.center[1], last.center[2]], dtype=np.float64)
         anchors = [course.start, *(g.position for g in gates), finish_pt]
-        for obstacle in obstacles:
-            # (a) no anchor may lie inside the pillar.
-            for pt in anchors:
-                if point_in_cylinder(pt, obstacle, floor_z):
-                    return False
-            # (b) polyline clearance within the pillar's z-band.
+        anchors_xy = [np.asarray(a, dtype=np.float64)[:2] for a in anchors]
+        for i, obstacle in enumerate(obstacles):
             axis = np.asarray(
                 [float(obstacle.center[0]), float(obstacle.center[1])], dtype=np.float64
             )
-            clearance = float(obstacle.radius) + rcfg.obstacle_clearance
-            top = floor_z + float(obstacle.height)
-            for a, b in zip(anchors[:-1], anchors[1:], strict=True):
-                z_lo = min(float(a[2]), float(b[2]))
-                z_hi = max(float(a[2]), float(b[2]))
-                if z_hi < floor_z or z_lo > top:
-                    continue  # segment passes entirely above/below the pillar band
-                if _segment_axis_distance_2d(a, b, axis) < clearance:
+            radius = float(obstacle.radius)
+            gate_req = radius + rcfg.drone_radius + rcfg.obstacle_evasion_margin
+            # (i) no anchor inside the pillar, and every anchor keeps gate-passability clearance.
+            for pt in anchors:
+                if point_in_cylinder(pt, obstacle, floor_z):
                     return False
+            for a_xy in anchors_xy:
+                if float(np.linalg.norm(axis - a_xy)) < gate_req:
+                    return False
+            # (ii) an escape lane on the wider side stays within the lateral corridor.
+            if not _obstacle_escape_lane_ok(axis, radius, rcfg):
+                return False
+            # (iii) pairwise separation — two pillars must not form an unevadable wall.
+            for j in range(i + 1, len(obstacles)):
+                other = obstacles[j]
+                other_axis = np.asarray(
+                    [float(other.center[0]), float(other.center[1])], dtype=np.float64
+                )
+                need = (
+                    radius
+                    + float(other.radius)
+                    + 2.0 * (rcfg.drone_radius + rcfg.obstacle_evasion_margin)
+                )
+                if float(np.linalg.norm(axis - other_axis)) < need:
+                    return False
+
+    # -- pad placement guard (UC-35 AC1/AC2) --------------------------------------------
+    # Service (recharge/repair) pads are placed OFF gate columns (UC-35 AC1). Defensively enforce
+    # the placement invariants on any course that carries pads: every pad keeps ``R_pad`` from every
+    # gate centre, stays within the lateral corridor, and its floor→gate descend column clears every
+    # pillar (so a docking detour never clips an obstacle).
+    pads = getattr(course, "pads", ())
+    if pads:
+        r_pad = rcfg.pad_min_gate_distance
+        gate_centres_xy = [np.asarray(g.center, dtype=np.float64)[:2] for g in gates]
+        for pad in pads:
+            pad_xy = np.asarray(pad.center, dtype=np.float64)
+            if abs(float(pad_xy[1])) > rcfg.lateral_bound:
+                return False
+            for gc in gate_centres_xy:
+                if float(np.linalg.norm(pad_xy - gc)) < r_pad:
+                    return False
+            if not _descend_column_clear(pad_xy, obstacles, rcfg):
+                return False
 
     # -- recharge reachability (UC-18 AC4) ----------------------------------------------
     # Only when battery physics are enabled: if the full reference 3D path costs more than one
@@ -170,14 +207,28 @@ def is_course_solvable(
     return True
 
 
-def _floor_point(gate: GateSpec, floor_z: float) -> np.ndarray:
-    """The floor-anchored 3D waypoint under ``gate``: ``(gate.x, gate.y, floor_z)`` (UC-18).
+def _floor_point(pad: PadSpec, floor_z: float) -> np.ndarray:
+    """The floor-anchored 3D waypoint at ``pad``'s actual ``(x, y)``: ``(pad.x, pad.y, floor_z)``.
 
-    A recharge pad sits on the floor beneath a gate, so descending to it and climbing back out
-    are genuine vertical legs of the flight path — modelling the pad as this floor waypoint makes
-    the energy model count those legs by construction.
+    UC-35: a recharge pad is placed **off** the gate columns, so the recharge detour descends to the
+    pad's own ``(x, y)`` — not the gate's. Modelling the pad as this floor waypoint makes the energy
+    model count the lateral detour + descend/climb legs against the pad's real position (UC-18/24
+    keyed this off the gate column, which was only correct while pads sat on gates).
     """
-    return np.asarray([float(gate.center[0]), float(gate.center[1]), floor_z], dtype=np.float64)
+    return np.asarray([float(pad.center[0]), float(pad.center[1]), floor_z], dtype=np.float64)
+
+
+def _obstacle_escape_lane_ok(axis: np.ndarray, radius: float, rcfg: RandomizationConfig) -> bool:
+    """Return ``True`` iff the drone can pass the pillar on its wider side within the corridor.
+
+    Measures the free gap between the pillar's edge and each lateral wall (``±lateral_bound``); an
+    escape lane exists iff the WIDER side leaves at least ``drone_radius + evasion_margin`` of room.
+    This guarantees the pillar never fully blocks the ``±lateral_bound`` corridor (UC-35 AC4).
+    """
+    ay = float(axis[1])
+    lane_pos = rcfg.lateral_bound - (ay + radius)  # gap to the +y wall
+    lane_neg = (ay - radius) + rcfg.lateral_bound  # gap to the -y wall
+    return max(lane_pos, lane_neg) >= rcfg.drone_radius + rcfg.obstacle_evasion_margin
 
 
 def _reference_path(course: CourseConfig) -> list[np.ndarray]:
@@ -213,23 +264,28 @@ def _path_energy(
     return float(rcfg.recharge_energy_margin) * drain_per_sec * flight_time
 
 
-def _recharge_gate_indices(course: CourseConfig, rechargeable) -> list[int]:
-    """Ordered gate indices that carry a rechargeable pad under their (x, y) column (UC-18).
+def _recharge_pad_order(course: CourseConfig, rechargeable) -> list[tuple[int, PadSpec]]:
+    """Order rechargeable pads along the course by their **nearest gate** (UC-35 retarget of UC-18).
 
-    A gate is a recharge point iff some rechargeable pad's centre lies within that pad's own
-    ``radius`` of the gate's ``(x, y)`` — exactly how :func:`_place_single_recharge_pad` places the
-    pad (at a gate column). Pads not under any gate contribute no recharge (the covering check then
-    treats the intervening path as un-refilled — the safe, conservative direction).
+    UC-18/24 associated a recharge pad with the gate it sat *under*; UC-35 places pads **off** the
+    gate columns, so each rechargeable pad is instead associated with its geometrically **nearest**
+    gate — the leg the recharge detour branches off. Returns ``(gate_index, pad)`` pairs sorted by
+    gate index (ties broken by pad x), which fixes the order the covering check reconstructs the
+    refuel legs in.
     """
-    idxs: list[int] = []
-    for idx, gate in enumerate(course.gates):
-        gx, gy = float(gate.center[0]), float(gate.center[1])
-        for pad in rechargeable:
-            px, py = float(pad.center[0]), float(pad.center[1])
-            if float(np.hypot(gx - px, gy - py)) <= float(pad.radius):
-                idxs.append(idx)
-                break
-    return idxs
+    gates = course.gates
+    pairs: list[tuple[int, PadSpec]] = []
+    for pad in rechargeable:
+        px, py = float(pad.center[0]), float(pad.center[1])
+        best_idx = 0
+        best_d: float | None = None
+        for idx, gate in enumerate(gates):
+            d = float(np.hypot(float(gate.center[0]) - px, float(gate.center[1]) - py))
+            if best_d is None or d < best_d:
+                best_idx, best_d = idx, d
+        pairs.append((best_idx, pad))
+    pairs.sort(key=lambda kp: (kp[0], float(kp[1].center[0])))
+    return pairs
 
 
 def _recharge_covering_valid(
@@ -240,29 +296,31 @@ def _recharge_covering_valid(
 ) -> bool:
     """Re-verify every induced recharge sub-path fits one charge (UC-18 AC4 covering check).
 
-    Reconstructs the flight as: ``start → gates… → floor(first recharge gate)``, then
-    ``floor(pad) → gates… → floor(next recharge gate)`` for each subsequent pad, then
-    ``floor(last pad) → gates… → finish``. Each leg is charged from full (start, or a fully-
-    refilled pad) and must cost ≤ one charge. Uses the same :func:`_path_energy` model as the
-    placer, so a covering the placer produced always re-verifies (a tiny epsilon absorbs float
-    round-off).
+    Reconstructs the flight as: ``start → gates… → floor(first recharge pad)``, then
+    ``floor(pad) → gates… → floor(next recharge pad)`` for each subsequent pad, then
+    ``floor(last pad) → gates… → finish``. Each pad's floor point is its **actual** ``(x, y)``
+    (UC-35: pads sit off the gate columns), so the detour to the pad and back is charged against the
+    pad's real position. Each leg is charged from full (start, or a fully-refilled pad) and must
+    cost ≤ one charge. Uses the same :func:`_path_energy` model as the placer, so a covering the
+    placer produced always re-verifies (a tiny epsilon absorbs float round-off).
     """
     gates = course.gates
     n = len(gates)
     floor_z = course.floor_z
-    recharge_idxs = _recharge_gate_indices(course, rechargeable)
+    pad_order = _recharge_pad_order(course, rechargeable)
     last = gates[-1]
     finish_pt = np.asarray([course.finish_x, last.center[1], last.center[2]], dtype=np.float64)
 
     legs: list[list[np.ndarray]] = []
     charged_point = course.start
     cursor = 0  # first gate not yet consumed by a prior leg
-    for k in recharge_idxs:
+    for k, pad in pad_order:
+        floor_pt = _floor_point(pad, floor_z)
         pts = [charged_point, *(gates[j].position for j in range(cursor, k + 1))]
-        pts.append(_floor_point(gates[k], floor_z))
+        pts.append(floor_pt)
         legs.append(pts)
-        charged_point = _floor_point(gates[k], floor_z)
-        cursor = k + 1
+        charged_point = floor_pt
+        cursor = max(cursor, k + 1)
     # Final leg: from the last charge point through any remaining gates to the finish.
     final_pts = [charged_point, *(gates[j].position for j in range(cursor, n)), finish_pt]
     legs.append(final_pts)
@@ -346,12 +404,15 @@ def sample_course(
         finish_x = x + float(rng.uniform(*rcfg.finish_gap_range))
 
         # Obstacle draws come LAST and only when enabled (pinned order → disabled axis makes no
-        # draw and never perturbs the gate/dynamics stream). Placement is biased off the corridor
-        # so the draws actually clear the solvability guard; the whole candidate (gates + pillars)
-        # is then reject-resampled together.
+        # draw and never perturbs the gate/dynamics stream). UC-35: pillars are drawn *between*
+        # consecutive waypoints (forced-but-evadable); each drawn pillar consumes a fixed number of
+        # draws whether accepted or skipped, so a seed stays reproducible and the count is an upper
+        # bound. The whole candidate (gates + pillars) is then reject-resampled together.
         obstacles: tuple[ObstacleSpec, ...] = ()
         if rcfg.enable_obstacles:
-            obstacles = _sample_obstacles(rng, rcfg, tuple(gates))
+            obstacles = _sample_obstacles(
+                rng, rcfg, tuple(gates), (start_x, start_y, start_z), finish_x
+            )
 
         candidate = CourseConfig(
             start_position=(start_x, start_y, start_z),
@@ -376,72 +437,225 @@ def sample_course(
     return _fallback_course(n, base_course, rcfg, battery=battery)
 
 
+def _course_segments(
+    start_xy: np.ndarray, gates: tuple[GateSpec, ...]
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """The waypoint→waypoint segments of the course as 2D ``(p, q)`` pairs (UC-35 AC3).
+
+    Waypoints are the start followed by every gate centre; segments are consecutive pairs, so the
+    set **includes** ``start→first-gate`` (the AC3 assumption). Used to place pillars *between*
+    consecutive waypoints (inside the corridor around each segment).
+    """
+    waypoints = [start_xy, *(np.asarray(g.center, dtype=np.float64)[:2] for g in gates)]
+    return list(zip(waypoints[:-1], waypoints[1:], strict=True))
+
+
+def _obstacle_evadable(
+    obstacle: ObstacleSpec,
+    anchors_xy: list[np.ndarray],
+    accepted: list[ObstacleSpec],
+    rcfg: RandomizationConfig,
+) -> bool:
+    """Return ``True`` iff a candidate pillar satisfies the UC-35 AC4 evadability invariants.
+
+    Mirrors (and is stricter than) the obstacle checks in :func:`is_course_solvable`: gate
+    passability (≥ ``radius + drone_radius + evasion_margin`` from every anchor), an escape lane on
+    the wider side within ``±lateral_bound``, and pairwise separation from every already-accepted
+    pillar (with an extra ``min_obstacle_separation`` slack, so an accepted set always clears the
+    solvability guard). Used at sampling time to accept/skip a drawn pillar with NO extra RNG.
+    """
+    axis = np.asarray(obstacle.center, dtype=np.float64)
+    radius = float(obstacle.radius)
+    gate_req = radius + rcfg.drone_radius + rcfg.obstacle_evasion_margin
+    for a_xy in anchors_xy:
+        if float(np.linalg.norm(axis - a_xy)) < gate_req:
+            return False
+    if not _obstacle_escape_lane_ok(axis, radius, rcfg):
+        return False
+    for other in accepted:
+        other_axis = np.asarray(other.center, dtype=np.float64)
+        need = (
+            radius
+            + float(other.radius)
+            + 2.0 * (rcfg.drone_radius + rcfg.obstacle_evasion_margin)
+            + rcfg.min_obstacle_separation
+        )
+        if float(np.linalg.norm(axis - other_axis)) < need:
+            return False
+    return True
+
+
 def _sample_obstacles(
     rng: np.random.Generator,
     rcfg: RandomizationConfig,
     gates: tuple[GateSpec, ...],
+    start: tuple[float, float, float],
+    finish_x: float,
 ) -> tuple[ObstacleSpec, ...]:
-    """Draw pillars biased **off** the corridor (UC-15 AC3); reject-resampling handles misses.
+    """Draw pillars **between consecutive waypoints**, forced-but-evadable (UC-35 AC3/AC4).
 
-    Draw order per pillar is pinned: count first, then for each pillar its anchor gate, lateral
-    side, |y|-offset, radius, and height. Each pillar is placed at a random gate's ``(x, y)``
-    shifted laterally by ``obstacle_lateral_offset_range`` (well outside the gate corridor), so
-    most draws clear the solvability guard; the ones that don't are rejected with the whole
-    course by :func:`sample_course`. Consumes a fixed number of draws given the count, so a seed
-    stays reproducible.
+    Draw order per pillar is pinned and **fixed** (segment index, along-fraction, side, perp
+    fraction, radius, height); every drawn pillar consumes the SAME number of draws whether it is
+    accepted or skipped, so a seed is reproducible and toggling the axis never shifts other streams.
+    The drawn count is an **upper bound**: a pillar whose position fails the evadability invariants
+    (:func:`_obstacle_evadable`) is skipped (no extra RNG), so the realised count can be lower —
+    even zero on pathologically short courses.
+
+    Each pillar is anchored on an *eligible* segment (long enough to host an interior band), placed
+    in that segment's interior (``obstacle_along_margin_frac`` trimmed off each end) and offset
+    perpendicular by up to ``min(obstacle_corridor_half_width, radius + drone_radius)`` — close
+    enough that the straight path passes within ``radius`` of the axis, so the drone is FORCED to
+    evade, while the accept test guarantees an escape lane and gate passability keep it feasible.
     """
     lo, hi = rcfg.obstacle_count_range
     lo = max(0, int(lo))
     hi = max(lo, int(hi))
     count = int(rng.integers(lo, hi + 1))
 
-    obstacles: list[ObstacleSpec] = []
+    start_xy = np.asarray(start, dtype=np.float64)[:2]
+    segments = _course_segments(start_xy, gates)
+    # Eligible segments are long enough to host a pillar interior clear of both endpoints.
+    min_len = 2.0 * rcfg.obstacle_gate_clearance
+    eligible = [(p, q) for (p, q) in segments if float(np.linalg.norm(q - p)) >= min_len]
+    if not eligible:
+        return ()
+
+    last = gates[-1]
+    finish_xy = np.asarray([float(finish_x), float(last.center[1])], dtype=np.float64)
+    anchors_xy = [
+        start_xy,
+        *(np.asarray(g.center, dtype=np.float64)[:2] for g in gates),
+        finish_xy,
+    ]
+
+    margin = rcfg.obstacle_along_margin_frac
+    accepted: list[ObstacleSpec] = []
     for _ in range(count):
-        gate = gates[int(rng.integers(0, len(gates)))]
-        gx, gy = float(gate.center[0]), float(gate.center[1])
+        # Fixed draws per pillar (consumed regardless of the accept/skip outcome below).
+        seg_i = int(rng.integers(0, len(eligible)))
+        t = float(rng.uniform(margin, 1.0 - margin))
         side = 1.0 if rng.random() < 0.5 else -1.0
-        offset = float(rng.uniform(*rcfg.obstacle_lateral_offset_range))
+        offset_frac = float(rng.uniform(0.0, 1.0))
         radius = float(rng.uniform(*rcfg.obstacle_radius_range))
         height = float(rng.uniform(*rcfg.obstacle_height_range))
-        obstacles.append(
-            ObstacleSpec(center=(gx, gy + side * offset), radius=radius, height=height)
+
+        p, q = eligible[seg_i]
+        seg = q - p
+        seg_len = float(np.linalg.norm(seg))
+        if seg_len < 1e-9:
+            continue  # degenerate segment (draws already consumed) → skip
+        path_dir = seg / seg_len
+        perp = np.array([-path_dir[1], path_dir[0]], dtype=np.float64)
+        along = p + t * seg
+        # Perpendicular offset within [0, min(corridor_half_width, radius + drone_radius)] so the
+        # straight path passes within ``radius`` of the axis (forced evasion), capped to corridor.
+        max_off = min(rcfg.obstacle_corridor_half_width, radius + rcfg.drone_radius)
+        axis = along + side * offset_frac * max_off * perp
+
+        candidate = ObstacleSpec(
+            center=(float(axis[0]), float(axis[1])), radius=radius, height=height
         )
-    return tuple(obstacles)
+        if _obstacle_evadable(candidate, anchors_xy, accepted, rcfg):
+            accepted.append(candidate)
+        # else: skip — draws already consumed, so the count is an upper bound.
+    return tuple(accepted)
 
 
 def _descend_column_clear(
-    gate: GateSpec,
+    point_xy,
     obstacles,
     rcfg: RandomizationConfig,
 ) -> bool:
-    """Return ``True`` iff the floor→gate descend column at ``(gate.x, gate.y)`` clears pillars.
+    """Return ``True`` iff the floor→gate descend column at ``point_xy`` clears every pillar.
 
-    A recharge pad forces the drone to descend a vertical column at the gate's ``(x, y)`` from
-    ``gate.z`` to the floor and climb back out. Since every pillar is floor-anchored, that column
+    A service pad forces the drone to descend a vertical column at the pad's ``(x, y)`` from flight
+    altitude to the floor and climb back out. Since every pillar is floor-anchored, that column
     overlaps a pillar's z-band whenever it comes within ``obstacle.radius + obstacle_clearance``
-    horizontally — which would make the recharge detour clip the pillar. Rejecting such an anchor
-    keeps the recharge×obstacle composition safe **by construction** (UC-18 cross-axis decision).
+    horizontally — which would make the docking detour clip the pillar. Rejecting such a point keeps
+    the pad×obstacle composition safe **by construction**. UC-35 generalises this from a
+    ``GateSpec`` to an arbitrary ``(x, y)`` point so it guards the pad's actual (off-gate) position.
     """
+    px, py = float(point_xy[0]), float(point_xy[1])
     for obstacle in obstacles:
         ox, oy = float(obstacle.center[0]), float(obstacle.center[1])
-        horiz = float(np.hypot(float(gate.center[0]) - ox, float(gate.center[1]) - oy))
+        horiz = float(np.hypot(px - ox, py - oy))
         if horiz < float(obstacle.radius) + rcfg.obstacle_clearance:
             return False
     return True
 
 
-def _eligible_gate_indices(course: CourseConfig, rcfg: RandomizationConfig) -> list[int]:
-    """Ordered gate indices whose floor→gate descend column clears every pillar (UC-24).
+def _offset_pad_off_gates(
+    course: CourseConfig,
+    rcfg: RandomizationConfig,
+    anchor_idx: int,
+    avoid: tuple[np.ndarray, ...] = (),
+) -> np.ndarray | None:
+    """Find a **zero-RNG** off-gate pad position anchored near gate ``anchor_idx`` (UC-35 AC1/AC2).
 
-    A service pad (recharge or repair) forces a descend-and-climb at its gate's ``(x, y)`` column,
-    so an anchor is eligible only if that column is obstacle-clear (:func:`_descend_column_clear`).
-    On an obstacle-free course (including every :func:`_fallback_course`) every gate is eligible, so
-    the list is non-empty and placement never deadlocks.
+    Deterministically scans a **fixed** candidate set of offsets from the anchor gate — perp to
+    the local path first (both signs), then axial, at increasing distances from ``R_pad`` — and
+    returns the first ``(x, y)`` that is (a) ≥ ``R_pad`` (``pad_min_gate_distance``) from **every**
+    gate centre, (b) within the lateral corridor and the course x-span, (c) descend-column-clear of
+    every pillar, and (d) ≥ ``R_pad`` from every already-placed pad in ``avoid``. Because the
+    candidate order is fixed and no RNG is drawn, the placer only ever *appends* a pad and never
+    shifts the sampled geometry (AC5). Returns ``None`` when no candidate satisfies the constraints.
+    """
+    gates = course.gates
+    n = len(gates)
+    r_pad = rcfg.pad_min_gate_distance
+    anchor_xy = np.asarray(gates[anchor_idx].center, dtype=np.float64)[:2]
+
+    prev_pt = (
+        np.asarray(gates[anchor_idx - 1].center, dtype=np.float64)[:2]
+        if anchor_idx > 0
+        else np.asarray(course.start, dtype=np.float64)[:2]
+    )
+    if anchor_idx < n - 1:
+        next_pt = np.asarray(gates[anchor_idx + 1].center, dtype=np.float64)[:2]
+    else:
+        next_pt = np.asarray(
+            [course.finish_x, float(gates[anchor_idx].center[1])], dtype=np.float64
+        )
+    direction = next_pt - prev_pt
+    norm = float(np.linalg.norm(direction))
+    if norm < 1e-9:
+        path_dir = np.array([1.0, 0.0], dtype=np.float64)
+    else:
+        path_dir = direction / norm
+    perp = np.array([-path_dir[1], path_dir[0]], dtype=np.float64)
+
+    gate_centres = [np.asarray(g.center, dtype=np.float64)[:2] for g in gates]
+    start_x = float(np.asarray(course.start, dtype=np.float64)[0])
+    # Fixed, increasing candidate distances starting just above R_pad.
+    distances = [r_pad + 0.25 * k for k in range(1, 13)]
+    for offset_dir in (perp, -perp, path_dir, -path_dir):
+        for dist in distances:
+            cand = anchor_xy + offset_dir * dist
+            if abs(float(cand[1])) > rcfg.lateral_bound:
+                continue
+            if not (start_x <= float(cand[0]) <= course.finish_x):
+                continue
+            if any(float(np.linalg.norm(cand - gc)) < r_pad for gc in gate_centres):
+                continue
+            if not _descend_column_clear(cand, course.obstacles, rcfg):
+                continue
+            if any(float(np.linalg.norm(cand - other)) < r_pad for other in avoid):
+                continue
+            return cand
+    return None
+
+
+def _eligible_gate_indices(course: CourseConfig, rcfg: RandomizationConfig) -> list[int]:
+    """Ordered gate indices for which an off-gate pad position exists (UC-35 redefinition).
+
+    A service pad is placed **off** its anchor gate (UC-35 AC1), so an anchor is eligible iff
+    :func:`_offset_pad_off_gates` can find a valid off-gate position near it (≥ ``R_pad`` from every
+    gate, in-corridor, descend-column-clear). On an obstacle-free course (including every
+    :func:`_fallback_course`) an offset always exists, so the list is non-empty and placement never
+    deadlocks.
     """
     return [
-        i
-        for i, gate in enumerate(course.gates)
-        if _descend_column_clear(gate, course.obstacles, rcfg)
+        i for i in range(len(course.gates)) if _offset_pad_off_gates(course, rcfg, i) is not None
     ]
 
 
@@ -507,18 +721,19 @@ def _place_single_recharge_pad(
     rcfg: RandomizationConfig,
     battery: BatteryConfig,
 ) -> CourseConfig | None:
-    """Place **exactly one** ``rechargeable`` pad at an eligible gate anchor (UC-24 single pad).
+    """Place **exactly one** ``rechargeable`` pad **off** an eligible gate anchor (UC-35 AC1).
 
     UC-24 redefinition of UC-18's placer: a single recharge pad is placed **regardless** of whether
     the course is energy-constrained (UC-18 placed pads only on over-budget courses, so under the
     shipped default battery *zero* pads were ever produced — the unreachable-placement bug this
-    fixes). The anchor is the eligible gate nearest the path-energy midpoint
-    (:func:`_energy_midpoint_gate`); anchor choice is deterministic and **zero-RNG**, so it never
-    perturbs the seeded stream and only ever *appends* a pad (never shifts gate geometry). The pad
-    radius is ``rcfg.recharge_pad_radius`` and it is tagged ``rechargeable=True``; existing course
-    pads are preserved.
+    fixes). The anchor gate is the eligible gate nearest the path-energy midpoint
+    (:func:`_energy_midpoint_gate`); UC-35 then offsets the pad **off** that gate's column via the
+    zero-RNG :func:`_offset_pad_off_gates` (≥ ``R_pad`` from every gate — AC1). Anchor + offset are
+    deterministic and **zero-RNG**, so placement never perturbs the seeded stream and only ever
+    *appends* a pad (never shifts gate geometry). The pad radius is ``rcfg.recharge_pad_radius`` and
+    it is tagged ``rechargeable=True``; existing course pads are preserved.
 
-    Returns ``None`` when no gate's descend column is obstacle-clear (see
+    Returns ``None`` when no eligible anchor admits an off-gate pad position (see
     :func:`_eligible_gate_indices`) → the caller reject-resamples.
 
     **One-pad narrowing of UC-18's covering guarantee (documented, load-bearing):** a single pad
@@ -536,9 +751,11 @@ def _place_single_recharge_pad(
     if not eligible:
         return None
     k = _energy_midpoint_gate(course, rcfg, battery, eligible)
-    gate = course.gates[k]
+    pad_xy = _offset_pad_off_gates(course, rcfg, k)
+    if pad_xy is None:  # defensive — k is drawn from `eligible`, so an offset always exists
+        return None
     pad = PadSpec(
-        center=(float(gate.center[0]), float(gate.center[1])),
+        center=(float(pad_xy[0]), float(pad_xy[1])),
         radius=float(rcfg.recharge_pad_radius),
         rechargeable=True,
     )
@@ -553,19 +770,22 @@ def _place_single_repair_pad(
 
     Symmetric with :func:`_place_single_recharge_pad` but with **no energy model** — damage does not
     gate whether the finish is reachable, so a repair pad is pure feature presence: a damaged drone
-    simply *can* land and recover. The anchor is the eligible gate nearest the course's middle index
-    (:func:`_index_midpoint_gate`), reusing the recharge descend-column-clear eligibility geometry.
-    The pad radius is ``rcfg.repair_pad_radius`` and it is tagged ``repairable=True``; existing
-    course pads are preserved. Returns ``None`` when no gate's descend column is obstacle-clear →
-    the caller reject-resamples.
+    simply *can* land and recover. The anchor gate is the eligible gate nearest the course's middle
+    index (:func:`_index_midpoint_gate`); UC-35 then offsets the pad **off** that gate's column via
+    the zero-RNG :func:`_offset_pad_off_gates` (≥ ``R_pad`` from every gate — AC1). The pad radius
+    is ``rcfg.repair_pad_radius`` and it is tagged ``repairable=True``; existing course pads are
+    preserved. Returns ``None`` when no eligible anchor admits an off-gate pad position → the caller
+    reject-resamples.
     """
     eligible = _eligible_gate_indices(course, rcfg)
     if not eligible:
         return None
     k = _index_midpoint_gate(eligible, len(course.gates))
-    gate = course.gates[k]
+    pad_xy = _offset_pad_off_gates(course, rcfg, k)
+    if pad_xy is None:  # defensive — k is drawn from `eligible`, so an offset always exists
+        return None
     pad = PadSpec(
-        center=(float(gate.center[0]), float(gate.center[1])),
+        center=(float(pad_xy[0]), float(pad_xy[1])),
         radius=float(rcfg.repair_pad_radius),
         repairable=True,
     )
@@ -583,16 +803,17 @@ def _place_service_pads(
 
     * recharge only → :func:`_place_single_recharge_pad`;
     * repair only → :func:`_place_single_repair_pad`;
-    * **both** → one ``rechargeable`` pad at the energy-midpoint anchor and one ``repairable`` pad
-      at a **distinct** eligible anchor (recharge then repair, appended in that order). When only
-      **one** eligible gate exists (e.g. a 1-gate course or the fallback), the two co-locate into a
-      **single dual-purpose pad** (``rechargeable=True, repairable=True``) — a documented
-      co-location exception that still counts as "one of each" and avoids one pad shadowing the
-      other under a shared gate column.
+    * **both** → one ``rechargeable`` pad offset off the energy-midpoint anchor and one
+      ``repairable`` pad offset off a **distinct** anchor (recharge then repair, in that order),
+      each ≥ ``R_pad`` from every gate AND from each other (UC-35 AC1). When only **one** eligible
+      anchor exists (e.g. a 1-gate course or the fallback), or no distinct feasible off-gate repair
+      position exists, the two co-locate into a **single dual-purpose pad**
+      (``rechargeable=True, repairable=True``) — a documented exception that still counts as "one of
+      each" and avoids one pad shadowing the other.
 
     Recharge is active only when ``rcfg.enable_recharge`` **and** a battery is enabled; repair is
     active whenever ``rcfg.enable_repair``. Returns ``course`` unchanged when neither axis is
-    active, and ``None`` when no gate's descend column is obstacle-clear → the caller
+    active, and ``None`` when no eligible anchor admits an off-gate pad position → the caller
     reject-resamples. All placement is deterministic and **zero-RNG**.
     """
     recharge_active = rcfg.enable_recharge and battery is not None and battery.enabled
@@ -604,32 +825,46 @@ def _place_service_pads(
     if repair_active and not recharge_active:
         return _place_single_repair_pad(course, rcfg)
 
-    # Both axes active: distinct anchors when possible, else a single dual-purpose pad.
+    # Both axes active: distinct off-gate anchors when possible, else a single dual-purpose pad.
     eligible = _eligible_gate_indices(course, rcfg)
     if not eligible:
         return None
     rk = _energy_midpoint_gate(course, rcfg, battery, eligible)  # type: ignore[arg-type]
-    if len(eligible) == 1:
-        gate = course.gates[rk]
+    recharge_xy = _offset_pad_off_gates(course, rcfg, rk)
+    if recharge_xy is None:  # defensive — rk ∈ eligible, so an offset always exists
+        return None
+
+    # Try to place the repair pad off a DISTINCT anchor, ≥ R_pad from the recharge pad too.
+    repair_xy: np.ndarray | None = None
+    repair_candidates = [i for i in eligible if i != rk]
+    if repair_candidates:
+        pk = _index_midpoint_gate(repair_candidates, len(course.gates))
+        repair_xy = _offset_pad_off_gates(course, rcfg, pk, avoid=(recharge_xy,))
+        if repair_xy is None:
+            for i in repair_candidates:  # any other distinct anchor with a feasible offset
+                repair_xy = _offset_pad_off_gates(course, rcfg, i, avoid=(recharge_xy,))
+                if repair_xy is not None:
+                    break
+
+    if repair_xy is None:
+        # Only one eligible anchor (e.g. a 1-gate course / the fallback), or no distinct feasible
+        # repair position: co-locate into a single dual-purpose pad at the recharge position. Still
+        # "one of each" (rechargeable AND repairable) and avoids one pad shadowing the other.
         dual = PadSpec(
-            center=(float(gate.center[0]), float(gate.center[1])),
+            center=(float(recharge_xy[0]), float(recharge_xy[1])),
             radius=max(float(rcfg.recharge_pad_radius), float(rcfg.repair_pad_radius)),
             rechargeable=True,
             repairable=True,
         )
         return _with_pads(course, [dual])
 
-    repair_candidates = [i for i in eligible if i != rk]
-    pk = _index_midpoint_gate(repair_candidates, len(course.gates))
-    gr = course.gates[rk]
-    gp = course.gates[pk]
     recharge_pad = PadSpec(
-        center=(float(gr.center[0]), float(gr.center[1])),
+        center=(float(recharge_xy[0]), float(recharge_xy[1])),
         radius=float(rcfg.recharge_pad_radius),
         rechargeable=True,
     )
     repair_pad = PadSpec(
-        center=(float(gp.center[0]), float(gp.center[1])),
+        center=(float(repair_xy[0]), float(repair_xy[1])),
         radius=float(rcfg.repair_pad_radius),
         repairable=True,
     )

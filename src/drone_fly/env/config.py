@@ -439,11 +439,21 @@ class RandomizationConfig:
     # against the extended solvability guard. ``obstacle_clearance`` is the horizontal margin the
     # start→gates→finish polyline must keep beyond each pillar's radius (constructively
     # guarantees ≥1 collision-free path). All appended last so field order is UC-14-compatible.
-    obstacle_count_range: tuple[int, int] = (1, 3)  # inclusive count of pillars per course
+    obstacle_count_range: tuple[int, int] = (1, 3)  # inclusive UPPER-BOUND count of pillars (UC-35)
     obstacle_radius_range: tuple[float, float] = (0.3, 0.6)
     obstacle_height_range: tuple[float, float] = (1.0, 2.5)
-    obstacle_lateral_offset_range: tuple[float, float] = (1.0, 1.8)  # |y| offset off a gate
-    obstacle_clearance: float = 0.3  # polyline must clear each pillar by radius + this
+    # UC-35: **unused** by the current sampler. UC-15 placed pillars off the corridor at this |y|
+    # offset from a gate; UC-35 rewrote sampling to place pillars *between* consecutive waypoints
+    # (inside the corridor, forced-but-evadable), so this range is no longer read. Retained at its
+    # original position/default so every UC-15/16/17 positional/keyword construction is unshifted.
+    obstacle_lateral_offset_range: tuple[float, float] = (
+        1.0,
+        1.8,
+    )  # |y| offset off a gate (UNUSED)
+    # RETAINED (UC-35): still the horizontal margin the recharge descend-column keeps beyond each
+    # pillar's radius (see randomization._descend_column_clear). No longer used by the (removed)
+    # polyline far-clearance obstacle guard, which UC-35 replaced with an evadability model.
+    obstacle_clearance: float = 0.3  # descend-column must clear each pillar by radius + this
 
     # -- recharge axis (UC-18 AC3/AC4; UC-24 single-pad redefinition) --------------------
     # A **course-variation** axis (NOT a shaping reward): when on, a sampled/fallback course gets
@@ -487,6 +497,52 @@ class RandomizationConfig:
     enable_repair: bool = False
     # Horizontal radius of a placed repair pad (m); matches the default landing-/recharge-pad size.
     repair_pad_radius: float = 0.5
+
+    # -- course placement geometry (UC-35) ----------------------------------------------
+    # Two placement corrections over UC-08/15/18/24, both **zero-RNG for pads** and fixed-draw for
+    # obstacles, appended **last** (after the UC-24 repair block) so every prior positional/keyword
+    # construction is unshifted and the disabled-axis / non-randomized RNG streams stay
+    # byte-identical (AC5/AC6/AC7).
+    #
+    # (A) Pads off waypoints (AC-1/AC-2): a service (recharge/repair) pad is never placed on a gate
+    # column. ``pad_min_gate_distance`` (``R_pad``) is the minimum horizontal distance a placed pad
+    # must keep from EVERY gate centre; the placer searches a fixed candidate ring around the anchor
+    # gate for the first offset that clears every gate by ``R_pad`` (see
+    # randomization._offset_pad_off_gates). Zero-RNG, so it only ever appends a pad.
+    pad_min_gate_distance: float = 1.0  # R_pad — min horizontal pad↔gate-centre distance (m)
+    #
+    # (B) Obstacles between waypoints, forced-but-evadable (AC-3/AC-4): pillars are sampled inside a
+    # perpendicular corridor around a waypoint→waypoint segment (incl. start→first-gate), close
+    # enough that the straight path passes within the pillar so the drone is FORCED to evade, yet
+    # with a guaranteed escape lane so the course stays feasible.
+    #   ``drone_radius`` — generation-time placement buffer for the drone's body; a conservative
+    #   safety size added to clearance maths. NOT read by the sim collision test (obstacles.py stays
+    #   a point model), so AC-7 byte-identity is unaffected.
+    drone_radius: float = 0.15
+    #   ``obstacle_evasion_margin`` — extra slack beyond ``drone_radius`` required for the drone to
+    #   squeeze past a pillar and to keep pillars off gate approaches / off each other.
+    obstacle_evasion_margin: float = 0.2
+    #   ``obstacle_corridor_half_width`` — max perpendicular offset (m) of a pillar axis from its
+    #   segment centreline; caps how far off the nominal path a pillar may sit (keeps it "between"
+    #   the waypoints and reachable-around within ``lateral_bound``).
+    obstacle_corridor_half_width: float = 0.75
+    #   ``obstacle_gate_clearance`` — sampler-side minimum horizontal band kept between a pillar and
+    #   a segment endpoint (gate/start); also the eligible-segment half-length floor (a segment must
+    #   be ≥ ``2 * obstacle_gate_clearance`` long to host a pillar interior). Gate PASSABILITY in
+    #   the solvability guard is enforced per-pillar at ``radius + drone_radius +
+    #   obstacle_evasion_margin`` (a stricter, radius-aware bound); do not drop this below
+    #   ``drone_radius + obstacle_evasion_margin`` (the gate-passability invariant).
+    obstacle_gate_clearance: float = 0.5
+    #   ``min_obstacle_separation`` — extra slack added on top of ``2 * (drone_radius +
+    #   obstacle_evasion_margin)`` when spacing two pillars apart, so a pair never forms an
+    #   unevadable wall across the corridor.
+    min_obstacle_separation: float = 0.3
+    #   ``obstacle_along_margin_frac`` — fraction of a segment's length excluded at EACH end when
+    #   drawing a pillar's along-position, so pillars sit in the interior band, away from the gates.
+    #   0.3 keeps the drawn along-fraction in the central 40% of the segment, maximising clearance
+    #   from BOTH endpoint gates (the binding accept constraint) so pillars survive the evadability
+    #   guard at a healthy rate (~70–75% of courses carry ≥1 pillar).
+    obstacle_along_margin_frac: float = 0.3
 
 
 @dataclass(frozen=True)
