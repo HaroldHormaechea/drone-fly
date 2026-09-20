@@ -174,11 +174,21 @@ def test_env_config_floor_start_is_last_field() -> None:
     assert "grounded_window" in [f.name for f in dataclasses.fields(EarlyTerminationConfig)]
 
 
-def test_reward_config_airborne_bonus_is_last_field() -> None:
-    """UC-37: ``RewardConfig.airborne_bonus`` is appended **last** (after ``obstacle_penalty``), so
-    every pre-UC-37 positional ``RewardConfig`` call stays unshifted."""
+def test_reward_config_field_order() -> None:
+    """UC-39 (was UC-37 ``..._airborne_bonus_is_last_field``): the three climb fields are appended
+    **last**, in order, AFTER ``airborne_bonus`` — so every pre-UC-39 positional ``RewardConfig``
+    call (which never passed the climb fields) stays unshifted. The tail order is pinned exactly:
+    ``obstacle_penalty`` → ``airborne_bonus`` → ``climb_weight`` → ``climb_target_height`` →
+    ``climb_gamma`` (last)."""
     fields = [f.name for f in dataclasses.fields(RewardConfig)]
-    assert fields[-1] == "airborne_bonus"
+    assert fields[-1] == "climb_gamma"
+    assert fields[-4:] == [
+        "airborne_bonus",
+        "climb_weight",
+        "climb_target_height",
+        "climb_gamma",
+    ]
+    # The UC-37 tail invariant still holds one slot back (obstacle_penalty → airborne_bonus).
     assert fields.index("obstacle_penalty") == fields.index("airborne_bonus") - 1
 
 
@@ -189,6 +199,25 @@ def test_uc37_floor_start_and_airborne_bonus_defaults() -> None:
     rc = RewardConfig()
     assert rc.airborne_bonus == pytest.approx(0.1)  # the shipped survival bonus (AC5)
     assert rc.airborne_bonus > rc.time_penalty  # net per airborne step is positive (AC6a)
+
+
+def test_uc39_climb_reward_defaults_and_gamma_coupling() -> None:
+    """UC-39 AC1/AC2: the shipped climb-shaping constants, and the load-bearing Note-4 coupling that
+    ``climb_gamma`` MUST equal the training discount γ for the potential-based shaping to stay
+    policy-invariant (Ng et al. 1999)."""
+    from drone_fly.train.config import TrainConfig
+
+    rc = RewardConfig()
+    assert rc.climb_weight == pytest.approx(2.0)
+    assert rc.climb_target_height == pytest.approx(1.0)
+    assert rc.climb_gamma == pytest.approx(0.99)
+    # Note 4: the climb discount must track the training γ or the shaping stops being invariant.
+    assert rc.climb_gamma == pytest.approx(TrainConfig().gamma)
+    # Per-episode climb bound γ·w·target ≪ completion, and ≤ a normalised 3-gate gate_bonus (AC2).
+    climb_bound = rc.climb_gamma * rc.climb_weight * rc.climb_target_height
+    assert climb_bound == pytest.approx(1.98)
+    assert climb_bound < rc.completion_bonus
+    assert climb_bound <= rc.gate_bonus / 3  # ≤ normalised gate bonus on the default 3-gate course
 
 
 def test_env_config_default_course_has_no_pads() -> None:
