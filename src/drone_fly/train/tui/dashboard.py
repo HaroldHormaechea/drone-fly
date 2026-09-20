@@ -175,8 +175,11 @@ class TrainingDashboard:
             else:
                 display = getattr(self._capture, "display_stdout", None) if self._capture else None
                 self._console = Console(file=display) if display is not None else Console()
+            # UC-33 Item 1: pass the live terminal width so the bottom status region autosizes
+            # to a wrapped multi-line health verdict. None (no console) keeps the historical size.
+            status_width = self._console.width if self._console is not None else None
             self._live = Live(
-                build_layout(self.model, self._log_lines()),
+                build_layout(self.model, self._log_lines(), status_width=status_width),
                 console=self._console,
                 screen=True,
                 refresh_per_second=_REFRESH_PER_SECOND,
@@ -236,7 +239,22 @@ class TrainingDashboard:
         try:
             from drone_fly.train.tui.render import build_layout
 
-            self._live.update(build_layout(self.model, self._log_lines()))
+            # UC-33 Item 4: on Windows, follow live terminal-window resizes. Re-query the real
+            # terminal size (from the SAVED fd, not the redirected fd 1) and update the console
+            # size BEFORE the redraw so the layout re-flows within one refresh tick (AC-16). The
+            # console was NOT locked at construction (see _build_windows_console), so this simply
+            # updates the size Rich renders against. Helper returns None: leave the size alone
+            # and let Rich self-detect (never crash). macOS/Linux never enter this branch (AC-17).
+            if self._is_win and self._console is not None:
+                win_size = self._resolve_win_terminal_size()
+                if win_size is not None:
+                    self._console.size = win_size
+
+            # UC-33 Item 1: autosize the status region to the current terminal width.
+            status_width = self._console.width if self._console is not None else None
+            self._live.update(
+                build_layout(self.model, self._log_lines(), status_width=status_width)
+            )
             self._consecutive_redraw_failures = 0
         except Exception as exc:  # noqa: BLE001
             self._consecutive_redraw_failures += 1
@@ -309,26 +327,48 @@ class TrainingDashboard:
 
     # -- Windows native-fd redirect (AC-6/AC-7) --------------------------------------------
 
+    def _resolve_win_terminal_size(self) -> tuple[int, int] | None:
+        """Return ``(columns, lines)`` for the real Windows terminal, or ``None`` (UC-33 Item 4).
+
+        Single source of terminal size for both Console construction and per-redraw resize
+        following. It reads the **saved real terminal fd** (``self._win_saved_fd1``) — NOT the
+        bare fd 1, which the UC-32 native redirect has repointed at ``native.log`` (an
+        ``os.get_terminal_size()`` on it raises ``OSError`` → Rich falls back to ~80×25, the very
+        "renders small" defect this fixes). Returns ``None`` when the saved fd is unavailable or
+        ``os.get_terminal_size`` fails, so callers degrade gracefully to Rich's own detection
+        rather than crashing (AC-18).
+        """
+        if self._win_saved_fd1 is None:
+            return None
+        try:
+            size = os.get_terminal_size(self._win_saved_fd1)
+        except OSError:
+            return None
+        return (size.columns, size.lines)
+
     def _build_windows_console(self, display):
         """Build the Rich Console for Live on Windows: force_terminal + real terminal size (AC-6).
 
         ``force_terminal=True`` makes Rich treat the plain ``display`` stream as a terminal so
-        ``screen=True`` engages the full-screen alt-buffer even though we draw to a saved fd;
-        passing the real terminal size makes the layout fill the screen (worst case: legacy
-        conhost, already rejected by the AC-8 capability gate before we reach here).
+        ``screen=True`` engages the full-screen alt-buffer even though we draw to a saved fd.
+
+        The console is built WITHOUT a fixed ``width``/``height`` kwarg: passing those to the
+        constructor *locks* the size, so Rich would never follow a window resize (the "not
+        resizing" defect). Instead, if the real terminal size resolves, it is applied once via the
+        mutable ``console.size`` property; ``_redraw_locked`` re-applies it each tick so resizes are
+        followed (AC-15/AC-16). If the size can't be resolved (saved fd missing / not a tty), we
+        leave Rich to self-detect rather than locking a wrong size (AC-18).
         """
         from rich.console import Console
 
         kwargs: dict = {"force_terminal": True}
         if display is not None:
             kwargs["file"] = display
-        try:
-            size = os.get_terminal_size()
-            kwargs["width"] = size.columns
-            kwargs["height"] = size.lines
-        except OSError:
-            pass
-        return Console(**kwargs)
+        console = Console(**kwargs)
+        size = self._resolve_win_terminal_size()
+        if size is not None:
+            console.size = size
+        return console
 
     def _start_windows_capture(self) -> None:
         """Redirect native fd 1/2 to ``<logs_dir>/native.log``, saving BOTH real fds for restore.

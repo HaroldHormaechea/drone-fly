@@ -43,11 +43,17 @@ APPLE_SILICON_NOTE = (
 #: 8 GB (an RTX 3050) is tight for the large connectome slice (~122k neurons), so on a CUDA
 #: out-of-memory error the user trades throughput for a smaller VRAM footprint via the config
 #: knobs below. Logged whenever CUDA is selected (auto or explicit override).
+#: UC-33 (Item 2b): the hint names ONLY levers that actually exist. ``batch_size`` / ``n_steps``
+#: are ``TrainConfig`` field defaults, not validated YAML train-config keys, so recommending them
+#: pointed users at knobs a train config would reject as unknown. The real VRAM levers are the
+#: worker count (``n_envs``), a smaller pruned connectome slice (``prune`` / ``prune_k``), and
+#: falling back to CPU (``device: cpu``).
 CUDA_OOM_HINT = (
     "CUDA note: 8 GB VRAM is tight for the large connectome slice (~122k neurons). On a CUDA "
-    "out-of-memory error, lower n_envs and/or batch_size in your train config (and/or train a "
-    "smaller pruned slice); halve them until the run fits, then tune back up. These knobs trade "
-    "throughput for a smaller VRAM footprint and do not otherwise change training dynamics."
+    "out-of-memory error, lower n_envs, train a smaller pruned slice (a smaller prune / prune_k "
+    "in your train config), and/or fall back to device: cpu; step these down until the run fits, "
+    "then tune back up. These levers trade throughput for a smaller VRAM footprint and do not "
+    "otherwise change training dynamics."
 )
 
 

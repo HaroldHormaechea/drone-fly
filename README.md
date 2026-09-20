@@ -385,7 +385,10 @@ fetch and no per-run spectral eigendecomposition. Key points:
 - The `simple` (numpy) adapter needs no native deps and runs anywhere. The `pybullet` adapter
   (full physics sim, for mastery training) needs a C/C++ toolchain and is verified on macOS +
   Xcode CLT; `./scripts/train.sh` bootstraps it and launches a config-driven run.
-- CI gates: `uv run ruff check .`, `uv run ruff format --check .`, `uv run pytest`.
+- CI gates: `uv run ruff check .`, `uv run ruff format --check .`, and pytest. Run the tests
+  locally with `uv run --extra dev pytest` — pytest ships in the `dev` extra, so the bare
+  `uv run pytest` fails to collect unless the extra is already synced (CI runs `uv sync --extra
+  dev` first, then `uv run pytest`).
 
 ### Tested-vs-untested boundary
 What CI actually exercises versus what needs the native sim, recorded from a real install attempt:

@@ -11,7 +11,7 @@ viewer and pybullet sim. Rich is imported here and in :mod:`dashboard` only.
 
 from __future__ import annotations
 
-from rich.console import Group, RenderableType
+from rich.console import Console, Group, RenderableType
 from rich.layout import Layout
 from rich.panel import Panel
 from rich.progress_bar import ProgressBar
@@ -25,6 +25,20 @@ SEVERITY_STYLE = {"normal": "green", "warning": "yellow", "critical": "bold red"
 CONCERN_MARK = "⚠"
 #: Log lines shown in the right pane (tail); the scrollback itself is separately bounded.
 _LOG_TAIL = 200
+
+#: UC-33: bottom status-region autosize. The region wraps a Rich ``Panel`` around the
+#: health-verdict message, so its height is (content rows) + (panel chrome). Overhead is the
+#: Panel's top+bottom border; the historical hardcoded ``size=3`` == 1 content row + this
+#: overhead, so a single-line verdict keeps the exact same visual height (AC-3).
+STATUS_BORDER_OVERHEAD = 2
+#: Documented cap on content rows so a pathologically long verdict can never grow the status
+#: region to swallow the terminal (AC-2); rows beyond the cap are clipped by the fixed-size
+#: Layout region on screen — the message string itself is never mutated.
+STATUS_MAX_CONTENT_LINES = 6
+#: Columns the Panel consumes around its content on one row: 2 border columns + Rich's default
+#: ``(0, 1)`` padding (1 column each side) = 4. Subtracted from the terminal width to get the
+#: inner content width used for word-wrap measurement.
+STATUS_PANEL_CHROME_WIDTH = 4
 
 
 def _fmt_or_dash(value, fmt) -> str:
@@ -117,27 +131,81 @@ def build_logs_panel(log_lines: list[str] | None) -> Panel:
     return Panel(text, title="logs", border_style="dim")
 
 
+def _verdict_message_status(verdict) -> tuple[str, str]:
+    """Extract ``(message, status)`` from a health verdict (or the ``None`` default).
+
+    Single source of truth shared by :func:`build_status_bar` (what to render) and
+    :func:`status_region_size` (how tall to render it), so the two can never drift.
+    """
+    if verdict is None:
+        return "Training progressing normally.", "normal"
+    return getattr(verdict, "message", str(verdict)), getattr(verdict, "status", "normal")
+
+
+def status_region_size(message: str, width: int | None = None) -> int:
+    """Return the Rich ``Layout`` height for the bottom status region (UC-33, AC-1/2/5).
+
+    The status region wraps the verdict ``message`` in a Rich ``Panel``. Its height is the
+    number of content rows the message occupies plus :data:`STATUS_BORDER_OVERHEAD` (the
+    panel's top+bottom border).
+
+    Content rows are counted per logical line (``message`` split on ``\\n``):
+
+    * When ``width`` is a positive ``int``, the *wrapped* row count for each logical line is
+      measured with Rich itself against the panel's inner content width
+      (``width - STATUS_PANEL_CHROME_WIDTH``). Using Rich's own word-aware wrapper — rather
+      than ``ceil(len / inner_width)`` char-division, which under-counts word-wrapped text and
+      would re-clip the last line — keeps the count deterministic for a fixed ``width`` (AC-5).
+    * When ``width`` is ``None`` (or not a positive int), each logical line counts as one row.
+      A single-line verdict therefore yields ``1 + STATUS_BORDER_OVERHEAD == 3``, byte-identical
+      to the previous hardcoded ``size=3`` (AC-3).
+
+    The content-row total is clamped to at least 1 and at most
+    :data:`STATUS_MAX_CONTENT_LINES` (AC-2): a pathologically long message can never grow the
+    region to swallow the terminal; the extra rows are clipped on screen by the fixed-size
+    Layout region and the message string itself is never mutated.
+    """
+    logical_lines = message.split("\n")
+    if isinstance(width, int) and not isinstance(width, bool) and width > 0:
+        inner_width = max(width - STATUS_PANEL_CHROME_WIDTH, 1)
+        console = Console(width=inner_width)
+        content_lines = 0
+        for line in logical_lines:
+            # Rich wraps an empty line to zero rows; a blank line still occupies one visual row.
+            content_lines += max(len(Text(line).wrap(console, inner_width)), 1)
+    else:
+        content_lines = len(logical_lines)
+    content_lines = min(max(content_lines, 1), STATUS_MAX_CONTENT_LINES)
+    return content_lines + STATUS_BORDER_OVERHEAD
+
+
 def build_status_bar(verdict) -> Panel:
     """Full-width bottom status bar rendering the health verdict with severity styling."""
-    if verdict is None:
-        message, status = "Training progressing normally.", "normal"
-    else:
-        message = getattr(verdict, "message", str(verdict))
-        status = getattr(verdict, "status", "normal")
+    message, status = _verdict_message_status(verdict)
     style = SEVERITY_STYLE.get(status, "green")
     return Panel(Text(message, style=style), border_style=style)
 
 
-def build_layout(model: M.DashboardModel, log_lines: list[str] | None = None) -> RenderableType:
+def build_layout(
+    model: M.DashboardModel,
+    log_lines: list[str] | None = None,
+    status_width: int | None = None,
+) -> RenderableType:
     """Assemble the four regions into a Rich :class:`~rich.layout.Layout` (AC3).
 
     Left column ~70% (values on top, trends below), right log pane ~30%, full-width status bar
     at the bottom. Constructible headlessly; the live draw is the documented untested boundary.
+
+    ``status_width`` (UC-33): when the caller knows the live terminal width it passes it here so
+    the bottom status region autosizes to the wrapped height of a multi-line health verdict
+    (AC-1). Left ``None`` (the default, and every existing render test) the region falls back to
+    logical-line counting — a one-line verdict keeps the historical ``size=3`` (AC-3).
     """
+    status_message, _ = _verdict_message_status(model.latest_verdict)
     layout = Layout()
     layout.split_column(
         Layout(name="main", ratio=1),
-        Layout(name="status", size=3),
+        Layout(name="status", size=status_region_size(status_message, status_width)),
     )
     layout["main"].split_row(
         Layout(name="left", ratio=7),
@@ -160,6 +228,9 @@ __all__ = [
     "build_trends_panel",
     "build_logs_panel",
     "build_status_bar",
+    "status_region_size",
+    "STATUS_BORDER_OVERHEAD",
+    "STATUS_MAX_CONTENT_LINES",
     "SEVERITY_STYLE",
     "CONCERN_MARK",
 ]

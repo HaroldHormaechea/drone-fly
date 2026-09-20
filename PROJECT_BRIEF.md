@@ -11,7 +11,7 @@ stack:
   data_stores: ["local filesystem (cached connectome, checkpoints, logs)", "neuprint (remote graph API)"]
 build:
   tool: uv
-  commands: {test: "uv run pytest", lint: "uv run ruff check .", format: "uv run ruff format ."}
+  commands: {test: "uv run --extra dev pytest", lint: "uv run ruff check .", format: "uv run ruff format ."}
 paths:
   production: ["src/drone_fly/**"]
   test: ["tests/**"]
@@ -284,7 +284,7 @@ external install. `gym-pybullet-drones` is **GitHub-only** (not on PyPI), instal
 `pip install git+https://github.com/…`. `neuprint-python` is on PyPI. `connectome_interpreter`
 (optional reference) is pip-installable; `connectome_data_prep` matrices are downloaded for data
 acquisition. **AxonWeave is not installed and not a dependency** (no wheel exists — see the
-AxonWeave note above). Pinned versions and build commands (`uv run pytest` / `ruff`) are unchanged.
+AxonWeave note above). Pinned versions and build commands (`uv run --extra dev pytest` / `ruff`) are unchanged.
 
 **Data stores.**
 - No database engine. Connectome data is **fetched at runtime from neuPrint** (a hosted Neo4j

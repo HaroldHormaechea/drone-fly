@@ -2,7 +2,7 @@
 # Each entry maps to a Bash(<prefix>:*) permission rule, granted by the
 # develop skill's Step 3a before agents are spawned.
 #
-# Aligned with PROJECT_BRIEF.md: build.tool = uv, build.commands use `uv run pytest`
+# Aligned with PROJECT_BRIEF.md: build.tool = uv, build.commands use `uv run --extra dev pytest`
 # and `uv run ruff`. `uv` is the entry point for the Python toolchain (venv, installs,
 # and `uv run <tool>`), so it covers pytest/ruff/mypy/python invocations too.
 commands:
