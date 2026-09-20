@@ -65,13 +65,20 @@ class TrainingDashboard:
         capture: bool = True,
         n_envs: int = 1,
         backend: str = "dummy",
+        total_steps: int = 0,
         logs_dir: str | None = None,
         now=None,
         sleep=None,
     ) -> None:
         # UC-26 AC-11: forward the resolved rollout parallelism into the pure model so the
-        # values panel can render it (static per run).
-        self.model = DashboardModel(scheduled_iters=scheduled_iters, n_envs=n_envs, backend=backend)
+        # values panel can render it (static per run). UC-32: total_steps drives the TIME panel's
+        # steps line.
+        self.model = DashboardModel(
+            scheduled_iters=scheduled_iters,
+            n_envs=n_envs,
+            backend=backend,
+            total_steps=total_steps,
+        )
         self._capture = FdLogCapture() if capture else None
         self._live = None
         self._console = None

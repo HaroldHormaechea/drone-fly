@@ -64,6 +64,17 @@ default-on for a TTY and disabled with `--no-tui`; a non-TTY / piped / CI run au
 the plain Stable-Baselines3 line logger, so CI and log files are unaffected. The CSV and
 TensorBoard learning curves are written either way.
 
+**Windows support (UC-32).** The TUI now works on Windows rather than needing `--no-tui`:
+parallel rollouts (`n_envs>1`) no longer crash with the TUI on (each spawned worker's native
+output goes to a per-worker file under `<run>/logs/workers/` instead of a redirect that killed
+Windows workers; a genuine worker failure now surfaces the *real* traceback, not an opaque
+`EOFError`), the elapsed clock and liveness tick every second independent of PPO iteration
+boundaries, the dashboard renders full-screen, Python logging is routed into the logs pane
+(pybullet's native startup banner is redirected to `<run>/logs/native.log`), and the
+`OSError [WinError 1]` logging spam is gone. On a terminal that cannot drive the full-screen
+alternate-screen buffer (e.g. legacy `conhost.exe`) the TUI **fails fast** with an actionable
+error telling you to use Windows Terminal or pass `--no-tui`. macOS/Linux behavior is unchanged.
+
 ## Other useful commands
 
 - **Sanity check** (offline, seconds): `uv run drone-fly smoke-train --connectome tests/fixtures`.

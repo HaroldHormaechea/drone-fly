@@ -35,9 +35,13 @@ def build_values_panel(model: M.DashboardModel) -> Panel:
     """Top-left grouped raw-value panel: TIME / TRAIN / ROLLOUT (three columns)."""
     cur, sched, _ = model.progress()
 
+    cur_steps, total_steps = model.steps_progress()
     time_col = Text()
     time_col.append("TIME\n", style="bold")
     time_col.append(f" iters   {cur}/{sched}\n")
+    # UC-32: cumulative env-step progress (SB3 num_timesteps across all envs / total_timesteps),
+    # with thousands separators for legibility. Cross-platform (shown on every OS).
+    time_col.append(f" steps   {cur_steps:,} / {total_steps:,}\n")
     time_col.append(f" elapsed {M.format_duration(model.elapsed_seconds)}\n")
     time_col.append(f" eta     {M.format_duration(model.eta_seconds())}\n")
     # UC-26 AC-11: resolved rollout parallelism (worker count + active backend), e.g.
@@ -140,7 +144,9 @@ def build_layout(model: M.DashboardModel, log_lines: list[str] | None = None) ->
         Layout(name="logs", ratio=3),
     )
     layout["left"].split_column(
-        Layout(build_values_panel(model), name="values", size=7),
+        # size=8: 6 TIME-column content lines (UC-32 added the steps line) + the panel's 2 border
+        # rows. Bumped from 7 so the extra steps line isn't clipped.
+        Layout(build_values_panel(model), name="values", size=8),
         Layout(build_trends_panel(model), name="trends", ratio=1),
     )
     layout["logs"].update(build_logs_panel(log_lines))

@@ -98,6 +98,7 @@ class TuiCallback(BaseCallback):
                 elapsed_seconds=elapsed,
                 rollout_steps=current,
                 rollout_target=target,
+                current_steps=self.num_timesteps,
             )
         except Exception as exc:  # noqa: BLE001 - never crash training over the TUI
             logger.warning("TuiCallback heartbeat disabled after error: %s", exc)
@@ -137,6 +138,7 @@ class TuiCallback(BaseCallback):
                 value_loss=name_to_value.get(_VLOSS_KEY),
                 approx_kl=name_to_value.get(_KL_KEY),
                 explained_variance=name_to_value.get(_EV_KEY),
+                current_steps=self.num_timesteps,
             )
         except Exception as exc:  # noqa: BLE001 - never crash training over the TUI
             logger.warning("TuiCallback disabled after error: %s", exc)

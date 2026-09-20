@@ -33,6 +33,7 @@ from drone_fly.connectome.prune import DEFAULT_PRUNE_K, prune_to_subcircuit
 from drone_fly.controller.sb3 import ConnectomeFeaturesExtractor
 from drone_fly.env.config import EnvConfig
 from drone_fly.env.racing_env import build_vec_env, resolve_vec_env
+from drone_fly.env.worker_output import WORKER_LOG_SUBDIR
 from drone_fly.train.config import TrainConfig
 from drone_fly.train.device import resolve_device
 
@@ -402,6 +403,12 @@ def train(
         resolved_adapter,
     )
 
+    # UC-32: when the TUI is active, each spawned worker redirects its native stdout/stderr to a
+    # per-worker FILE under <logs_dir>/workers/ (Windows-safe, inspectable) instead of the
+    # pre-UC-32 devnull dup2 that killed Windows spawn workers. None when the TUI is off, so the
+    # --no-tui / non-TTY path stays byte-identical (no redirect at all, AC-10).
+    worker_log_dir = os.path.join(cfg.logs_dir, WORKER_LOG_SUBDIR) if tui_enabled else None
+
     venv = build_vec_env(
         config=env_config,
         adapter=resolved_adapter,
@@ -411,6 +418,7 @@ def train(
         vecnormalize_path=stats_path,
         vec_backend=vec_backend,
         suppress_worker_output=tui_enabled,
+        worker_log_dir=worker_log_dir,
     )
 
     # UC-15 fail-loud env↔schema width coupling: the env's observation width MUST equal the
@@ -461,6 +469,11 @@ def train(
             scheduled_iters=scheduled_iters,
             n_envs=resolved_n_envs,
             backend=vec_backend,
+            # UC-32: total env-step budget for the TIME panel's steps line (cross-platform).
+            total_steps=steps,
+            # UC-32: the dashboard writes pybullet's native banner here (<logs_dir>/native.log)
+            # on Windows so it no longer pollutes the screen (AC-7).
+            logs_dir=cfg.logs_dir,
         )
 
     checkpoint_cb = CheckpointCallback(
@@ -536,8 +549,18 @@ def train(
     # The capacity-guard prompt (if any) already ran above, BEFORE fd capture engages, so the
     # live session wraps only ``model.learn`` — no conflict between the prompt and the screen.
     if dashboard is not None:
-        with dashboard.live_session():
-            model.learn(**learn_kwargs)
+        # UC-32 (AC-8): on an incapable Windows terminal the dashboard fails fast with an
+        # actionable TuiUnsupportedError before engaging any alt-buffer. Close the vec env so
+        # spawned workers don't leak, then re-raise for the user to act on. No-op off Windows
+        # (the capability gate never raises there).
+        from drone_fly.train.tui.capability import TuiUnsupportedError
+
+        try:
+            with dashboard.live_session():
+                model.learn(**learn_kwargs)
+        except TuiUnsupportedError:
+            venv.close()
+            raise
     else:
         model.learn(**learn_kwargs)
 

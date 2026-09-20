@@ -314,8 +314,14 @@ class DashboardModel:
         flat_tol: float = DEFAULT_FLAT_TOL,
         n_envs: int = 1,
         backend: str = "dummy",
+        total_steps: int = 0,
     ) -> None:
         self.scheduled_iters = int(scheduled_iters or 0)
+        # UC-32: total configured env-step budget (``total_timesteps``, static per run) and the
+        # live cumulative step count (SB3 ``num_timesteps``, across all envs) for the TIME panel's
+        # ``steps current/total`` line. Cross-platform (not platform-guarded).
+        self.total_steps = int(total_steps or 0)
+        self.current_steps = 0
         # UC-26 AC-11: the RESOLVED rollout parallelism (worker count + active vec-env backend),
         # shown static in the values panel so the operator sees how many cores are in use.
         self.n_envs = int(n_envs)
@@ -356,6 +362,7 @@ class DashboardModel:
         value_loss=None,
         approx_kl=None,
         explained_variance=None,
+        current_steps=None,
     ) -> None:
         """Ingest one rollout snapshot. Every value is None/nan-tolerant (see module docstring).
 
@@ -366,6 +373,8 @@ class DashboardModel:
             self.current_iter = int(n_updates)
         if elapsed_seconds is not None:
             self.elapsed_seconds = float(elapsed_seconds)
+        if current_steps is not None:
+            self.current_steps = int(current_steps)
 
         el = _finite(entropy_loss)
         entropy = -el if el is not None else None
@@ -387,18 +396,20 @@ class DashboardModel:
         self.raw["value_loss"] = _finite(value_loss)
         self.raw["explained_variance"] = _finite(explained_variance)
 
-    def tick(self, *, elapsed_seconds, rollout_steps, rollout_target) -> None:
+    def tick(self, *, elapsed_seconds, rollout_steps, rollout_target, current_steps=None) -> None:
         """Ingest one intra-rollout heartbeat (UC-30): live elapsed + within-rollout progress.
 
         Deliberately touches **neither** ``history`` **nor** ``raw`` — unlike :meth:`update`,
         whose unconditional ``raw[...]`` assignments would blank the six values-panel entries to
-        the placeholder after the first rollout. It only refreshes the live clock and the
-        collecting-progress counters, so the last rollout-end snapshot persists through the next
-        collection (AC-4).
+        the placeholder after the first rollout. It only refreshes the live clock, the
+        collecting-progress counters, and the cumulative step count (UC-32), so the last
+        rollout-end snapshot persists through the next collection (AC-4).
         """
         self.elapsed_seconds = float(elapsed_seconds)
         self.rollout_steps = int(rollout_steps)
         self.rollout_target = int(rollout_target)
+        if current_steps is not None:
+            self.current_steps = int(current_steps)
 
     def tick_clock(self, elapsed_seconds) -> None:
         """Advance ONLY the live elapsed clock (and hence ETA) — no counters, no history (UC-32).
@@ -446,6 +457,10 @@ class DashboardModel:
             self.scheduled_iters,
             progress_fraction(self.current_iter, self.scheduled_iters),
         )
+
+    def steps_progress(self) -> tuple[int, int]:
+        """``(current_steps, total_steps)`` for the TIME panel's steps line (UC-32)."""
+        return (self.current_steps, self.total_steps)
 
     def rollout_progress(self) -> tuple[int, int, float]:
         """``(rollout_steps, rollout_target, fraction)`` for the UC-30 collecting bar.
