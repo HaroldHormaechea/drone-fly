@@ -291,6 +291,50 @@ golden fixtures); set `early_termination.enabled = false` to restore the legacy 
 All five thresholds (`floor_epsilon`, `stuck_window`, `grounded_window`, `progress_epsilon`,
 `rest_speed_epsilon`) are documented, tunable constants.
 
+### Floor start & airborne survival reward (UC-37)
+Early training used to "fall like a rock": the drone spawned **mid-air** (`start_z_range=(0.7,1.5)`)
+and, with the policy's near-zero initial throttle, simply dropped from height, while the reward had
+**no dense survival term** — so every episode ended at the −100 crash cliff, returns were flat
+(~−101), and there was no gradient toward staying up. The task itself is easily solvable (the sim's
+thrust-to-weight ratio is 2, so 50 % throttle hovers); the failure was a **bootstrap trap**, not a
+physics limit. UC-37 fixes it with two paired changes:
+
+- **Floor start (`EnvConfig.floor_start`, default `True`).** On reset the drone now spawns **resting
+  on the floor** (`z ≈ course.floor_z`, ~zero velocity), the way a real drone begins — instead of
+  the artificial mid-air start. The override is applied at the env layer *after* course sampling, so
+  the RNG stream and determinism are untouched. Set `floor_start: false` to restore the legacy
+  mid-air start. There is deliberately **no** hover-bias on the action: the neutral (zero) action
+  still maps to ~zero throttle, so the policy must *learn* to command throttle and take off — a
+  floor-start drone under zero action stays on the floor (it does not spontaneously lift).
+- **Airborne survival reward (`RewardConfig.airborne_bonus`, default `0.1`).** A small per-step reward
+  is paid **only while the drone is airborne** (above the floor band, `floor_z + floor_epsilon`) and
+  is exactly **zero on/at the floor** — so the only path to reward is to throttle up and stay up. It
+  is sized against two bounds: the net per-airborne-step reward (`airborne_bonus − time_penalty` =
+  0.10 − 0.05 = **+0.05**) is strictly positive (a gradient toward takeoff), and the max survival
+  reward over the default 3-gate episode (budget 800 steps → 0.1 × 800 = **80**) is below the
+  `completion_bonus` (**100**), so loitering scores strictly worse than completing the course.
+
+Two supporting rules keep this consistent with the earlier detectors: (1) a **pre-takeoff floor
+contact is not a crash** — a grounded drone at zero throttle would otherwise insta-crash at step 1 —
+suppressed only before the first takeoff and only within the floor band; and (2) the **grounded
+early-termination detector arms only after the first takeoff** (a floor-start drone that never lifts
+off is bounded instead by the no-progress/stuck detector and the episode timeout, so episodes never
+run unbounded), while a drone that takes off and then floors is cut exactly as under UC-36. Any
+episode that **starts airborne** (above the floor band — e.g. the scripted UC-25/UC-36 fixtures) is
+considered "taken off" at step 0, so grounded-termination arms immediately and those paths stay
+byte-for-byte unchanged.
+
+**Honest large-N caveat.** The survival-vs-completion bound above is anchored to the **default**
+800-step budget. For large randomized courses (N up to ~10, step budget up to ~2200) the *theoretical*
+max survival reward (0.1 × 2200 = 220) exceeds `completion_bonus`; loiter-domination there does **not**
+rest on the per-step arithmetic but on the no-progress/stuck detector (`stuck_window`, 100 steps)
+cutting a non-progressing hover, plus the forgone per-gate and completion bonuses.
+
+This UC intentionally changes default training dynamics, so the committed seed-42 golden rollout
+(`tests/data/uc08_baseline_rollout.npz`, regenerated via `scripts/regen_uc08_baseline.py`) legitimately
+reflects the new floor-start default; airborne-start reward/termination paths and determinism are
+preserved.
+
 ### Visualization & recording
 Enable recording in a train/evaluate config with `record: true` (tune cadence via `record_every`);
 frames land in that run's `training/<name>/recordings/`. Open `viz/viewer.html` in a browser

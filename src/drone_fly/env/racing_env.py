@@ -162,6 +162,11 @@ class RaceEnv(gym.Env):
         self._best_dist = float("inf")
         self._prev_battery = 1.0
         self._prev_integrity = 1.0
+        # UC-37: per-episode takeoff latch. Armed once the drone first leaves the floor band; gates
+        # the grounded detector (which must NOT fire before takeoff, AC3) and, for an airborne-start
+        # episode, is True at step 0 so behaviour stays byte-identical to UC-25/36 (AC4). Set
+        # properly from the spawn state in reset(); declared here for the reset()-skipped path.
+        self._took_off = False
 
     @property
     def obs_width(self) -> int:
@@ -241,22 +246,47 @@ class RaceEnv(gym.Env):
         else:
             self._course = self.config.course
 
+        # UC-37 floor start (AC1): override the spawn z to rest on the floor. Applied AFTER course
+        # sampling — on the fixed path it never touches the RNG, and on the sampled path the course
+        # (incl. its solvability check) is already drawn, so determinism is intact (AC8). We keep
+        # the sampled/fixed (x, y) and drop z to ``floor_z`` (the SimpleDroneAdapter's true ground-
+        # rest height; it clamps to floor_z). NOTE: a floored start intentionally violates
+        # ``is_course_solvable``'s ``floor_z + z_margin < start_z`` — takeoff is the learned
+        # behaviour — so the floored course is deliberately NOT re-validated.
+        if self.config.floor_start:
+            sx, sy, _sz = self._course.start_position
+            self._course = dataclasses.replace(
+                self._course, start_position=(sx, sy, self._course.floor_z)
+            )
+
         if rcfg.enable_dynamics:
             dynamics = sample_dynamics(self.np_random, rcfg, DynamicsParams())
         else:
             dynamics = None
 
-        # Apply the per-episode spawn / dynamics before the adapter reset. When BOTH axes
-        # are off we skip the call entirely (not even a no-op reconfigure) so the fixed
-        # path is byte-identical and never depends on the adapter implementing the hook —
-        # a scripted test-double adapter without reconfigure() still works unchanged (AC7).
-        if rcfg.enable_course or rcfg.enable_dynamics:
+        # Apply the per-episode spawn / dynamics before the adapter reset. When every axis is off
+        # we skip the call entirely (not even a no-op reconfigure) so the fixed path is byte-
+        # identical and never depends on the adapter implementing the hook — a scripted test-double
+        # adapter without reconfigure() still works unchanged (AC7). UC-37: ``floor_start`` also
+        # requires a reconfigure so the floored spawn z reaches the adapter even on the
+        # randomization-off / seed-42 path; the ``hasattr`` guard stays load-bearing (the scripted
+        # ``_ScriptedAdapter`` has no ``reconfigure``).
+        need_reconfigure = rcfg.enable_course or rcfg.enable_dynamics or self.config.floor_start
+        if need_reconfigure and hasattr(self.adapter, "reconfigure"):
             self.adapter.reconfigure(
-                start=self._course.start if rcfg.enable_course else None,
+                start=(
+                    self._course.start if (rcfg.enable_course or self.config.floor_start) else None
+                ),
                 dynamics=dynamics,
             )
 
         state = self.adapter.reset(seed=seed)
+        # UC-37: arm the takeoff latch from the SPAWN state. A floor start (z ≈ floor_z) is NOT
+        # taken off → the grounded detector stays disarmed until the drone first lifts (AC3). An
+        # airborne start (z above the floor band, e.g. the scripted/legacy z=1.0 fixtures) is
+        # considered taken off at step 0 → grounded-termination arms immediately and behaves byte-
+        # for-byte as before this UC (AC4). The threshold reuses ``floor_z + floor_epsilon``.
+        self._took_off = bool(state.position[2] > self._course.floor_z + self._et_floor_epsilon)
         self._gates_passed = 0
         self._done = False
         self._prev_pos = state.position.copy()
@@ -323,6 +353,12 @@ class RaceEnv(gym.Env):
         state = self.adapter.step(np.asarray(action, dtype=np.float64))
         self._step_count += 1
 
+        # UC-37: is the drone airborne (above the floor band) this step? This gates the survival
+        # reward (AC5) and latches the per-episode takeoff flag (AC3). Threshold reuses
+        # ``floor_z + floor_epsilon`` — the same band the grounded detector uses.
+        airborne = bool(state.position[2] > course.floor_z + self._et_floor_epsilon)
+        self._took_off = self._took_off or airborne
+
         self._gates_passed, self._done, event = advance(
             course, self._gates_passed, self._done, self._prev_pos, state.position
         )
@@ -363,6 +399,18 @@ class RaceEnv(gym.Env):
         # A crash is a collision that is NOT a controlled dock. This is the only signal that
         # feeds termination and the collision penalty now (UC-16): a dock keeps the episode alive.
         crash = bool(state.collided and not docked)
+        # UC-37 (AC2): before the drone has EVER taken off, a floor contact while resting in the
+        # floor band is NOT a crash — a floor-start drone sitting on the ground at zero throttle
+        # would otherwise insta-crash at step 1 (``SimpleDroneAdapter`` sets ``collided`` on floor
+        # contact). Suppress it only pre-takeoff and only within the floor band; this is SEPARATE
+        # from the UC-25/36 grounded detector, and it is placed BEFORE the early-termination block
+        # below so a legitimate grounded/stuck cut can still set ``crash=True`` for a never-flyer.
+        if (
+            not self._took_off
+            and state.collided
+            and state.position[2] <= course.floor_z + self._et_floor_epsilon
+        ):
+            crash = False
         # Single authoritative docked state (no vestigial copy): LEVEL/every-step so it persists
         # across dwell (each docked step re-satisfies the rule) and clears on takeoff (collided
         # goes False ⇒ docked False), giving repeatable dock↔fly within one episode (AC4/AC5).
@@ -441,7 +489,12 @@ class RaceEnv(gym.Env):
                 and (floor_z <= state.position[2] <= floor_z + self._et_floor_epsilon)
                 and (float(np.linalg.norm(state.velocity)) <= self._et_rest_speed_epsilon)
             )
-            if grounded:
+            # UC-37 (AC3): the grounded detector ARMS only after the first takeoff. A floor-start
+            # drone that has never lifted off is NOT cut by this detector (it is instead bounded by
+            # the no-progress/stuck detector below and the episode timeout, AC7); once it takes off,
+            # dropping back and resting fires the grounded cut exactly as UC-36. The no-progress
+            # (stuck) detector is deliberately left UNGATED so a never-flyer is still bounded.
+            if grounded and self._took_off:
                 self._grounded_counter += 1
             else:
                 self._grounded_counter = 0
@@ -494,6 +547,9 @@ class RaceEnv(gym.Env):
             cfg=self.config.reward,
             num_gates=course.num_gates,
             obstacle_contact=obstacle_contact,
+            # UC-37 (AC5): pay the survival bonus only while airborne (above the floor band); zero
+            # on/at the floor, so sitting on the ground earns nothing.
+            airborne=airborne,
         )
 
         # UC-16: a dock does NOT terminate — only a valid completion or a (non-dock) crash does.

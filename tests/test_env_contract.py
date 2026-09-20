@@ -9,6 +9,7 @@ fly the course.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -414,17 +415,28 @@ def test_course_varies_across_resets_when_enabled() -> None:
 
 
 def test_course_fixed_across_resets_when_disabled() -> None:
-    """With course randomization off, active_course stays the fixed config course (AC7)."""
+    """With course randomization off, active_course stays fixed across resets (AC7). UC-37: under
+    the floor-start default the fixed course's spawn z is lowered to the floor at the env layer, so
+    active_course is the config course with its start floored — identical on every reset."""
     env = make_env(EnvConfig(), adapter="simple")
+    # UC-37 floors the spawn z to floor_z (x, y preserved); everything else matches config.course.
+    cc = env.config.course
+    floored = dataclasses.replace(
+        cc, start_position=(cc.start_position[0], cc.start_position[1], cc.floor_z)
+    )
     env.reset(seed=0)
-    assert env.active_course == env.config.course
+    assert env.active_course == floored  # floored start, otherwise the fixed config course (AC1)
+    first = env.active_course
     env.reset()
-    assert env.active_course == env.config.course
+    assert env.active_course == first  # and it is stable across resets (AC7)
 
 
 # --- active_course property ---------------------------------------------------------
 def test_active_course_reflects_the_sampled_course() -> None:
-    cfg = EnvConfig(randomization=RandomizationConfig(enable_course=True))
+    # floor_start=False: this test's subject is the SAMPLER (it emits a solvable, mid-air-solvable
+    # course); the UC-37 floor-start override would deliberately floor the start z and violate
+    # is_course_solvable, which is orthogonal to what this asserts. Keep the legacy mid-air start.
+    cfg = EnvConfig(randomization=RandomizationConfig(enable_course=True), floor_start=False)
     env = make_env(cfg, adapter="simple")
     env.reset(seed=3)
     ac = env.active_course
@@ -436,8 +448,14 @@ def test_active_course_reflects_the_sampled_course() -> None:
 
 # --- AC3 wiring: no sampled course collides at step 0 -------------------------------
 def test_no_sampled_course_collides_at_step_zero() -> None:
-    """Every enabled-course reset spawns strictly inside the arena — no step-0 collision."""
-    cfg = EnvConfig(randomization=RandomizationConfig(enable_course=True))
+    """Every enabled-course reset spawns strictly inside the arena — no step-0 collision.
+
+    floor_start=False: this validates the SAMPLER's mid-air, solvable starts (``floor_z + z_margin <
+    sz``). The UC-37 floor-start override deliberately floors the spawn z (which by design violates
+    that inequality — takeoff is the learned behaviour), so it is disabled here to keep the sampler
+    contract under test.
+    """
+    cfg = EnvConfig(randomization=RandomizationConfig(enable_course=True), floor_start=False)
     rcfg = cfg.randomization
     env = make_env(cfg, adapter="simple")
     for i in range(200):
@@ -786,6 +804,14 @@ def test_docked_state_surfaced_via_info_only_observation_byte_identical() -> Non
     )
     obs_pad, _ = pad_env.reset()
     obs_bare, _ = bare_env.reset()
+    # UC-37: the scripted dock trajectory spawns just above the floor (z=0.02, inside the floor
+    # band) but MODELS a drone that is already in flight and descends to land on the pad. Arm the
+    # per-episode takeoff latch on both envs so the frame-1 floor contact on the NO-pad course is
+    # judged a crash exactly as before UC-37 — otherwise the new pre-takeoff floor-contact
+    # suppression (AC2) would treat the no-pad touchdown as a benign never-took-off floor rest and
+    # the dock-vs-crash divergence this test asserts would vanish. Set symmetrically → obs match.
+    pad_env._took_off = True
+    bare_env._took_off = True
     # Reset observation identical (no pad influence on the obs vector).
     assert obs_pad.shape == (OBS_DIM,)
     np.testing.assert_array_equal(obs_pad, obs_bare)
@@ -2190,3 +2216,137 @@ def test_uc36_short_grounded_window_preserves_baseline_byte_identity(connectome)
     assert short[4] == legacy[4]  # final RNG state
     # And it still matches the committed golden fixture exactly.
     np.testing.assert_array_equal(short[0], golden["env_trace"])
+
+
+# ===========================================================================
+# UC-37 — floor start + airborne survival reward (AC1-AC4, AC8)
+# ===========================================================================
+# The floor-start default and the takeoff latch are exercised here end-to-end on the REAL
+# ``simple`` adapter (AC1/AC2/AC8) and with scripted trajectories for the arm-after-takeoff
+# grounded logic (AC3/AC4). AC5/AC6 (the survival-reward arithmetic) live in ``test_reward.py``;
+# the AC9 whole-suite triage (floor_start default flips every real-adapter reset) is reflected in
+# the per-test ``floor_start=False`` opt-outs above for the sampler/dynamics/dock/recording tests.
+
+
+def test_uc37_floor_start_reset_spawns_on_the_floor_at_rest() -> None:
+    """AC1: with the floor-start default the drone spawns resting ON the floor (z ≈ floor_z, well
+    below the legacy 0.7-1.5 m mid-air start) with ~zero initial vertical velocity."""
+    env = make_env(EnvConfig(), adapter="simple")  # floor_start defaults to True
+    env.reset(seed=0)
+    floor_z = env._course.floor_z
+    # Altitude at/near the floor band, not the old mid-air start.
+    assert env._prev_pos[2] == pytest.approx(floor_z, abs=env._et_floor_epsilon)
+    assert env._prev_pos[2] < 0.7, "the legacy mid-air (0.7-1.5 m) default is gone"
+    # Initial vertical velocity ≈ 0 — a real drone begins grounded, at rest.
+    assert abs(float(env.adapter._velocity[2])) < 1e-6
+    # A floor-start spawn has NOT taken off, so the grounded detector stays disarmed (AC3 spine).
+    assert env._took_off is False
+
+
+def test_uc37_zero_action_floor_drone_stays_grounded_and_uncrashed() -> None:
+    """AC2: under the neutral (zero) action a floor-start drone stays on the floor — it does not
+    spontaneously lift (no hover-bias) and, never having taken off, its floor contact is NOT a
+    crash, so the episode is not terminated within the stuck window; the policy must learn to
+    throttle up."""
+    env = make_env(EnvConfig(), adapter="simple")  # floor_start default True
+    env.reset(seed=0)
+    band = env._course.floor_z + env._et_floor_epsilon
+    zero = np.zeros(ACTION_DIM, dtype=np.float32)  # neutral action ⇒ zero throttle
+    for _ in range(40):  # well under the default stuck_window (100)
+        _obs, _r, terminated, truncated, info = env.step(zero)
+        assert not terminated, "a never-took-off floor drone must not be crash-terminated (AC2)"
+        assert not truncated
+        assert info["position"][2] <= band, (
+            "the drone stays on the floor; it never spontaneously lifts"
+        )
+        assert info["collided"] is False, (
+            "pre-takeoff floor contact is suppressed, not a crash (AC2)"
+        )
+    assert env._took_off is False  # zero throttle never lifts it off the floor band
+
+
+def test_uc37_never_took_off_floor_drone_is_not_grounded_cut_but_still_bounded() -> None:
+    """AC3/AC7: a floor-start drone that NEVER lifts off is not cut by the grounded detector (it
+    stays disarmed until the first takeoff); it is instead bounded by the no-progress/stuck
+    detector. With grounded_window(3) < stuck_window(4) a grounded cut would fire FIRST if it were
+    armed — because it is not, the cut is a 'stuck' cut, proving the arm-after-takeoff gate."""
+    positions = [(0.0, 0.0, 0.01)] * 12  # spawns in the floor band, zero velocity, never rises
+    env = _env_with(
+        _ScriptedAdapter(positions),
+        EnvConfig(early_termination=EarlyTerminationConfig(stuck_window=4, grounded_window=3)),
+    )
+    env.reset()
+    assert env._took_off is False
+    terminated = truncated = False
+    info: dict = {}
+    for _ in range(env._max_steps + 1):
+        _obs, _r, terminated, truncated, info = env.step(HOVER)
+        if terminated or truncated:
+            break
+    assert terminated is True and truncated is False  # bounded, never runs unbounded (AC7)
+    assert info["early_termination"] == "stuck", (
+        "a never-took-off drone is bounded by the stuck detector, never grounded-cut (AC3)"
+    )
+    assert env._grounded_counter == 0, "the grounded counter never armed pre-takeoff"
+
+
+def test_uc37_takeoff_then_floor_is_grounded_cut() -> None:
+    """AC3: once a drone HAS taken off (left the floor band), settling back onto the floor arms the
+    grounded detector exactly as under UC-36 — it is cut as a grounded crash."""
+    # spawn on the floor (not took off) → lift above the band (arms the latch) → settle back down.
+    positions = [(0.0, 0.0, 0.01), (0.0, 0.0, 1.0)] + [(0.0, 0.0, 0.01)] * 8
+    env = _env_with(
+        _ScriptedAdapter(positions),
+        EnvConfig(early_termination=EarlyTerminationConfig(stuck_window=100, grounded_window=3)),
+    )
+    env.reset()
+    assert env._took_off is False  # spawned in the floor band
+    terminated = truncated = False
+    info: dict = {}
+    for _ in range(env._max_steps + 1):
+        _obs, _r, terminated, truncated, info = env.step(HOVER)
+        if terminated or truncated:
+            break
+    assert terminated is True and truncated is False
+    assert info["early_termination"] == "grounded", (
+        "a drone that took off then floored is grounded-cut exactly as UC-36 (AC3)"
+    )
+    assert info["collided"] is True  # a grounded cut folds into crash accounting
+
+
+def test_uc37_airborne_start_is_taken_off_at_step_zero() -> None:
+    """AC4: an episode that starts ABOVE the floor band (the scripted/legacy z=1.0 fixtures) is
+    considered 'taken off' at step 0, so grounded-termination arms immediately and those paths stay
+    byte-for-byte as before UC-37. This is the latch mechanism the UC-25/36 fixtures rely on."""
+    env = _env_with(_ScriptedAdapter([(0.0, 0.0, 1.0)] * 6), EnvConfig())
+    env.reset()
+    assert env._took_off is True  # airborne spawn → armed at step 0 (AC4)
+
+
+def test_uc37_floor_start_is_deterministic_same_seed() -> None:
+    """AC8: floor start preserves determinism — same seed ⇒ identical reset obs AND identical
+    (obs, reward, terminated, truncated) streams over a fixed action sequence."""
+    rng = np.random.default_rng(7)
+    actions = [rng.uniform([0, -1, -1, -1], [1, 1, 1, 1]).astype(np.float32) for _ in range(40)]
+
+    def rollout():
+        env = make_env(EnvConfig(), adapter="simple")  # floor_start default True
+        obs, _ = env.reset(seed=11)
+        trace = [obs.copy()]
+        rews: list = []
+        terms: list = []
+        truncs: list = []
+        for a in actions:
+            obs, r, term, trunc, _info = env.step(a)
+            trace.append(obs.copy())
+            rews.append(r)
+            terms.append(term)
+            truncs.append(trunc)
+            if term or trunc:
+                break
+        return np.asarray(trace), rews, terms, truncs
+
+    a_trace, a_r, a_term, a_trunc = rollout()
+    b_trace, b_r, b_term, b_trunc = rollout()
+    np.testing.assert_array_equal(a_trace, b_trace)  # identical reset + trajectory obs
+    assert a_r == b_r and a_term == b_term and a_trunc == b_trunc

@@ -565,6 +565,22 @@ class RewardConfig:
     # normalised gate_bonus (severe) yet below the terminal collision_penalty, and it never
     # feeds ``terminated`` — the drone may recover aerially and still complete the course.
     obstacle_penalty: float = 50.0
+    # Per-step SURVIVAL reward paid ONLY while the drone is airborne (above the floor band),
+    # exactly zero on/at the floor (UC-37 AC5). Appended **last** (after ``obstacle_penalty``) so
+    # every positional ``RewardConfig`` call is unshifted. Sized against two bounds (AC-6):
+    #   (a) net per-airborne-step reward ``airborne_bonus − time_penalty`` = 0.10 − 0.05 = +0.05 is
+    #       strictly positive, so staying airborne beats sinking/crashing and there is a gradient
+    #       toward takeoff; AND
+    #   (b) the max survival reward accruable over the DEFAULT 3-gate episode (budget 800 steps =
+    #       max_steps 400 + steps_per_gate 200 × 2) is 0.10 × 800 = 80 < ``completion_bonus`` 100,
+    #       so a policy that merely loiters scores strictly below one that completes the course.
+    # HONEST large-N caveat: for large randomized courses (N up to ~10, budget up to ~2200 steps)
+    # the theoretical max survival (0.10 × 2200 = 220) exceeds ``completion_bonus``. Loiter-
+    # domination there does NOT rest on the per-step arithmetic; it rests on the no-progress /
+    # stuck detector (``EarlyTerminationConfig.stuck_window`` = 100 steps) cutting a non-
+    # progressing hover, plus the forgone per-gate and completion bonuses. The bound in (b) is
+    # anchored to the default 800-step budget.
+    airborne_bonus: float = 0.1
 
 
 @dataclass(frozen=True)
@@ -807,3 +823,11 @@ class EnvConfig:
     # which a flying or promptly-crashing episode never accumulates. No obs-schema / checkpoint
     # impact — it only affects the termination decision on genuinely grounded/stuck episodes.
     early_termination: EarlyTerminationConfig = field(default_factory=EarlyTerminationConfig)
+    # Floor start (UC-37 AC1). Appended **last** (after ``early_termination``) so every positional
+    # ``EnvConfig`` call is unshifted. When True (the new default), the drone spawns resting on the
+    # floor (``course.floor_z``) instead of the legacy mid-air 0.7–1.5 m start, matching a real
+    # drone that begins grounded — the intended default-dynamics change of this UC. The env applies
+    # the override at reset AFTER course sampling (so RNG/determinism are intact) and pairs it with
+    # the airborne-only survival reward so the policy must learn to throttle up and take off. Set
+    # False to restore the legacy mid-air start (airborne-start code paths stay byte-identical).
+    floor_start: bool = True
