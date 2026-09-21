@@ -252,9 +252,13 @@ def _rule_under_capacity_signature(
     Suppressed when entropy is falling or when success/reward is climbing (those mean the
     policy IS committing / learning, so it is not the stuck-undersized signature).
     """
-    ev_ok = _mean(signals.explained_variance) >= thresholds.ev_healthy or (
-        _rel_change(signals.explained_variance) > 0
-    )
+    # UC-40 (AC2): the critic counts as "healthy" ONLY when its ABSOLUTE explained_variance
+    # clears ev_healthy. The old OR-branch (``_rel_change(explained_variance) > 0``) forced
+    # ev_ok=True whenever EV merely rose, so at an absolute EV≈0.03 that is trending up the
+    # rule fired and claimed the critic was "high/rising" — false at 0.03. A merely-rising but
+    # still near-zero critic is NOT the K0 undersized-slice signature, so the trend-branch is
+    # dropped and only the absolute threshold decides critic health.
+    ev_ok = _mean(signals.explained_variance) >= thresholds.ev_healthy
     entropy_change = _rel_change(signals.entropy_std)
     entropy_flat = abs(entropy_change) <= thresholds.entropy_flat_tol
     entropy_falling = entropy_change < -thresholds.entropy_flat_tol
@@ -273,8 +277,9 @@ def _rule_under_capacity_signature(
     )
     text = (
         "Likely-undersized connectome slice (K0 signature): critic is healthy "
-        "(explained_variance high/rising) but the actor is not committing (action std flat "
-        "and high) and success_rate is pinned at ~0. The slice may lack the capacity to learn."
+        "(explained_variance at or above the healthy threshold in absolute terms) but the "
+        "actor is not committing (action std flat and high) and success_rate is pinned at ~0. "
+        "The slice may lack the capacity to learn."
     )
     return HealthReason("under_capacity_signature", text, status)
 

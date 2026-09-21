@@ -43,6 +43,14 @@ THROTTLE_INDEX = 0
 THROTTLE_RANGE = (0.0, 1.0)
 ATTITUDE_RANGE = (-1.0, 1.0)  # ROLL / PITCH / YAW
 
+#: Canonical hover throttle for the CTBR contract. A throttle of 0.5 is the exact hover
+#: point in both adapters: the simple point-mass model sizes ``BASE_MAX_THRUST = 2·m·g`` so
+#: ``throttle 0.5 -> m·g`` (:data:`drone_fly.adapter.simple._WARMUP_ACTION` derives from this),
+#: and the pybullet adapter maps ``throttle 0.5 -> hover_rpm``. Kept here as the single source
+#: of truth so training-time policy initialization (UC-40 hover bias) can center the throttle
+#: mean on hover without hardcoding a bare literal that could silently desync from the dynamics.
+HOVER_THROTTLE = 0.5
+
 
 def sensory_neuron_indices(n_neurons: int) -> np.ndarray:
     """Return the ``OBS_DIM`` neuron indices the observation is scattered into.

@@ -49,3 +49,4 @@ Statuses:
 | 37 | [use-cases/37-floor-start-and-survival-reward.md](use-cases/37-floor-start-and-survival-reward.md) | Floor start + airborne survival reward (learn to take off and stay up) | done | 2026-09-20 |
 | 38 | [use-cases/38-decouple-early-term-from-crash-penalty.md](use-cases/38-decouple-early-term-from-crash-penalty.md) | Decouple no-progress/timeout early-termination from the crash penalty | done | 2026-09-20 |
 | 39 | [use-cases/39-takeoff-bootstrap-crash-relief-and-climb-reward.md](use-cases/39-takeoff-bootstrap-crash-relief-and-climb-reward.md) | Takeoff bootstrap — relieve the crash cliff + dense upward-progress reward | done | 2026-09-20 |
+| 40 | [use-cases/40-diagnose-k0-actor-no-commit.md](use-cases/40-diagnose-k0-actor-no-commit.md) | Diagnose why the actor won't commit before accepting the K0 "undersized slice" verdict | in-progress | 2026-09-21 |
