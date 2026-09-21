@@ -51,4 +51,4 @@ Statuses:
 | 39 | [use-cases/39-takeoff-bootstrap-crash-relief-and-climb-reward.md](use-cases/39-takeoff-bootstrap-crash-relief-and-climb-reward.md) | Takeoff bootstrap — relieve the crash cliff + dense upward-progress reward | done | 2026-09-20 |
 | 40 | [use-cases/40-diagnose-k0-actor-no-commit.md](use-cases/40-diagnose-k0-actor-no-commit.md) | Diagnose why the actor won't commit before accepting the K0 "undersized slice" verdict | done | 2026-09-21 |
 | 41 | [use-cases/41-reward-stall-success-gradient.md](use-cases/41-reward-stall-success-gradient.md) | Give the now-committing actor a real learning gradient toward success (reward stall) | done | 2026-09-21 |
-| 42 | [use-cases/42-strengthen-takeoff-climb-reward.md](use-cases/42-strengthen-takeoff-climb-reward.md) | Strengthen the climb/airborne reward so the drone leaves the floor (takeoff gradient) | in-progress | 2026-09-21 |
+| 42 | [use-cases/42-strengthen-takeoff-climb-reward.md](use-cases/42-strengthen-takeoff-climb-reward.md) | Strengthen the climb/airborne reward so the drone leaves the floor (takeoff gradient) | done | 2026-09-21 |
