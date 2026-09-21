@@ -72,8 +72,9 @@ def test_uc42_net_hold_at_target_rose_from_old_margin() -> None:
     global rescale (which VecNormalize would erase), because the penalty/progress/gate knobs are
     unchanged (proven in test_uc42_unchanged_knobs_prove_relative_restructuring)."""
     net_hold_target = _net_hold(CFG.climb_target_height)
-    # Illustrative absolute value of the shipped constants: -0.05 + 0.20 - 0.02 = +0.13.
-    assert net_hold_target == pytest.approx(0.13, abs=1e-9)
+    # Illustrative absolute value of the shipped constants: -0.05 + 0.20 - 0.02 - 0.005 = +0.125
+    # (UC-43 added the ground-break constant above-threshold leak -(1-gamma)*w = -0.005/step).
+    assert net_hold_target == pytest.approx(0.125, abs=1e-9)
     # Load-bearing RELATIVE assertions:
     assert net_hold_target >= 0.12, "net-hold at target must clear ~+0.12/step"
     assert net_hold_target > OLD_NET_HOLD_AT_TARGET, (
@@ -88,7 +89,7 @@ def test_uc42_hold_differential_over_floor_is_large_and_positive() -> None:
     and holding altitude is strictly, and substantially, better than resting on the ground."""
     differential = _net_hold(CFG.climb_target_height) - SIT_ON_FLOOR
     assert differential > 0
-    assert differential == pytest.approx(0.18, abs=1e-9)  # 0.13 - (-0.05)
+    assert differential == pytest.approx(0.175, abs=1e-9)  # 0.125 - (-0.05) (UC-43: -0.005 leak)
 
 
 # --- (b) net-hold is monotone increasing to target, flat above, ~0 at the floor -------------
@@ -105,7 +106,7 @@ def test_uc42_net_hold_is_monotonically_increasing_up_to_target() -> None:
         assert higher > lower, "net-hold must strictly increase with altitude up to the target"
     # Endpoints: at the floor it equals sitting (no airborne credit); at the target it is the max.
     assert holds[0] == pytest.approx(SIT_ON_FLOOR)
-    assert holds[-1] == pytest.approx(0.13, abs=1e-9)
+    assert holds[-1] == pytest.approx(0.125, abs=1e-9)  # UC-43: 0.13 - the 0.005 ground-break leak
 
 
 def test_uc42_net_hold_is_flat_above_target_no_ceiling_seeking() -> None:
@@ -120,19 +121,22 @@ def test_uc42_net_hold_is_flat_above_target_no_ceiling_seeking() -> None:
 
 def test_uc42_net_hold_zero_floor_credit_and_positive_break_even() -> None:
     """AC3 (b): at the floor an airborne step earns ~no credit over sitting (the graded payout -> 0
-    as h -> 0). The differential over sitting is ``0.18*h`` — strictly positive for ANY positive
-    altitude — so there is no "hover just off the floor" local optimum: climbing always pays more
-    than staying lower. Separately, the ABSOLUTE per-step reward crosses zero at the break-even
-    altitude h ~= time_penalty / 0.18 ~= 0.278 m (below it the step is still net-negative in
-    absolute terms; above it the drone banks positive reward every step it holds)."""
+    as h -> 0). Above the airborne threshold the differential over sitting is ``0.18*h - 0.005``
+    (UC-43's ground-break term adds a constant -0.005/step leak above threshold) — still strictly
+    positive for any h above ~0.028 m and monotone, so there is no "hover just off the floor" local
+    optimum: climbing always pays more than staying lower. Separately, the ABSOLUTE per-step reward
+    crosses zero at the break-even altitude h ~= 0.055 / 0.18 ~= 0.306 m (raised from UC-42's ~0.278
+    by the -0.005 leak): below it the step is still net-negative in absolute terms; above it the
+    drone banks positive reward every step it holds."""
     # ~0 credit over sitting at the floor; strictly-positive, altitude-proportional pull above it.
     assert _net_hold(0.0) == pytest.approx(SIT_ON_FLOOR)
-    assert _net_hold(0.1) - SIT_ON_FLOOR == pytest.approx(0.18 * 0.1, abs=1e-9)
+    # h=0.1 is above the 0.05 threshold, so the differential is 0.18*h minus the 0.005 leak.
+    assert _net_hold(0.1) - SIT_ON_FLOOR == pytest.approx(0.18 * 0.1 - 0.005, abs=1e-9)
     assert _net_hold(0.1) > SIT_ON_FLOOR  # any positive altitude beats sitting (monotone pull)
-    # Absolute break-even of the per-step reward at h ~= 0.278 m.
+    # Absolute break-even of the per-step reward at h ~= 0.306 m (0.055 / 0.18, UC-43-shifted).
     assert _net_hold(0.2) < 0.0  # below break-even: absolute per-step reward still negative
     assert _net_hold(0.4) > 0.0  # above break-even: absolute per-step reward positive
-    assert _net_hold(0.05 / 0.18) == pytest.approx(0.0, abs=2e-3)
+    assert _net_hold(0.055 / 0.18) == pytest.approx(0.0, abs=2e-3)
 
 
 # --- (c) the unchanged knobs prove a RELATIVE restructuring, not a global rescale ------------
@@ -153,6 +157,10 @@ def test_uc42_unchanged_knobs_prove_relative_restructuring() -> None:
     # The two DELIBERATE changes, pinned so a silent drift is caught.
     assert CFG.airborne_bonus == pytest.approx(0.2), "airborne_bonus raised 0.1 -> 0.2 (UC-42)"
     assert CFG.completion_bonus == pytest.approx(200.0), "completion_bonus raised 100->200 (UC-42)"
+    # UC-43 added the two ground-break knobs (the ONLY new reward config; everything else above is
+    # byte-identical to UC-42), pinned here so a silent drift is caught.
+    assert CFG.ground_break_weight == pytest.approx(0.5), "ground_break_weight added (UC-43)"
+    assert CFG.ground_break_height == pytest.approx(0.05), "ground_break_height added (UC-43)"
 
 
 # --- invariant re-proofs (UC-37/38/39 must all still hold after the restructuring) ----------

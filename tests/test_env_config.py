@@ -175,20 +175,24 @@ def test_env_config_floor_start_is_last_field() -> None:
 
 
 def test_reward_config_field_order() -> None:
-    """UC-39 (was UC-37 ``..._airborne_bonus_is_last_field``): the three climb fields are appended
-    **last**, in order, AFTER ``airborne_bonus`` — so every pre-UC-39 positional ``RewardConfig``
-    call (which never passed the climb fields) stays unshifted. The tail order is pinned exactly:
+    """UC-43 (extends UC-39/UC-37): the two ground-break fields are appended **last**, in order,
+    AFTER the three climb fields — so every pre-UC-43 positional ``RewardConfig`` call (which never
+    passed the ground-break fields) stays unshifted. The tail order is pinned exactly:
     ``obstacle_penalty`` → ``airborne_bonus`` → ``climb_weight`` → ``climb_target_height`` →
-    ``climb_gamma`` (last)."""
+    ``climb_gamma`` → ``ground_break_weight`` → ``ground_break_height`` (last)."""
     fields = [f.name for f in dataclasses.fields(RewardConfig)]
-    assert fields[-1] == "climb_gamma"
-    assert fields[-4:] == [
+    assert fields[-1] == "ground_break_height"
+    assert fields[-6:] == [
         "airborne_bonus",
         "climb_weight",
         "climb_target_height",
         "climb_gamma",
+        "ground_break_weight",
+        "ground_break_height",
     ]
-    # The UC-37 tail invariant still holds one slot back (obstacle_penalty → airborne_bonus).
+    # The UC-39 tail invariant still holds (climb_gamma immediately precedes the ground-break pair).
+    assert fields.index("climb_gamma") == fields.index("ground_break_weight") - 1
+    # The UC-37 tail invariant still holds further back (obstacle_penalty → airborne_bonus).
     assert fields.index("obstacle_penalty") == fields.index("airborne_bonus") - 1
 
 
