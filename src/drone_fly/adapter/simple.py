@@ -37,6 +37,7 @@ from collections import deque
 import numpy as np
 
 from drone_fly.adapter.base import DroneAdapter, DroneState, sanitize_action
+from drone_fly.controller.encoding import HOVER_THROTTLE
 
 # --- Base dynamics constants (documented) ----------------------------------------------
 # These are the *defaults*: with no reconfigure (UC-08 randomization off) the instance
@@ -56,8 +57,10 @@ MAX_BODY_RATE = BASE_MAX_BODY_RATE
 LINEAR_DRAG = BASE_LINEAR_DRAG
 
 #: Warm-up action applied while the control-latency buffer fills (exact hover at base
-#: dynamics: throttle 0.5 -> 0.5 * 19.62 / 1.0 == 9.81 == g, level attitude).
-_WARMUP_ACTION = np.array([0.5, 0.0, 0.0, 0.0], dtype=np.float64)
+#: dynamics: throttle ``HOVER_THROTTLE`` -> 0.5 * 19.62 / 1.0 == 9.81 == g, level attitude).
+#: The throttle channel is tied to the canonical :data:`~drone_fly.controller.encoding.
+#: HOVER_THROTTLE` so it cannot silently desync from the training-time hover-bias init (UC-40).
+_WARMUP_ACTION = np.array([HOVER_THROTTLE, 0.0, 0.0, 0.0], dtype=np.float64)
 
 
 class SimpleDroneAdapter(DroneAdapter):

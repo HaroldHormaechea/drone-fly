@@ -57,7 +57,13 @@ class TrainConfig:
     # ent_coef=0 the policy's entropy/std collapse before it discovers throttle-up, so a small
     # positive coefficient keeps the action distribution exploring long enough to find takeoff
     # (paired with the UC-38 decoupling that restores the +airborne_bonus survival gradient).
-    ent_coef: float = 0.01
+    # UC-40 (AC8): lowered 0.01 -> 0.001, still STRICTLY POSITIVE. Once the UC-40 hover-bias
+    # init supplies a real takeoff gradient (the policy no longer starts pinned below the hover
+    # throttle), the entropy bonus no longer needs to be the dominant surviving gradient; a
+    # smaller-but-positive coefficient lets the action std COMMIT (trend down) instead of staying
+    # flat-high, while never returning to the ent_coef=0 std-collapse that UC-38 fixed. SB3 uses
+    # ent_coef raw (not a schedule), so this is the effective coefficient for the whole run.
+    ent_coef: float = 0.001
 
     # UC-39 — training-time collision-penalty CURRICULUM (crash-cliff relief, default on). The
     # genuine floor/ceiling/OOB collision penalty is ramped LINEARLY from

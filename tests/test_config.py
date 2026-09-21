@@ -408,13 +408,16 @@ def test_prune_trained_invalid_name_still_validated() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# UC-38 AC8 — training entropy-coefficient default bump (0.0 → 0.01)
+# UC-40 AC8 — training entropy-coefficient default lowered (0.01 → 0.001)
 # --------------------------------------------------------------------------- #
-def test_uc38_train_config_ent_coef_default_is_positive_exploration_bump() -> None:
-    """UC-38 AC8: the PPO entropy-coefficient default is bumped from 0.0 to 0.01 to sustain
-    exploration long enough for the policy to discover takeoff (with ent_coef=0 the action
-    distribution collapses before throttle-up is found). The default must be strictly > 0."""
+def test_uc40_train_config_ent_coef_default_is_lowered_but_strictly_positive() -> None:
+    """UC-40 AC8: the PPO entropy-coefficient default is lowered from the UC-38 value 0.01 to
+    0.001 — still STRICTLY POSITIVE. Once the UC-40 hover-bias init supplies a real takeoff
+    gradient, the entropy bonus no longer has to be the dominant surviving gradient, so a
+    smaller-but-positive coefficient lets the action std commit (trend down) instead of staying
+    flat-high. It must NOT drop to 0.0: UC-38 proved that at ent_coef=0 the action distribution
+    collapses before takeoff is discovered, so the strictly-positive floor is preserved (AC8)."""
     from drone_fly.train.config import TrainConfig
 
-    assert TrainConfig().ent_coef == 0.01, "ent_coef default is the UC-38 exploration bump"
+    assert TrainConfig().ent_coef == 0.001, "ent_coef default is the UC-40 lowered value"
     assert TrainConfig().ent_coef > 0.0, "AC8 requires a strictly positive default"
