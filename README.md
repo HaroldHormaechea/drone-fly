@@ -311,13 +311,16 @@ physics limit. UC-37 fixes it with two paired changes:
   mid-air start. There is deliberately **no** hover-bias on the action: the neutral (zero) action
   still maps to ~zero throttle, so the policy must *learn* to command throttle and take off — a
   floor-start drone under zero action stays on the floor (it does not spontaneously lift).
-- **Airborne survival reward (`RewardConfig.airborne_bonus`, default `0.1`).** A small per-step reward
+- **Airborne survival reward (`RewardConfig.airborne_bonus`, default `0.2`).** A small per-step reward
   is paid **only while the drone is airborne** (above the floor band, `floor_z + floor_epsilon`) and
-  is exactly **zero on/at the floor** — so the only path to reward is to throttle up and stay up. It
-  is sized against two bounds: the net per-airborne-step reward (`airborne_bonus − time_penalty` =
-  0.10 − 0.05 = **+0.05**) is strictly positive (a gradient toward takeoff), and the max survival
-  reward over the default 3-gate episode (budget 800 steps → 0.1 × 800 = **80**) is below the
-  `completion_bonus` (**100**), so loitering scores strictly worse than completing the course.
+  is exactly **zero on/at the floor** — so the only path to reward is to throttle up and stay up. Since
+  UC-42 it is **altitude-graded** (see the [UC-42 section](#takeoff-gradient-graded-airborne-survival-reward-uc-42)):
+  the payout scales linearly with height toward `climb_target_height`, so holding a higher altitude
+  pays strictly more. It is sized against two bounds: at the target the net per-airborne-step reward
+  (`airborne_bonus − time_penalty` = 0.20 − 0.05 = **+0.15**) is strictly positive (a gradient toward
+  takeoff), and the max survival reward over the default 3-gate episode (budget 800 steps → 0.2 × 800 =
+  **160**, plus the climb-term bound 1.98 = **161.98**) is below the `completion_bonus` (**200**), so
+  loitering scores strictly worse than completing the course.
 
 Two supporting rules keep this consistent with the earlier detectors: (1) a **pre-takeoff floor
 contact is not a crash** — a grounded drone at zero throttle would otherwise insta-crash at step 1 —
@@ -331,7 +334,7 @@ byte-for-byte unchanged.
 
 **Honest large-N caveat.** The survival-vs-completion bound above is anchored to the **default**
 800-step budget. For large randomized courses (N up to ~10, step budget up to ~2200) the *theoretical*
-max survival reward (0.1 × 2200 = 220) exceeds `completion_bonus`; loiter-domination there does **not**
+max survival reward (0.2 × 2200 = 440) exceeds `completion_bonus`; loiter-domination there does **not**
 rest on the per-step arithmetic but on the no-progress/stuck detector (`stuck_window`, 100 steps)
 cutting a non-progressing hover, plus the forgone per-gate and completion bonuses.
 
@@ -388,10 +391,10 @@ directly with two coupled levers.
 |---|---|---|
 | Progress | +1.0 × Δdist | per step, for closing distance to the current target waypoint (`progress_weight`) |
 | Climb | potential-based, weight 2.0, target 1.0 m | per step of upward progress toward the hover target; `F = γ·Φ(curr) − Φ(prev)`, `Φ(h) = 2.0·min(max(h, 0), 1.0)` (`climb_weight` / `climb_target_height` / `climb_gamma`) |
-| Hover / airborne | +0.1 | per step while above the floor band (`airborne_bonus`) |
+| Hover / airborne | +0.2 × min(h, target)/target | per step while above the floor band; **altitude-graded** (UC-42) — 0 at the floor band, ramping linearly to +0.2 at `climb_target_height` (1.0 m) and flat above it (`airborne_bonus`) |
 | Time penalty | −0.05 | every step (`time_penalty`) |
 | Gate passed | +10 / N | on a validly passed gate, normalised by gate count N (`gate_bonus`) |
-| Course completed | +100 | on a valid all-gates-then-finish (`completion_bonus`) |
+| Course completed | +200 | on a valid all-gates-then-finish (`completion_bonus`; raised 100 → 200 in UC-42 to preserve the loiter < completion bound after the airborne bump) |
 | Collision (floor/ceiling/OOB) | −100 | on a genuine crash; terminates the episode (`collision_penalty` — see the training curriculum below) |
 | Obstacle contact | −50 | edge-triggered once per distinct pillar contact; non-terminating (`obstacle_penalty`) |
 | No-progress / timeout cut | 0 | penalty-free (UC-38) |
@@ -408,7 +411,7 @@ with any future reward change.
   contribution is `F = climb_gamma · Φ(curr) − Φ(prev)`, where `h` is altitude above the floor. This
   form is deliberate: it **telescopes**, so a climb-then-descend round trip nets ≈ 0 (it cannot be
   farmed into a loiter optimum by bobbing); its per-episode total is bounded by ≈ `climb_gamma ·
-  climb_weight · climb_target_height` = **1.98**, far below `completion_bonus` (100) and at/below a
+  climb_weight · climb_target_height` = **1.98**, far below `completion_bonus` (200) and at/below a
   normalised `gate_bonus`; it is ≈ 0 on the floor; and it **caps at the target height**, so there is
   no incentive to climb into the ceiling. **Coupling note:** `climb_gamma` **must** equal the training
   discount γ (`TrainConfig.gamma`, 0.99) for the shaping to stay policy-invariant — if you change the
@@ -441,6 +444,61 @@ punished, without breaking any UC-03/16/37/38 reward ordering: completion still 
 a floor-shortcut still loses to a valid completion (the end-value penalty stays 100), hover still
 beats sit, and a full hovering episode still beats a takeoff-then-immediate-crash episode even at the
 curriculum's lowest endpoint (there is no grounded penalty, so no suicide optimum).
+
+### Takeoff gradient: graded airborne survival reward (UC-42)
+UC-41 removed the crash-cliff *punishment* and that half worked — a fresh pybullet run no longer
+crashes, freezes, or trips the K0 verdict; the actor holds a calm hover. **But it still never took
+off:** across three recordings the drone stayed pinned at the floor (z ≈ 0.0135 m), throttle sitting
+right at hover, reward at the pure time-penalty floor. Removing the punishment did not create enough
+*pull* toward sustained lift, so the policy settled into a **penalty-free hover-rest local optimum**.
+
+The diagnosis (evidence-backed, all three candidate levers adjudicated):
+
+- **Climb/airborne magnitude — the primary cause.** With the old **flat** `airborne_bonus` (0.1), the
+  only durable altitude reward, net of the time penalty and the discounted climb-potential *leak*
+  (`(γ−1)·climb_weight·climb_target = −0.02/step`), a sustained hold netted only **+0.03/step** over
+  hover-at-floor — the same thin margin UC-38 already showed was too weak. Worse, because the bonus
+  was **flat**, net-hold as a function of altitude `h` was `0.05 − 0.02h`: *decreasing* in `h`, so
+  holding a higher altitude was actually slightly **worse**. The reward had the right sign but no real
+  climb gradient.
+- **Exploration (`ent_coef`) — ruled out.** The fresh run showed exploration alive (≈47 % of steps
+  above 0.6 throttle, no std-collapse / freeze / K0), so the UC-40/41 guards hold; `ent_coef` stays
+  **0.005**.
+- **Thrust authority — ruled out on physics evidence.** A pybullet probe confirmed thrust-to-weight
+  ≈ 2.25 (throttle 0.9 lifts z from 0.02 → 2.66 m in 14 steps). The drone *can* climb trivially; the
+  blocker is purely that sustained above-hover throttle was never reinforced.
+
+The fix is a single, minimal lever set (no change to `racing_env.py`, `ent_coef`, the collision
+curriculum, or the UC-40 hover-bias):
+
+- **Altitude-graded airborne reward.** The airborne survival term is now scaled by fractional height
+  toward the target: `airborne_bonus · min(max(h, 0), climb_target_height) / climb_target_height`
+  while airborne, else 0. This flips the perverse gradient into a **monotone climb-to-target pull**:
+  net-hold as a function of altitude becomes `0.18h − 0.05` (break-even at `h ≈ 0.28 m`, **+0.13/step
+  at the target** — ≈ 4.3× the old +0.03), and it **saturates flat above the target** so there is no
+  ceiling-seeking. It is still exactly 0 on the floor (non-farmable) and the per-episode max is still
+  `airborne_bonus × budget`.
+- **`airborne_bonus` 0.1 → 0.2** to give that gradient enough magnitude to survive PPO advantage
+  normalization.
+- **`completion_bonus` 100 → 200** strictly as **forced bound-preservation**: with `airborne_bonus`
+  at 0.2 the per-episode airborne max over the default 800-step budget is 160 (plus the climb bound
+  1.98 = 161.98), which would exceed the old 100 and break the loiter < completion invariant. 200
+  restores it tight (headroom ≈ 1.23). It is **not** a takeoff signal and is kept deliberately tight
+  because reward VecNormalize is on — a larger completion spike would only inflate the return-std the
+  normaliser divides by.
+
+All UC-37/38/39 invariants are preserved: the telescoping climb term is untouched (round-trip nets
+≈ 0, non-farmable), the graded survival reward is ≈ 0 at rest and capped at the target, `climb_gamma`
+still equals the training γ, and the penalty-free stuck-cut / anti-suicide orderings are intact.
+`climb_weight`, `climb_target`, `time_penalty`, `progress_weight`, `collision_penalty`, `gate_bonus`,
+and `ent_coef` are all unchanged.
+
+**Validation is at the reward-math level only.** pybullet is unavailable in the sandbox and the numpy
+`simple` adapter is over-optimistic about takeoff (UC-40 proved this), so the committed acceptance gate
+is a **deterministic reward-function test** showing sustained climb out-rewards hover-rest by a
+normalization-surviving, relational margin (not an absolute one — VecNormalize makes a global rescale a
+no-op). A `simple`-adapter smoke-train is a wires/finite/no-collapse check only; **behavioral takeoff
+confirmation is deferred to the user's pybullet GPU retrain and is not claimed here.**
 
 ### Visualization & recording
 Enable recording in a train/evaluate config with `record: true` (tune cadence via `record_every`);

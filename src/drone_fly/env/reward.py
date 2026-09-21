@@ -76,10 +76,20 @@ def compute_reward(
         pre-UC-15 caller byte-identical.
     airborne:
         Whether the drone is above the floor band this step (UC-37 AC5). When ``True`` the per-step
-        ``cfg.airborne_bonus`` survival reward is added; it is exactly zero on/at the floor, so
-        sitting on the ground earns nothing and the only path to reward is to take off and stay up.
-        The env raises this flag only when the drone's altitude exceeds ``floor_z + floor_epsilon``.
-        Default ``False`` keeps every pre-UC-37 caller byte-identical (no survival term).
+        survival reward is added; it is exactly zero on/at the floor, so sitting on the ground earns
+        nothing and the only path to reward is to take off and stay up. The env raises this flag
+        only when the drone's altitude exceeds ``floor_z + floor_epsilon``. Default ``False`` keeps
+        every pre-UC-37 caller byte-identical (no survival term).
+
+        **UC-42 contract change — the survival reward is now altitude-GRADED, not bool-only.** The
+        payout is ``cfg.airborne_bonus · min(max(height_above_floor_curr, 0),
+        cfg.climb_target_height) / cfg.climb_target_height`` — ``airborne_bonus`` scaled by
+        fractional height toward the climb target, clamped to [0, 1] and saturating (flat) at/above
+        the target. This makes holding a higher altitude net strictly better than hovering just off
+        the floor (a flat bonus made it slightly *worse*, net of ``time_penalty`` and the discounted
+        climb-potential leak), giving a monotone climb-to-target pull with no ceiling-seeking above
+        the target. At ``h == target`` the payout equals ``airborne_bonus`` exactly, so UC-37's
+        flat-bonus behaviour at the target is backward compatible.
     height_above_floor_prev, height_above_floor_curr:
         Drone altitude ABOVE the course floor (``position[2] − floor_z``) before and after the
         step (UC-39 AC1/AC2). They drive a **dense potential-based climb reward** that pays for
@@ -108,7 +118,14 @@ def compute_reward(
     if obstacle_contact:
         reward -= cfg.obstacle_penalty
     if airborne:
-        reward += cfg.airborne_bonus
+        # UC-42: altitude-GRADED survival reward (was a flat per-step bonus). Pay ``airborne_bonus``
+        # scaled by fractional height toward ``climb_target_height`` (clamped to [0, 1], flat
+        # at/above the target). This flips the previously-perverse net-hold gradient — a flat bonus
+        # made holding higher slightly WORSE net of ``time_penalty`` and the discounted climb-
+        # potential leak — into a monotone climb-to-target pull, with no ceiling-seeking above the
+        # target. At h == target the payout equals ``airborne_bonus`` (UC-37 behaviour preserved).
+        h_frac = min(max(height_above_floor_curr, 0.0), cfg.climb_target_height)
+        reward += cfg.airborne_bonus * (h_frac / cfg.climb_target_height)
     # UC-39: dense potential-based climb shaping (F = γΦ' − Φ, Φ = w·min(max(h,0), target)).
     # Telescoping ⇒ non-farmable; capped at the target ⇒ no ceiling-seeking; ≈0 on the floor.
     phi_prev = cfg.climb_weight * min(max(height_above_floor_prev, 0.0), cfg.climb_target_height)

@@ -557,7 +557,14 @@ class RewardConfig:
     time_penalty: float = 0.05  # subtracted every step -> faster start→gate→finish wins
     progress_weight: float = 1.0  # reward for closing distance to the current target
     gate_bonus: float = 10.0  # per-gate reward, NORMALISED by num_gates (UC-09 AC4)
-    completion_bonus: float = 100.0  # one-off reward on a VALID all-gates-then-finish
+    # One-off reward on a VALID all-gates-then-finish. UC-42 raised this 100 → 200 strictly as
+    # forced bound-preservation: with the airborne bump to 0.2 the per-episode airborne max
+    # (0.2 × 800 = 160) + the climb-term bound (1.98) = 161.98 would exceed the old 100, breaking
+    # the loiter < completion invariant (b). 200 restores it tight (headroom ≈ 1.23, matching the
+    # original ≈ 1.22). NOT a takeoff signal, and kept tight on purpose: reward VecNormalize is ON,
+    # so a larger completion spike would inflate the return-std the normaliser divides by and is
+    # counterproductive — do NOT raise it further.
+    completion_bonus: float = 200.0
     collision_penalty: float = 100.0  # subtracted on floor/ceiling contact (episode ends)
     # SEVERE, NON-terminating obstacle-contact penalty (UC-15 AC2/AC9). Documented, tunable.
     # Applied **edge-triggered** (once per distinct contact, not per overlapping step), so a
@@ -567,20 +574,29 @@ class RewardConfig:
     obstacle_penalty: float = 50.0
     # Per-step SURVIVAL reward paid ONLY while the drone is airborne (above the floor band),
     # exactly zero on/at the floor (UC-37 AC5). Appended **last** (after ``obstacle_penalty``) so
-    # every positional ``RewardConfig`` call is unshifted. Sized against two bounds (AC-6):
-    #   (a) net per-airborne-step reward ``airborne_bonus − time_penalty`` = 0.10 − 0.05 = +0.05 is
-    #       strictly positive, so staying airborne beats sinking/crashing and there is a gradient
-    #       toward takeoff; AND
+    # every positional ``RewardConfig`` call is unshifted.
+    # UC-42 makes the payout ALTITUDE-GRADED (see :func:`drone_fly.env.reward.compute_reward`):
+    # ``airborne_bonus · min(max(h, 0), climb_target_height) / climb_target_height`` — flat at/above
+    # the target and equal to ``airborne_bonus`` at the target. This flips the previously-perverse
+    # net-hold gradient (with a FLAT bonus, holding higher was slightly WORSE net of the time
+    # penalty and the discounted climb-potential leak) into a monotone climb-to-target pull. Sized
+    # against two bounds (AC-6):
+    #   (a) at the target the net per-airborne-step reward ``airborne_bonus − time_penalty`` =
+    #       0.20 − 0.05 = +0.15 is strictly positive, and combined with the climb term the net-hold
+    #       differential over hover-at-floor is monotone increasing in altitude — so climbing and
+    #       holding altitude decisively beats hovering just off the floor; AND
     #   (b) the max survival reward accruable over the DEFAULT 3-gate episode (budget 800 steps =
-    #       max_steps 400 + steps_per_gate 200 × 2) is 0.10 × 800 = 80 < ``completion_bonus`` 100,
-    #       so a policy that merely loiters scores strictly below one that completes the course.
+    #       max_steps 400 + steps_per_gate 200 × 2) is 0.20 × 800 = 160; plus the climb-term bound
+    #       (1.98) that is 161.98 < ``completion_bonus`` 200, so a policy that merely loiters scores
+    #       strictly below one that completes the course. (``completion_bonus`` was raised 100 → 200
+    #       in UC-42 precisely to keep this bound after the airborne bump — see its comment.)
     # HONEST large-N caveat: for large randomized courses (N up to ~10, budget up to ~2200 steps)
-    # the theoretical max survival (0.10 × 2200 = 220) exceeds ``completion_bonus``. Loiter-
+    # the theoretical max survival (0.20 × 2200 = 440) exceeds ``completion_bonus``. Loiter-
     # domination there does NOT rest on the per-step arithmetic; it rests on the no-progress /
     # stuck detector (``EarlyTerminationConfig.stuck_window`` = 100 steps) cutting a non-
     # progressing hover, plus the forgone per-gate and completion bonuses. The bound in (b) is
     # anchored to the default 800-step budget.
-    airborne_bonus: float = 0.1
+    airborne_bonus: float = 0.2
     # UC-39 — Dense potential-based CLIMB reward (default on). Pays positive signal on every
     # step of upward progress from a floor start toward ``climb_target_height``, so the first
     # increments of a takeoff earn reward immediately (before/independent of any later crash),
