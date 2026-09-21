@@ -4,8 +4,9 @@ Covers the primary root-cause fix (AC3/AC4): PPO's action mean is a linear reado
 ``action_net`` is initialized ≈0 and the Gaussian head is unbounded (not tanh-squashed), so at
 init the deterministic throttle is ≈0 and mean-0 exploration clipped to ``[0, 1]`` averages well
 below the ``HOVER_THROTTLE`` (0.5) hover point — the drone never sustains takeoff, the climb
-gradient is never reached, returns stay flat and the actor freezes at high std. ``_apply_hover_bias``
-seeds the throttle channel of ``action_net.bias`` to ``HOVER_THROTTLE`` on FRESH builds only.
+gradient is never reached, returns stay flat and the actor freezes at high std.
+``_apply_hover_bias`` seeds the throttle channel of ``action_net.bias`` to ``HOVER_THROTTLE`` on
+FRESH builds only.
 
 These tests build a real SB3 ``PPO`` against the committed connectome fixture on the pure-numpy
 ``simple`` adapter (no pybullet, CPU, seeded), so they double as the AC4 in-sandbox smoke-train:
