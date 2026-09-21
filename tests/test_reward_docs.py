@@ -75,6 +75,7 @@ def test_reward_table_covers_every_term_with_matching_values() -> None:
     expectations: list[tuple[str, list[float]]] = [
         ("progress", [CFG.progress_weight]),
         ("climb", [CFG.climb_weight, CFG.climb_target_height]),
+        ("ground", [CFG.ground_break_weight, CFG.ground_break_height]),
         ("time penalty", [CFG.time_penalty]),
         ("gate", [CFG.gate_bonus]),
         ("completed", [CFG.completion_bonus]),

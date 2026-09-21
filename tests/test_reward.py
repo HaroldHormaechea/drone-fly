@@ -395,6 +395,9 @@ def test_uc38_stuck_or_timeout_cut_reward_has_no_collision_penalty() -> None:
     # tiny standing tax ((γ−1)·w·target = −0.02); crucially there is still NO −collision_penalty.
     target = CFG.climb_target_height
     standing_tax = (CFG.climb_gamma - 1.0) * CFG.climb_weight * CFG.climb_target_height
+    # UC-43: the ground-break potential also levies a constant above-threshold standing tax
+    # ((γ−1)·ground_break_weight = −0.005/step) at this above-threshold hover.
+    gb_standing_tax = (CFG.climb_gamma - 1.0) * CFG.ground_break_weight
     stuck_cut = compute_reward(
         dist_to_target_prev=1.0,
         dist_to_target_curr=1.0,
@@ -406,8 +409,10 @@ def test_uc38_stuck_or_timeout_cut_reward_has_no_collision_penalty() -> None:
         height_above_floor_prev=target,
         height_above_floor_curr=target,
     )
-    assert stuck_cut == pytest.approx(-CFG.time_penalty + CFG.airborne_bonus + standing_tax)
-    assert stuck_cut == pytest.approx(0.13)  # −0.05 + 0.20 − 0.02, the UC-42 net-hold at target
+    assert stuck_cut == pytest.approx(
+        -CFG.time_penalty + CFG.airborne_bonus + standing_tax + gb_standing_tax
+    )
+    assert stuck_cut == pytest.approx(0.125)  # −0.05+0.20−0.02−0.005 = UC-43 net-hold at target
     assert stuck_cut > -CFG.collision_penalty, "no −collision_penalty on a decoupled stuck cut"
     # A pure timeout truncation step (here on/at the floor, no bonus) likewise carries no penalty —
     # it is just the per-step time penalty, nowhere near the −collision_penalty terminal.
@@ -427,9 +432,15 @@ def test_uc39_from_floor_climb_yields_positive_contribution() -> None:
     positive signal is unambiguous."""
     contrib = _climb_contribution(h_prev=0.0, h_curr=0.3)
     assert contrib > 0.0
-    # F = γ·Φ(0.3) − Φ(0) = 0.99·(2.0·0.3) − 0 = 0.594.
-    assert contrib == pytest.approx(0.99 * (CFG.climb_weight * 0.3), abs=1e-9)
-    assert contrib == pytest.approx(0.594, abs=1e-6)
+    # ``_climb_contribution`` isolates ALL height-driven shaping, which since UC-43 is the climb
+    # potential PLUS the ground-break potential. For a 0 → 0.3 m step (0.3 clears the 0.05 m
+    # ground-break threshold), both contribute their full from-floor amount:
+    #   climb:        F   = γ·Φ(0.3) − Φ(0)     = 0.99·(2.0·0.3) − 0 = 0.594
+    #   ground-break: F_gb = γ·Φ_gb(0.3) − Φ_gb(0) = 0.99·0.5     − 0 = 0.495 (saturated)
+    climb_part = CFG.climb_gamma * (CFG.climb_weight * 0.3)
+    ground_break_part = CFG.climb_gamma * CFG.ground_break_weight
+    assert contrib == pytest.approx(climb_part + ground_break_part, abs=1e-9)
+    assert contrib == pytest.approx(1.089, abs=1e-6)
 
 
 def test_uc39_resting_on_floor_yields_no_climb_reward() -> None:
@@ -442,10 +453,16 @@ def test_uc39_step_above_target_yields_no_additional_climb_reward() -> None:
     """AC1: a step taken entirely ABOVE the target height yields ≤0 additional climb reward — the
     potential saturates at ``climb_target_height`` so there is no incentive to climb into the
     ceiling. Both a flat above-target step and a climb-higher-above-target step are capped."""
-    # Both endpoints above target ⇒ Φ saturates ⇒ F = (γ − 1)·w·target = −0.02 ≤ 0.
+    # Both endpoints above target ⇒ BOTH potentials saturate ⇒ the isolated height shaping is the
+    # sum of the two constant standing taxes: climb (γ−1)·w·target = −0.02 and ground-break
+    # (γ−1)·ground_break_weight = −0.005, i.e. −0.025 ≤ 0.
     flat_above = _climb_contribution(h_prev=1.2, h_curr=1.5)
     assert flat_above <= 0.0
-    assert flat_above == pytest.approx((CFG.climb_gamma - 1.0) * CFG.climb_weight, abs=1e-9)
+    assert flat_above == pytest.approx(
+        (CFG.climb_gamma - 1.0) * CFG.climb_weight
+        + (CFG.climb_gamma - 1.0) * CFG.ground_break_weight,
+        abs=1e-9,
+    )
     # Climbing FROM the target further UP into the ceiling earns nothing extra (also capped ≤ 0).
     into_ceiling = _climb_contribution(h_prev=1.0, h_curr=2.4)
     assert into_ceiling <= 0.0
@@ -468,15 +485,24 @@ def test_uc39_per_episode_climb_reward_is_bounded_below_completion_and_gate() ->
     ``climb_gamma × climb_weight × climb_target_height`` = 1.98 (a from-floor jump to the target;
     any further step at/above target pays ≤0, any descent pays negative). It is strictly below
     ``completion_bonus`` and at/below a single normalised 3-gate ``gate_bonus`` (3.33)."""
-    # The single largest climb step (floor → target in one step) realises the whole bound.
+    # The single largest climb step (floor → target in one step) realises the whole bound. Since
+    # UC-43 ``_climb_contribution`` also captures the ground-break potential, whose full from-floor
+    # amount (γ·ground_break_weight = 0.495) is banked on that step, the isolated height shaping
+    # is climb bound (1.98) + ground-break bound (0.495) = 2.475.
     max_single_step = _climb_contribution(h_prev=0.0, h_curr=CFG.climb_target_height)
     bound = CFG.climb_gamma * CFG.climb_weight * CFG.climb_target_height
-    assert max_single_step == pytest.approx(bound)
+    ground_break_bound = CFG.climb_gamma * CFG.ground_break_weight
+    assert max_single_step == pytest.approx(bound + ground_break_bound)
     assert bound == pytest.approx(1.98)
-    # A further step held at the target adds ≤ 0 (standing tax), so 1.98 really is the ceiling.
+    assert ground_break_bound == pytest.approx(0.495)
+    # A further step held at the target adds ≤ 0 (both standing taxes), so the bound is the ceiling.
     assert _climb_contribution(h_prev=1.0, h_curr=1.0) <= 0.0
-    assert bound < CFG.completion_bonus  # ≪ completion (100)
+    # The CLIMB bound alone stays ≪ completion and ≤ a normalised 3-gate gate_bonus (unchanged); the
+    # ground-break bound is tiny (0.495) and the combined-shaping < completion invariant is pinned
+    # in test_uc43_ground_break_reward.py.
+    assert bound < CFG.completion_bonus  # ≪ completion (200)
     assert bound <= CFG.gate_bonus / 3  # ≤ normalised gate bonus on the default 3-gate course
+    assert bound + ground_break_bound < CFG.completion_bonus
 
 
 # --- UC-39 AC6: floor-shortcut still loses to a valid completion ---------------------
@@ -513,12 +539,14 @@ def test_uc39_floor_shortcut_still_loses_to_valid_completion_even_with_climb() -
 def test_uc39_hover_at_target_nets_above_sitting_on_floor() -> None:
     """AC7: taking off and hovering AT the target height still returns strictly more per step than
     sitting on the floor — even after the potential-based climb term's tiny standing tax
-    ((1−γ)·w·target = 0.02/step) is subtracted. UC-42 raised ``airborne_bonus`` 0.1 → 0.2, so the
-    hover net rose 0.03 → 0.13: hover net = airborne_bonus − time_penalty − tax =
-    0.2 − 0.05 − 0.02 = +0.13/step > sit = −time_penalty = −0.05/step."""
+    ((1−γ)·w·target = 0.02/step) AND the UC-43 ground-break term's constant above-threshold standing
+    tax ((1−γ)·ground_break_weight = 0.005/step) are subtracted. UC-42 raised ``airborne_bonus``
+    0.1 → 0.2 and UC-43 added the ground-break leak, so the hover net is 0.03 → 0.13 → 0.125: hover
+    net = airborne_bonus − time_penalty − climb_tax − gb_tax = 0.2 − 0.05 − 0.02 − 0.005 =
+    +0.125/step > sit = −time_penalty = −0.05/step."""
     hover_at_target = _step_climb(h_prev=1.0, h_curr=1.0, airborne=True)
     sit_on_floor = _step_climb(h_prev=0.0, h_curr=0.0, airborne=False)
-    assert hover_at_target == pytest.approx(0.13, abs=1e-9)
+    assert hover_at_target == pytest.approx(0.125, abs=1e-9)
     assert sit_on_floor == pytest.approx(-CFG.time_penalty)
     assert hover_at_target > sit_on_floor
 

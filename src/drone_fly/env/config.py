@@ -564,6 +564,12 @@ class RewardConfig:
     # original ≈ 1.22). NOT a takeoff signal, and kept tight on purpose: reward VecNormalize is ON,
     # so a larger completion spike would inflate the return-std the normaliser divides by and is
     # counterproductive — do NOT raise it further.
+    # UC-43 update: the new sub-threshold ``ground_break`` potential adds a per-episode bound of
+    # ``climb_gamma`` · ``ground_break_weight`` = 0.99 × 0.5 = 0.495 (telescoping, capped at
+    # ``ground_break_height``). The combined shaping bound is now 160 (airborne) + 1.98 (climb) +
+    # 0.495 (ground-break) = 162.48 < ``completion_bonus`` 200, so the loiter < completion invariant
+    # (b) still holds with headroom (the historical 161.98 above is UC-42's rationale and is left
+    # intact for provenance).
     completion_bonus: float = 200.0
     collision_penalty: float = 100.0  # subtracted on floor/ceiling contact (episode ends)
     # SEVERE, NON-terminating obstacle-contact penalty (UC-15 AC2/AC9). Documented, tunable.
@@ -623,6 +629,41 @@ class RewardConfig:
     # silently sourced) so the coupling is visible; the value is deliberately identical to the train
     # default γ = 0.99.
     climb_gamma: float = 0.99
+    # UC-43 — Dense potential-based SUB-THRESHOLD "ground-breaking" reward (default on). Fixes the
+    # takeoff chicken-and-egg: UC-42's graded airborne bonus is gated off below the airborne
+    # threshold (``EarlyTerminationConfig.floor_epsilon`` ≈ 0.05 m; ``racing_env.py`` only raises
+    # the ``airborne`` flag above it), and the UC-39 climb potential — though active below the
+    # threshold — is return-invariant and too weak (net of ``time_penalty``) to pull a resting drone
+    # up. So a fresh run rests at ~0.0135 m forever (``ep_rew_mean`` glued to −5). This term adds a
+    # positive gradient in the sub-threshold band [0, ``ground_break_height``] so PPO is rewarded
+    # for the first few centimetres of lift BEFORE the airborne bonus can engage. Implemented in
+    # :func:`drone_fly.env.reward.compute_reward` as potential-based shaping (Ng et al. 1999):
+    #   Φ_gb(h) = ``ground_break_weight`` · min(max(h, 0), ``ground_break_height``)
+    #             / ``ground_break_height``;
+    #   per-step F_gb = ``climb_gamma`` · Φ_gb(curr) − Φ_gb(prev).
+    # Properties (all unit-testable):
+    #   * ≈0 at rest (Φ_gb(0) = 0) and non-farmable — it telescopes, so a bob nets (γ−1)·ΣΦ ≤ 0;
+    #   * dense sub-threshold slope ``ground_break_weight`` / ``ground_break_height`` = 10/m (5× the
+    #     climb slope), so a genuine break from rest pays strongly;
+    #   * saturates exactly at ``ground_break_height`` → clean, continuous handoff to UC-42's graded
+    #     airborne bonus at the threshold; above threshold F_gb = (γ−1)·``ground_break_weight`` =
+    #     −0.005/step, height-independent (Φ_gb flat) → a benign constant leak, NOT a double-count;
+    #   * per-episode bound ``climb_gamma`` · ``ground_break_weight`` = 0.495 (see the
+    #     ``completion_bonus`` comment for the combined-shaping < completion invariant).
+    # SIZING BOUND: ``ground_break_weight`` < 0.9 is the HARD seam-monotonicity constraint (the
+    # net-hold band slope 0.18 − 0.2·w must stay > 0). 0.5 keeps a +0.08/m margin and a strong
+    # transient (a 0.0135 m hop pays ≈0.13) — do NOT shrink it. Appended **last** (after
+    # ``climb_gamma``) so every positional ``RewardConfig`` call is unshifted.
+    ground_break_weight: float = 0.5
+    # Sub-threshold band height (metres) at which Φ_gb saturates. IMPORTANT COUPLING: this MUST
+    # equal ``EarlyTerminationConfig.floor_epsilon`` (the airborne threshold), so the
+    # ground-breaking potential hands off to UC-42's graded airborne bonus exactly where the
+    # airborne flag trips — no gap, no overlap-driven discontinuity. Kept as an explicit constant
+    # here (not silently sourced from ``EarlyTerminationConfig``) so the coupling is visible;
+    # mirrors the ``climb_gamma`` == γ pattern and keeps ``racing_env.py`` untouched. The UC-43 test
+    # asserts this equality against its source (``EarlyTerminationConfig().floor_epsilon``), not an
+    # independent literal.
+    ground_break_height: float = 0.05
 
 
 @dataclass(frozen=True)
