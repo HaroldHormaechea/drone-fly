@@ -197,7 +197,7 @@ def test_uc37_floor_start_and_airborne_bonus_defaults() -> None:
     strictly net-positive against the per-step time penalty (a gradient toward takeoff)."""
     assert EnvConfig().floor_start is True  # floor start is the new default (AC1)
     rc = RewardConfig()
-    assert rc.airborne_bonus == pytest.approx(0.1)  # the shipped survival bonus (AC5)
+    assert rc.airborne_bonus == pytest.approx(0.2)  # UC-42 raised the survival bonus 0.1→0.2 (AC5)
     assert rc.airborne_bonus > rc.time_penalty  # net per airborne step is positive (AC6a)
 
 

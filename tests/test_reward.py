@@ -305,14 +305,22 @@ def test_obstacle_contact_does_not_grant_or_block_completion_bonus() -> None:
 
 # --- UC-37 AC5/AC6: airborne-only survival reward ------------------------------------
 def test_airborne_step_yields_the_bonus_grounded_step_yields_none() -> None:
-    """AC5: an airborne step adds exactly ``airborne_bonus``; a grounded (on/at-floor) step adds
-    nothing — the survival reward is paid ONLY while off the ground, so sitting still earns zero."""
-    airborne = _step_air(airborne=True)
-    grounded = _step_air(airborne=False)
-    assert airborne - grounded == pytest.approx(CFG.airborne_bonus)
-    # A grounded step earns nothing beyond the usual time penalty (bonus is exactly zero on floor).
-    assert grounded == pytest.approx(-CFG.time_penalty)
-    assert airborne == pytest.approx(-CFG.time_penalty + CFG.airborne_bonus)
+    """AC5 (UC-42 altitude-graded): at/above the climb target the airborne survival payout
+    SATURATES at exactly ``airborne_bonus``; a grounded (on/at-floor) step adds nothing. The
+    airborne and not-airborne steps are BOTH evaluated at ``h == target`` so the shared
+    potential-based climb term cancels and their difference isolates the (now graded) airborne
+    payout at its saturated maximum. UC-42 also makes an airborne step AT THE FLOOR pay ≈0 (the
+    payout is graded by fractional height), where UC-37's flat bonus paid the full amount there."""
+    target = CFG.climb_target_height
+    airborne_at_target = _step_climb(h_prev=target, h_curr=target, airborne=True)
+    not_airborne_at_target = _step_climb(h_prev=target, h_curr=target, airborne=False)
+    # Graded payout saturates at ``airborne_bonus`` for h ≥ target (== UC-37's flat value there).
+    assert airborne_at_target - not_airborne_at_target == pytest.approx(CFG.airborne_bonus)
+    # A grounded step on the floor earns nothing beyond the usual time penalty.
+    assert _step_air(airborne=False) == pytest.approx(-CFG.time_penalty)
+    # UC-42 contract change: an airborne step AT THE FLOOR (h ≈ 0) now pays ≈0 (graded), not a flat
+    # bonus — so hovering just off the ground is no longer rewarded like holding the target.
+    assert _step_climb(h_prev=0.0, h_curr=0.0, airborne=True) == pytest.approx(-CFG.time_penalty)
 
 
 def test_airborne_defaults_to_grounded_for_pre_uc37_callers() -> None:
@@ -331,11 +339,12 @@ def test_airborne_defaults_to_grounded_for_pre_uc37_callers() -> None:
 
 
 def test_net_per_airborne_step_is_strictly_positive() -> None:
-    """AC6a: the net per-airborne-step reward (``airborne_bonus − time_penalty``) is strictly
-    positive, so staying airborne beats sinking/crashing and there is a gradient toward takeoff."""
+    """AC6a: the net per-airborne-step reward AT THE TARGET (``airborne_bonus − time_penalty``) is
+    strictly positive, so staying airborne beats sinking/crashing and there is a gradient toward
+    takeoff. UC-42 raised ``airborne_bonus`` 0.1 → 0.2, so this net rose 0.05 → 0.15."""
     net = CFG.airborne_bonus - CFG.time_penalty
     assert net > 0
-    assert net == pytest.approx(0.05)  # 0.10 − 0.05, the shipped constants
+    assert net == pytest.approx(0.15)  # 0.20 − 0.05, the UC-42 constants
 
 
 def test_max_episode_survival_reward_is_below_completion_bonus() -> None:
@@ -356,15 +365,19 @@ def test_max_episode_survival_reward_is_below_completion_bonus() -> None:
     course = EnvConfig().course
     budget = ep.max_steps + ep.steps_per_gate * (course.num_gates - 1)
     assert budget == 800  # 400 + 200 × (3 − 1): the default 3-gate budget the plan anchors AC6b to
+    # UC-42: max survival = ``airborne_bonus`` per step (the payout saturates at the target, so a
+    # policy hovering AT the target for the whole budget banks the full per-step bonus each step).
     max_survival = CFG.airborne_bonus * budget
-    assert max_survival == pytest.approx(80.0)
+    assert max_survival == pytest.approx(160.0)  # 0.20 × 800 (was 0.10 × 800 = 80 pre-UC-42)
     # UC-39: the per-episode climb bound (telescoping ⇒ ≈ γ·w·target, reached by a from-floor jump
     # to the target height) is the MOST climb reward any single episode can accrue.
     max_climb = CFG.climb_gamma * CFG.climb_weight * CFG.climb_target_height
     assert max_climb == pytest.approx(1.98)
     combined_max_non_completion = max_survival + max_climb
-    assert combined_max_non_completion == pytest.approx(81.98)  # 80 + 1.98 (UC-39 Note 3)
-    assert CFG.completion_bonus == pytest.approx(100.0)
+    assert combined_max_non_completion == pytest.approx(161.98)  # 160 + 1.98 (UC-42; was 81.98)
+    # UC-42 raised ``completion_bonus`` 100 → 200 precisely to keep this loiter < completion bound
+    # after the airborne bump (161.98 < 200, headroom ≈ 1.23 ≈ the original ≈ 1.22).
+    assert CFG.completion_bonus == pytest.approx(200.0)
     assert combined_max_non_completion < CFG.completion_bonus  # loiter+climb < completing (AC5)
 
 
@@ -376,7 +389,12 @@ def test_uc38_stuck_or_timeout_cut_reward_has_no_collision_penalty() -> None:
     reward — time penalty + progress + any airborne survival bonus — with NO −collision_penalty
     term. This is the reward-side pin for the −105-trap fix."""
     # Airborne no-progress hover at the moment of the stuck cut: no progress, no event, airborne ⇒
-    # survival bonus; collided is False because the cut is decoupled from the crash penalty.
+    # survival bonus; collided is False because the cut is decoupled from the crash penalty. UC-42's
+    # airborne payout is altitude-graded, so thread a REAL height (hover AT the target) — the
+    # saturated payout is ``airborne_bonus`` and the shared climb potential contributes only its
+    # tiny standing tax ((γ−1)·w·target = −0.02); crucially there is still NO −collision_penalty.
+    target = CFG.climb_target_height
+    standing_tax = (CFG.climb_gamma - 1.0) * CFG.climb_weight * CFG.climb_target_height
     stuck_cut = compute_reward(
         dist_to_target_prev=1.0,
         dist_to_target_curr=1.0,
@@ -385,8 +403,11 @@ def test_uc38_stuck_or_timeout_cut_reward_has_no_collision_penalty() -> None:
         completed=False,
         cfg=CFG,
         airborne=True,
+        height_above_floor_prev=target,
+        height_above_floor_curr=target,
     )
-    assert stuck_cut == pytest.approx(-CFG.time_penalty + CFG.airborne_bonus)
+    assert stuck_cut == pytest.approx(-CFG.time_penalty + CFG.airborne_bonus + standing_tax)
+    assert stuck_cut == pytest.approx(0.13)  # −0.05 + 0.20 − 0.02, the UC-42 net-hold at target
     assert stuck_cut > -CFG.collision_penalty, "no −collision_penalty on a decoupled stuck cut"
     # A pure timeout truncation step (here on/at the floor, no bonus) likewise carries no penalty —
     # it is just the per-step time penalty, nowhere near the −collision_penalty terminal.
@@ -492,11 +513,12 @@ def test_uc39_floor_shortcut_still_loses_to_valid_completion_even_with_climb() -
 def test_uc39_hover_at_target_nets_above_sitting_on_floor() -> None:
     """AC7: taking off and hovering AT the target height still returns strictly more per step than
     sitting on the floor — even after the potential-based climb term's tiny standing tax
-    ((1−γ)·w·target = 0.02/step) is subtracted. Hover net = airborne_bonus − time_penalty − tax =
-    0.1 − 0.05 − 0.02 = +0.03/step > sit = −time_penalty = −0.05/step."""
+    ((1−γ)·w·target = 0.02/step) is subtracted. UC-42 raised ``airborne_bonus`` 0.1 → 0.2, so the
+    hover net rose 0.03 → 0.13: hover net = airborne_bonus − time_penalty − tax =
+    0.2 − 0.05 − 0.02 = +0.13/step > sit = −time_penalty = −0.05/step."""
     hover_at_target = _step_climb(h_prev=1.0, h_curr=1.0, airborne=True)
     sit_on_floor = _step_climb(h_prev=0.0, h_curr=0.0, airborne=False)
-    assert hover_at_target == pytest.approx(0.03, abs=1e-9)
+    assert hover_at_target == pytest.approx(0.13, abs=1e-9)
     assert sit_on_floor == pytest.approx(-CFG.time_penalty)
     assert hover_at_target > sit_on_floor
 
