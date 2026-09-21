@@ -165,9 +165,7 @@ def test_under_capacity_signature_message_states_absolute_not_high_rising() -> N
     """AC2: the corrected reason text no longer claims the critic is 'high/rising' — it states
     absolute health — while still naming the (possible) undersized 'slice'."""
     verdict = assess_training_health(signals=_under_capacity_signature_signals())
-    text = next(
-        r.text for r in verdict.reasons if r.rule_id == "under_capacity_signature"
-    ).lower()
+    text = next(r.text for r in verdict.reasons if r.rule_id == "under_capacity_signature").lower()
     assert "slice" in text
     assert "high/rising" not in text
     assert "rising" not in text
