@@ -63,25 +63,42 @@ class TrainConfig:
     # smaller-but-positive coefficient lets the action std COMMIT (trend down) instead of staying
     # flat-high, while never returning to the ent_coef=0 std-collapse that UC-38 fixed. SB3 uses
     # ent_coef raw (not a schedule), so this is the effective coefficient for the whole run.
-    ent_coef: float = 0.001
+    # UC-41 (AC4): raised 0.001 -> 0.005 (still STRICTLY POSITIVE), a companion guard to the
+    # hold-then-ramp collision curriculum below. With ent_coef=0.001 the diagnostic run showed the
+    # action std trending down at 0% success — the UC-38 premature-collapse precondition — i.e. the
+    # policy was committing onto the do-nothing local optimum before it explored into sustained
+    # flight. A larger-but-still-modest coefficient keeps exploration alive long enough for the
+    # relieved crash-cliff (curriculum) to make takeoff→progress the higher-advantage path, without
+    # returning to the flat-high std of the UC-38 era.
+    ent_coef: float = 0.005
 
-    # UC-39 — training-time collision-penalty CURRICULUM (crash-cliff relief, default on). The
-    # genuine floor/ceiling/OOB collision penalty is ramped LINEARLY from
-    # ``collision_penalty_start``
-    # to ``collision_penalty_end`` over the first ``collision_curriculum_warmup_fraction`` of
-    # ``total_timesteps``, then held at the end value. Rationale: PPO propagates the −100 crash
-    # terminal back onto the "throttle up" actions that begin any takeoff, giving them negative
-    # advantage; starting the penalty low (10) while the policy learns to fly removes that barrier,
-    # and ramping it back to full strength (100) restores precision so the drone doesn't learn
-    # permanently-sloppy floor/ceiling-clipping flight. Applied at rollout time via the env's
+    # UC-39/41 — training-time collision-penalty CURRICULUM (crash-cliff relief, default on). The
+    # genuine floor/ceiling/OOB collision penalty follows a HOLD-THEN-RAMP schedule: held at
+    # ``collision_penalty_start`` through the first ``collision_curriculum_hold_fraction`` of
+    # ``total_timesteps``, then ramped LINEARLY up to ``collision_penalty_end`` over the next
+    # ``collision_curriculum_warmup_fraction``, then held at the end value for the remainder.
+    # Rationale: PPO propagates the −100 crash terminal back onto the "throttle up" actions that
+    # begin any takeoff, giving them negative advantage. UC-39 relieved this with a from-t=0 linear
+    # ramp, but UC-41 found that ramp re-erected the crash cliff to ~33 by 16% of training (the
+    # observed stall point) regardless of the start value, so a *failed* takeoff (which trips the
+    # grounded cut that PAYS the collision penalty) stayed more negative than the penalty-free
+    # do-nothing floor — the policy committed to do-nothing. Holding the penalty low (2.0) through
+    # the whole fly-learning phase (0–40%) keeps the effective penalty inside the invariant-safe
+    # band (≤ the climb-shaping bound) so takeoff→progress out-scores do-nothing across that window,
+    # then ramping back to full strength (100) over 40–90% restores precision so the drone doesn't
+    # learn permanently-sloppy floor/ceiling-clipping flight. Applied at rollout time via the env's
     # ``set_collision_penalty`` — the env DEFAULT ``RewardConfig.collision_penalty`` (100) is never
     # changed, so every reward test that asserts 100 is unaffected (minimal test blast radius). The
     # schedule is a function of ``num_timesteps`` only (stateless), so it is resume-correct. End
-    # value 100 keeps AC6 (floor-shortcut still loses to completion) and AC8 holds at every value
-    # (start 10 ≥ any hover net). Set ``collision_curriculum_enabled=False`` to train at the
-    # constant env default (byte-identical to pre-UC-39).
-    collision_penalty_start: float = 10.0
+    # value 100 keeps AC6 (floor-shortcut still loses to completion) and the anti-suicide bound
+    # holds at every value. ``collision_curriculum_hold_fraction`` and
+    # ``collision_curriculum_warmup_fraction`` must satisfy ``0 ≤ hold`` and ``hold + warmup ≤ 1``
+    # (enforced in :func:`~drone_fly.train.collision_curriculum.collision_penalty_at`). Set
+    # ``collision_curriculum_enabled=False`` to train at the constant env default (byte-identical to
+    # pre-UC-39).
+    collision_penalty_start: float = 2.0
     collision_penalty_end: float = 100.0
+    collision_curriculum_hold_fraction: float = 0.4
     collision_curriculum_warmup_fraction: float = 0.5
     collision_curriculum_enabled: bool = True
 

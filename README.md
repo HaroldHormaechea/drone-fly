@@ -414,19 +414,27 @@ with any future reward change.
   discount γ (`TrainConfig.gamma`, 0.99) for the shaping to stay policy-invariant — if you change the
   training γ, update `climb_gamma` in lockstep.
 - **Lever 2 — crash-cliff relief via a training-time collision-penalty curriculum (default on).**
-  During training the genuine floor/ceiling/OOB collision penalty is ramped **linearly from
-  `TrainConfig.collision_penalty_start` (10) up to `collision_penalty_end` (100)** over the first
-  `collision_curriculum_warmup_fraction` (0.5) of `total_timesteps`, then held at the full value. A
-  low early penalty removes the crash barrier while the drone learns to fly; ramping it back to full
-  strength restores precision so it does not learn permanently-sloppy floor/ceiling-clipping flight.
-  The ramp is implemented as an SB3 callback (`drone_fly.train.collision_curriculum`) that pushes the
-  current value into the training envs each rollout via `env_method("set_collision_penalty", …)`; the
-  schedule is a pure function of `num_timesteps`, so a resumed run continues it correctly. Crucially,
-  this is **training-only**: the env's *default* `RewardConfig.collision_penalty` stays **100** (the
-  value in the table above), and termination is never affected — a genuine crash still terminates the
-  episode and is still penalised, just at the active curriculum magnitude. Set
-  `collision_curriculum_enabled = False` to train at the constant default. `ent_coef` stays at the
-  UC-38 value (0.01).
+  During training the genuine floor/ceiling/OOB collision penalty follows a **hold-then-ramp**
+  schedule: it is **held at `TrainConfig.collision_penalty_start` (2) through the first
+  `collision_curriculum_hold_fraction` (0.4) of `total_timesteps`** (0–40%, the whole fly-learning
+  phase), then **ramped linearly up to `collision_penalty_end` (100)** over the next
+  `collision_curriculum_warmup_fraction` (0.5) of `total_timesteps` (40%→90%), then **held at the
+  full value 100** for the remainder (90–100%). Holding a low penalty through the fly-learning phase
+  removes the crash barrier while the drone learns to fly — UC-41 found that the earlier from-t=0
+  linear ramp re-erected the crash cliff (to ~33 by 16% of training) before the policy had learned
+  to fly, so a *failed* takeoff (which trips the grounded cut that pays the collision penalty) stayed
+  worse than the penalty-free do-nothing floor and the policy committed to do-nothing. Ramping the
+  penalty back to full strength restores precision so the drone does not learn permanently-sloppy
+  floor/ceiling-clipping flight. The schedule is implemented as an SB3 callback
+  (`drone_fly.train.collision_curriculum`) that pushes the current value into the training envs each
+  rollout via `env_method("set_collision_penalty", …)`; it is a pure function of `num_timesteps`, so
+  a resumed run continues it correctly. Crucially, this is **training-only**: the env's *default*
+  `RewardConfig.collision_penalty` stays **100** (the value in the table above), and termination is
+  never affected — a genuine crash still terminates the episode and is still penalised, just at the
+  active curriculum magnitude. Set `collision_curriculum_enabled = False` to train at the constant
+  default. As a companion exploration guard, UC-41 raises `ent_coef` to **0.005** (still strictly
+  positive) so the action std keeps exploring long enough for the relieved crash-cliff to make
+  takeoff→progress the higher-advantage path.
 
 Together these make the first increments of flight net-positive in expected advantage instead of
 punished, without breaking any UC-03/16/37/38 reward ordering: completion still dominates loitering,

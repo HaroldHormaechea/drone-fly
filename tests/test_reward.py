@@ -505,16 +505,19 @@ def test_uc39_hover_at_target_nets_above_sitting_on_floor() -> None:
 def test_uc39_hover_episode_beats_takeoff_then_immediate_crash_at_worst_case_cp() -> None:
     """AC8: a full hovering episode must return strictly MORE than a take-off-then-immediately-crash
     episode, so the policy is never incentivised to end an episode early via a deliberate crash. The
-    guarantee is tightest at the LOW curriculum endpoint (``collision_penalty_start`` = 10), so this
-    test evaluates the crash episode at CP = 10 — the worst case for anti-suicide.
+    guarantee is tightest at the LOW curriculum endpoint (``collision_penalty_start``, UC-41 = 2.0),
+    so this test evaluates the crash episode at the held curriculum start value — the worst case for
+    anti-suicide (the smaller the crash penalty, the more attractive a deliberate crash becomes).
 
     Both episodes share an identical takeoff prefix (climb floor→target over K steps); they diverge
-    only afterwards, so the comparison reduces to (continue hovering) vs (crash once at CP=10)."""
+    only afterwards, so the comparison reduces to (continue hovering) vs (crash once at the held
+    start CP). The inequality is collision-penalty-independent — the crash-step climb give-back
+    (≈ −climb_weight·target) dominates — so it holds with margin at the lowered UC-41 start too."""
     from drone_fly.env.config import RewardConfig
     from drone_fly.train.config import TrainConfig
 
     cp_low = TrainConfig().collision_penalty_start
-    assert cp_low == pytest.approx(10.0)
+    assert cp_low == pytest.approx(2.0)
     crash_cfg = RewardConfig(collision_penalty=cp_low)  # worst-case low curriculum endpoint
 
     target = CFG.climb_target_height

@@ -408,16 +408,45 @@ def test_prune_trained_invalid_name_still_validated() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# UC-40 AC8 — training entropy-coefficient default lowered (0.01 → 0.001)
+# UC-41 AC8/AC4 — entropy-coefficient default raised (0.001 → 0.005) as a
+# companion exploration guard to the hold-then-ramp collision curriculum.
 # --------------------------------------------------------------------------- #
-def test_uc40_train_config_ent_coef_default_is_lowered_but_strictly_positive() -> None:
-    """UC-40 AC8: the PPO entropy-coefficient default is lowered from the UC-38 value 0.01 to
-    0.001 — still STRICTLY POSITIVE. Once the UC-40 hover-bias init supplies a real takeoff
-    gradient, the entropy bonus no longer has to be the dominant surviving gradient, so a
-    smaller-but-positive coefficient lets the action std commit (trend down) instead of staying
-    flat-high. It must NOT drop to 0.0: UC-38 proved that at ent_coef=0 the action distribution
-    collapses before takeoff is discovered, so the strictly-positive floor is preserved (AC8)."""
+def test_uc41_train_config_ent_coef_default_raised_but_strictly_positive() -> None:
+    """UC-41 AC8/AC4: the PPO entropy-coefficient default is raised from the UC-40 value 0.001 to
+    0.005 — still STRICTLY POSITIVE, and strictly between UC-40's 0.001 and UC-38's 0.01. It is a
+    companion guard to the hold-then-ramp collision curriculum: raising ``ent_coef`` monotonically
+    REDUCES the premature-entropy-collapse risk (UC-38 mode), preserving exploration long enough
+    for the now-unblocked takeoff gradient to take. It must stay strictly positive (UC-38 proved
+    that at ent_coef=0 the action distribution collapses before takeoff is discovered) and must not
+    drop below the prior UC-40 value (AC4 monotonicity — the fix must not weaken exploration)."""
     from drone_fly.train.config import TrainConfig
 
-    assert TrainConfig().ent_coef == 0.001, "ent_coef default is the UC-40 lowered value"
+    assert TrainConfig().ent_coef == 0.005, "ent_coef default is the UC-41 raised value"
     assert TrainConfig().ent_coef > 0.0, "AC8 requires a strictly positive default"
+    assert TrainConfig().ent_coef >= 0.001, (
+        "AC4: the UC-41 fix must not lower ent_coef below the prior UC-40 value (0.001)"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# UC-41 AC3 — collision-penalty curriculum shape defaults (hold-then-ramp) and
+# the hold/warmup split range guard.
+# --------------------------------------------------------------------------- #
+def test_uc41_train_config_collision_curriculum_defaults() -> None:
+    """UC-41 AC3: the hold-then-ramp curriculum defaults on ``TrainConfig``. The penalty is HELD at
+    ``collision_penalty_start`` = 2.0 (below the ~4.8 crash cliff) through the first
+    ``collision_curriculum_hold_fraction`` = 0.4 of training, then ramped over the next
+    ``collision_curriculum_warmup_fraction`` = 0.5 up to ``collision_penalty_end`` = 100.0 (held for
+    late-training precision). The hold+warmup split leaves a final held-at-end tail (0.4+0.5<1)."""
+    from drone_fly.train.config import TrainConfig
+
+    cfg = TrainConfig()
+    assert cfg.collision_penalty_start == pytest.approx(2.0), "UC-41 held value below the cliff"
+    assert cfg.collision_penalty_end == pytest.approx(100.0), "AC6: full strength preserved"
+    assert cfg.collision_curriculum_hold_fraction == pytest.approx(0.4), "UC-41 new hold fraction"
+    assert cfg.collision_curriculum_warmup_fraction == pytest.approx(0.5), "ramp DURATION unchanged"
+    # The split must be a valid curriculum shape: 0 ≤ hold and hold + warmup ≤ 1.
+    assert cfg.collision_curriculum_hold_fraction >= 0.0
+    assert (
+        cfg.collision_curriculum_hold_fraction + cfg.collision_curriculum_warmup_fraction <= 1.0
+    ), "the default hold+ramp must fit inside the run length (leaves a held-at-end tail)"
