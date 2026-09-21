@@ -106,6 +106,20 @@ def compute_reward(
         MUST equal the training γ for the invariance to hold (see
         :class:`~drone_fly.env.config.RewardConfig`). Both default to ``0.0`` ⇒ Φ_prev = Φ_curr = 0
         ⇒ F = 0, so every pre-UC-39 caller is byte-identical.
+
+        **UC-43 — the same two heights ALSO drive a sub-threshold "ground-breaking" potential.**
+        UC-42's graded airborne bonus is gated off below the airborne threshold (the env only
+        raises ``airborne`` above ``floor_z + floor_epsilon`` ≈ 0.05 m) and the UC-39 climb term is
+        too weak there to overcome ``time_penalty``, so a fresh policy rests on the floor forever.
+        A SECOND potential-based term supplies a strong positive gradient in the band
+        [0, ``cfg.ground_break_height``]: Φ_gb(h) = ``cfg.ground_break_weight`` · min(max(h, 0),
+        ``cfg.ground_break_height``) / ``cfg.ground_break_height``; per-step
+        F_gb = ``cfg.climb_gamma`` · Φ_gb(curr) − Φ_gb(prev). It telescopes (non-farmable — a bob
+        nets ≈0), is ≈0 at rest, and SATURATES at ``ground_break_height`` (chosen equal to the
+        airborne threshold ``EarlyTerminationConfig.floor_epsilon``), so above the threshold Φ_gb is
+        flat ⇒ F_gb = (γ−1)·``ground_break_weight`` per step, height-independent — a continuous
+        handoff to the UC-42 bonus with no double-count. Its per-episode contribution is bounded by
+        ≈ ``climb_gamma`` · ``ground_break_weight`` ≪ ``completion_bonus``.
     """
     reward = -cfg.time_penalty
     reward += cfg.progress_weight * (dist_to_target_prev - dist_to_target_curr)
@@ -131,4 +145,20 @@ def compute_reward(
     phi_prev = cfg.climb_weight * min(max(height_above_floor_prev, 0.0), cfg.climb_target_height)
     phi_curr = cfg.climb_weight * min(max(height_above_floor_curr, 0.0), cfg.climb_target_height)
     reward += cfg.climb_gamma * phi_curr - phi_prev
+    # UC-43: dense potential-based SUB-THRESHOLD "ground-breaking" shaping (F_gb = γΦ_gb' − Φ_gb,
+    # Φ_gb = w·min(max(h,0), gb_height)/gb_height). Pays a positive gradient in the band
+    # [0, ground_break_height] — where UC-42's graded airborne bonus is gated OFF (the airborne
+    # flag only trips above floor_z + floor_epsilon) — so PPO earns reward for the first few
+    # centimetres of lift and can break the takeoff chicken-and-egg. Like the climb term it
+    # telescopes (non-farmable: a bob nets ≈0), is ≈0 at rest (Φ_gb(0) = 0), and SATURATES at
+    # ``ground_break_height`` so it hands off continuously to UC-42 at the airborne threshold
+    # (above it Φ_gb is flat ⇒ F_gb = (γ−1)·w = −0.005/step, height-independent, no double-count).
+    # ``ground_break_height`` MUST equal ``EarlyTerminationConfig.floor_epsilon`` (see the config).
+    phi_gb_prev = cfg.ground_break_weight * (
+        min(max(height_above_floor_prev, 0.0), cfg.ground_break_height) / cfg.ground_break_height
+    )
+    phi_gb_curr = cfg.ground_break_weight * (
+        min(max(height_above_floor_curr, 0.0), cfg.ground_break_height) / cfg.ground_break_height
+    )
+    reward += cfg.climb_gamma * phi_gb_curr - phi_gb_prev
     return float(reward)

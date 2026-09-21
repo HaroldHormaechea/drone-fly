@@ -52,3 +52,4 @@ Statuses:
 | 40 | [use-cases/40-diagnose-k0-actor-no-commit.md](use-cases/40-diagnose-k0-actor-no-commit.md) | Diagnose why the actor won't commit before accepting the K0 "undersized slice" verdict | done | 2026-09-21 |
 | 41 | [use-cases/41-reward-stall-success-gradient.md](use-cases/41-reward-stall-success-gradient.md) | Give the now-committing actor a real learning gradient toward success (reward stall) | done | 2026-09-21 |
 | 42 | [use-cases/42-strengthen-takeoff-climb-reward.md](use-cases/42-strengthen-takeoff-climb-reward.md) | Strengthen the climb/airborne reward so the drone leaves the floor (takeoff gradient) | done | 2026-09-21 |
+| 43 | [use-cases/43-ground-breaking-bootstrap-and-reward-audit.md](use-cases/43-ground-breaking-bootstrap-and-reward-audit.md) | Sub-threshold ground-breaking reward to bootstrap takeoff + reward-system audit | in-progress | 2026-09-21 |

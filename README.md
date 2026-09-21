@@ -390,6 +390,7 @@ directly with two coupled levers.
 | Action | Reward | Condition |
 |---|---|---|
 | Progress | +1.0 × Δdist | per step, for closing distance to the current target waypoint (`progress_weight`) |
+| Ground-breaking | potential-based, weight 0.5, band 0.05 m | per step of upward progress in the sub-threshold band; `F = γ·Φ_gb(curr) − Φ_gb(prev)`, `Φ_gb(h) = 0.5·min(max(h, 0), 0.05)/0.05` (UC-43; `ground_break_weight` / `ground_break_height` = airborne threshold) |
 | Climb | potential-based, weight 2.0, target 1.0 m | per step of upward progress toward the hover target; `F = γ·Φ(curr) − Φ(prev)`, `Φ(h) = 2.0·min(max(h, 0), 1.0)` (`climb_weight` / `climb_target_height` / `climb_gamma`) |
 | Hover / airborne | +0.2 × min(h, target)/target | per step while above the floor band; **altitude-graded** (UC-42) — 0 at the floor band, ramping linearly to +0.2 at `climb_target_height` (1.0 m) and flat above it (`airborne_bonus`) |
 | Time penalty | −0.05 | every step (`time_penalty`) |
@@ -492,6 +493,104 @@ All UC-37/38/39 invariants are preserved: the telescoping climb term is untouche
 still equals the training γ, and the penalty-free stuck-cut / anti-suicide orderings are intact.
 `climb_weight`, `climb_target`, `time_penalty`, `progress_weight`, `collision_penalty`, `gate_bonus`,
 and `ent_coef` are all unchanged.
+
+### Sub-threshold ground-breaking reward + reward-system audit (UC-43)
+UC-40/41/42 removed the freeze, the crash-cliff, and the perverse once-airborne gradient — yet a
+fresh full-stack run (~99k steps) still **never breaks ground at all**. Every sampled recording pins
+z at ~0.0135 m (resting height — no hop, no lift-and-drop) and `ep_rew_mean` is glued to exactly
+**−5** = `−time_penalty (0.05) × stuck_window (100)`. That −5 is diagnostic: any airborne time at all
+would add the airborne bonus and lift the mean, so the **entire episode population is planted**, not
+just the sampled ones. The clipped throttle mean sits flat at hover (~0.48) and is not rising.
+
+**Root cause — a sub-threshold dead zone (chicken-and-egg).** The airborne survival flag only trips
+at `z > floor_z + floor_epsilon` (≈ 0.05 m; `racing_env.py:384`), so UC-42's graded airborne reward —
+and *any* airborne credit — never activates while the drone rests at ~0.0135 m. The only reward
+active below the threshold is the UC-39 climb potential, and it is (a) **return-invariant** — it
+telescopes to ≈ 0 for the tiny transient hops a resting drone makes — and (b) too weak (≈ 0.027/step
+at its strongest vs. the −0.05 time penalty). Net sub-threshold signal is negative, so PPO gets no
+gradient favouring higher throttle → the throttle mean never rises → nothing ever gets airborne to
+collect the airborne/climb reward. Breaking ground needs *sustained* consecutive above-hover throttle
+that per-step exploration noise around a 0.48 mean effectively never produces on its own.
+
+The `racing_env.py:384` airborne gate is **correct-by-design, not a bug** — it defines what "airborne"
+means for the survival term. So the fix is purely additive in `reward.py` / `config.py`;
+`racing_env.py` is unchanged.
+
+**The fix — a second potential-based "ground-breaking" reward** (`RewardConfig.ground_break_weight`
+= 0.5, `ground_break_height` = 0.05 m; default on) active in the sub-threshold band, saturating
+exactly at the airborne threshold for a clean handoff to UC-42:
+
+```
+Φ_gb(h) = ground_break_weight · min(max(h, 0), ground_break_height) / ground_break_height
+F_gb    = climb_gamma · Φ_gb(curr) − Φ_gb(prev)     # reuses climb_gamma (== training γ)
+```
+
+Properties (all covered by a deterministic reward-math test):
+
+- **Dense sub-threshold gradient.** Slope `ground_break_weight / ground_break_height` = **10/m**
+  (5× the climb slope), so a genuine break from rest pays strongly — a 0.0135 m hop earns ≈ 0.13 of
+  ground-break shaping — while staying planted earns strictly less.
+- **≈ 0 at rest** (`Φ_gb(0) = 0`) and **non-farmable**: it telescopes, so a bob (up then back down)
+  nets `(γ−1)·ΣΦ ≤ 0`. There is no reward for hovering-in-place at the floor.
+- **Continuous handoff, no double-count.** `ground_break_height` equals the airborne threshold
+  `EarlyTerminationConfig.floor_epsilon` (an explicit, documented coupling — the UC-43 test asserts
+  the equality against its source, not an independent literal), so Φ_gb saturates exactly where the
+  airborne flag trips. Above the threshold Φ_gb is flat ⇒ `F_gb = (γ−1)·ground_break_weight =
+  −0.005/step`, height-independent — a benign constant leak, not a second altitude reward stacked on
+  UC-42's.
+- **Bound preserved.** The per-episode ground-break contribution is bounded by `climb_gamma ·
+  ground_break_weight` = **0.495**. Combined shaping is now 160 (airborne) + 1.98 (climb) + 0.495
+  (ground-break) = **162.48 < `completion_bonus` 200**, so the loiter < completion invariant still
+  holds. (The **honest large-N caveat** on the airborne bound above is unchanged — adding 0.495 does
+  not change that story.)
+- **Sizing.** `ground_break_weight` < 0.9 is the hard seam-monotonicity bound (the net-hold band
+  slope `0.18 − 0.2·w` must stay > 0); 0.5 keeps a +0.08/m margin and a strong transient. It is **not**
+  shrunk below that.
+
+**Honest scope note (Risk 1).** Potential-based shaping is **return-invariant** by construction: a
+steeper sub-threshold potential strengthens the per-step learning signal for the first centimetres of
+lift, but it does **not** by itself change the episodic optimum for an un-sustained hop. So this fix
+is **necessary but maybe not sufficient** — it makes the right actions pay per-step, which is what PPO
+reinforces, but confirming *behavioral* takeoff-learning is the user's pybullet GPU retrain, not this
+gate. If that retrain shows exploration still can't produce the *sustained* above-hover throttle,
+the documented next levers are temporally-correlated exploration (OU / pink noise) and/or a higher
+fresh-build throttle-bias init (extending the UC-40 hover-bias above 0.5); `ent_coef` is already 0.005.
+
+**Reward-system audit.** Per the governing directive — *any* nudge toward *any* desired outcome, no
+matter how small, must be rewarded, with no dead zone where genuine incremental progress earns zero
+or goes negative — every desired outcome was checked for a dense, non-farmable crediting gradient:
+
+| Desired outcome | Crediting gradient | Verdict |
+|---|---|---|
+| Break ground `[0, 0.05 m]` | was dead/negative (airborne gated off, climb too weak) → now the ground-breaking potential | **fixed** (the sole takeoff-blocker) |
+| Climb to target `[0.05, 1.0 m]` | UC-39 climb potential + UC-42 graded airborne bonus | dense, non-farmable ✔ |
+| Reduce distance to next gate | `progress` term (dense, telescoping) | ✔ |
+| Pass a gate | `gate_bonus` event + the progress approach gradient | ✔ |
+| Complete the course | `completion_bonus` + progress/gate gradient | ✔ |
+| Above target / into ceiling | intentionally saturated (no ceiling-seeking) | correct — not a desired outcome ✔ |
+
+Per-term verdicts (fixing only the clearly-wrong, evidence-backed takeoff-blocker; documenting the
+rest rather than speculatively rewriting):
+
+- **`time_penalty`** — correct; kept. The fix adds the missing positive term, it does not remove the
+  time cost.
+- **`progress`** — healthy and telescoping; a weak, geometry-dependent vertical component is noted but
+  is *not* a bootstrap and is left unchanged (a deferred follow-up, to avoid double-shaping).
+- **climb potential (UC-39)** — correct but return-invariant and weak below threshold; kept
+  byte-identical and *supplemented* below the threshold by the new term.
+- **graded airborne (UC-42)** — correct above the threshold; the dead zone below it is remedied by the
+  new term, so UC-42 itself is unchanged.
+- **`collision_penalty` + UC-41 curriculum** — healthy: during the fly-learning phase (0–40 %) the
+  penalty is held at 2.0, so a *failed* takeoff (~−2) already beats the planted stuck-cut (−5). No
+  change.
+- **`obstacle_penalty`, gate/completion bonuses, anti-suicide (pre-takeoff floor-contact
+  suppression), stuck / grounded early-termination** — all healthy. No change.
+
+**Preserved invariants.** `racing_env.py`, the UC-40 hover-bias, the UC-41 collision curriculum,
+`ent_coef` (0.005), and every prior reward value are untouched. The only pinned-scalar movement is a
+benign side-effect of the new term's `−0.005/step` constant leak above the threshold, which shifts
+some exact-value assertions in the UC-42 tests (a legitimate contract change; the structural
+properties — monotone-increasing, flat-above-target, ≈0-at-floor, telescoping round-trip — all hold).
 
 **Validation is at the reward-math level only.** pybullet is unavailable in the sandbox and the numpy
 `simple` adapter is over-optimistic about takeoff (UC-40 proved this), so the committed acceptance gate
