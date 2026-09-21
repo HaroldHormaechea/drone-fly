@@ -1,19 +1,25 @@
-"""Training-time collision-penalty curriculum (UC-39 crash-cliff relief).
+"""Training-time collision-penalty curriculum (UC-39 crash-cliff relief, UC-41 hold-then-ramp).
 
 PPO propagates the genuine −``collision_penalty`` crash terminal (discounted by γ) back onto the
 "throttle up" actions that *begin* any takeoff, so those correct actions receive negative advantage
-and the policy learns "attempting flight leads to disaster — don't". UC-39 relieves this by ramping
-the collision penalty applied *during training* from a low value (while the drone learns to fly) up
-to the full value (for precision, so it doesn't learn permanently-sloppy floor/ceiling-clipping
+and the policy learns "attempting flight leads to disaster — don't". UC-39 relieved this by ramping
+the collision penalty applied *during training* from a low value up to the full value. UC-41 found
+that a from-t=0 linear ramp re-erected the crash cliff (to ~33 by 16% of training) well before the
+policy had learned to fly, so a *failed* takeoff — which trips the grounded cut that PAYS the
+collision penalty — stayed more negative than the penalty-free do-nothing floor and the policy
+committed to do-nothing. The schedule is therefore reshaped into a **hold-then-ramp**: the low
+penalty is *held* through the entire fly-learning phase, then ramped to full strength for
+late-training precision (so the drone doesn't learn permanently-sloppy floor/ceiling-clipping
 flight).
 
 Two pieces live here:
 
-* :func:`collision_penalty_at` — the **pure** schedule. A linear ramp from
-  ``cfg.collision_penalty_start`` to ``cfg.collision_penalty_end`` over the first
-  ``cfg.collision_curriculum_warmup_fraction * cfg.total_timesteps`` steps, then held flat.
-  Clamped and monotonic non-decreasing (for the default ``start <= end`` endpoints). It is a
-  function of ``num_timesteps`` only, so a resumed run continues the schedule correctly.
+* :func:`collision_penalty_at` — the **pure** schedule. ``collision_penalty_start`` held through the
+  first ``cfg.collision_curriculum_hold_fraction * cfg.total_timesteps`` steps, then a linear ramp
+  to ``cfg.collision_penalty_end`` over the next
+  ``cfg.collision_curriculum_warmup_fraction * cfg.total_timesteps`` steps, then held flat at the
+  end value. Clamped and monotonic non-decreasing (for the default ``start <= end`` endpoints). It
+  is a function of ``num_timesteps`` only, so a resumed run continues the schedule correctly.
 * :class:`CollisionCurriculumCallback` — the SB3 callback that, at the start of every rollout,
   computes the penalty for the current ``num_timesteps`` and pushes it into every base
   :class:`~drone_fly.env.racing_env.RaceEnv` via ``training_env.env_method`` — which propagates
@@ -33,26 +39,48 @@ from drone_fly.train.config import TrainConfig
 
 
 def collision_penalty_at(num_timesteps: int, cfg: TrainConfig) -> float:
-    """Return the collision penalty to apply at ``num_timesteps`` env steps (UC-39 AC3).
+    """Return the collision penalty to apply at ``num_timesteps`` env steps (UC-39/41 AC3).
 
-    Linear ramp ``collision_penalty_start`` → ``collision_penalty_end`` over the first
-    ``collision_curriculum_warmup_fraction * total_timesteps`` steps, then held at the end value:
+    HOLD-THEN-RAMP schedule (UC-41): ``collision_penalty_start`` held through the first
+    ``collision_curriculum_hold_fraction * total_timesteps`` steps, then a linear ramp to
+    ``collision_penalty_end`` over the next ``collision_curriculum_warmup_fraction *
+    total_timesteps`` steps, then held at the end value:
 
-    * ``num_timesteps <= 0`` → ``collision_penalty_start`` (episode-0 value).
-    * ``num_timesteps >= warmup_steps`` → ``collision_penalty_end`` (full-strength, held).
-    * in between → linear interpolation.
+    * ``num_timesteps <= hold_steps`` → ``collision_penalty_start`` (the whole fly-learning phase).
+    * ``num_timesteps >= hold_steps + warmup_steps`` → ``collision_penalty_end`` (full-strength).
+    * in between → linear interpolation across the ramp.
 
-    The fraction is clamped to ``[0, 1]`` so the result never overshoots the endpoints, and the
-    ramp is monotonic non-decreasing for the default ``start <= end``. A non-positive warmup
-    fraction (or ``total_timesteps``) degenerates to the end value immediately (no curriculum).
-    Pure and stateless — depends only on ``num_timesteps`` and ``cfg`` — so it is resume-correct.
+    The ramp fraction is clamped to ``[0, 1]`` so the result never overshoots the endpoints, and the
+    schedule is monotonic non-decreasing for the default ``start <= end``. A non-positive warmup
+    fraction (or ``total_timesteps``) degenerates to the end value immediately (no curriculum),
+    matching the UC-39 degenerate guard. Pure and stateless — depends only on ``num_timesteps`` and
+    ``cfg`` — so it is resume-correct.
+
+    Raises
+    ------
+    ValueError
+        If ``collision_curriculum_hold_fraction < 0`` or ``hold_fraction + warmup_fraction > 1``
+        (an out-of-range curriculum shape that would over/underflow the run length).
     """
+    hold_fraction = float(cfg.collision_curriculum_hold_fraction)
+    warmup_fraction = float(cfg.collision_curriculum_warmup_fraction)
+    if hold_fraction < 0.0 or hold_fraction + warmup_fraction > 1.0:
+        raise ValueError(
+            "collision curriculum fractions out of range: require 0 <= hold_fraction and "
+            f"hold_fraction + warmup_fraction <= 1, got hold_fraction={hold_fraction}, "
+            f"warmup_fraction={warmup_fraction}"
+        )
     start = float(cfg.collision_penalty_start)
     end = float(cfg.collision_penalty_end)
-    warmup_steps = float(cfg.collision_curriculum_warmup_fraction) * float(cfg.total_timesteps)
+    total = float(cfg.total_timesteps)
+    warmup_steps = warmup_fraction * total
     if warmup_steps <= 0.0:
         return end
-    frac = float(num_timesteps) / warmup_steps
+    hold_steps = hold_fraction * total
+    # Held at the start value through the entire fly-learning phase.
+    if float(num_timesteps) <= hold_steps:
+        return start
+    frac = (float(num_timesteps) - hold_steps) / warmup_steps
     frac = min(max(frac, 0.0), 1.0)  # clamp into [0, 1] so we never overshoot either endpoint
     return start + (end - start) * frac
 

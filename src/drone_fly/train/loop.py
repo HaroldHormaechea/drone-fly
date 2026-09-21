@@ -540,14 +540,16 @@ def train(
 
     callbacks: list = [checkpoint_cb]
 
-    # UC-39: default-on training-time collision-penalty curriculum (crash-cliff relief). Ramps the
-    # genuine-crash penalty from ``collision_penalty_start`` up to ``collision_penalty_end`` over
-    # the warmup fraction of the run, pushing the current value into the base envs each rollout via
-    # ``env_method``. Applied on BOTH the fresh and resume paths (the callback list feeds
-    # ``model.learn`` in either case); the schedule is stateless in ``num_timesteps`` so a resume
-    # continues it correctly. On ``smoke_train`` the tiny step budget keeps the value near
-    # ``collision_penalty_start`` — enough to prove the wiring end-to-end. Set
-    # ``collision_curriculum_enabled=False`` to train at the constant env default (pre-UC-39).
+    # UC-39/41: default-on training-time collision-penalty curriculum (crash-cliff relief). Follows
+    # a hold-then-ramp schedule — the genuine-crash penalty is held at ``collision_penalty_start``
+    # through the hold fraction of the run (the whole fly-learning phase), then ramped up to
+    # ``collision_penalty_end`` over the warmup fraction, then held at the end value — pushing the
+    # current value into the base envs each rollout via ``env_method``. Applied on BOTH the fresh
+    # and resume paths (the callback list feeds ``model.learn`` in either case); the schedule is
+    # stateless in ``num_timesteps`` so a resume continues it correctly. On ``smoke_train`` the tiny
+    # step budget keeps the value at ``collision_penalty_start`` (still inside the hold) — enough to
+    # prove the wiring end-to-end. Set ``collision_curriculum_enabled=False`` to train at the
+    # constant env default (pre-UC-39).
     if cfg.collision_curriculum_enabled:
         from drone_fly.train.collision_curriculum import CollisionCurriculumCallback
 
