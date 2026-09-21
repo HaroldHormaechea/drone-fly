@@ -120,6 +120,60 @@ def test_under_capacity_signature_suppressed_when_success_climbing() -> None:
     assert "under_capacity_signature" not in _rule_ids(assess_training_health(signals=signals))
 
 
+# --- UC-40 (AC2): EV criterion is ABSOLUTE, not "rising" ----------------------------------
+# The K0 signature must gate "critic is healthy" on the ABSOLUTE explained_variance clearing
+# ev_healthy — never on a mere upward trend. The old OR-branch (`_rel_change(EV) > 0`) fired the
+# rule at an absolute EV≈0.03 that happened to be rising, mislabeling a near-zero critic as
+# "high/rising" and producing the false K0 "undersized slice" verdict UC-40 exists to fix.
+
+
+def test_under_capacity_signature_not_fired_when_ev_rising_but_near_zero() -> None:
+    """AC2 regression: EV rising (0.01→0.02→0.03) but mean ≈0.02 ≪ ev_healthy must NOT fire.
+
+    This is the exact observed trace (abs EV ~0.03, trending up) that the pre-UC-40 trend-branch
+    mis-classified as a healthy critic. With the trend-branch dropped, a near-zero critic — even
+    a rising one — is no longer the K0 undersized-slice signature.
+    """
+    near_zero_rising = (0.01, 0.02, 0.03)
+    # Guard the premise: the series really is below the healthy threshold on absolute terms.
+    assert sum(near_zero_rising) / len(near_zero_rising) < DEFAULT_THRESHOLDS.ev_healthy
+    signals = _under_capacity_signature_signals(explained_variance=near_zero_rising)
+    assert "under_capacity_signature" not in _rule_ids(assess_training_health(signals=signals))
+
+
+def test_under_capacity_signature_fires_when_ev_absolutely_healthy() -> None:
+    """AC2: a genuinely healthy critic (abs EV at/above ev_healthy) with the flat-high-std /
+    zero-success actor still fires — the fix must not suppress the genuine K0 signature."""
+    signals = _under_capacity_signature_signals(explained_variance=(0.55, 0.60, 0.58))
+    verdict = assess_training_health(signals=signals)
+    assert "under_capacity_signature" in _rule_ids(verdict)
+    reason = next(r for r in verdict.reasons if r.rule_id == "under_capacity_signature")
+    assert "slice" in reason.text.lower()
+
+
+def test_under_capacity_signature_ev_boundary_at_ev_healthy() -> None:
+    """AC2: the decision is a clean threshold at ``ev_healthy`` — mean EV exactly at the
+    threshold fires; a hair below does not (all other K0 conditions held constant)."""
+    ev = DEFAULT_THRESHOLDS.ev_healthy
+    at = _under_capacity_signature_signals(explained_variance=(ev, ev, ev))
+    below = _under_capacity_signature_signals(explained_variance=(ev - 0.01, ev - 0.01, ev - 0.01))
+    assert "under_capacity_signature" in _rule_ids(assess_training_health(signals=at))
+    assert "under_capacity_signature" not in _rule_ids(assess_training_health(signals=below))
+
+
+def test_under_capacity_signature_message_states_absolute_not_high_rising() -> None:
+    """AC2: the corrected reason text no longer claims the critic is 'high/rising' — it states
+    absolute health — while still naming the (possible) undersized 'slice'."""
+    verdict = assess_training_health(signals=_under_capacity_signature_signals())
+    text = next(
+        r.text for r in verdict.reasons if r.rule_id == "under_capacity_signature"
+    ).lower()
+    assert "slice" in text
+    assert "high/rising" not in text
+    assert "rising" not in text
+    assert "absolute" in text
+
+
 # --- AC3: reward stalled ------------------------------------------------------------------
 
 
