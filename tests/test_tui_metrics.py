@@ -544,3 +544,36 @@ def test_update_and_tick_without_current_steps_leave_it_unchanged() -> None:
     assert m.current_steps == 30_000
     m.tick(elapsed_seconds=1.0, rollout_steps=1, rollout_target=2)  # no current_steps -> keep last
     assert m.current_steps == 30_000
+
+
+# --------------------------------------------------------------------------- #
+# UC-49 AC2 — the drone-dynamics slot on the model (None-tolerant)
+# --------------------------------------------------------------------------- #
+def test_drone_dynamics_slot_defaults_to_none() -> None:
+    """A fresh model carries no summary yet — the slot is None until the callback feeds one."""
+    m = DashboardModel(scheduled_iters=10)
+    assert m.drone_dynamics is None
+
+
+def test_set_drone_dynamics_stores_the_summary() -> None:
+    """set_drone_dynamics stores the summary object for the renderer to pick up."""
+    from drone_fly.adapter.dynamics_summary import drone_dynamics_summary
+
+    m = DashboardModel(scheduled_iters=10)
+    summary = drone_dynamics_summary(
+        backend="pybullet", sampled_mass=1.0, max_body_rate=4.0, tw_preserving=True
+    )
+    m.set_drone_dynamics(summary)
+    assert m.drone_dynamics is summary
+
+
+def test_set_drone_dynamics_tolerates_none() -> None:
+    """Feeding None (e.g. a glitched read) clears the slot without raising — None-tolerant."""
+    from drone_fly.adapter.dynamics_summary import drone_dynamics_summary
+
+    m = DashboardModel(scheduled_iters=10)
+    m.set_drone_dynamics(
+        drone_dynamics_summary(backend="simple", sampled_mass=1.0, max_body_rate=4.0)
+    )
+    m.set_drone_dynamics(None)
+    assert m.drone_dynamics is None

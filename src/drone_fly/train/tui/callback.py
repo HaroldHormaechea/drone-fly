@@ -51,13 +51,22 @@ class TuiCallback(BaseCallback):
     """
 
     def __init__(
-        self, dashboard, *, now: Callable[[], float] = time.monotonic, verbose: int = 0
+        self,
+        dashboard,
+        *,
+        now: Callable[[], float] = time.monotonic,
+        tw_preserving: bool = True,
+        verbose: int = 0,
     ) -> None:
         super().__init__(verbose)
         self.dashboard = dashboard
         #: Injectable monotonic clock (defaults to ``time.monotonic``) — the seam AC-2 tests use
         #: to drive the heartbeat throttle deterministically without real sleeps.
         self._now = now
+        #: UC-49: the run's ``EnvConfig.pybullet_tw_preserving`` flag, forwarded to
+        #: :func:`~drone_fly.adapter.dynamics_summary.drone_dynamics_summary` so the displayed
+        #: applied mass / T/W reflect the same UC-48 resolution the env uses. Default ``True``.
+        self._tw_preserving = bool(tw_preserving)
         self._n_updates = 0
         self._start_time: float | None = None
         self._enabled = True
@@ -126,6 +135,14 @@ class TuiCallback(BaseCallback):
 
             elapsed = time.monotonic() - self._start_time if self._start_time is not None else 0.0
 
+            # UC-49 AC2: build the shared drone-dynamics summary from env-0 and push it to the
+            # dashboard's own None-tolerant slot before the metrics update. In its OWN guarded
+            # block so a summary read glitch can never disable the whole metrics callback — it
+            # just skips the segment this iteration. Reads backend / active_dynamics and the live
+            # curriculum knobs (attitude-authority, spawn-z) off env-0 via get_attr, so the panel
+            # shows the LIVE scheduled curriculum values during training.
+            self._push_drone_dynamics()
+
             # UC-32: lock-guarded update (mutation+redraw atomic) — see _on_step note.
             self.dashboard.update(
                 n_updates=self._n_updates,
@@ -143,6 +160,45 @@ class TuiCallback(BaseCallback):
         except Exception as exc:  # noqa: BLE001 - never crash training over the TUI
             logger.warning("TuiCallback disabled after error: %s", exc)
             self._enabled = False
+
+    def _push_drone_dynamics(self) -> None:
+        """Build the shared drone-dynamics summary from env-0 and feed the dashboard (UC-49 AC2).
+
+        Best-effort and self-contained: any failure (an env without the accessors, a missing
+        vec-env) is swallowed with a debug log so the metrics update still runs. Uses the run's
+        ``tw_preserving`` flag so the reported applied mass / T/W match the env's UC-48 resolution;
+        when dynamics randomization is off, ``active_dynamics`` is ``None`` → the default
+        :class:`~drone_fly.env.config.DynamicsParams` is used (the physics actually in force).
+        """
+        try:
+            from drone_fly.adapter.dynamics_summary import drone_dynamics_summary
+            from drone_fly.env.config import DynamicsParams
+
+            venv = self.training_env
+            if venv is None:
+                return
+            backend = venv.get_attr("backend")[0]
+            dyn = venv.get_attr("active_dynamics")[0] or DynamicsParams()
+            try:
+                attitude_authority = float(venv.get_attr("attitude_authority")[0])
+            except Exception:  # noqa: BLE001 - env may predate the accessor; default to full
+                attitude_authority = 1.0
+            try:
+                spawn_z = venv.get_attr("spawn_z")[0]
+            except Exception:  # noqa: BLE001 - env may predate the accessor; leave unknown
+                spawn_z = None
+            summary = drone_dynamics_summary(
+                backend=backend,
+                sampled_mass=dyn.mass,
+                max_body_rate=dyn.max_body_rate,
+                max_thrust=dyn.max_thrust,
+                tw_preserving=self._tw_preserving,
+                attitude_authority=attitude_authority,
+                spawn_z=spawn_z,
+            )
+            self.dashboard.set_drone_dynamics(summary)
+        except Exception as exc:  # noqa: BLE001 - best-effort; the segment is optional
+            logger.debug("TuiCallback drone-dynamics summary skipped this iteration: %s", exc)
 
 
 __all__ = ["TuiCallback"]

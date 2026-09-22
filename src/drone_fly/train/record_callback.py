@@ -60,11 +60,22 @@ def _highest_episode_index(record_dir) -> int:
 class RecordingCallback(BaseCallback):
     """Record env-0's every-``record_every``-th training episode into ``recorder``."""
 
-    def __init__(self, recorder: ActivationRecorder, *, record_every: int = 1, seed: int = 0):
+    def __init__(
+        self,
+        recorder: ActivationRecorder,
+        *,
+        record_every: int = 1,
+        seed: int = 0,
+        tw_preserving: bool = True,
+    ):
         super().__init__()
         self.recorder = recorder
         self.record_every = max(int(record_every), 1)
         self.seed = int(seed)
+        # UC-49 AC3: the run's ``EnvConfig.pybullet_tw_preserving`` flag, forwarded to
+        # :func:`~drone_fly.adapter.dynamics_summary.drone_dynamics_summary` so the recorded
+        # ``meta.drone_dynamics`` pins the same UC-48-resolved applied mass / T/W the env uses.
+        self._tw_preserving = bool(tw_preserving)
         self._actor = None
         self._episode = 0
         self._capturing = False
@@ -93,6 +104,39 @@ class RecordingCallback(BaseCallback):
             # crash the training callback; a None stamp simply omits the meta.dynamics block.
             try:
                 self.recorder.set_dynamics(self.training_env.get_attr("active_dynamics")[0])
+            except Exception:  # noqa: BLE001 - best-effort; recording never breaks training
+                pass
+            # UC-49 AC3 (best-effort): stamp env-0's drone-dynamics summary so a randomized-
+            # training playback pins the resolved physics (applied mass / weight / T/W / hover /
+            # curriculum knobs) via the SAME shared computation the TUI and CI guard use. Its own
+            # guarded block — an env without the accessors (or randomization off → default
+            # DynamicsParams) must never crash the training callback. Uses the run's tw_preserving
+            # flag so the recorded T/W matches the env's UC-48 resolution.
+            try:
+                from drone_fly.adapter.dynamics_summary import drone_dynamics_summary
+                from drone_fly.env.config import DynamicsParams
+
+                backend = self.training_env.get_attr("backend")[0]
+                dyn = self.training_env.get_attr("active_dynamics")[0] or DynamicsParams()
+                try:
+                    attitude_authority = float(self.training_env.get_attr("attitude_authority")[0])
+                except Exception:  # noqa: BLE001 - env may predate the accessor; default full
+                    attitude_authority = 1.0
+                try:
+                    spawn_z = self.training_env.get_attr("spawn_z")[0]
+                except Exception:  # noqa: BLE001 - env may predate the accessor; leave unknown
+                    spawn_z = None
+                self.recorder.set_drone_dynamics(
+                    drone_dynamics_summary(
+                        backend=backend,
+                        sampled_mass=dyn.mass,
+                        max_body_rate=dyn.max_body_rate,
+                        max_thrust=dyn.max_thrust,
+                        tw_preserving=self._tw_preserving,
+                        attitude_authority=attitude_authority,
+                        spawn_z=spawn_z,
+                    )
+                )
             except Exception:  # noqa: BLE001 - best-effort; recording never breaks training
                 pass
             if self._actor is not None:
