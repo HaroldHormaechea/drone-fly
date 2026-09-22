@@ -678,6 +678,51 @@ def test_viewer_js_renders_additive_splat_heatmap() -> None:
     assert re.search(r"[Cc]olormap", js), "viewer.js must map intensity through a colormap"
 
 
+def test_viewer_js_weights_splats_by_activation_magnitude_from_rest() -> None:
+    """The heatmap animates only if splat weight tracks activation MAGNITUDE RELATIVE TO REST,
+    not the raw uint8 code.
+
+    The recorder quantizes real activation ∈ [-1, 1] to a code ∈ [0, 255] with rest (0) → code
+    ~127. Weighting a splat by ``act[i] / 255`` therefore pins every resting neuron at ~0.5
+    brightness, so the whole map glows at a constant half-lit floor and the frame-to-frame
+    signal (a fraction of a percent of that floor) is invisible. The weight must instead be the
+    magnitude of the dequantized activation — ``|code * scale + offset|`` — sourced from the
+    file's own ``activation_scale`` / ``activation_offset`` meta (with a canonical fallback), so
+    a resting neuron reads dark and only deviations light up and fade over time.
+    """
+    js = (_VIZ / "viewer.js").read_text()
+    # Weight is magnitude of the dequantized activation, not the raw code / 255.
+    assert "act[i] / 255" not in js and "act[i]/255" not in js, (
+        "viewer.js must NOT weight splats by the raw uint8 code (rest would glow at ~0.5)"
+    )
+    assert re.search(r"Math\.abs\(\s*act\[i\]\s*\*\s*ascale\s*\+\s*aoffset\s*\)", js), (
+        "viewer.js must weight splats by |act[i] * scale + offset| (activation magnitude from rest)"
+    )
+    # Scale/offset are sourced from the recording meta (not hardcoded), with a legacy fallback.
+    assert "activation_scale" in js and "activation_offset" in js, (
+        "viewer.js must read activation_scale/activation_offset from the recording meta"
+    )
+
+
+def test_viewer_js_applies_per_neuron_temporal_autogain() -> None:
+    """Magnitude-from-rest alone leaves the map nearly constant frame-to-frame (the activations
+    drift slowly), so the splat weight is additionally auto-gained per neuron: each neuron's
+    magnitude is stretched to its OWN episode min→max range (with a floored divisor so
+    quantization noise on near-rest neurons is not blown up), making slow swings fill the
+    dark→bright range and visibly animate.
+    """
+    js = (_VIZ / "viewer.js").read_text()
+    # A per-recording gain pre-pass exists and is memoized (not recomputed per view).
+    assert "ensureActivationGain" in js, "viewer.js must compute a per-neuron temporal auto-gain"
+    assert "actGain" in js, "the auto-gain must be memoized on state (per recording, not per view)"
+    # The divisor is floored by a named constant so near-rest noise is not amplified.
+    assert "MAP_GAIN_MIN_RANGE" in js, "auto-gain divisor must be floored (MAP_GAIN_MIN_RANGE)"
+    # The stamp weight applies the gain: clamp01((mag - lo) * inv).
+    assert re.search(r"\(\s*mag\s*-\s*gainLo\[i\]\s*\)\s*\*\s*gainInv\[i\]", js), (
+        "stampFrame must apply the per-neuron auto-gain: (mag - gainLo[i]) * gainInv[i]"
+    )
+
+
 def test_viewer_html_map_norm_select_per_frame_and_global() -> None:
     """AC5: the anatomical panel offers an intensity-normalization toggle with ``per-frame``
     and ``global`` options, **per-frame** the default.
