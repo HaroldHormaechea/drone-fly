@@ -5,10 +5,11 @@ pybullet, no GPU). Because the reward feeds VecNormalize, every assertion is an 
 sign, a round-trip net, or an equality — **never** an absolute magnitude margin (the UC-42
 lesson).
 
-The UC-50 block is default-OFF: ``RewardConfig().enable_altitude_decoupling is False`` ⇒ the
-new ``target_height_above_floor_*`` inputs are ignored and the function is byte-identical to
-UC-43 (AC-6). The enabled configuration under test mirrors the recommended training values
-documented in ``RewardConfig`` (``altitude_hold_weight = 2.0``, ``altitude_band = 0.6``).
+UC-50 ships ENABLED by default (``RewardConfig().enable_altitude_decoupling is True``); the
+``OFF`` config below constructs the explicit feature-off variant used to pin the byte-identical
+path — with the feature off the new ``target_height_above_floor_*`` inputs are ignored and the
+function is byte-identical to UC-43 (AC-6). The enabled configuration under test mirrors the
+shipped/recommended training values (``altitude_hold_weight = 2.0``, ``altitude_band = 0.6``).
 
 Two coupled mechanisms are exercised (see the ``compute_reward`` docstring for the contract):
 
@@ -33,7 +34,9 @@ from drone_fly.env.config import RewardConfig
 from drone_fly.env.reward import compute_reward
 
 # --- Configs under test ----------------------------------------------------------------------
-OFF = RewardConfig()  # shipped default: enable_altitude_decoupling is False (byte-identical path)
+OFF = RewardConfig(  # explicit feature-off variant (UC-50 now ships enabled by default)
+    enable_altitude_decoupling=False, altitude_hold_weight=0.0
+)
 # Enabled with the recommended training values (documented in RewardConfig).
 EN = RewardConfig(enable_altitude_decoupling=True, altitude_hold_weight=2.0, altitude_band=0.6)
 # Enabled but with the altitude-hold WEIGHT zeroed: the progress hard-gate still runs, the
@@ -359,10 +362,11 @@ _REPRESENTATIVE_CALLS = (
 
 @pytest.mark.parametrize("call", _REPRESENTATIVE_CALLS)
 def test_ac6_flag_off_is_byte_identical_regardless_of_target_height(call: dict) -> None:
-    """AC-6: with ``enable_altitude_decoupling`` False (the shipped default), the new
+    """AC-6: with ``enable_altitude_decoupling`` explicitly False, the new
     ``target_height_above_floor_*`` inputs are ignored — the result is identical whether they are
     omitted (pre-change callers) or set to arbitrary non-zero values. Pins the additive,
-    default-off, byte-compatible contract mirrored from every prior reward UC."""
+    feature-off, byte-compatible contract mirrored from every prior reward UC (UC-50 itself now
+    ships enabled by default)."""
     baseline = compute_reward(cfg=OFF, **call)
     with_targets = compute_reward(
         cfg=OFF,

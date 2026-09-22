@@ -35,7 +35,9 @@ from drone_fly.env.config import (
 )
 from drone_fly.env.reward import compute_reward
 
-CFG = RewardConfig()
+# UC-50 ships enabled-by-default; these UC-43 ground-break tests pin the pre-UC-50 shaping in
+# isolation, so use an explicit feature-OFF config.
+CFG = RewardConfig(enable_altitude_decoupling=False, altitude_hold_weight=0.0)
 GAMMA = CFG.climb_gamma  # 0.99 — must equal training γ (asserted in the unchanged-terms test)
 THRESHOLD = CFG.ground_break_height  # 0.05 m — saturation height ≡ floor_epsilon (asserted below)
 
@@ -44,7 +46,7 @@ THRESHOLD = CFG.ground_break_height  # 0.05 m — saturation height ≡ floor_ep
 # above-threshold height-independence, telescoping) in isolation from the climb potential, which is
 # also active in the sub-threshold band. Only ``climb_weight`` is zeroed; every other knob (and the
 # ground-break knobs in particular) is the shipped default.
-GB_ONLY = RewardConfig(climb_weight=0.0)
+GB_ONLY = RewardConfig(climb_weight=0.0, enable_altitude_decoupling=False, altitude_hold_weight=0.0)
 
 
 def _reward(cfg: RewardConfig = CFG, **over: object) -> float:
@@ -276,7 +278,11 @@ def test_ac7_climb_step_pays_and_round_trip_nets_zero() -> None:
         # Isolate the climb POTENTIAL: ground-break zeroed and ``airborne=False`` (the airborne
         # graded bonus is a state function of the current height, NOT a potential difference, so it
         # would not telescope), differenced against the h=0 baseline.
-        cfg = RewardConfig(ground_break_weight=0.0)
+        cfg = RewardConfig(
+            ground_break_weight=0.0,
+            enable_altitude_decoupling=False,
+            altitude_hold_weight=0.0,
+        )
         step = _reward(
             cfg=cfg, airborne=False, height_above_floor_prev=h_prev, height_above_floor_curr=h_curr
         )

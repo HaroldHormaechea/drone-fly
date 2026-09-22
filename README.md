@@ -402,13 +402,14 @@ directly with two coupled levers.
 | Collision (floor/ceiling/OOB) | −100 | on a genuine crash; terminates the episode (`collision_penalty` — see the training curriculum below) |
 | Obstacle contact | −50 | edge-triggered once per distinct pillar contact; non-terminating (`obstacle_penalty`) |
 | No-progress / timeout cut | 0 | penalty-free (UC-38) |
-| Altitude progress-gate (UC-50, **default off**) | withholds the **positive** Progress reward | when `enable_altitude_decoupling` and `height < max(ref − altitude_band, ground_break_height)`, where `ref` = current target-gate height above floor, lower-clamped to `ground_break_height` (one-sided — no ceiling clamp). Only ever *reduces* reward (a below-band retreat keeps its penalty ⇒ non-farmable); the `ground_break_height` lower edge keeps takeoff bootstrapping |
-| Altitude-hold (UC-50, **default off**) | potential-based, weight `altitude_hold_weight`, band `altitude_band` | when `enable_altitude_decoupling`; `F = γ·Φ_track(curr) − Φ_track(prev)`, `Φ_track(h, ref) = altitude_hold_weight·clamp(h − (ref − altitude_band), 0, altitude_band)`, `ref = max(target-gate height above floor, ground_break_height)` — a **non-negative** altitude credit (anchored like Climb ⇒ leak ≤ 0, bob nets ≤ 0, no loiter optimum), one-sided (flat above `ref`), reference tracks the current target-gate z. Recommended enabled: weight 2.0, band 0.6 m (sizing invariant `ref − band ≤ climb_target_height`) |
+| Altitude progress-gate (UC-50, **default on**) | withholds the **positive** Progress reward | when `enable_altitude_decoupling` and `height < max(ref − altitude_band, ground_break_height)`, where `ref` = current target-gate height above floor, lower-clamped to `ground_break_height` (one-sided — no ceiling clamp). Only ever *reduces* reward (a below-band retreat keeps its penalty ⇒ non-farmable); the `ground_break_height` lower edge keeps takeoff bootstrapping |
+| Altitude-hold (UC-50, **default on**) | potential-based, weight `altitude_hold_weight`, band `altitude_band` | when `enable_altitude_decoupling`; `F = γ·Φ_track(curr) − Φ_track(prev)`, `Φ_track(h, ref) = altitude_hold_weight·clamp(h − (ref − altitude_band), 0, altitude_band)`, `ref = max(target-gate height above floor, ground_break_height)` — a **non-negative** altitude credit (anchored like Climb ⇒ leak ≤ 0, bob nets ≤ 0, no loiter optimum), one-sided (flat above `ref`), reference tracks the current target-gate z. Shipped enabled: weight 2.0, band 0.6 m (sizing invariant `ref − band ≤ climb_target_height`) |
 
 The reward-column values are the env **defaults** (`RewardConfig` constants); keep this table in sync
-with any future reward change. **UC-50 altitude/forward decoupling ships OFF** (`enable_altitude_decoupling=False`,
-`altitude_hold_weight=0.0`) so the shipped default reward is byte-identical to UC-43; the two rows above
-apply only when the training config enables the flag (recommended `altitude_hold_weight=2.0`, `altitude_band=0.6`).
+with any future reward change. **UC-50 altitude/forward decoupling ships ON by default**
+(`enable_altitude_decoupling=True`, `altitude_hold_weight=2.0`, `altitude_band=0.6`) so a plain
+`drone-fly train` retrain uses it (the training YAML does not expose reward weights). To recover the
+pre-UC-50 reward exactly, construct `RewardConfig(enable_altitude_decoupling=False, altitude_hold_weight=0.0)`.
 
 - **Lever 1 — dense potential-based climb reward (`RewardConfig.climb_weight` = 2.0,
   `climb_target_height` = 1.0 m, `climb_gamma` = 0.99; default on).** A small per-step reward pays for

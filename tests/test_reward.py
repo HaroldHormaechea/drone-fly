@@ -21,7 +21,9 @@ import pytest
 from drone_fly.env.config import RewardConfig
 from drone_fly.env.reward import compute_reward
 
-CFG = RewardConfig()
+# UC-50 shipped enabled-by-default; these base-component tests pin the pre-UC-50 reward pieces
+# in isolation, so they use an explicit feature-OFF config.
+CFG = RewardConfig(enable_altitude_decoupling=False, altitude_hold_weight=0.0)
 
 
 def _step(
@@ -255,7 +257,11 @@ def test_obstacle_penalty_defaults_to_no_contact() -> None:
 def test_obstacle_penalty_magnitude_is_tunable() -> None:
     """The penalty magnitude is read from the config — a documented, tunable constant (AC9)."""
     for magnitude in (10.0, 50.0, 250.0):
-        cfg = RewardConfig(obstacle_penalty=magnitude)
+        cfg = RewardConfig(
+            obstacle_penalty=magnitude,
+            enable_altitude_decoupling=False,
+            altitude_hold_weight=0.0,
+        )
         hit = compute_reward(
             dist_to_target_prev=0.0,
             dist_to_target_curr=0.0,
@@ -568,7 +574,11 @@ def test_uc39_hover_episode_beats_takeoff_then_immediate_crash_at_worst_case_cp(
 
     cp_low = TrainConfig().collision_penalty_start
     assert cp_low == pytest.approx(2.0)
-    crash_cfg = RewardConfig(collision_penalty=cp_low)  # worst-case low curriculum endpoint
+    crash_cfg = RewardConfig(
+        collision_penalty=cp_low,  # worst-case low curriculum endpoint
+        enable_altitude_decoupling=False,
+        altitude_hold_weight=0.0,
+    )
 
     target = CFG.climb_target_height
 

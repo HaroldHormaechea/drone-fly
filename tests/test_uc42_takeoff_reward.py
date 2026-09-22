@@ -31,7 +31,9 @@ import pytest
 from drone_fly.env.config import EnvConfig, EpisodeConfig, RewardConfig
 from drone_fly.env.reward import compute_reward
 
-CFG = RewardConfig()
+# UC-50 ships enabled-by-default; these UC-42 survival/altitude-grading tests pin the pre-UC-50
+# behavior in isolation, so use an explicit feature-OFF config.
+CFG = RewardConfig(enable_altitude_decoupling=False, altitude_hold_weight=0.0)
 
 # The pre-UC-42 durable net-hold-per-airborne-step AT THE TARGET, with the OLD flat bonus:
 #   airborne_bonus(0.10) - time_penalty(0.05) - standing_tax(0.02) = +0.03/step.
