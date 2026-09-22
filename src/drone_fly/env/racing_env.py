@@ -189,6 +189,13 @@ class RaceEnv(gym.Env):
         # neither observed nor checkpointed, so this has no obs-schema / checkpoint-schema impact.
         self._spawn_z_override: float | None = None
 
+        # UC-45 AC9: the DynamicsParams actually in force for the current episode. Set each
+        # reset() to the sampled params when dynamics randomization is on, or None when it is
+        # off. Read by the recorder (via active_dynamics) to stamp meta.dynamics so a randomized
+        # playback pins the true sampled physics. Purely a read-out — no behaviour change; the
+        # sampling itself is unchanged. Declared here so the property is safe before first reset.
+        self._active_dynamics: DynamicsParams | None = None
+
     def set_collision_penalty(self, value: float | None) -> None:
         """Override the genuine-collision penalty used in reward shaping (UC-39 crash-cliff relief).
 
@@ -237,6 +244,17 @@ class RaceEnv(gym.Env):
         sampled course into ``meta.course`` (so the UC-06 viewer draws the right markers).
         """
         return self._course
+
+    @property
+    def active_dynamics(self):
+        """The :class:`DynamicsParams` in force for the current episode, or ``None`` (UC-45 AC9).
+
+        ``None`` unless dynamics randomization sampled a fresh :class:`DynamicsParams` at the
+        last ``reset()``. Read by the recorder to stamp each episode's true sampled physics
+        into ``meta.dynamics`` (so a randomized playback is reproducible independent of the
+        seed→sample mapping). Read-only view — no behaviour change.
+        """
+        return self._active_dynamics
 
     # -- observation encoding -----------------------------------------------------------
     def _observation(self, state) -> np.ndarray:
@@ -321,6 +339,9 @@ class RaceEnv(gym.Env):
             dynamics = sample_dynamics(self.np_random, rcfg, DynamicsParams())
         else:
             dynamics = None
+        # UC-45 AC9: expose the per-episode sampled dynamics (or None when off) so the recorder
+        # can stamp meta.dynamics. Assignment only — no behaviour / RNG effect.
+        self._active_dynamics = dynamics
 
         # Apply the per-episode spawn / dynamics before the adapter reset. When every axis is off
         # we skip the call entirely (not even a no-op reconfigure) so the fixed path is byte-
@@ -668,6 +689,13 @@ class RaceEnv(gym.Env):
             "target_gate": min(self._gates_passed, course.num_gates),
             # World-frame drone position this step (UC-05 recording draws the flight path).
             # Additive key; existing tests assert membership, so this stays back-compatible.
+            #
+            # UC-45 INVARIANT: this is the AUTHORITATIVE per-step true drone state — the exact
+            # adapter-reported world position, copied verbatim off ``state.position`` (itself the
+            # adapter's ``_read_state`` output). Every recording's ``frames.drone_position`` MUST
+            # equal this value component-wise; the recorder stores it byte-for-byte (no axis
+            # freeze/drop/reprojection). The UC-45 diagnosis proved this path byte-faithful across
+            # the full vec/subproc training stack — do not filter, clamp, or transform it here.
             "position": state.position.copy(),
             # UC-25/UC-38: reason this episode was cut early — ``"grounded"`` (rested on the floor
             # after takeoff), ``"stuck"`` (no course progress for a full window), or ``None`` (not

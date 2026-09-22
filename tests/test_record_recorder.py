@@ -59,6 +59,7 @@ _DOC_META_KEYS = {
     "seed",
     "checkpoint",
     "backend",
+    "git_sha",  # UC-45 AC8a: always-present source-tree commit stamp (None/"unknown" when absent).
     "n_frames",
     "n_neurons",
     "action_layout",

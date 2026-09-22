@@ -110,6 +110,17 @@ class ActivationRecorder:
         **additive** ``meta.course`` block so the viewer can place the 3-D floor and the
         start / gate / finish markers (UC-06 AC8). ``None`` omits the block entirely, keeping
         older files back-compatible; the viewer degrades gracefully when it is absent.
+    git_sha:
+        The source-tree commit (a ``git describe`` string from
+        :func:`drone_fly.record.provenance.resolve_git_sha`) recorded at capture time so a
+        recording pins the exact code that produced it, even across later code drift (UC-45
+        AC8a). It may carry a tag form (e.g. ``v1.2.3-4-ga1b2c3d-dirty``); it pins the commit
+        via the ``g<sha>`` field and flags uncommitted edits with ``-dirty`` — it is **not**
+        promised to be a bare 7-char sha. ``"unknown"`` when the tree could not be resolved.
+        Always present in ``meta`` (like ``backend`` / ``checkpoint`` / ``dt``), defaulting to
+        ``None`` when the caller does not supply one. Note ``meta.checkpoint`` on a
+        training/resume run is the base/resume ANCHOR (the weights the run started from), not a
+        per-rollout weights snapshot.
     """
 
     def __init__(
@@ -123,6 +134,7 @@ class ActivationRecorder:
         dt: float | None = None,
         projection: str = DEFAULT_PROJECTION,
         course: CourseConfig | None = None,
+        git_sha: str | None = None,
     ) -> None:
         self.out_dir = Path(out_dir)
         self.gzip_output = gzip_output
@@ -130,6 +142,13 @@ class ActivationRecorder:
         self.checkpoint = checkpoint
         self.dt = dt
         self.course = course
+        self.git_sha = git_sha
+        # UC-45 AC9: the per-episode sampled dynamics (mass/drag/thrust/body-rate/latency),
+        # stamped by the caller via :meth:`set_dynamics` when domain randomization is active so
+        # the recording pins the physics independent of the seed→sample mapping. ``None`` (the
+        # default and when randomization is off) omits the ``meta.dynamics`` block entirely,
+        # keeping older files byte-for-byte back-compatible. Mirrors the ``course`` handling.
+        self.dynamics = None
         self.n_neurons = data.neuron_count
         self.neuron_ids = [
             int(x) if _is_int_like(x) else str(x) for x in np.asarray(data.neuron_ids)
@@ -216,6 +235,18 @@ class ActivationRecorder:
         """
         self.course = course
 
+    def set_dynamics(self, dynamics) -> None:
+        """Set the per-episode sampled dynamics stamped into ``meta.dynamics`` (UC-45 AC9).
+
+        With domain randomization on, the caller passes the env's actual per-episode
+        ``active_dynamics`` (a :class:`~drone_fly.env.config.DynamicsParams`) so the recorded
+        ``meta.dynamics`` pins the true sampled physics (mass/drag/thrust/body-rate/latency)
+        independent of the seed→sample mapping. ``None`` (randomization off) leaves the block
+        out of ``meta`` entirely, keeping older recordings back-compatible. Mirrors
+        :meth:`set_course`.
+        """
+        self.dynamics = dynamics
+
     # -- capture ------------------------------------------------------------------------
     def sink(self, activation: np.ndarray) -> None:
         """Actor hook: stash the latest post-propagation activation (pull-based capture).
@@ -297,6 +328,10 @@ class ActivationRecorder:
             "seed": self._seed,
             "checkpoint": self.checkpoint,
             "backend": self.backend,
+            # UC-45 AC8a: the source-tree commit at record time, ALWAYS present (like
+            # checkpoint/backend/dt) so a recording pins the code that produced it. ``None`` when
+            # the caller supplied none; ``"unknown"`` when git could not resolve it (never raises).
+            "git_sha": self.git_sha,
             "n_frames": self.n_frames,
             "n_neurons": self.n_neurons,
             "action_layout": ACTION_LAYOUT_LOWER,
@@ -308,6 +343,19 @@ class ActivationRecorder:
             # Additive, back-compatible block (UC-06 AC8): semantic course anchors only —
             # the viewer owns display sizing. Absent when no course is supplied.
             meta["course"] = _course_meta(self.course)
+        if self.dynamics is not None:
+            # UC-45 AC9: additive, presence-guarded block — the per-episode sampled physics,
+            # stamped only when domain randomization is active (``set_dynamics`` received a
+            # non-None ``DynamicsParams``). Omitted entirely otherwise, so no-randomization runs
+            # and every pre-UC-45 recording stay byte-for-byte unchanged. Absolute resolved
+            # values (mass/drag/thrust/body-rate/latency), read verbatim off the sampled params.
+            meta["dynamics"] = {
+                "mass": float(self.dynamics.mass),
+                "drag": float(self.dynamics.drag),
+                "max_thrust": float(self.dynamics.max_thrust),
+                "max_body_rate": float(self.dynamics.max_body_rate),
+                "latency_steps": int(self.dynamics.latency_steps),
+            }
 
         frames: dict = {
             "activations": self._activations,

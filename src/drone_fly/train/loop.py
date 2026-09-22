@@ -586,6 +586,7 @@ def train(
         # UC-05 best-effort training-time capture (documented; eval is the tested primary).
         # Records env-0's every-Nth episode during on-policy rollout collection. Guarded so
         # a recording error can never crash a training run.
+        from drone_fly.record.provenance import resolve_git_sha
         from drone_fly.record.recorder import ActivationRecorder
         from drone_fly.train.record_callback import RecordingCallback
 
@@ -593,9 +594,15 @@ def train(
             connectome,
             record_dir or "artifacts/activations",
             backend=venv.get_attr("backend")[0],
-            checkpoint="(training)",
+            # UC-45 AC8b: stamp the REAL resume checkpoint (the weights the run started from) when
+            # resuming; the "(training)" placeholder remains only for a genuine from-scratch run
+            # with no saved weights yet.
+            checkpoint=(resume if resuming else "(training)"),
             dt=(env_config or EnvConfig()).episode.dt,
             course=(env_config or EnvConfig()).course,
+            # UC-45 AC8a: pin the source-tree commit at record time (never raises; "unknown" on
+            # failure). Resolved against the drone-fly source tree, not the process CWD.
+            git_sha=resolve_git_sha(),
         )
         callbacks.append(RecordingCallback(recorder, record_every=record_every, seed=cfg.seed))
         logger.info(
