@@ -582,6 +582,23 @@ def train(
             )
         )
 
+    # UC-46: default-on training-time attitude-authority curriculum (tumbling relief). Scales the
+    # roll/pitch/yaw command channels (never throttle) by an authority factor that starts low and
+    # anneals to full over the first ``attitude_authority_anneal_fraction`` of the run, pushing the
+    # current value into the base envs each rollout via ``set_attitude_authority`` / ``env_method``.
+    # The schedule is a pure function of ``num_timesteps`` (no env geometry needed), so — unlike the
+    # airborne curriculum — it takes no floor/high endpoints. Applied on BOTH the fresh and resume
+    # paths (the callback list feeds ``model.learn`` in either case); the schedule is stateless in
+    # ``num_timesteps`` so a resume continues it correctly. On ``smoke_train`` the tiny step budget
+    # keeps ``num_timesteps`` ≈ 0 → the low start authority → the smoke run demonstrates the effect
+    # (AC8). ONLY the training venv gets this callback, so eval/recording run at full authority
+    # (AC3). Set ``attitude_authority_curriculum_enabled=False`` to train at constant full authority
+    # (byte-identical to pre-UC-46).
+    if cfg.attitude_authority_curriculum_enabled:
+        from drone_fly.train.attitude_curriculum import AttitudeAuthorityCurriculumCallback
+
+        callbacks.append(AttitudeAuthorityCurriculumCallback(cfg))
+
     if record:
         # UC-05 best-effort training-time capture (documented; eval is the tested primary).
         # Records env-0's every-Nth episode during on-policy rollout collection. Guarded so

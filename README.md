@@ -673,6 +673,73 @@ demonstrates that with an airborne spawn the drone collects airborne/climb rewar
 above the −5 floor, and the action std does not collapse. **Behavioral takeoff confirmation is the
 user's fresh GPU retrain and is not claimed here.**
 
+### Attitude-authority curriculum (UC-46)
+UC-45 proved the recordings are **byte-faithful**, so the drone's failure to fly is real behaviour,
+not a logging artifact: it **tumbles**. Level control is fine (throttle 1.0 + level attitude climbs
+0.9→9.36 m; 0.5 hovers at 0.900 m), but the open-loop CTBR→RPM mixer (`ctbr_to_rpm`; `rate_gain=0.15`
+on the pybullet backend, `BASE_MAX_BODY_RATE=4.0` on the simple backend) has **no attitude
+stabilization**, and early PPO — with an unbounded Gaussian head (`squash_output=False`) and action
+std ~1.0 — commands wild roll/pitch/yaw **rate** commands. The drone flips (roll reached 171° in a
+reproduction), vectors its thrust sideways/down, loses net lift, and falls. This is the same root
+that defeated the seven reward/curriculum use cases before it. UC-46 adds a training-time
+**attitude-authority curriculum** — the direct analogue of UC-44's airborne-start reverse curriculum,
+applied to attitude instead of spawn altitude. **No reward-function change and no inner-loop attitude
+controller** (both deliberately deferred so the result is attributable to authority-limiting alone);
+the mixer, exploration/entropy, and UC-44/UC-45 are all untouched.
+
+- **What it scales (training-time only; `TrainConfig` `attitude_authority_curriculum_enabled` default
+  `True`).** The roll/pitch/yaw command channels (action indices **1, 2, 3**) are multiplied by an
+  **authority factor** in `RaceEnv.step` before they reach the adapter. **Throttle (index 0) is never
+  scaled** — lift authority is untouched, so the drone can always climb. The factor **starts at
+  `attitude_authority_start` (default 0.25) and anneals linearly up to `1.0` (full authority)** over
+  the first `attitude_authority_anneal_fraction` (default **0.5**) of `total_timesteps`, then holds
+  full authority for the remainder. Early on a noisy policy physically cannot flip the drone (its
+  attitude commands are capped to a quarter of their range → it stays roughly level → net thrust stays
+  up → it climbs and collects the existing airborne/climb reward); as the authority anneals to full
+  the policy regains full maneuvering control, bootstrapped from an upright-and-climbing policy.
+- **Clip-then-scale ordering (deliberate; a structural cap, not a statistical one).** Because
+  `squash_output=False`, the raw Gaussian samples reaching `RaceEnv.step` are **unbounded** — the
+  largest, most flip-inducing commands are exactly the ones outside the `[-1, 1]` box. The env
+  therefore **clips first, then scales**: `sanitize_action(action)` clips into the canonical CTBR box,
+  then the clipped attitude channels are multiplied by the factor. This guarantees effective
+  `|rpy| ≤ factor` for **all** inputs including saturated ones. Scale-then-clip would leak at full-
+  sized commands and invert the lever, so the ordering is load-bearing.
+- **The schedule** (`drone_fly.train.attitude_curriculum.attitude_authority_at`) is a pure function of
+  `num_timesteps`: monotone non-decreasing, clamped to `[attitude_authority_start, 1.0]`, returns the
+  start value at step 0 and exactly `1.0` at/after the anneal end — so a **resumed** run continues it
+  correctly. It is pushed into the envs each rollout by an SB3 callback via
+  `env_method("set_attitude_authority", …)`, exactly like the UC-44 airborne curriculum. It raises
+  `ValueError` on a misconfigured `attitude_authority_anneal_fraction` or `attitude_authority_start`
+  outside `[0, 1]` (a negative authority would invert the channels; above `1.0` would amplify past the
+  sanitized envelope). Set `attitude_authority_curriculum_enabled = False` to train at constant full
+  authority (byte-identical to pre-UC-46).
+- **Training-only scope (does not leak into the flight measurement).** The callback is attached to the
+  **training** run only, and `RaceEnv.set_attitude_authority` is a per-instance override defaulting
+  **1.0** (full authority). **Eval and standalone-recording envs** are separate instances that never
+  receive the callback, so they run at **full authority (1.0) = the annealed endpoint** and measure
+  true flight. The `!= 1.0` guard keeps the default / eval / recording / post-anneal / disabled step
+  path byte-identical to pre-UC-46.
+
+> **⚠️ Fresh-run requirement (read before evaluating this change).** As with UC-44, a **valid**
+> evaluation requires a **brand-new model with old checkpoints cleared**. The UC-44 climb-bias init
+> fires **only on a fresh build**, and a resumed pre-fix checkpoint carries an already-collapsed
+> policy that no curriculum — spawn or attitude — can un-collapse. Before the retrain, **delete the
+> old checkpoints** (clear `training/<name>/checkpoints/` or point at a fresh run name) and confirm
+> `resume` does not pick up a stale checkpoint. This is a documentation guarantee, not a
+> code-enforceable one.
+
+**Validation (lab-only; the ~12h GPU retrain stays the user's and is not a CI gate).** Hermetic unit
+tests (no pybullet) cover the schedule (start value at fraction 0, exactly 1.0 at/after the anneal
+end, monotonicity, clamp, out-of-range `ValueError` on both fields, degenerate/disabled → constant
+1.0, resume-correctness), the env in-box behaviour (only channels 1/2/3 scaled, throttle untouched,
+default 1.0 byte-identical passthrough, and a saturated-input regression lock on the clip-then-scale
+ordering), and the training-only scope (the callback pushes the scheduled factor through the wrapper
+stack while an eval/recording env reports authority 1.0 regardless of schedule). A short CPU/pybullet
+smoke sanity-checks the start value: under reduced early authority the drone stays markedly more
+upright (lower max |roll|/|pitch|) and gains altitude versus full authority with the same
+policy/noise. **Behavioral takeoff confirmation is the user's fresh GPU retrain and is not claimed
+here.**
+
 ### Visualization & recording
 Enable recording in a train/evaluate config with `record: true` (tune cadence via `record_every`);
 frames land in that run's `training/<name>/recordings/`. Open `viz/viewer.html` in a browser
