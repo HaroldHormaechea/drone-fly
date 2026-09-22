@@ -59,3 +59,4 @@ Statuses:
 | 47 | [use-cases/47-diagnose-thrust-pathway-collective-collapse.md](use-cases/47-diagnose-thrust-pathway-collective-collapse.md) | Diagnose the throttle→thrust pathway (collective-thrust collapse) | done | 2026-09-22 |
 | 48 | [use-cases/48-fix-pybullet-mass-thrust-tw-preserving.md](use-cases/48-fix-pybullet-mass-thrust-tw-preserving.md) | Make pybullet dynamics randomization thrust-to-weight preserving | done | 2026-09-22 |
 | 49 | [use-cases/49-drone-dynamics-observability.md](use-cases/49-drone-dynamics-observability.md) | Drone-dynamics observability — TUI segment, recording provenance, T/W regression guard | done | 2026-09-22 |
+| 50 | [use-cases/50-reward-altitude-holding-forward-flight.md](use-cases/50-reward-altitude-holding-forward-flight.md) | Reward altitude-holding forward flight — stop trading height for gate-progress | done | 2026-09-22 |
