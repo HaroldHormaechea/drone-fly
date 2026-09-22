@@ -1,0 +1,1126 @@
+{
+  "backend": "pybullet",
+  "cf2x_constants": {
+    "hover_rpm": 14468.429183500699,
+    "max_rpm": 21702.64377525105,
+    "mass": 0.027,
+    "gravity": 9.8,
+    "kf": 3.16e-10
+  },
+  "rate_gain": 0.15,
+  "measure": {
+    "steps": 10,
+    "skip": 2
+  },
+  "baseline_default_mass": [
+    {
+      "label": "baseline[default_0.027kg] thr=0.0",
+      "throttle": 0.0,
+      "rpy": 0.0,
+      "authority": 1.0,
+      "mass": 0.027,
+      "a_z": -7.024614044165383,
+      "tw": 0.2832026485545528,
+      "attitude_drift_rad": 0.0,
+      "omega_max": 0.0,
+      "z0": 49.990054070902445,
+      "zf": 49.090559676078236
+    },
+    {
+      "label": "baseline[default_0.027kg] thr=0.25",
+      "throttle": 0.25,
+      "rpy": 0.0,
+      "authority": 1.0,
+      "mass": 0.027,
+      "a_z": -4.15298745340189,
+      "tw": 0.5762257700610317,
+      "attitude_drift_rad": 0.0,
+      "omega_max": 0.0,
+      "z0": 49.99419793680866,
+      "zf": 49.46687977310732
+    },
+    {
+      "label": "baseline[default_0.027kg] thr=0.5",
+      "throttle": 0.5,
+      "rpy": 0.0,
+      "authority": 1.0,
+      "mass": 0.027,
+      "a_z": -1.0279842820603304e-15,
+      "tw": 0.9999999999999998,
+      "attitude_drift_rad": 0.0,
+      "omega_max": 0.0,
+      "z0": 50.0,
+      "zf": 50.0
+    },
+    {
+      "label": "baseline[default_0.027kg] thr=0.75",
+      "throttle": 0.75,
+      "rpy": 0.0,
+      "authority": 1.0,
+      "mass": 0.027,
+      "a_z": 5.310928664091338,
+      "tw": 1.5419314963358508,
+      "attitude_drift_rad": 0.0,
+      "omega_max": 0.0,
+      "z0": 50.00745965604276,
+      "zf": 50.684089988345455
+    },
+    {
+      "label": "baseline[default_0.027kg] thr=1.0",
+      "throttle": 1.0,
+      "rpy": 0.0,
+      "authority": 1.0,
+      "mass": 0.027,
+      "a_z": 11.46200975372865,
+      "tw": 2.169592832013127,
+      "attitude_drift_rad": 0.0,
+      "omega_max": 0.0,
+      "z0": 50.0165753088567,
+      "zf": 51.50402448122189
+    }
+  ],
+  "baseline_recorded_mass": [
+    {
+      "label": "baseline[recorded~1kg] thr=0.0",
+      "throttle": 0.0,
+      "rpy": 0.0,
+      "authority": 1.0,
+      "mass": 1.0,
+      "a_z": -6.235370957538189,
+      "tw": 0.3637376573940624,
+      "attitude_drift_rad": 0.0,
+      "omega_max": 0.0,
+      "z0": 49.990073816246706,
+      "zf": 49.13335379455803
+    },
+    {
+      "label": "baseline[recorded~1kg] thr=0.25",
+      "throttle": 0.25,
+      "rpy": 0.0,
+      "authority": 1.0,
+      "mass": 1.0,
+      "a_z": -3.81360261028988,
+      "tw": 0.6108568765010326,
+      "attitude_drift_rad": 0.0,
+      "omega_max": 0.0,
+      "z0": 49.99420871353683,
+      "zf": 49.48576216562813
+    },
+    {
+      "label": "baseline[recorded~1kg] thr=0.5",
+      "throttle": 0.5,
+      "rpy": 0.0,
+      "authority": 1.0,
+      "mass": 1.0,
+      "a_z": -1.0279842820603304e-15,
+      "tw": 0.9999999999999998,
+      "attitude_drift_rad": 0.0,
+      "omega_max": 0.0,
+      "z0": 50.0,
+      "zf": 50.0
+    },
+    {
+      "label": "baseline[recorded~1kg] thr=0.75",
+      "throttle": 0.75,
+      "rpy": 0.0,
+      "authority": 1.0,
+      "mass": 1.0,
+      "a_z": 4.810423766714493,
+      "tw": 1.490859568032091,
+      "attitude_drift_rad": 0.0,
+      "omega_max": 0.0,
+      "z0": 50.007445418891535,
+      "zf": 50.656618767982344
+    },
+    {
+      "label": "baseline[recorded~1kg] thr=1.0",
+      "throttle": 1.0,
+      "rpy": 0.0,
+      "authority": 1.0,
+      "mass": 1.0,
+      "a_z": 9.66137399831206,
+      "tw": 1.9858544896236796,
+      "attitude_drift_rad": 0.0,
+      "omega_max": 0.0,
+      "z0": 50.01653901350968,
+      "zf": 51.40729462364613
+    }
+  ],
+  "rate_coupled_default_mass": [
+    {
+      "label": "rate[default_0.027kg] thr=0.0 rpy=+1 auth=0.25",
+      "throttle": 0.0,
+      "rpy": 1.0,
+      "authority": 0.25,
+      "mass": 0.027,
+      "a_z": -9.29120418956248,
+      "tw": 0.05191793984056334,
+      "attitude_drift_rad": 2.5706559011511327,
+      "omega_max": 20.446849513341867,
+      "z0": 49.990179662229956,
+      "zf": 48.97840123841606,
+      "mixer": {
+        "throttle": 0.0,
+        "rpy": 1.0,
+        "authority": 0.25,
+        "rpms": [
+          6420.365450178433,
+          6420.365450178433,
+          6420.365450178433,
+          9675.762016466091
+        ],
+        "sum_sq": 217283648.1408227,
+        "sum_sq_baseline_rpy0": 209335443.0379746,
+        "collective_bleed_fraction": -0.03796875000000011,
+        "n_clipped": 0
+      }
+    },
+    {
+      "label": "rate[default_0.027kg] thr=0.25 rpy=+1 auth=0.25",
+      "throttle": 0.25,
+      "rpy": 1.0,
+      "authority": 0.25,
+      "mass": 0.027,
+      "a_z": -8.584173549303177,
+      "tw": 0.12406392354049221,
+      "attitude_drift_rad": 2.569046677968634,
+      "omega_max": 26.458448217538276,
+      "z0": 49.99432254951912,
+      "zf": 49.17322971176327,
+      "mixer": {
+        "throttle": 0.25,
+        "rpy": 1.0,
+        "authority": 0.25,
+        "rpms": [
+          10037.472746053609,
+          10037.472746053609,
+          10037.472746053609,
+          13292.869312341267
+        ],
+        "sum_sq": 478952951.9382911,
+        "sum_sq_baseline_rpy0": 471004746.835443,
+        "collective_bleed_fraction": -0.016874999999999973,
+        "n_clipped": 0
+      }
+    },
+    {
+      "label": "rate[default_0.027kg] thr=0.5 rpy=+1 auth=0.25",
+      "throttle": 0.5,
+      "rpy": 1.0,
+      "authority": 0.25,
+      "mass": 0.027,
+      "a_z": -8.06792973381639,
+      "tw": 0.17674186389628677,
+      "attitude_drift_rad": 2.6481467064488644,
+      "omega_max": 30.56170964383008,
+      "z0": 50.000122066881836,
+      "zf": 49.42401302037095,
+      "mixer": {
+        "throttle": 0.5,
+        "rpy": 1.0,
+        "authority": 0.25,
+        "rpms": [
+          13654.580041928784,
+          13654.580041928784,
+          13654.580041928784,
+          16909.976608216442
+        ],
+        "sum_sq": 845289977.2547468,
+        "sum_sq_baseline_rpy0": 837341772.1518987,
+        "collective_bleed_fraction": -0.009492187500000027,
+        "n_clipped": 0
+      }
+    },
+    {
+      "label": "rate[default_0.027kg] thr=0.75 rpy=+1 auth=0.25",
+      "throttle": 0.75,
+      "rpy": 1.0,
+      "authority": 0.25,
+      "mass": 0.027,
+      "a_z": -6.964783656861881,
+      "tw": 0.2893077901161346,
+      "attitude_drift_rad": 2.75760120388761,
+      "omega_max": 34.00281573284815,
+      "z0": 50.007576421779454,
+      "zf": 49.72158856154334,
+      "mixer": {
+        "throttle": 0.75,
+        "rpy": 1.0,
+        "authority": 0.25,
+        "rpms": [
+          17271.68733780396,
+          17271.68733780396,
+          17271.68733780396,
+          20527.083904091618
+        ],
+        "sum_sq": 1316294724.0901902,
+        "sum_sq_baseline_rpy0": 1308346518.9873421,
+        "collective_bleed_fraction": -0.006075000000000053,
+        "n_clipped": 0
+      }
+    },
+    {
+      "label": "rate[default_0.027kg] thr=1.0 rpy=+1 auth=0.25",
+      "throttle": 1.0,
+      "rpy": 1.0,
+      "authority": 0.25,
+      "mass": 0.027,
+      "a_z": -7.50580491798257,
+      "tw": 0.23410153898137043,
+      "attitude_drift_rad": 3.067352146096849,
+      "omega_max": 14.605358078940437,
+      "z0": 50.014927824700585,
+      "zf": 50.62279504488807,
+      "mixer": {
+        "throttle": 1.0,
+        "rpy": 1.0,
+        "authority": 0.25,
+        "rpms": [
+          20888.794633679136,
+          20888.794633679136,
+          20888.794633679136,
+          21702.64377525105
+        ],
+        "sum_sq": 1780029970.5795097,
+        "sum_sq_baseline_rpy0": 1884018987.3417726,
+        "collective_bleed_fraction": 0.05519531250000009,
+        "n_clipped": 1
+      }
+    },
+    {
+      "label": "rate[default_0.027kg] thr=0.0 rpy=+1 auth=0.5",
+      "throttle": 0.0,
+      "rpy": 1.0,
+      "authority": 0.5,
+      "mass": 0.027,
+      "a_z": -8.924147504273082,
+      "tw": 0.08937270364560398,
+      "attitude_drift_rad": 3.1292879670622846,
+      "omega_max": 33.0056835437543,
+      "z0": 49.99055606291203,
+      "zf": 48.963059163063406,
+      "mixer": {
+        "throttle": 0.0,
+        "rpy": 1.0,
+        "authority": 0.5,
+        "rpms": [
+          5606.516308606519,
+          5606.516308606519,
+          5606.516308606519,
+          12117.309441181835
+        ],
+        "sum_sq": 241128263.44936702,
+        "sum_sq_baseline_rpy0": 209335443.0379746,
+        "collective_bleed_fraction": -0.1518750000000002,
+        "n_clipped": 0
+      }
+    },
+    {
+      "label": "rate[default_0.027kg] thr=0.25 rpy=+1 auth=0.5",
+      "throttle": 0.25,
+      "rpy": 1.0,
+      "authority": 0.5,
+      "mass": 0.027,
+      "a_z": -7.962147122789182,
+      "tw": 0.18753600787865493,
+      "attitude_drift_rad": 2.4973406255772526,
+      "omega_max": 38.99658984055313,
+      "z0": 49.99469538348463,
+      "zf": 49.1303373220411,
+      "mixer": {
+        "throttle": 0.25,
+        "rpy": 1.0,
+        "authority": 0.5,
+        "rpms": [
+          9223.623604481694,
+          9223.623604481694,
+          9223.623604481694,
+          15734.41673705701
+        ],
+        "sum_sq": 502797567.2468355,
+        "sum_sq_baseline_rpy0": 471004746.835443,
+        "collective_bleed_fraction": -0.06750000000000012,
+        "n_clipped": 0
+      }
+    },
+    {
+      "label": "rate[default_0.027kg] thr=0.5 rpy=+1 auth=0.5",
+      "throttle": 0.5,
+      "rpy": 1.0,
+      "authority": 0.5,
+      "mass": 0.027,
+      "a_z": -6.68435769393029,
+      "tw": 0.31792268429282766,
+      "attitude_drift_rad": 2.584598156017607,
+      "omega_max": 44.33204402419914,
+      "z0": 50.00048615999961,
+      "zf": 49.3560187288641,
+      "mixer": {
+        "throttle": 0.5,
+        "rpy": 1.0,
+        "authority": 0.5,
+        "rpms": [
+          12840.73090035687,
+          12840.73090035687,
+          12840.73090035687,
+          19351.524032932186
+        ],
+        "sum_sq": 869134592.5632912,
+        "sum_sq_baseline_rpy0": 837341772.1518987,
+        "collective_bleed_fraction": -0.03796875000000011,
+        "n_clipped": 0
+      }
+    },
+    {
+      "label": "rate[default_0.027kg] thr=0.75 rpy=+1 auth=0.5",
+      "throttle": 0.75,
+      "rpy": 1.0,
+      "authority": 0.5,
+      "mass": 0.027,
+      "a_z": -5.515783883068077,
+      "tw": 0.4371649098910126,
+      "attitude_drift_rad": 2.3645086031227533,
+      "omega_max": 43.461892331786345,
+      "z0": 50.00704409207135,
+      "zf": 49.63389423356164,
+      "mixer": {
+        "throttle": 0.75,
+        "rpy": 1.0,
+        "authority": 0.5,
+        "rpms": [
+          16457.838196232045,
+          16457.838196232045,
+          16457.838196232045,
+          21702.64377525105
+        ],
+        "sum_sq": 1283586061.1155066,
+        "sum_sq_baseline_rpy0": 1308346518.9873421,
+        "collective_bleed_fraction": 0.01892499999999997,
+        "n_clipped": 1
+      }
+    },
+    {
+      "label": "rate[default_0.027kg] thr=1.0 rpy=+1 auth=0.5",
+      "throttle": 1.0,
+      "rpy": 1.0,
+      "authority": 0.5,
+      "mass": 0.027,
+      "a_z": -7.231312382444328,
+      "tw": 0.2621109813832319,
+      "attitude_drift_rad": 2.709757374454684,
+      "omega_max": 24.649150042932717,
+      "z0": 50.01334161105467,
+      "zf": 50.16668416553708,
+      "mixer": {
+        "throttle": 1.0,
+        "rpy": 1.0,
+        "authority": 0.5,
+        "rpms": [
+          20074.94549210722,
+          20074.94549210722,
+          20074.94549210722,
+          21702.64377525105
+        ],
+        "sum_sq": 1680015056.3686714,
+        "sum_sq_baseline_rpy0": 1884018987.3417726,
+        "collective_bleed_fraction": 0.10828124999999988,
+        "n_clipped": 1
+      }
+    },
+    {
+      "label": "rate[default_0.027kg] thr=0.0 rpy=+1 auth=1.0",
+      "throttle": 0.0,
+      "rpy": 1.0,
+      "authority": 1.0,
+      "mass": 0.027,
+      "a_z": -8.07484847380371,
+      "tw": 0.17603587002002963,
+      "attitude_drift_rad": 2.6453360624250375,
+      "omega_max": 50.81080766640401,
+      "z0": 49.99205651685947,
+      "zf": 49.00351177808916,
+      "mixer": {
+        "throttle": 0.0,
+        "rpy": 1.0,
+        "authority": 1.0,
+        "rpms": [
+          3978.81802546269,
+          3978.81802546269,
+          3978.81802546269,
+          17000.40429061332
+        ],
+        "sum_sq": 336506724.6835443,
+        "sum_sq_baseline_rpy0": 209335443.0379746,
+        "collective_bleed_fraction": -0.6075000000000006,
+        "n_clipped": 0
+      }
+    },
+    {
+      "label": "rate[default_0.027kg] thr=0.25 rpy=+1 auth=1.0",
+      "throttle": 0.25,
+      "rpy": 1.0,
+      "authority": 1.0,
+      "mass": 0.027,
+      "a_z": -6.682525415427671,
+      "tw": 0.3181096514869724,
+      "attitude_drift_rad": 2.8305457294193124,
+      "omega_max": 59.116727577552474,
+      "z0": 49.99617539391619,
+      "zf": 49.16647404254181,
+      "mixer": {
+        "throttle": 0.25,
+        "rpy": 1.0,
+        "authority": 1.0,
+        "rpms": [
+          7595.925321337865,
+          7595.925321337865,
+          7595.925321337865,
+          20617.511586488497
+        ],
+        "sum_sq": 598176028.4810126,
+        "sum_sq_baseline_rpy0": 471004746.835443,
+        "collective_bleed_fraction": -0.2699999999999998,
+        "n_clipped": 0
+      }
+    },
+    {
+      "label": "rate[default_0.027kg] thr=0.5 rpy=+1 auth=1.0",
+      "throttle": 0.5,
+      "rpy": 1.0,
+      "authority": 1.0,
+      "mass": 0.027,
+      "a_z": -5.63208894252838,
+      "tw": 0.42529704668077756,
+      "attitude_drift_rad": 2.3574449607739947,
+      "omega_max": 57.25747497734697,
+      "z0": 50.00012611556398,
+      "zf": 49.32425278414996,
+      "mixer": {
+        "throttle": 0.5,
+        "rpy": 1.0,
+        "authority": 1.0,
+        "rpms": [
+          11213.03261721304,
+          11213.03261721304,
+          11213.03261721304,
+          21702.64377525105
+        ],
+        "sum_sq": 848201048.2594938,
+        "sum_sq_baseline_rpy0": 837341772.1518987,
+        "collective_bleed_fraction": -0.012968750000000195,
+        "n_clipped": 1
+      }
+    },
+    {
+      "label": "rate[default_0.027kg] thr=0.75 rpy=+1 auth=1.0",
+      "throttle": 0.75,
+      "rpy": 1.0,
+      "authority": 1.0,
+      "mass": 0.027,
+      "a_z": -5.354654808806103,
+      "tw": 0.45360665216264257,
+      "attitude_drift_rad": 2.931240515821461,
+      "omega_max": 48.81317942910403,
+      "z0": 50.004615473,
+      "zf": 49.51302409922069,
+      "mixer": {
+        "throttle": 0.75,
+        "rpy": 1.0,
+        "authority": 1.0,
+        "rpms": [
+          14830.139913088216,
+          14830.139913088216,
+          14830.139913088216,
+          21702.64377525105
+        ],
+        "sum_sq": 1130803896.3607597,
+        "sum_sq_baseline_rpy0": 1308346518.9873421,
+        "collective_bleed_fraction": 0.13570000000000004,
+        "n_clipped": 1
+      }
+    },
+    {
+      "label": "rate[default_0.027kg] thr=1.0 rpy=+1 auth=1.0",
+      "throttle": 1.0,
+      "rpy": 1.0,
+      "authority": 1.0,
+      "mass": 0.027,
+      "a_z": -6.2889698081195196,
+      "tw": 0.3582683869265797,
+      "attitude_drift_rad": 3.0244720120934425,
+      "omega_max": 35.064443413788766,
+      "z0": 50.01035486836816,
+      "zf": 49.833538686066774,
+      "mixer": {
+        "throttle": 1.0,
+        "rpy": 1.0,
+        "authority": 1.0,
+        "rpms": [
+          18447.247208963392,
+          18447.247208963392,
+          18447.247208963392,
+          21702.64377525105
+        ],
+        "sum_sq": 1491907535.6012661,
+        "sum_sq_baseline_rpy0": 1884018987.3417726,
+        "collective_bleed_fraction": 0.208125,
+        "n_clipped": 1
+      }
+    }
+  ],
+  "rate_coupled_recorded_mass": [
+    {
+      "label": "rate[recorded~1kg] thr=0.0 rpy=+1 auth=0.25",
+      "throttle": 0.0,
+      "rpy": 1.0,
+      "authority": 0.25,
+      "mass": 1.0,
+      "a_z": -8.289875478188579,
+      "tw": 0.15409433896034916,
+      "attitude_drift_rad": 2.5706559011511327,
+      "omega_max": 20.446849513341867,
+      "z0": 49.990199119801126,
+      "zf": 49.02819207458236,
+      "mixer": {
+        "throttle": 0.0,
+        "rpy": 1.0,
+        "authority": 0.25,
+        "rpms": [
+          6420.365450178433,
+          6420.365450178433,
+          6420.365450178433,
+          9675.762016466091
+        ],
+        "sum_sq": 217283648.1408227,
+        "sum_sq_baseline_rpy0": 209335443.0379746,
+        "collective_bleed_fraction": -0.03796875000000011,
+        "n_clipped": 0
+      }
+    },
+    {
+      "label": "rate[recorded~1kg] thr=0.25 rpy=+1 auth=0.25",
+      "throttle": 0.25,
+      "rpy": 1.0,
+      "authority": 0.25,
+      "mass": 1.0,
+      "a_z": -7.791126362152834,
+      "tw": 0.20498710590277208,
+      "attitude_drift_rad": 2.569046677968634,
+      "omega_max": 26.458448217538276,
+      "z0": 49.994333071356614,
+      "zf": 49.209545479050824,
+      "mixer": {
+        "throttle": 0.25,
+        "rpy": 1.0,
+        "authority": 0.25,
+        "rpms": [
+          10037.472746053609,
+          10037.472746053609,
+          10037.472746053609,
+          13292.869312341267
+        ],
+        "sum_sq": 478952951.9382911,
+        "sum_sq_baseline_rpy0": 471004746.835443,
+        "collective_bleed_fraction": -0.016874999999999973,
+        "n_clipped": 0
+      }
+    },
+    {
+      "label": "rate[recorded~1kg] thr=0.5 rpy=+1 auth=0.25",
+      "throttle": 0.5,
+      "rpy": 1.0,
+      "authority": 0.25,
+      "mass": 1.0,
+      "a_z": -7.505240243396112,
+      "tw": 0.2341591588371315,
+      "attitude_drift_rad": 2.6481467064488644,
+      "omega_max": 30.56170964383008,
+      "z0": 50.00012185692513,
+      "zf": 49.446846230976945,
+      "mixer": {
+        "throttle": 0.5,
+        "rpy": 1.0,
+        "authority": 0.25,
+        "rpms": [
+          13654.580041928784,
+          13654.580041928784,
+          13654.580041928784,
+          16909.976608216442
+        ],
+        "sum_sq": 845289977.2547468,
+        "sum_sq_baseline_rpy0": 837341772.1518987,
+        "collective_bleed_fraction": -0.009492187500000027,
+        "n_clipped": 0
+      }
+    },
+    {
+      "label": "rate[recorded~1kg] thr=0.75 rpy=+1 auth=0.25",
+      "throttle": 0.75,
+      "rpy": 1.0,
+      "authority": 0.25,
+      "mass": 1.0,
+      "a_z": -6.608186892570974,
+      "tw": 0.3256952150437782,
+      "attitude_drift_rad": 2.75760120388761,
+      "omega_max": 34.00281573284815,
+      "z0": 50.007561920480235,
+      "zf": 49.73014272703793,
+      "mixer": {
+        "throttle": 0.75,
+        "rpy": 1.0,
+        "authority": 0.25,
+        "rpms": [
+          17271.68733780396,
+          17271.68733780396,
+          17271.68733780396,
+          20527.083904091618
+        ],
+        "sum_sq": 1316294724.0901902,
+        "sum_sq_baseline_rpy0": 1308346518.9873421,
+        "collective_bleed_fraction": -0.006075000000000053,
+        "n_clipped": 0
+      }
+    },
+    {
+      "label": "rate[recorded~1kg] thr=1.0 rpy=+1 auth=0.25",
+      "throttle": 1.0,
+      "rpy": 1.0,
+      "authority": 0.25,
+      "mass": 1.0,
+      "a_z": -8.095487390177771,
+      "tw": 0.17392985814512543,
+      "attitude_drift_rad": 3.067352146096849,
+      "omega_max": 14.605358078940437,
+      "z0": 50.014895893379446,
+      "zf": 50.56995105178615,
+      "mixer": {
+        "throttle": 1.0,
+        "rpy": 1.0,
+        "authority": 0.25,
+        "rpms": [
+          20888.794633679136,
+          20888.794633679136,
+          20888.794633679136,
+          21702.64377525105
+        ],
+        "sum_sq": 1780029970.5795097,
+        "sum_sq_baseline_rpy0": 1884018987.3417726,
+        "collective_bleed_fraction": 0.05519531250000009,
+        "n_clipped": 1
+      }
+    },
+    {
+      "label": "rate[recorded~1kg] thr=0.0 rpy=+1 auth=0.5",
+      "throttle": 0.0,
+      "rpy": 1.0,
+      "authority": 0.5,
+      "mass": 1.0,
+      "a_z": -7.899065679328495,
+      "tw": 0.19397288986443934,
+      "attitude_drift_rad": 3.1292879670622846,
+      "omega_max": 33.0056835437543,
+      "z0": 49.99057466333087,
+      "zf": 49.015090858965486,
+      "mixer": {
+        "throttle": 0.0,
+        "rpy": 1.0,
+        "authority": 0.5,
+        "rpms": [
+          5606.516308606519,
+          5606.516308606519,
+          5606.516308606519,
+          12117.309441181835
+        ],
+        "sum_sq": 241128263.44936702,
+        "sum_sq_baseline_rpy0": 209335443.0379746,
+        "collective_bleed_fraction": -0.1518750000000002,
+        "n_clipped": 0
+      }
+    },
+    {
+      "label": "rate[recorded~1kg] thr=0.25 rpy=+1 auth=0.5",
+      "throttle": 0.25,
+      "rpy": 1.0,
+      "authority": 0.5,
+      "mass": 1.0,
+      "a_z": -7.131831647546453,
+      "tw": 0.27226207678097425,
+      "attitude_drift_rad": 2.4973406255772526,
+      "omega_max": 38.99658984055313,
+      "z0": 49.99470514723215,
+      "zf": 49.170596778835225,
+      "mixer": {
+        "throttle": 0.25,
+        "rpy": 1.0,
+        "authority": 0.5,
+        "rpms": [
+          9223.623604481694,
+          9223.623604481694,
+          9223.623604481694,
+          15734.41673705701
+        ],
+        "sum_sq": 502797567.2468355,
+        "sum_sq_baseline_rpy0": 471004746.835443,
+        "collective_bleed_fraction": -0.06750000000000012,
+        "n_clipped": 0
+      }
+    },
+    {
+      "label": "rate[recorded~1kg] thr=0.5 rpy=+1 auth=0.5",
+      "throttle": 0.5,
+      "rpy": 1.0,
+      "authority": 0.5,
+      "mass": 1.0,
+      "a_z": -6.069504080335077,
+      "tw": 0.38066284894540037,
+      "attitude_drift_rad": 2.584598156017607,
+      "omega_max": 44.33204402419914,
+      "z0": 50.00048531517106,
+      "zf": 49.38378545867882,
+      "mixer": {
+        "throttle": 0.5,
+        "rpy": 1.0,
+        "authority": 0.5,
+        "rpms": [
+          12840.73090035687,
+          12840.73090035687,
+          12840.73090035687,
+          19351.524032932186
+        ],
+        "sum_sq": 869134592.5632912,
+        "sum_sq_baseline_rpy0": 837341772.1518987,
+        "collective_bleed_fraction": -0.03796875000000011,
+        "n_clipped": 0
+      }
+    },
+    {
+      "label": "rate[recorded~1kg] thr=0.75 rpy=+1 auth=0.5",
+      "throttle": 0.75,
+      "rpy": 1.0,
+      "authority": 0.5,
+      "mass": 1.0,
+      "a_z": -5.101295146441263,
+      "tw": 0.47945967893456504,
+      "attitude_drift_rad": 2.3645086031227533,
+      "omega_max": 43.461892331786345,
+      "z0": 50.007030702846976,
+      "zf": 49.64847019801626,
+      "mixer": {
+        "throttle": 0.75,
+        "rpy": 1.0,
+        "authority": 0.5,
+        "rpms": [
+          16457.838196232045,
+          16457.838196232045,
+          16457.838196232045,
+          21702.64377525105
+        ],
+        "sum_sq": 1283586061.1155066,
+        "sum_sq_baseline_rpy0": 1308346518.9873421,
+        "collective_bleed_fraction": 0.01892499999999997,
+        "n_clipped": 1
+      }
+    },
+    {
+      "label": "rate[recorded~1kg] thr=1.0 rpy=+1 auth=0.5",
+      "throttle": 1.0,
+      "rpy": 1.0,
+      "authority": 0.5,
+      "mass": 1.0,
+      "a_z": -7.205254234419339,
+      "tw": 0.26476997607965935,
+      "attitude_drift_rad": 2.709757374454684,
+      "omega_max": 24.649150042932717,
+      "z0": 50.01331372066545,
+      "zf": 50.147131677380465,
+      "mixer": {
+        "throttle": 1.0,
+        "rpy": 1.0,
+        "authority": 0.5,
+        "rpms": [
+          20074.94549210722,
+          20074.94549210722,
+          20074.94549210722,
+          21702.64377525105
+        ],
+        "sum_sq": 1680015056.3686714,
+        "sum_sq_baseline_rpy0": 1884018987.3417726,
+        "collective_bleed_fraction": 0.10828124999999988,
+        "n_clipped": 1
+      }
+    },
+    {
+      "label": "rate[recorded~1kg] thr=0.0 rpy=+1 auth=1.0",
+      "throttle": 0.0,
+      "rpy": 1.0,
+      "authority": 1.0,
+      "mass": 1.0,
+      "a_z": -7.109101647228948,
+      "tw": 0.27458146456847476,
+      "attitude_drift_rad": 2.6453360624250375,
+      "omega_max": 50.81080766640401,
+      "z0": 49.992071780572324,
+      "zf": 49.053283427254726,
+      "mixer": {
+        "throttle": 0.0,
+        "rpy": 1.0,
+        "authority": 1.0,
+        "rpms": [
+          3978.81802546269,
+          3978.81802546269,
+          3978.81802546269,
+          17000.40429061332
+        ],
+        "sum_sq": 336506724.6835443,
+        "sum_sq_baseline_rpy0": 209335443.0379746,
+        "collective_bleed_fraction": -0.6075000000000006,
+        "n_clipped": 0
+      }
+    },
+    {
+      "label": "rate[recorded~1kg] thr=0.25 rpy=+1 auth=1.0",
+      "throttle": 0.25,
+      "rpy": 1.0,
+      "authority": 1.0,
+      "mass": 1.0,
+      "a_z": -5.901249869241265,
+      "tw": 0.39783164599578935,
+      "attitude_drift_rad": 2.8305457294193124,
+      "omega_max": 59.116727577552474,
+      "z0": 49.99618222068476,
+      "zf": 49.205952680063476,
+      "mixer": {
+        "throttle": 0.25,
+        "rpy": 1.0,
+        "authority": 1.0,
+        "rpms": [
+          7595.925321337865,
+          7595.925321337865,
+          7595.925321337865,
+          20617.511586488497
+        ],
+        "sum_sq": 598176028.4810126,
+        "sum_sq_baseline_rpy0": 471004746.835443,
+        "collective_bleed_fraction": -0.2699999999999998,
+        "n_clipped": 0
+      }
+    },
+    {
+      "label": "rate[recorded~1kg] thr=0.5 rpy=+1 auth=1.0",
+      "throttle": 0.5,
+      "rpy": 1.0,
+      "authority": 1.0,
+      "mass": 1.0,
+      "a_z": -4.990837286508298,
+      "tw": 0.49073088913180635,
+      "attitude_drift_rad": 2.3574449607739947,
+      "omega_max": 57.25747497734697,
+      "z0": 50.000125849461284,
+      "zf": 49.355109538305996,
+      "mixer": {
+        "throttle": 0.5,
+        "rpy": 1.0,
+        "authority": 1.0,
+        "rpms": [
+          11213.03261721304,
+          11213.03261721304,
+          11213.03261721304,
+          21702.64377525105
+        ],
+        "sum_sq": 848201048.2594938,
+        "sum_sq_baseline_rpy0": 837341772.1518987,
+        "collective_bleed_fraction": -0.012968750000000195,
+        "n_clipped": 1
+      }
+    },
+    {
+      "label": "rate[recorded~1kg] thr=0.75 rpy=+1 auth=1.0",
+      "throttle": 0.75,
+      "rpy": 1.0,
+      "authority": 1.0,
+      "mass": 1.0,
+      "a_z": -4.8558320380037205,
+      "tw": 0.5045069348975796,
+      "attitude_drift_rad": 2.931240515821461,
+      "omega_max": 48.81317942910403,
+      "z0": 50.00460702319321,
+      "zf": 49.53392608689331,
+      "mixer": {
+        "throttle": 0.75,
+        "rpy": 1.0,
+        "authority": 1.0,
+        "rpms": [
+          14830.139913088216,
+          14830.139913088216,
+          14830.139913088216,
+          21702.64377525105
+        ],
+        "sum_sq": 1130803896.3607597,
+        "sum_sq_baseline_rpy0": 1308346518.9873421,
+        "collective_bleed_fraction": 0.13570000000000004,
+        "n_clipped": 1
+      }
+    },
+    {
+      "label": "rate[recorded~1kg] thr=1.0 rpy=+1 auth=1.0",
+      "throttle": 1.0,
+      "rpy": 1.0,
+      "authority": 1.0,
+      "mass": 1.0,
+      "a_z": -6.005263994604855,
+      "tw": 0.38721795973419854,
+      "attitude_drift_rad": 3.0244720120934425,
+      "omega_max": 35.064443413788766,
+      "z0": 50.01033416137882,
+      "zf": 49.83619125116238,
+      "mixer": {
+        "throttle": 1.0,
+        "rpy": 1.0,
+        "authority": 1.0,
+        "rpms": [
+          18447.247208963392,
+          18447.247208963392,
+          18447.247208963392,
+          21702.64377525105
+        ],
+        "sum_sq": 1491907535.6012661,
+        "sum_sq_baseline_rpy0": 1884018987.3417726,
+        "collective_bleed_fraction": 0.208125,
+        "n_clipped": 1
+      }
+    }
+  ],
+  "oscillation_default_mass": {
+    "dynamics_label": "default_0.027kg",
+    "models_motor_lag": false,
+    "note": "RPM set directly each step; thrust proportional to RPM^2 (convex).",
+    "bang_bang": {
+      "a_z": 2.880650319552399,
+      "tw": 1.293943910158408,
+      "mean_sum_sq": 1046677215.1898736
+    },
+    "steady_mean_0p5": {
+      "a_z": -1.0279842820603304e-15,
+      "tw": 0.9999999999999998,
+      "sum_sq": 837341772.1518987
+    },
+    "net_lift_delta_tw": 0.29394391015840826
+  },
+  "oscillation_recorded_mass": {
+    "dynamics_label": "recorded~1kg",
+    "models_motor_lag": false,
+    "note": "RPM set directly each step; thrust proportional to RPM^2 (convex).",
+    "bang_bang": {
+      "a_z": 2.785086088974185,
+      "tw": 1.2841924580585904,
+      "mean_sum_sq": 1046677215.1898736
+    },
+    "steady_mean_0p5": {
+      "a_z": -1.0279842820603304e-15,
+      "tw": 0.9999999999999998,
+      "sum_sq": 837341772.1518987
+    },
+    "net_lift_delta_tw": 0.2841924580585906
+  },
+  "baseline_simple": [
+    {
+      "throttle": 0.0,
+      "a_z": -9.81,
+      "tw": 0.0
+    },
+    {
+      "throttle": 0.25,
+      "a_z": -4.905,
+      "tw": 0.5
+    },
+    {
+      "throttle": 0.5,
+      "a_z": 0.0,
+      "tw": 1.0
+    },
+    {
+      "throttle": 0.75,
+      "a_z": 4.904999999999999,
+      "tw": 1.5
+    },
+    {
+      "throttle": 1.0,
+      "a_z": 9.81,
+      "tw": 2.0
+    }
+  ],
+  "secondary_latency_simple": [
+    {
+      "latency_steps": 0,
+      "a_z_per_step": [
+        0.0,
+        0.0,
+        0.0,
+        9.81,
+        9.736425,
+        9.6634018125,
+        9.59092629890625,
+        9.518994351664455,
+        9.447601894026976,
+        9.376744879821768
+      ],
+      "command_jump_step": 3,
+      "first_response_step": 3,
+      "observed_shift": 0
+    },
+    {
+      "latency_steps": 1,
+      "a_z_per_step": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        9.81,
+        9.736425,
+        9.6634018125,
+        9.59092629890625,
+        9.518994351664455,
+        9.447601894026976
+      ],
+      "command_jump_step": 3,
+      "first_response_step": 4,
+      "observed_shift": 1
+    },
+    {
+      "latency_steps": 2,
+      "a_z_per_step": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        9.81,
+        9.736425,
+        9.6634018125,
+        9.59092629890625,
+        9.518994351664455
+      ],
+      "command_jump_step": 3,
+      "first_response_step": 5,
+      "observed_shift": 2
+    }
+  ],
+  "secondary_battery_simple": {
+    "off_a_z_step0": 9.81,
+    "full_charge_a_z_step0": 9.81,
+    "charge_after_20_steps": 0.9849999999999994,
+    "delta_full_vs_off": 0.0,
+    "forced_low_charge": 0.05,
+    "low_charge_a_z_step0": -0.4905000000000008,
+    "ceiling_factor_full": 1.0,
+    "ceiling_factor_low": 0.475,
+    "note": "Full-charge ceiling_factor==1.0 => negligible early delta; low charge collapses ceiling."
+  },
+  "secondary_damage_simple": {
+    "authority_factor_full": 1.0,
+    "authority_factor_half": 0.5,
+    "min_authority": 1.0,
+    "affects": "max_body_rate only (never thrust/mass/drag)",
+    "note": "authority_factor(1.0)==1.0 => full-integrity path is byte-identical (no thrust impact ever)."
+  }
+}

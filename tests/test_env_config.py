@@ -154,13 +154,15 @@ def test_env_config_has_default_dock() -> None:
 
 
 def test_env_config_floor_start_is_last_field() -> None:
-    """UC-37 (retargets the UC-25 last-field test): ``floor_start`` is appended **after**
-    ``early_termination`` (itself after ``damage`` / ``battery`` / ``dock`` / ``obstacle_vision``),
-    so every UC-15..36 positional/keyword ``EnvConfig`` call is unshifted. ``early_termination`` is
-    now second-to-last; ``floor_start`` (the intended default-dynamics change) is last."""
+    """UC-48 (retargets the UC-37 last-field test): ``pybullet_tw_preserving`` is appended
+    **after** ``floor_start`` (itself after ``early_termination`` / ``damage`` / ``battery`` /
+    ``dock`` / ``obstacle_vision``), so every UC-15..37 positional/keyword ``EnvConfig`` call is
+    unshifted. ``pybullet_tw_preserving`` (the UC-48 T/W-preserving flag) is now last;
+    ``floor_start`` is second-to-last; ``early_termination`` is third-to-last."""
     fields = [f.name for f in dataclasses.fields(EnvConfig)]
-    assert fields[-1] == "floor_start"
-    # The append-last chain is preserved: floor_start ← early_termination ← damage ← battery ← ...
+    assert fields[-1] == "pybullet_tw_preserving"
+    # The append-last chain: pybullet_tw_preserving ← floor_start ← early_termination ← damage ← ...
+    assert fields.index("floor_start") == fields.index("pybullet_tw_preserving") - 1
     assert fields.index("early_termination") == fields.index("floor_start") - 1
     assert fields.index("damage") == fields.index("early_termination") - 1
     assert fields.index("battery") == fields.index("damage") - 1

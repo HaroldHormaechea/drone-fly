@@ -18,9 +18,103 @@ the owner's macOS M4, not in the hermetic Linux CI sandbox.
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
+
 import numpy as np
 
 from drone_fly.adapter.base import DroneAdapter, DroneState, sanitize_action
+from drone_fly.adapter.simple import BASE_MASS
+
+#: CF2X rigid-body reference constants (UC-48). Documented here so the T/W-preservation
+#: logic is a **pure, hermetic** computation that CI can assert without importing pybullet.
+#: ``_build_env`` reads the live ``env.HOVER_RPM`` / ``env.MAX_RPM`` / inertia off the freshly
+#: built CF2X body and feeds *those* into :func:`resolve_tw_preserving_dynamics` (so the sim
+#: path never depends on these literals drifting from the installed model); these constants are
+#: the values that live read is expected to match, and the defaults the hermetic tests use.
+CF2X_NATIVE_MASS = 0.027  # kg — the CF2X body mass its motor thrust (KF) is sized for
+CF2X_HOVER_RPM = 14468.429183500699  # per-rotor RPM that hovers the native 0.027 kg body
+CF2X_MAX_RPM = 21702.64377525105  # per-rotor RPM at full throttle (peak T/W ≈ 2.25 native)
+CF2X_KF = 3.16e-10  # N per rpm^2 — per-rotor thrust coefficient (thrust = KF·rpm^2)
+CF2X_GRAVITY = 9.8  # m/s^2 — the aviary's gravity constant
+
+
+@dataclass(frozen=True)
+class ResolvedPybulletDynamics:
+    """Result of :func:`resolve_tw_preserving_dynamics` (pure, no pybullet).
+
+    ``applied_mass`` is the mass to hand to ``changeDynamics``; ``hover_rpm`` / ``max_rpm``
+    are the mixer RPM band the CTBR mixer should use; ``mass_ratio`` is the scale (relative
+    to the native CF2X baseline) applied to mass-dependent quantities such as inertia.
+    """
+
+    applied_mass: float
+    hover_rpm: float
+    max_rpm: float
+    mass_ratio: float
+
+
+def resolve_tw_preserving_dynamics(
+    sampled_mass: float,
+    *,
+    tw_preserving: bool = True,
+    native_mass: float = CF2X_NATIVE_MASS,
+    base_mass: float = BASE_MASS,
+    native_hover_rpm: float = CF2X_HOVER_RPM,
+    native_max_rpm: float = CF2X_MAX_RPM,
+) -> ResolvedPybulletDynamics:
+    """Map a sampled point-mass ``mass`` to a CF2X-consistent, T/W-preserving dynamics set.
+
+    The sampler produces an **absolute** point-mass ``mass`` sized for
+    :class:`~drone_fly.adapter.simple.SimpleDroneAdapter` (base ``1.0`` kg), whose thrust is
+    ``2·m·g`` so its T/W is preserved by construction. On the CF2X body the same absolute mass
+    (~1 kg) with a native-sized thrust yields T/W ≈ 0.24 → free-fall (the UC-47 root cause).
+
+    When ``tw_preserving`` (default), the sampled mass is reinterpreted as a **CF2X-relative
+    multiplier** ``mass_ratio = sampled_mass / base_mass``: the applied body mass becomes
+    ``native_mass · mass_ratio`` and the mixer RPM band is scaled by ``sqrt(mass_ratio)``.
+    Peak T/W = ``(max_rpm / hover_rpm)²`` is therefore **invariant** under the scale (both RPMs
+    scale by the same factor), so a randomized-heavier drone keeps the native ~2.25 peak T/W —
+    no mixer-*structure* change, only the mass-dependent RPM constants it is fed.
+
+    When ``tw_preserving`` is ``False`` (opt-out / bug-lock), the sampled mass is applied
+    **absolutely** with the **native, unscaled** RPM band — today's degenerate behavior, kept
+    for an explicit opt-out and a regression bug-lock test. ``mass_ratio`` is ``1.0`` so inertia
+    stays at the native baseline (the pre-UC-48 path never rescaled inertia).
+    """
+    sampled_mass = float(sampled_mass)
+    if tw_preserving:
+        mass_ratio = sampled_mass / base_mass
+        scale = math.sqrt(mass_ratio)
+        return ResolvedPybulletDynamics(
+            applied_mass=native_mass * mass_ratio,
+            hover_rpm=native_hover_rpm * scale,
+            max_rpm=native_max_rpm * scale,
+            mass_ratio=mass_ratio,
+        )
+    return ResolvedPybulletDynamics(
+        applied_mass=sampled_mass,
+        hover_rpm=native_hover_rpm,
+        max_rpm=native_max_rpm,
+        mass_ratio=1.0,
+    )
+
+
+def thrust_to_weight(
+    applied_mass: float,
+    rpm: float,
+    *,
+    kf: float = CF2X_KF,
+    g: float = CF2X_GRAVITY,
+) -> float:
+    """Thrust-to-weight of the 4-rotor CF2X body at a per-rotor ``rpm`` (pure).
+
+    Each of the four rotors produces ``kf·rpm²`` of vertical thrust, so the collective is
+    ``4·kf·rpm²``; dividing by weight ``applied_mass·g`` gives the dimensionless T/W. Used by
+    the hermetic tests to assert the preservation property without a simulator.
+    """
+    return 4.0 * float(kf) * float(rpm) ** 2 / (float(applied_mass) * float(g))
+
 
 #: Pinned, reproducible install ref (a fixed commit SHA, never floating ``main``). This is
 #: gym-pybullet-drones v2.2.0 — the gymnasium-native line matching our gymnasium/SB3 pins.
@@ -105,6 +199,10 @@ class PyBulletAdapter(DroneAdapter):
         Arena vertical bounds; contact flags a collision and terminates the episode.
     dt:
         Target control timestep (seconds); mapped to the aviary control frequency.
+    tw_preserving:
+        UC-48. When ``True`` (default), domain-randomized mass is applied so thrust-to-weight is
+        preserved on the CF2X body (see :func:`resolve_tw_preserving_dynamics`); ``False`` restores
+        the pre-UC-48 degenerate absolute-mass behavior for opt-out / regression testing.
     """
 
     backend = "pybullet"
@@ -118,11 +216,18 @@ class PyBulletAdapter(DroneAdapter):
         dt: float,
         battery=None,
         damage=None,
+        tw_preserving: bool = True,
     ) -> None:  # pragma: no cover - requires the sim; verified on the owner's macOS M4
         self._start = np.asarray(start_position, dtype=np.float64).reshape(3).copy()
         self._floor_z = float(floor_z)
         self._ceiling_z = float(ceiling_z)
         self._dt = float(dt)
+        # UC-48: when True (default) domain-randomized mass is applied T/W-preservingly on the
+        # CF2X body (reinterpreted as a CF2X-relative multiplier, RPM band scaled with it) so a
+        # heavier drone keeps a flyable thrust-to-weight; False restores the pre-UC-48 degenerate
+        # absolute-mass behavior (~1 kg on a 0.027 kg body → T/W ≈ 0.24 free-fall). See
+        # :func:`resolve_tw_preserving_dynamics`.
+        self._tw_preserving = bool(tw_preserving)
         # UC-17: accepted for signature parity with make_adapter / SimpleDroneAdapter but not
         # modelled here — the battery drain + thrust-impact model is asserted only on the
         # hermetic numpy backend. This backend always reports a full charge (battery=1.0 default).
@@ -135,6 +240,12 @@ class PyBulletAdapter(DroneAdapter):
         self._env = None
         self._hover_rpm = 0.0
         self._max_rpm = 0.0
+        # Native CF2X baselines captured ONCE off the fresh body in ``_build_env`` (UC-48), so the
+        # resolved RPM band / inertia are always derived from the pristine baseline — never
+        # compounded across successive ``_apply_dynamics`` calls.
+        self._native_hover_rpm = 0.0
+        self._native_max_rpm = 0.0
+        self._native_inertia: np.ndarray | None = None
         self._pending_dynamics = None
 
     def reconfigure(self, *, start=None, dynamics=None) -> None:  # pragma: no cover - sim path
@@ -156,21 +267,47 @@ class PyBulletAdapter(DroneAdapter):
             self._apply_dynamics()
 
     def _apply_dynamics(self) -> None:  # pragma: no cover - sim path
-        """Apply pending mass/drag to the pybullet body, best-effort (not asserted)."""
+        """Apply pending mass/drag to the pybullet body T/W-preservingly (UC-48), best-effort.
+
+        Resolves the sampled point-mass to a CF2X-consistent ``(applied_mass, hover_rpm,
+        max_rpm)`` via :func:`resolve_tw_preserving_dynamics`, always from the native baseline
+        captured once in ``_build_env`` (no compounding), then applies the mass (and, best-effort,
+        a mass-scaled inertia) to the rigid body while retargeting the mixer's RPM band so the
+        thrust-to-weight the mixer commands tracks the applied mass. Lives here (not in
+        ``reconfigure``) so both the training env and the UC-47 harness — which sets
+        ``_pending_dynamics`` and calls ``reset`` directly, bypassing ``reconfigure`` — get the fix.
+        The sim path is not asserted by the hermetic suite; the T/W-preservation *logic* is
+        (see ``resolve_tw_preserving_dynamics`` / ``thrust_to_weight`` and their tests).
+        """
         if self._env is None or self._pending_dynamics is None:
             return
+        resolved = resolve_tw_preserving_dynamics(
+            self._pending_dynamics.mass,
+            tw_preserving=self._tw_preserving,
+            native_hover_rpm=self._native_hover_rpm,
+            native_max_rpm=self._native_max_rpm,
+        )
+        # Retarget the mixer's RPM band so commanded thrust scales with the applied mass. Derived
+        # from the stored native base every call, so repeated resets never compound the scale.
+        self._hover_rpm = resolved.hover_rpm
+        self._max_rpm = resolved.max_rpm
         try:
             import pybullet as p
 
             body_id = self._env.DRONE_IDS[0]
             client = self._env.CLIENT
-            p.changeDynamics(
-                body_id,
-                -1,
-                mass=float(self._pending_dynamics.mass),
+            kwargs = dict(
+                mass=float(resolved.applied_mass),
                 linearDamping=float(self._pending_dynamics.drag),
                 physicsClientId=client,
             )
+            # Best-effort inertia consistency: scale the fixed native diagonal by the same ratio so
+            # rotational inertia does not desync from the applied mass (edge case flagged in UC-48).
+            if self._native_inertia is not None:
+                kwargs["localInertiaDiagonal"] = (
+                    self._native_inertia * resolved.mass_ratio
+                ).tolist()
+            p.changeDynamics(body_id, -1, **kwargs)
         except Exception:  # noqa: BLE001 - best-effort; documented as not asserted
             pass
 
@@ -185,9 +322,24 @@ class PyBulletAdapter(DroneAdapter):
             ctrl_freq=ctrl_freq,
             gui=False,
         )
-        # Hover / max RPM come from the drone model constants exposed by the aviary.
-        self._hover_rpm = float(env.HOVER_RPM)
-        self._max_rpm = float(env.MAX_RPM)
+        # Capture the native CF2X baselines ONCE on the fresh, unmodified body (UC-48). Hover / max
+        # RPM come from the drone-model constants the aviary exposes; these are expected to match
+        # the module CF2X_HOVER_RPM / CF2X_MAX_RPM literals. ``_apply_dynamics`` derives every
+        # subsequent RPM band from these stored baselines, so nothing compounds across resets.
+        self._native_hover_rpm = float(env.HOVER_RPM)
+        self._native_max_rpm = float(env.MAX_RPM)
+        self._hover_rpm = self._native_hover_rpm
+        self._max_rpm = self._native_max_rpm
+        # Capture the native local inertia diagonal so ``_apply_dynamics`` can scale it with mass
+        # from a fixed baseline (best-effort; the sim path is not hermetically asserted).
+        self._native_inertia = None
+        try:
+            import pybullet as p
+
+            info = p.getDynamicsInfo(env.DRONE_IDS[0], -1, physicsClientId=env.CLIENT)
+            self._native_inertia = np.asarray(info[2], dtype=np.float64)
+        except Exception:  # noqa: BLE001 - best-effort; inertia scaling is skipped if unavailable
+            self._native_inertia = None
         return env
 
     def _read_state(self, collided: bool) -> DroneState:  # pragma: no cover - sim path
