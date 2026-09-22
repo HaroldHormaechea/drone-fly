@@ -87,6 +87,7 @@ class RaceEnv(gym.Env):
             dt=self.config.episode.dt,
             battery=self.config.battery if self._battery_enabled else None,
             damage=self.config.damage if self._damage_enabled else None,
+            tw_preserving=self.config.pybullet_tw_preserving,
         )
         self.backend = self.adapter.backend
 

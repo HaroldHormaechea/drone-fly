@@ -920,3 +920,12 @@ class EnvConfig:
     # the airborne-only survival reward so the policy must learn to throttle up and take off. Set
     # False to restore the legacy mid-air start (airborne-start code paths stay byte-identical).
     floor_start: bool = True
+    # PyBullet T/W-preserving dynamics randomization (UC-48). Appended **last** (after
+    # ``floor_start``) so every pre-UC-48 positional/keyword ``EnvConfig`` call is unshifted. When
+    # True (the new default) a domain-randomized mass is applied to the CF2X body T/W-preservingly
+    # (reinterpreted as a CF2X-relative multiplier, with the mixer RPM band scaled with it) so a
+    # heavier drone stays flyable — fixing the UC-47 free-fall root cause. Only the pybullet backend
+    # reads it (forwarded via ``make_adapter``); the simple backend's T/W is already preserved by
+    # construction. Set False to restore the pre-UC-48 degenerate absolute-mass behavior. This does
+    # not change the observation schema, so it is checkpoint/obs byte-compatible.
+    pybullet_tw_preserving: bool = True

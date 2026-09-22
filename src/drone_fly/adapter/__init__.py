@@ -39,6 +39,7 @@ def make_adapter(
     dt: float,
     battery=None,
     damage=None,
+    tw_preserving: bool = True,
 ) -> DroneAdapter:
     """Construct a drone adapter for ``backend`` and log which physics is active.
 
@@ -58,6 +59,11 @@ def make_adapter(
     integrity damage + control-authority model (symmetric to ``battery``). ``None`` (default) means
     no damage (byte-identical to pre-UC-19). Only the numpy backend implements it; the pybullet
     backend accepts it for signature parity and ignores it (the model is asserted on numpy only).
+
+    ``tw_preserving`` (UC-48): forwarded **only** to the pybullet backend, where it makes
+    domain-randomized mass thrust-to-weight-preserving (default ``True``). The simple backend
+    ignores it — its T/W is already preserved by construction (``BASE_MAX_THRUST = 2·m·g``), so it
+    is not threaded into the ``SimpleDroneAdapter`` signature.
     """
     if backend not in ADAPTER_CHOICES:
         raise ValueError(f"adapter must be one of {ADAPTER_CHOICES}, got {backend!r}.")
@@ -78,6 +84,7 @@ def make_adapter(
             dt=dt,
             battery=battery,
             damage=damage,
+            tw_preserving=tw_preserving,
         )
 
     logger.info("Using SimpleDroneAdapter backend (pure-numpy; hermetic, NOT mastery physics).")

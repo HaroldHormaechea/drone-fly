@@ -740,6 +740,40 @@ upright (lower max |roll|/|pitch|) and gains altitude versus full authority with
 policy/noise. **Behavioral takeoff confirmation is the user's fresh GPU retrain and is not claimed
 here.**
 
+### T/W-preserving pybullet dynamics randomization (UC-48)
+UC-47 traced the drone's refusal to leave the ground to a **mass/thrust-scale mismatch** on the
+pybullet backend (not the reward, curricula, mixer, or attitude — those were never the wall). Domain
+randomization samples an **absolute** body mass (~1 kg) sized for the `SimpleDroneAdapter` point-mass
+model (`BASE_MAX_THRUST = 2·m·g`, so its T/W is preserved by construction). The pybullet adapter
+applied that ~1 kg to the **CF2X** body — native mass **0.027 kg**, motor thrust `KF` sized for
+0.027 kg — while leaving the mixer's RPM band native. Weight ≈ 10 N against ≈ 0.6 N of max thrust
+gives **thrust-to-weight ≈ 0.24**: guaranteed free-fall at any throttle, on the mastery backend the
+≥80 % bar is defined against. The simple backend is unaffected (its thrust tracks the sampled mass).
+
+- **The fix (T/W-preserving; default ON via `EnvConfig.pybullet_tw_preserving`).** On the pybullet
+  backend the sampled mass is reinterpreted as a **CF2X-relative multiplier**
+  `mass_ratio = sampled_mass / BASE_MASS`. The applied body mass becomes `0.027 · mass_ratio` and the
+  mixer's `hover_rpm` / `max_rpm` band is scaled by `√mass_ratio`. Because peak T/W = `(max_rpm /
+  hover_rpm)²` and **both** RPMs scale by the same factor, peak T/W is **invariant** — a randomized-
+  heavier drone keeps the native **~2.25** peak (hover at throttle 0.5, climb at 1.0) instead of
+  collapsing to 0.24. Only the mixer's mass-dependent **constants** change; its **structure**
+  (`ctbr_to_rpm`), the reward, the UC-44 airborne curriculum, the UC-46 attitude-authority curriculum,
+  and the climb-bias init are all untouched. Best-effort rotational inertia is scaled from a native
+  baseline captured once per body so it does not desync from the applied mass.
+- **Where it lives.** A pure, hermetic helper `resolve_tw_preserving_dynamics` (+ `thrust_to_weight`)
+  in `pybullet_adapter.py` does the math with **no pybullet import**, so CI asserts the
+  T/W-preservation property (hover ≈ 1.0, peak invariant within 1e-6, sanity band [1.5, 2.5]) without
+  a simulator. The adapter applies it in `_apply_dynamics` (not `reconfigure`) so both the training env
+  and the UC-47 diagnostic harness pick up the fix. Set `pybullet_tw_preserving = False` to restore the
+  pre-UC-48 degenerate absolute-mass behavior (kept for opt-out and a regression bug-lock test).
+  Additive and observation-schema-neutral, so it is checkpoint/obs byte-compatible.
+
+> **⚠️ Fresh-run requirement.** Like UC-44/UC-46, observing takeoff needs a **brand-new** model with
+> old checkpoints cleared: this intentionally changes the training-dynamics distribution, so
+> checkpoints and recordings made on the broken scale are invalid. Real-pybullet confirmation via the
+> UC-47 harness is reported in the PR and is **non-gating** (CI is hermetic — no pybullet). See
+> `docs/uc48-mass-thrust-tw-preserving.md`.
+
 ### Visualization & recording
 Enable recording in a train/evaluate config with `record: true` (tune cadence via `record_every`);
 frames land in that run's `training/<name>/recordings/`. Open `viz/viewer.html` in a browser
