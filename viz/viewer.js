@@ -21,14 +21,26 @@ const SUPPORTED_SCHEMA = 1;
 
 // ---- anatomical brain-map heatmap (UC-12) ---------------------------------------------
 // The panel is an MRI/fMRI-style activation heatmap: per active neuron an additive
-// kernel-density Gaussian splat is stamped (weighted by that neuron's activation) into a
-// float accumulation buffer, the buffer is normalized and mapped through a "hot" colormap
+// kernel-density Gaussian splat is stamped (weighted by that neuron's activation MAGNITUDE
+// RELATIVE TO REST — |code*scale + offset|, sourced from the recording's own quantization
+// meta) into a float accumulation buffer, the buffer is normalized and mapped through a
+// "hot" colormap. Weighting by magnitude-from-rest (not the raw uint8 code) is what makes
+// the map animate: a resting neuron (real activation ≈ 0, code ≈ 127) reads DARK, and only
+// neurons that deviate from rest light up and fade as the state evolves. Using the raw code
+// instead put every neuron at ~0.5 brightness permanently (rest → code 127 → 0.5), burying
+// the frame-to-frame signal (~0.03% of that constant floor) under a static half-lit blob.
 // (black→red→orange→yellow→white), then drawn under a static registered brain outline.
 // Per-neuron screen positions are precomputed once per view (not per frame — see MAP_SS).
 const MAP_SS = 2; // accumulation-buffer downscale (softness + ~4× fewer stamp writes)
 const MAP_KERNEL_R = 7; // Gaussian splat radius, in downscaled buffer pixels
 const MAP_KERNEL_SIGMA = MAP_KERNEL_R / 2.4;
-const MAP_MIN_WEIGHT = 2 / 255; // skip near-silent neurons (perf; sub-uint8-step activation)
+const MAP_MIN_WEIGHT = 2 / 255; // skip near-rest neurons (perf; deviation-from-rest below one code step)
+// Per-neuron temporal auto-gain: each neuron's magnitude is stretched to its OWN episode
+// min→max so slow, small swings still fill the dark→bright range and the map visibly animates
+// (magnitude-from-rest alone leaves the pattern nearly constant frame-to-frame — the drift is
+// real but tiny). The divisor is floored at MAP_GAIN_MIN_RANGE so a near-rest neuron whose only
+// "range" is quantization noise is NOT blown up to full brightness — it stays proportionally dim.
+const MAP_GAIN_MIN_RANGE = 0.05;
 
 // ---- UC-28: full-coverage body-schematic placement + modality overlay -----------------
 // Soma-less afferents are placed in a schematic fly body around the brain (placement ===
@@ -163,6 +175,7 @@ function loadDocument(doc, name) {
   state.frame = 0;
   state.playing = false;
   state.mapCache = null; // rebuilt lazily by ensureMapCache() on the next brain-map draw
+  state.actGain = null; // per-neuron temporal auto-gain, recomputed lazily for this recording
   const normSel = el("map-norm-select");
   state.mapNorm = normSel && normSel.value === "global" ? "global" : "frame";
 
@@ -318,6 +331,38 @@ function makeTransform(W, H, pad, uMin, uMax, vMin, vMax) {
   return { s, pt: (u, v) => [offX + (u - uMin) * s, H - offY - (v - vMin) * s] };
 }
 
+// Per-neuron temporal auto-gain (memoized per recording, not per view — it depends only on the
+// activations, not the projection plane). For each neuron: lo = min magnitude-from-rest over all
+// frames, inv = 1 / max(range, MAP_GAIN_MIN_RANGE). The splat weight is then clamp01((mag-lo)*inv),
+// so a neuron that swings across the episode fills the full dark→bright range while a near-static
+// neuron stays dim/dark. Sourced from the file's own quantization meta (canonical fallback).
+function ensureActivationGain() {
+  if (state.actGain) return state.actGain;
+  const meta = state.data.meta || {};
+  const ascale = typeof meta.activation_scale === "number" ? meta.activation_scale : 2 / 255;
+  const aoffset = typeof meta.activation_offset === "number" ? meta.activation_offset : -1;
+  const frames = state.data.frames.activations;
+  const nF = frames.length;
+  const N = meta.n_neurons || (nF ? frames[0].length : 0);
+  const lo = new Float32Array(N).fill(Infinity);
+  const hi = new Float32Array(N).fill(-Infinity);
+  for (let f = 0; f < nF; f++) {
+    const a = frames[f];
+    for (let i = 0; i < N; i++) {
+      const mag = Math.abs(a[i] * ascale + aoffset);
+      if (mag < lo[i]) lo[i] = mag;
+      if (mag > hi[i]) hi[i] = mag;
+    }
+  }
+  const inv = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    if (!isFinite(lo[i])) { lo[i] = 0; inv[i] = 0; continue; }
+    inv[i] = 1 / Math.max(hi[i] - lo[i], MAP_GAIN_MIN_RANGE);
+  }
+  state.actGain = { lo, inv, ascale, aoffset };
+  return state.actGain;
+}
+
 // Build (once per view) the brain-map cache: per-neuron accumulation-buffer positions, the
 // active transform, the registered outline polygon (fixed mode only), and the exact global
 // normalization peak. Rebuilt when the view plane or canvas size changes.
@@ -354,6 +399,10 @@ function ensureMapCache(W, H, pad) {
     tf = makeTransform(W, H, pad, b.minX, b.maxX, b.minY, b.maxY);
   }
 
+  // Quantization mapping (real activation = code * scale + offset) and per-neuron temporal
+  // auto-gain, both sourced from the file's own meta (canonical fallback for legacy files).
+  const { lo: gainLo, inv: gainInv, ascale, aoffset } = ensureActivationGain();
+
   const bw = Math.max(1, Math.ceil(W / MAP_SS)), bh = Math.max(1, Math.ceil(H / MAP_SS));
   const sx = new Int32Array(pts.length), sy = new Int32Array(pts.length);
   const valid = new Uint8Array(pts.length);
@@ -372,7 +421,8 @@ function ensureMapCache(W, H, pad) {
   }
 
   const cache = {
-    viewKey, W, H, plane, tf, poly, fixed, bw, bh, sx, sy, valid, wmul,
+    viewKey, W, H, plane, tf, poly, fixed, bw, bh, sx, sy, valid, wmul, ascale, aoffset,
+    gainLo, gainInv,
     buf: new Float32Array(bw * bh),
     img: el("brain-canvas").getContext("2d").createImageData(bw, bh),
     globalPeak: 0,
@@ -385,15 +435,21 @@ function ensureMapCache(W, H, pad) {
 // Zero the accumulation buffer and stamp every active neuron's weighted Gaussian into it for
 // one frame's activations. Returns the frame's peak intensity (for per-frame normalization).
 function stampFrame(cache, act) {
-  const { buf, bw, bh, sx, sy, valid, wmul } = cache;
+  const { buf, bw, bh, sx, sy, valid, wmul, ascale, aoffset, gainLo, gainInv } = cache;
   buf.fill(0);
   const R = MAP_KERNEL.R, size = MAP_KERNEL.size, kd = MAP_KERNEL.data;
   let peak = 0;
   for (let i = 0; i < valid.length; i++) {
     if (!valid[i]) continue;
-    // UC-28: scale by the per-neuron splat weight (schematic neurons stamp fainter — AC-6).
-    const w = (act[i] / 255) * (wmul ? wmul[i] : 1.0);
-    if (w < MAP_MIN_WEIGHT) continue; // perf: skip near-silent neurons
+    // Weight by activation MAGNITUDE RELATIVE TO REST (|real activation| = |code*scale + offset|),
+    // NOT the raw code: a resting neuron (real ≈ 0) is dark, so only deviations light up and fade
+    // as the state evolves. Then apply per-neuron temporal auto-gain — stretch to this neuron's own
+    // episode min→max (floored divisor) so slow, small swings still fill the dark→bright range and
+    // the map visibly animates. UC-28: schematic neurons stamp fainter (AC-6) via the per-neuron wmul.
+    const mag = Math.abs(act[i] * ascale + aoffset);
+    const g = clamp01((mag - gainLo[i]) * gainInv[i]);
+    const w = g * (wmul ? wmul[i] : 1.0);
+    if (w < MAP_MIN_WEIGHT) continue; // perf: skip near-silent (near-rest) neurons
     const cx = sx[i], cy = sy[i];
     for (let dy = -R; dy <= R; dy++) {
       const py = cy + dy;
