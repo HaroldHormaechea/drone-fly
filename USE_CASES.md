@@ -56,3 +56,4 @@ Statuses:
 | 44 | [use-cases/44-reverse-curriculum-airborne-start-climb-init.md](use-cases/44-reverse-curriculum-airborne-start-climb-init.md) | Airborne-start reverse curriculum + climb-biased throttle init | done | 2026-09-22 |
 | 45 | [use-cases/45-recording-physics-telemetry-divergence.md](use-cases/45-recording-physics-telemetry-divergence.md) | Diagnose & fix recording-vs-physics telemetry divergence | done | 2026-09-22 |
 | 46 | [use-cases/46-attitude-authority-curriculum.md](use-cases/46-attitude-authority-curriculum.md) | Attitude-authority curriculum (stop tumbling so it can take off) | done | 2026-09-22 |
+| 47 | [use-cases/47-diagnose-thrust-pathway-collective-collapse.md](use-cases/47-diagnose-thrust-pathway-collective-collapse.md) | Diagnose the throttle→thrust pathway (collective-thrust collapse) | done | 2026-09-22 |
