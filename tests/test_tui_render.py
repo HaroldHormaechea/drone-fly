@@ -20,12 +20,14 @@ import io
 
 import pytest
 
+from drone_fly.adapter.dynamics_summary import drone_dynamics_summary
 from drone_fly.train.health import HealthReason, HealthVerdict
 from drone_fly.train.tui import metrics as M
 from drone_fly.train.tui.render import (
     SEVERITY_STYLE,
     STATUS_BORDER_OVERHEAD,
     STATUS_MAX_CONTENT_LINES,
+    build_drone_panel,
     build_layout,
     build_status_bar,
     build_trends_panel,
@@ -369,3 +371,74 @@ def test_layout_status_region_autosizes_for_a_multiline_verdict() -> None:
     assert status_region_size("line one\nline two\nline three") == 3 + STATUS_BORDER_OVERHEAD
     out = _render(build_layout(m), width=120)
     assert out.strip()  # assembles + renders without raising
+
+
+# --------------------------------------------------------------------------- #
+# UC-49 AC2 — the drone-dynamics top segment
+# --------------------------------------------------------------------------- #
+def _summary(**overrides):
+    """A known DroneDynamicsSummary for the render assertions (pybullet default is T/W 2.25)."""
+    kwargs = dict(
+        backend="pybullet",
+        sampled_mass=1.0,
+        max_body_rate=4.0,
+        tw_preserving=True,
+        attitude_authority=0.75,
+        spawn_z=1.5,
+    )
+    kwargs.update(overrides)
+    return drone_dynamics_summary(**kwargs)
+
+
+def test_drone_panel_shows_all_six_fields_from_a_known_summary() -> None:
+    """build_drone_panel renders Weight/T/W/hover/body-rate/attitude/spawn-z headlessly."""
+    m = M.DashboardModel(scheduled_iters=488)
+    m.set_drone_dynamics(_summary())
+    out = _render(build_drone_panel(m))
+    assert out.strip()
+    # The six fields' formatted values appear (weight 0.027*9.8=0.26 N, T/W 2.25, hover 0.50,
+    # rate 4.0 rad/s, attitude 0.75, spawn_z 1.50 m).
+    assert "0.26 N" in out  # weight
+    assert "2.25" in out  # T/W
+    assert "0.50" in out  # hover throttle
+    assert "4.0 rad/s" in out  # max body rate
+    assert "0.75" in out  # attitude authority
+    assert "1.50 m" in out  # spawn-z
+    # Field labels present so an operator can read the segment.
+    for label in ("weight", "T/W", "hover", "rate", "attitude", "spawn_z"):
+        assert label in out
+
+
+def test_drone_panel_none_summary_renders_placeholders_without_raising() -> None:
+    """A model with no summary yet renders '—' placeholders and never crashes (graceful degrade)."""
+    m = M.DashboardModel(scheduled_iters=488)  # drone_dynamics defaults to None
+    out = _render(build_drone_panel(m))
+    assert out.strip()
+    assert M.PLACEHOLDER in out
+
+
+def test_drone_panel_none_spawn_z_renders_placeholder() -> None:
+    """spawn_z=None (unknown) renders the placeholder for that field, not a crash."""
+    m = M.DashboardModel(scheduled_iters=488)
+    m.set_drone_dynamics(_summary(spawn_z=None))
+    out = _render(build_drone_panel(m))
+    assert out.strip()
+    assert "2.25" in out  # other fields still render
+    assert M.PLACEHOLDER in out  # the spawn_z field degrades to placeholder
+
+
+def test_build_layout_includes_the_drone_segment() -> None:
+    """The full layout carries the drone segment values when a summary is set (end-to-end AC2)."""
+    m = _populated_model()
+    m.set_drone_dynamics(_summary())
+    out = _render(build_layout(m, ["pybullet build"]))
+    assert out.strip()
+    assert "T/W" in out
+    assert "2.25" in out
+
+
+def test_build_layout_renders_without_drone_summary() -> None:
+    """A layout whose model has no drone summary still renders (segment shows placeholders)."""
+    m = _populated_model()  # no set_drone_dynamics call
+    out = _render(build_layout(m))
+    assert out.strip()

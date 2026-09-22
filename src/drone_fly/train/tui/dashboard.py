@@ -117,6 +117,19 @@ class TrainingDashboard:
         except Exception as exc:  # noqa: BLE001 - a consumer must not crash training
             logger.warning("dashboard set_verdict failed: %s", exc)
 
+    def set_drone_dynamics(self, summary) -> None:
+        """Store the latest drone-dynamics summary (UC-49); never raises into the callback.
+
+        Lock-guarded passthrough mirroring :meth:`set_verdict`. The next :meth:`tick` /
+        :meth:`update` redraw picks the summary up via ``build_drone_panel``; this only mutates
+        the model, so it does not itself redraw (matching ``set_verdict``).
+        """
+        try:
+            with self._lock:
+                self.model.set_drone_dynamics(summary)
+        except Exception as exc:  # noqa: BLE001 - a consumer must not crash training
+            logger.warning("dashboard set_drone_dynamics failed: %s", exc)
+
     # -- callback-facing, lock-guarded mutation+redraw (UC-32) -----------------------------
 
     def tick(self, **kwargs) -> None:

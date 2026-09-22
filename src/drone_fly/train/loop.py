@@ -621,7 +621,16 @@ def train(
             # failure). Resolved against the drone-fly source tree, not the process CWD.
             git_sha=resolve_git_sha(),
         )
-        callbacks.append(RecordingCallback(recorder, record_every=record_every, seed=cfg.seed))
+        callbacks.append(
+            RecordingCallback(
+                recorder,
+                record_every=record_every,
+                seed=cfg.seed,
+                # UC-49: forward the run's T/W-preservation flag so meta.drone_dynamics reports
+                # the same UC-48-resolved applied mass / T/W the env actually flies under.
+                tw_preserving=(env_config or EnvConfig()).pybullet_tw_preserving,
+            )
+        )
         logger.info(
             "Training-time activation recording enabled (every %d episodes, best-effort).",
             record_every,
@@ -660,7 +669,14 @@ def train(
     if dashboard is not None:
         from drone_fly.train.tui.callback import TuiCallback
 
-        callbacks.append(TuiCallback(dashboard))
+        # UC-49: forward the run's T/W-preservation flag so the drone-dynamics top segment shows
+        # the same UC-48-resolved applied mass / T/W the env actually flies under.
+        callbacks.append(
+            TuiCallback(
+                dashboard,
+                tw_preserving=(env_config or EnvConfig()).pybullet_tw_preserving,
+            )
+        )
 
     learn_kwargs = dict(
         total_timesteps=steps,

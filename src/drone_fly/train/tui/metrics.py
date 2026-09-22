@@ -348,6 +348,11 @@ class DashboardModel:
             "explained_variance": None,
         }
         self.latest_verdict = None
+        # UC-49 AC2: latest drone-dynamics summary (a
+        # :class:`~drone_fly.adapter.dynamics_summary.DroneDynamicsSummary`) for the top segment.
+        # ``None``-tolerant exactly like ``self.raw`` / ``self.latest_verdict`` — the renderer
+        # shows placeholders and never crashes until the callback feeds the first summary.
+        self.drone_dynamics = None
 
     def update(
         self,
@@ -426,6 +431,10 @@ class DashboardModel:
     def set_verdict(self, verdict) -> None:
         """Store the latest health verdict (the UC-23 seam the status bar renders)."""
         self.latest_verdict = verdict
+
+    def set_drone_dynamics(self, summary) -> None:
+        """Store the latest drone-dynamics summary for the UC-49 top segment (None-tolerant)."""
+        self.drone_dynamics = summary
 
     def rows(self) -> list[TrendRow]:
         """Build the 7 :class:`TrendRow`s in registry order."""

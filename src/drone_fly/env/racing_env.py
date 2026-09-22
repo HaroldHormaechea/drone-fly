@@ -284,6 +284,30 @@ class RaceEnv(gym.Env):
         """
         return self._active_dynamics
 
+    @property
+    def attitude_authority(self) -> float:
+        """The live UC-46 attitude-authority curriculum knob (UC-49 observability, read-only).
+
+        The multiplier currently applied to the roll/pitch/yaw command channels in
+        :meth:`step` (see :meth:`set_attitude_authority`). ``1.0`` = full authority. On the
+        training venv this is the live scheduled (mid-anneal) value; eval / recording envs
+        never receive the curriculum callback, so they read the ``1.0`` endpoint. Single live
+        source both UC-49 summary consumers read via ``get_attr``. Read-only — no behaviour
+        change; it simply exposes the existing ``_attitude_authority`` field.
+        """
+        return self._attitude_authority
+
+    @property
+    def spawn_z(self) -> float:
+        """The live UC-44 airborne-start spawn altitude (m) for the ``floor_start`` reset path.
+
+        Returns the active spawn-z override (:meth:`set_spawn_z`) when one is set, else the
+        course ``floor_z`` — the effective spawn height the next ``reset()`` would use (UC-49
+        observability, read-only). On the training venv this is the live scheduled value; eval /
+        recording envs keep the floored spawn. Read-only — no behaviour change.
+        """
+        return self._course.floor_z if self._spawn_z_override is None else self._spawn_z_override
+
     # -- observation encoding -----------------------------------------------------------
     def _observation(self, state) -> np.ndarray:
         target = current_target(self._course, self._gates_passed)

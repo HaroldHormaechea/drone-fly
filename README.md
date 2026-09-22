@@ -774,6 +774,39 @@ gives **thrust-to-weight ≈ 0.24**: guaranteed free-fall at any throttle, on th
 > UC-47 harness is reported in the PR and is **non-gating** (CI is hermetic — no pybullet). See
 > `docs/uc48-mass-thrust-tw-preserving.md`.
 
+### Drone-dynamics observability & T/W regression guard (UC-49)
+UC-47/UC-48 fixed the mass/thrust-scale bug, but it had lived **silently** in the sampler/wiring layer
+for many training UCs because nothing surfaced the drone's real thrust-to-weight. UC-49 makes that
+physics **observable and regression-guarded** so it can never regress unseen. One shared, pure
+computation — `drone_dynamics_summary(...) -> DroneDynamicsSummary` in
+`src/drone_fly/adapter/dynamics_summary.py` — derives the summary **once** from UC-48's resolved
+dynamics (`resolve_tw_preserving_dynamics` / `thrust_to_weight`), always from the **resolved
+`applied_mass`** (`native · mass_ratio`), never the raw ~1 kg sampled mass that hid the bug. It reports
+applied mass, weight (`mass·g`), peak T/W, hover throttle, max body-rate, and the live curriculum knobs
+(attitude-authority, spawn-z). It imports **no pybullet** (pure numpy/arithmetic), so it is hermetic
+and CI-gating. The same summary is surfaced in three places, and because they all read the one function
+a display, a recording, and CI can never disagree about the drone's T/W:
+
+- **Training TUI top segment.** A new `build_drone_panel` renders a full-width segment **above** the
+  TIME/TRAIN/ROLLOUT panel showing Weight, T/W, hover throttle, max body-rate, attitude-authority, and
+  spawn-z, refreshed per iteration. A `None` summary (before the first rollout) renders placeholders
+  and never crashes, like every other panel.
+- **Recording provenance.** Every recording gains an additive, presence-guarded `meta.drone_dynamics`
+  block (beside the UC-45 `git_sha` / `checkpoint` / `dynamics` provenance). It is omitted entirely
+  when unset, so pre-UC-49 recordings and no-randomization runs stay byte-for-byte back-compatible;
+  `SCHEMA_VERSION` is unchanged.
+- **CI T/W regression guard.** A hermetic test drives the **real `EnvConfig()`** default and the real
+  `sample_dynamics` mass range through the summary on the pybullet path and asserts peak T/W stays
+  **in-band ([1.5, 2.5])** and **mass-invariant** — gating the exact `EnvConfig → sample_dynamics →
+  resolve` seam where the UC-47 bug lived. A build-time `logging.warning` (the `FLYABLE_TW_FLOOR = 1.0`
+  tripwire) also fires if a drone is ever configured below hover-capable T/W.
+
+**Curriculum-value convention.** `attitude_authority` and `spawn_z` are the UC-46 / UC-44 curriculum
+knobs. On the **training** env the TUI and recording show the *live scheduled* (mid-anneal) value; at
+**eval/record** time the curriculum callbacks never run, so both sit at their annealed endpoints
+(authority `1.0`, spawn-z = floor). This is observability/guard-only — it changes no training behavior,
+the UC-48 fix, the simple backend, the reward, or the UC-44/UC-46 curricula.
+
 ### Visualization & recording
 Enable recording in a train/evaluate config with `record: true` (tune cadence via `record_every`);
 frames land in that run's `training/<name>/recordings/`. Open `viz/viewer.html` in a browser

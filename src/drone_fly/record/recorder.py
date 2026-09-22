@@ -149,6 +149,13 @@ class ActivationRecorder:
         # default and when randomization is off) omits the ``meta.dynamics`` block entirely,
         # keeping older files byte-for-byte back-compatible. Mirrors the ``course`` handling.
         self.dynamics = None
+        # UC-49 AC3: the per-episode drone-dynamics summary (applied mass / weight / T/W / hover
+        # throttle / body-rate / curriculum knobs), stamped by the caller via
+        # :meth:`set_drone_dynamics`. Kept as its OWN opt-in slot (not folded into ``dynamics``)
+        # so ``meta.drone_dynamics`` is a separate presence-guarded block: ``None`` (the default,
+        # and whenever the caller does not set it) omits it entirely, keeping every pre-UC-49
+        # recording byte-for-byte back-compatible. Mirrors the ``dynamics`` / ``course`` handling.
+        self.drone_dynamics = None
         self.n_neurons = data.neuron_count
         self.neuron_ids = [
             int(x) if _is_int_like(x) else str(x) for x in np.asarray(data.neuron_ids)
@@ -246,6 +253,21 @@ class ActivationRecorder:
         :meth:`set_course`.
         """
         self.dynamics = dynamics
+
+    def set_drone_dynamics(self, summary) -> None:
+        """Set the per-episode drone-dynamics summary → ``meta.drone_dynamics`` (UC-49 AC3).
+
+        ``summary`` is a
+        :class:`~drone_fly.adapter.dynamics_summary.DroneDynamicsSummary` (or ``None``). When set,
+        :meth:`finish_episode` emits an additive, presence-guarded ``meta.drone_dynamics`` block
+        pinning the physics the drone actually flew under — the resolved applied mass, weight, peak
+        thrust-to-weight, hover throttle, max body-rate, and the live curriculum knobs
+        (attitude-authority, spawn-z). ``None`` (the default) omits the block entirely, keeping
+        every pre-UC-49 recording byte-for-byte back-compatible. Deliberately a **separate** opt-in
+        setter (not folded into :meth:`set_dynamics`) so the block stays independent of the UC-45
+        ``meta.dynamics`` provenance. Mirrors :meth:`set_course` / :meth:`set_dynamics`.
+        """
+        self.drone_dynamics = summary
 
     # -- capture ------------------------------------------------------------------------
     def sink(self, activation: np.ndarray) -> None:
@@ -355,6 +377,25 @@ class ActivationRecorder:
                 "max_thrust": float(self.dynamics.max_thrust),
                 "max_body_rate": float(self.dynamics.max_body_rate),
                 "latency_steps": int(self.dynamics.latency_steps),
+            }
+        if self.drone_dynamics is not None:
+            # UC-49 AC3: additive, presence-guarded block — the single shared drone-dynamics
+            # summary the TUI and the CI guard also read (see
+            # :mod:`drone_fly.adapter.dynamics_summary`). Stamped only when the caller set it via
+            # :meth:`set_drone_dynamics`; omitted entirely otherwise, so no-summary runs and every
+            # pre-UC-49 recording stay byte-for-byte unchanged. Kept OUT of the shared ``meta``
+            # key-set / ``_DOC_META_KEYS`` on purpose so it never perturbs the exact-key-set
+            # assertions. ``spawn_z`` may be ``None`` (unknown) — serialised as JSON null.
+            ddyn = self.drone_dynamics
+            meta["drone_dynamics"] = {
+                "backend": str(ddyn.backend),
+                "applied_mass": float(ddyn.applied_mass),
+                "weight": float(ddyn.weight),
+                "thrust_to_weight": float(ddyn.thrust_to_weight),
+                "hover_throttle": float(ddyn.hover_throttle),
+                "max_body_rate": float(ddyn.max_body_rate),
+                "attitude_authority": float(ddyn.attitude_authority),
+                "spawn_z": (None if ddyn.spawn_z is None else float(ddyn.spawn_z)),
             }
 
         frames: dict = {

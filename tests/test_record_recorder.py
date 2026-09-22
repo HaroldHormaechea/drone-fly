@@ -646,3 +646,90 @@ def test_ac6_recorder_zero_anatomy_above_cap_raises_keyed_on_zero(
     message = str(excinfo.value).lower()
     assert "zero" in message
     assert "partial" not in message
+
+
+# ===========================================================================
+# UC-49 AC3 — additive, presence-guarded meta.drone_dynamics block
+# ===========================================================================
+# Guardrail 3: this block is exercised via its OWN helper that calls set_drone_dynamics(...)
+# (mirroring _record_with_course). It never touches _DOC_META_KEYS or the shared _record_episode
+# helper, so the exact-key-set assertions at lines 141 & 335 stay valid and unchanged.
+def _record_with_drone_dynamics(connectome: ConnectomeData, out_dir: Path, summary) -> dict:
+    """Record a tiny episode, optionally stamping a drone-dynamics summary, return the document."""
+    rec = ActivationRecorder(connectome, out_dir, backend="simple", dt=0.05)
+    n = connectome.neuron_count
+    rec.start_episode(episode_index=0, seed=0)
+    if summary is not None:
+        rec.set_drone_dynamics(summary)  # the env's per-episode summary for THIS episode
+    for f in range(2):
+        rec.sink(np.linspace(-1.0, 1.0, n, dtype=np.float32) * (f + 1) / 2)
+        rec.capture_frame(np.array([0.1, 0.2, 0.3, 0.4]), np.array([float(f), 0.0, 1.0]))
+    path = rec.finish_episode(completed=True, completion_time=0.1, total_reward=1.0, steps=2)
+    return json.loads(path.read_text())
+
+
+def test_meta_drone_dynamics_present_and_correct_when_set(
+    connectome: ConnectomeData, tmp_path: Path
+) -> None:
+    """A set summary is serialised verbatim into an additive meta.drone_dynamics block (AC3)."""
+    from drone_fly.adapter.dynamics_summary import drone_dynamics_summary
+
+    summary = drone_dynamics_summary(
+        backend="pybullet",
+        sampled_mass=1.0,
+        max_body_rate=4.0,
+        tw_preserving=True,
+        attitude_authority=0.6,
+        spawn_z=1.25,
+    )
+    doc = _record_with_drone_dynamics(connectome, tmp_path / "act", summary)
+
+    assert "drone_dynamics" in doc["meta"], "meta.drone_dynamics must be present when set"
+    block = doc["meta"]["drone_dynamics"]
+    assert block["backend"] == "pybullet"
+    assert block["applied_mass"] == pytest.approx(0.027, rel=1e-6)  # resolved, not raw ~1 kg
+    assert block["weight"] == pytest.approx(0.027 * 9.8, rel=1e-6)
+    assert block["thrust_to_weight"] == pytest.approx(2.25, rel=1e-6)
+    assert block["hover_throttle"] == pytest.approx(0.5, abs=1e-6)
+    assert block["max_body_rate"] == pytest.approx(4.0)
+    assert block["attitude_authority"] == pytest.approx(0.6)
+    assert block["spawn_z"] == pytest.approx(1.25)
+    # It is a plain JSON-serialisable dict (round-tripped through json.loads already).
+    assert set(block) == {
+        "backend",
+        "applied_mass",
+        "weight",
+        "thrust_to_weight",
+        "hover_throttle",
+        "max_body_rate",
+        "attitude_authority",
+        "spawn_z",
+    }
+
+
+def test_meta_drone_dynamics_serialises_none_spawn_z_as_null(
+    connectome: ConnectomeData, tmp_path: Path
+) -> None:
+    """spawn_z=None (unknown) round-trips as JSON null, not a crash or a sentinel."""
+    from drone_fly.adapter.dynamics_summary import drone_dynamics_summary
+
+    summary = drone_dynamics_summary(
+        backend="simple", sampled_mass=1.0, max_body_rate=4.0, spawn_z=None
+    )
+    doc = _record_with_drone_dynamics(connectome, tmp_path / "act", summary)
+    assert doc["meta"]["drone_dynamics"]["spawn_z"] is None
+
+
+def test_no_drone_dynamics_omits_meta_block_and_keeps_documented_key_set(
+    connectome: ConnectomeData, tmp_path: Path
+) -> None:
+    """Unset summary (the default) writes NO meta.drone_dynamics key — byte-compatible (AC3).
+
+    Mirrors test_course_none_omits_meta_course_block: the block is absent AND the documented
+    meta key set is unchanged (nothing added/removed), so pre-UC-49 recordings stay identical.
+    """
+    doc = _record_with_drone_dynamics(connectome, tmp_path / "act", None)
+    assert "drone_dynamics" not in doc["meta"], (
+        "meta.drone_dynamics must be absent when no summary is set"
+    )
+    assert set(doc["meta"]) == _DOC_META_KEYS
