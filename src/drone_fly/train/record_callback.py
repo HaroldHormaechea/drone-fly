@@ -10,9 +10,17 @@ playbacks are illustrative rather than reproducible.
 
 Only env 0 is recorded. The connectome actor's ``sink`` (wired at training start) stashes
 the batched ``(n_envs, N)`` post-propagation state each forward; on each ``_on_step`` we pull
-env-0's row and pair it with env-0's action / ``info["position"]``. Episode boundaries are
-detected from ``dones[0]``; the recorded ``total_reward`` is the sum of the *normalised*
-per-step rewards seen during training (documented caveat).
+env-0's row and pair it with env-0's **applied** action / ``info["position"]``. Episode
+boundaries are detected from ``dones[0]``; the recorded ``total_reward`` is the sum of the
+*normalised* per-step rewards seen during training (documented caveat).
+
+Action fidelity (UC-45 AC3)
+---------------------------
+The recorded action is exactly the array handed to ``env.step`` — SB3's ``clipped_actions``
+(the raw Gaussian sample after clip / unscale-into-box), NOT the unclipped ``actions``
+sample. This matches the evaluation recorder, which already records the actor's stepped
+output, so a recorded trajectory always replays to the true drone state. (Falls back to
+``actions`` with a one-time warning only if ``clipped_actions`` is absent from ``locals``.)
 """
 
 from __future__ import annotations
@@ -63,6 +71,8 @@ class RecordingCallback(BaseCallback):
         self._total_reward = 0.0
         self._steps = 0
         self._enabled = True
+        # UC-45: emit the "clipped_actions absent" fallback warning at most once per run.
+        self._warned_no_clipped = False
 
     def _begin_episode(self) -> None:
         self._capturing = (self._episode % self.record_every) == 0
@@ -75,6 +85,14 @@ class RecordingCallback(BaseCallback):
             # env without the property must never crash the training callback.
             try:
                 self.recorder.set_course(self.training_env.get_attr("active_course")[0])
+            except Exception:  # noqa: BLE001 - best-effort; recording never breaks training
+                pass
+            # UC-45 AC9 (best-effort): stamp env-0's per-episode sampled dynamics so a
+            # randomized-training playback pins the true sampled physics. Guarded exactly like
+            # set_course — an env without the property (or randomization off → None) must never
+            # crash the training callback; a None stamp simply omits the meta.dynamics block.
+            try:
+                self.recorder.set_dynamics(self.training_env.get_attr("active_dynamics")[0])
             except Exception:  # noqa: BLE001 - best-effort; recording never breaks training
                 pass
             if self._actor is not None:
@@ -109,8 +127,29 @@ class RecordingCallback(BaseCallback):
                 return True
             info0 = infos[0]
             if self._capturing and "position" in info0:
+                # UC-45 AC3 (action-channel fidelity): record the action actually APPLIED to the
+                # env, not the raw PPO Gaussian sample. SB3's on-policy collector clips (or, under
+                # ``squash_output``, unscales) ``actions`` into the action space and steps the env
+                # with the result, exposing it as ``clipped_actions`` in ``locals``. Recording
+                # ``actions[0]`` logged the unclipped sample (throttle/roll could sit outside the
+                # box) — faithful today only by accident (``sanitize_action`` == ``np.clip`` with
+                # ``squash_output=False``) and silently desyncing under a squashed head or changed
+                # bounds. Prefer ``clipped_actions[0]``; fall back to ``actions[0]`` (with a one-
+                # time warning) only if it is absent, so the recorder stores exactly the array
+                # handed to ``env.step``.
+                clipped = self.locals.get("clipped_actions")
+                if clipped is not None:
+                    applied_action = clipped[0]
+                else:
+                    if not self._warned_no_clipped:
+                        logger.warning(
+                            "clipped_actions absent from callback locals; recording the raw "
+                            "actions sample (may lie outside the action box)."
+                        )
+                        self._warned_no_clipped = True
+                    applied_action = actions[0]
                 self.recorder.capture_frame(
-                    actions[0], info0["position"], target_gate=info0.get("target_gate")
+                    applied_action, info0["position"], target_gate=info0.get("target_gate")
                 )
                 self._steps += 1
                 if rewards is not None:

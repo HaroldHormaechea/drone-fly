@@ -223,6 +223,7 @@ def _build_recorder(
     from drone_fly.connectome import load_connectome
     from drone_fly.connectome.prune import DEFAULT_PRUNE_K, prune_to_subcircuit
     from drone_fly.controller.sb3 import actor_from_model
+    from drone_fly.record.provenance import resolve_git_sha
     from drone_fly.record.recorder import DEFAULT_RECORD_DIR, ActivationRecorder
 
     connectome = load_connectome(connectome_path)
@@ -252,4 +253,7 @@ def _build_recorder(
         checkpoint=checkpoint,
         dt=dt,
         course=course,
+        # UC-45 AC8a: pin the source-tree commit at record time (never raises; "unknown" on
+        # failure). The eval path already stamps a real checkpoint reference.
+        git_sha=resolve_git_sha(),
     )
