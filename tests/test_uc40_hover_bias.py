@@ -1,17 +1,22 @@
-"""UC-40 — hover-bias policy init + the baseline-vs-fixed CPU smoke-train validation.
+"""UC-40 → UC-44 — climb-bias policy init + the baseline-vs-fixed CPU smoke-train validation.
 
 Covers the primary root-cause fix (AC3/AC4): PPO's action mean is a linear readout whose
 ``action_net`` is initialized ≈0 and the Gaussian head is unbounded (not tanh-squashed), so at
 init the deterministic throttle is ≈0 and mean-0 exploration clipped to ``[0, 1]`` averages well
-below the ``HOVER_THROTTLE`` (0.5) hover point — the drone never sustains takeoff, the climb
-gradient is never reached, returns stay flat and the actor freezes at high std.
-``_apply_hover_bias`` seeds the throttle channel of ``action_net.bias`` to ``HOVER_THROTTLE`` on
-FRESH builds only.
+below the hover point (``HOVER_THROTTLE`` 0.5) — the drone never sustains takeoff, the climb
+gradient is never reached, returns stay flat and the actor freezes at high std. UC-40 first seeded
+the throttle channel of ``action_net.bias`` to ``HOVER_THROTTLE`` (net-zero thrust → the drone
+merely floats). UC-44 **supersedes** that single initializer: ``_apply_climb_bias`` seeds the
+throttle channel to :data:`CLIMB_BIAS_THROTTLE` (0.6, slightly above hover) on FRESH builds only,
+so the fresh policy's default action produces gentle net-positive lift and collects airborne/climb
+reward immediately. There is exactly ONE throttle-bias initializer — the hover-bias path is
+replaced, not duplicated (UC-44 AC3).
 
 These tests build a real SB3 ``PPO`` against the committed connectome fixture on the pure-numpy
 ``simple`` adapter (no pybullet, CPU, seeded), so they double as the AC4 in-sandbox smoke-train:
 
-* the post-bias deterministic mean throttle lands on hover (the "real gate", not decoration);
+* the post-bias deterministic mean throttle lands on the climb-bias point (the "real gate", not
+  decoration);
 * under a short seeded rollout the FIXED policy reaches meaningfully higher altitude than the
   BASELINE (no-bias) policy — direct evidence the climb gradient is now reachable;
 * under a short seeded train the FIXED policy's action std commits (trends DOWN) more than the
@@ -27,7 +32,7 @@ import numpy as np
 import pytest
 import torch
 
-from drone_fly.controller.encoding import HOVER_THROTTLE, THROTTLE_INDEX
+from drone_fly.controller.encoding import CLIMB_BIAS_THROTTLE, THROTTLE_INDEX
 from drone_fly.env.racing_env import build_vec_env
 from drone_fly.train import loop as loop_mod
 from drone_fly.train.config import TrainConfig
@@ -37,12 +42,12 @@ pytest.importorskip("stable_baselines3")
 from stable_baselines3 import PPO  # noqa: E402
 
 
-def _build_ppo(connectome, *, hover_bias: bool, n_steps: int = 64, batch_size: int = 32):
+def _build_ppo(connectome, *, climb_bias: bool, n_steps: int = 64, batch_size: int = 32):
     """Build a fresh PPO exactly as the training loop does (numpy adapter, seeded, CPU).
 
     Mirrors ``run_training``'s fresh-build branch: same ``MlpPolicy`` + connectome
     ``policy_kwargs`` (empty pi head ⇒ linear action readout), then optionally applies the
-    UC-40 hover bias — so the only difference between baseline and fixed is the bias.
+    UC-44 climb bias — so the only difference between baseline and fixed is the bias.
     """
     venv = build_vec_env(adapter="simple", n_envs=1, seed=0, training=True)
     cfg = TrainConfig(seed=0)
@@ -57,16 +62,16 @@ def _build_ppo(connectome, *, hover_bias: bool, n_steps: int = 64, batch_size: i
         device="cpu",
         policy_kwargs=build_policy_kwargs(connectome, cfg),
     )
-    if hover_bias:
-        loop_mod._apply_hover_bias(model)
+    if climb_bias:
+        loop_mod._apply_climb_bias(model)
     return model, venv
 
 
 def _rollout_max_altitude(model, venv, *, steps: int, seed: int) -> float:
     """Run a seeded STOCHASTIC rollout and return the max altitude the drone reaches.
 
-    Stochastic (not deterministic): the mechanism is exploration centered on the hover point —
-    with the bias, half the throttle samples clear hover so the drone can climb; without it,
+    Stochastic (not deterministic): the mechanism is exploration centered above the hover point —
+    with the bias, throttle samples clear hover so the drone can climb; without it,
     exploration centers on ≈0 and mostly commands net-downward thrust.
     """
     model.set_random_seed(seed)
@@ -84,18 +89,18 @@ def _rollout_max_altitude(model, venv, *, steps: int, seed: int) -> float:
 # --- action_net bias init (the fix itself) ------------------------------------------------
 
 
-def test_apply_hover_bias_sets_only_the_throttle_channel(connectome) -> None:
-    """``_apply_hover_bias`` writes ``HOVER_THROTTLE`` into the throttle channel of
+def test_apply_climb_bias_sets_only_the_throttle_channel(connectome) -> None:
+    """``_apply_climb_bias`` writes ``CLIMB_BIAS_THROTTLE`` into the throttle channel of
     ``action_net.bias`` and leaves the attitude channels untouched; it returns the value set."""
-    model, _venv = _build_ppo(connectome, hover_bias=False)
+    model, _venv = _build_ppo(connectome, climb_bias=False)
     bias_before = model.policy.action_net.bias.detach().numpy().copy()
     assert bias_before[THROTTLE_INDEX] == pytest.approx(0.0), "fresh PPO throttle bias starts ≈0"
 
-    returned = loop_mod._apply_hover_bias(model)
+    returned = loop_mod._apply_climb_bias(model)
 
     bias_after = model.policy.action_net.bias.detach().numpy()
-    assert returned == pytest.approx(HOVER_THROTTLE)
-    assert bias_after[THROTTLE_INDEX] == pytest.approx(HOVER_THROTTLE)
+    assert returned == pytest.approx(CLIMB_BIAS_THROTTLE)
+    assert bias_after[THROTTLE_INDEX] == pytest.approx(CLIMB_BIAS_THROTTLE)
     # Every non-throttle (attitude) channel is left exactly as PPO initialized it.
     for i in range(bias_after.shape[0]):
         if i != THROTTLE_INDEX:
@@ -104,16 +109,17 @@ def test_apply_hover_bias_sets_only_the_throttle_channel(connectome) -> None:
 
 def test_real_ppo_policy_is_not_squashed(connectome) -> None:
     """The fix's core assumption: SB3's Gaussian action head is UNBOUNDED (not tanh-squashed),
-    so biasing the pre-squash mean lands the action on hover. Lock it in against SB3 drift."""
-    model, _venv = _build_ppo(connectome, hover_bias=False)
+    so biasing the pre-squash mean lands the action on the climb-bias point. Lock it in against
+    SB3 drift."""
+    model, _venv = _build_ppo(connectome, climb_bias=False)
     assert model.policy.squash_output is False
 
 
-def test_apply_hover_bias_guards_squash_output() -> None:
+def test_apply_climb_bias_guards_squash_output() -> None:
     """If a future SB3/policy change squashed the output (tanh), biasing the pre-squash mean
-    would NOT land the action on hover — so ``_apply_hover_bias`` must fail loud rather than
-    silently mis-initialize (rec #3). ``squash_output`` is a read-only property on the real
-    policy, so a minimal stub is used to exercise the guard branch directly."""
+    would NOT land the action on the climb-bias point — so ``_apply_climb_bias`` must fail loud
+    rather than silently mis-initialize (rec #3). ``squash_output`` is a read-only property on the
+    real policy, so a minimal stub is used to exercise the guard branch directly."""
 
     class _SquashedPolicyStub:
         squash_output = True  # the (hypothetical) future SB3 default the guard defends against
@@ -122,25 +128,27 @@ def test_apply_hover_bias_guards_squash_output() -> None:
         policy = _SquashedPolicyStub()
 
     with pytest.raises(ValueError, match="squash_output"):
-        loop_mod._apply_hover_bias(_ModelStub())
+        loop_mod._apply_climb_bias(_ModelStub())
 
 
-def test_post_bias_deterministic_mean_throttle_lands_on_hover(connectome) -> None:
+def test_post_bias_deterministic_mean_throttle_lands_on_climb_bias(connectome) -> None:
     """The "real gate" (rec #2): the deterministic mean is ``bias[0] + W·features`` — with the
     ortho-initialized ``action_net`` the ``W·features`` term is small, so the post-bias mean
-    throttle must empirically land ≈ hover, while the no-bias baseline sits far below it."""
-    baseline, venv_b = _build_ppo(connectome, hover_bias=False)
-    fixed, venv_f = _build_ppo(connectome, hover_bias=True)
+    throttle must empirically land ≈ the climb-bias point, while the no-bias baseline sits far
+    below it."""
+    baseline, venv_b = _build_ppo(connectome, climb_bias=False)
+    fixed, venv_f = _build_ppo(connectome, climb_bias=True)
 
     obs_b = venv_b.reset()
     obs_f = venv_f.reset()
     base_throttle = float(baseline.predict(obs_b, deterministic=True)[0][0][THROTTLE_INDEX])
     fixed_throttle = float(fixed.predict(obs_f, deterministic=True)[0][0][THROTTLE_INDEX])
 
-    assert fixed_throttle == pytest.approx(HOVER_THROTTLE, abs=0.05), (
-        f"post-bias mean throttle {fixed_throttle:.4f} must land on hover {HOVER_THROTTLE}"
+    assert fixed_throttle == pytest.approx(CLIMB_BIAS_THROTTLE, abs=0.05), (
+        f"post-bias mean throttle {fixed_throttle:.4f} must land on the climb-bias point "
+        f"{CLIMB_BIAS_THROTTLE}"
     )
-    assert base_throttle < HOVER_THROTTLE - 0.3, (
+    assert base_throttle < CLIMB_BIAS_THROTTLE - 0.3, (
         f"baseline mean throttle {base_throttle:.4f} sits far below hover (net downward thrust)"
     )
 
@@ -148,18 +156,18 @@ def test_post_bias_deterministic_mean_throttle_lands_on_hover(connectome) -> Non
 # --- fresh-only guarantee -----------------------------------------------------------------
 
 
-def test_hover_bias_applied_on_fresh_but_not_on_resume(connectome, tmp_path, monkeypatch) -> None:
-    """AC3: a FRESH build hover-biases exactly once; a resumed ``PPO.load`` keeps its checkpoint
-    bias and must NOT be re-seeded (that would clobber learned behaviour)."""
+def test_climb_bias_applied_on_fresh_but_not_on_resume(connectome, tmp_path, monkeypatch) -> None:
+    """AC3/AC4: a FRESH build climb-biases exactly once; a resumed ``PPO.load`` keeps its
+    checkpoint bias and must NOT be re-seeded (that would clobber learned behaviour)."""
     calls: list[float] = []
-    real = loop_mod._apply_hover_bias
+    real = loop_mod._apply_climb_bias
 
     def _spy(model):
         result = real(model)
         calls.append(result)
         return result
 
-    monkeypatch.setattr(loop_mod, "_apply_hover_bias", _spy)
+    monkeypatch.setattr(loop_mod, "_apply_climb_bias", _spy)
 
     cfg = TrainConfig(
         models_dir=str(tmp_path / "models"),
@@ -171,10 +179,10 @@ def test_hover_bias_applied_on_fresh_but_not_on_resume(connectome, tmp_path, mon
         seed=0,
     )
     smoke_train(connectome=connectome, cfg=cfg, timesteps=128)
-    assert len(calls) == 1, "fresh build must hover-bias exactly once"
-    assert calls[0] == pytest.approx(HOVER_THROTTLE)
+    assert len(calls) == 1, "fresh build must climb-bias exactly once"
+    assert calls[0] == pytest.approx(CLIMB_BIAS_THROTTLE)
 
-    # Resume from the checkpoint the fresh run just wrote — the hover bias must NOT re-apply.
+    # Resume from the checkpoint the fresh run just wrote — the climb bias must NOT re-apply.
     train(
         cfg,
         connectome=connectome,
@@ -183,12 +191,12 @@ def test_hover_bias_applied_on_fresh_but_not_on_resume(connectome, tmp_path, mon
         resume="latest",
         total_timesteps=64,
     )
-    assert len(calls) == 1, "resume path must not re-apply the hover bias"
+    assert len(calls) == 1, "resume path must not re-apply the climb bias"
 
 
-def test_smoke_train_fresh_build_carries_hover_bias(connectome, tmp_path) -> None:
+def test_smoke_train_fresh_build_carries_climb_bias(connectome, tmp_path) -> None:
     """End-to-end via the real ``smoke_train`` entry point: a fresh run's trained policy still
-    carries a throttle bias in the hover neighbourhood (training may move it, but not far in a
+    carries a throttle bias in the climb-bias neighbourhood (training may move it, but not far in a
     handful of CPU steps)."""
     cfg = TrainConfig(
         models_dir=str(tmp_path / "models"),
@@ -201,30 +209,30 @@ def test_smoke_train_fresh_build_carries_hover_bias(connectome, tmp_path) -> Non
     )
     model = smoke_train(connectome=connectome, cfg=cfg, timesteps=128)
     throttle_bias = float(model.policy.action_net.bias.detach().numpy()[THROTTLE_INDEX])
-    assert throttle_bias == pytest.approx(HOVER_THROTTLE, abs=0.1)
+    assert throttle_bias == pytest.approx(CLIMB_BIAS_THROTTLE, abs=0.1)
 
 
 # --- AC3/AC4: baseline-vs-fixed CPU smoke-train validation --------------------------------
 
 
-def test_hover_bias_makes_takeoff_reachable_vs_baseline(connectome) -> None:
+def test_climb_bias_makes_takeoff_reachable_vs_baseline(connectome) -> None:
     """AC3/AC4 (airborne clause): under an identical seeded stochastic rollout the FIXED policy
     reaches meaningfully higher altitude than the BASELINE — direct evidence the climb gradient
     is now reachable. The drone getting airborne is the minimum AC4 signal."""
-    baseline, venv_b = _build_ppo(connectome, hover_bias=False)
-    fixed, venv_f = _build_ppo(connectome, hover_bias=True)
+    baseline, venv_b = _build_ppo(connectome, climb_bias=False)
+    fixed, venv_f = _build_ppo(connectome, climb_bias=True)
 
     base_max_z = _rollout_max_altitude(baseline, venv_b, steps=400, seed=0)
     fixed_max_z = _rollout_max_altitude(fixed, venv_f, steps=400, seed=0)
 
     assert fixed_max_z > 1.0, f"fixed policy failed to get airborne (max_z={fixed_max_z:.3f})"
     assert fixed_max_z > base_max_z * 1.5, (
-        f"hover bias did not improve reachable altitude: baseline={base_max_z:.3f} "
+        f"climb bias did not improve reachable altitude: baseline={base_max_z:.3f} "
         f"fixed={fixed_max_z:.3f}"
     )
 
 
-def test_hover_bias_smoke_train_std_responds_and_stays_finite(connectome) -> None:
+def test_climb_bias_smoke_train_std_responds_and_stays_finite(connectome) -> None:
     """AC3/AC4 (std clause, lab-scoped): a short seeded train under the fix completes and the
     action std *responds* — it moves measurably off its frozen init and stays finite — i.e. the
     actor is no longer pinned at initialization (the K0 "flat-high std" symptom).
@@ -234,10 +242,10 @@ def test_hover_bias_smoke_train_std_responds_and_stays_finite(connectome) -> Non
     reliable gate at sandbox scale. The full DOWNWARD commit that AC3 describes is a property of
     the full ~12h GPU retrain (the user's to run, explicitly NOT a gate per AC4). The robust
     in-sandbox evidence that the fix makes the learning signal reachable is the airborne-altitude
-    gap in ``test_hover_bias_makes_takeoff_reachable_vs_baseline``; here we only assert the std
+    gap in ``test_climb_bias_makes_takeoff_reachable_vs_baseline``; here we only assert the std
     genuinely responds rather than staying frozen.
     """
-    fixed, _venv = _build_ppo(connectome, hover_bias=True, n_steps=128, batch_size=64)
+    fixed, _venv = _build_ppo(connectome, climb_bias=True, n_steps=128, batch_size=64)
 
     std0 = float(torch.exp(fixed.policy.log_std.detach()).mean())
     assert std0 == pytest.approx(1.0, abs=1e-6)  # frozen at init before any update

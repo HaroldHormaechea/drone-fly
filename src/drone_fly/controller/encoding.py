@@ -51,6 +51,17 @@ ATTITUDE_RANGE = (-1.0, 1.0)  # ROLL / PITCH / YAW
 #: mean on hover without hardcoding a bare literal that could silently desync from the dynamics.
 HOVER_THROTTLE = 0.5
 
+#: Canonical **climb-biased** init throttle for a fresh policy (UC-44). Set slightly ABOVE
+#: :data:`HOVER_THROTTLE` so a freshly-built PPO policy's default deterministic action produces
+#: gentle net-positive lift (rather than the net-zero thrust of a hover-centered init), collecting
+#: airborne/climb reward immediately and compounding with the airborne-start reverse curriculum.
+#: 0.6 is a mild climb: the sandbox pybullet probe showed hover ≈ 0.48 and throttle 0.9 rockets
+#: upward, so 0.6 is a small positive margin above hover, not a rocket. This SUPERSEDES the UC-40
+#: hover-bias init — there is exactly one throttle-bias initializer (:func:`drone_fly.train.loop.
+#: _apply_climb_bias`), which targets this value on fresh builds only. ``HOVER_THROTTLE`` is kept as
+#: the documented hover reference (dynamics single-source-of-truth); this is the init target.
+CLIMB_BIAS_THROTTLE = 0.6
+
 
 def sensory_neuron_indices(n_neurons: int) -> np.ndarray:
     """Return the ``OBS_DIM`` neuron indices the observation is scattered into.

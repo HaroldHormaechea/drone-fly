@@ -179,6 +179,16 @@ class RaceEnv(gym.Env):
         # :meth:`set_collision_penalty`.
         self._collision_penalty_override: float | None = None
 
+        # UC-44: training-time airborne-start reverse curriculum. When not None, this absolute z
+        # replaces ``course.floor_z`` as the spawn height on the ``floor_start`` reset path, so the
+        # drone spawns airborne early in training (learning to MAINTAIN altitude) and anneals down
+        # to the floor (learning takeoff) as training progresses. Default ``None`` ⇒ the spawn is
+        # the UC-37 floored start, byte-identical to UC-43. Set ONLY on the training venv via
+        # :meth:`set_spawn_z` (the curriculum callback); eval/recording envs never receive it, so
+        # they keep the floored spawn and the takeoff measurement is unchanged (AC2). Spawn state is
+        # neither observed nor checkpointed, so this has no obs-schema / checkpoint-schema impact.
+        self._spawn_z_override: float | None = None
+
     def set_collision_penalty(self, value: float | None) -> None:
         """Override the genuine-collision penalty used in reward shaping (UC-39 crash-cliff relief).
 
@@ -192,6 +202,21 @@ class RaceEnv(gym.Env):
         VecMonitor → DummyVecEnv/SubprocVecEnv delegate ``env_method`` down to this base env).
         """
         self._collision_penalty_override = None if value is None else float(value)
+
+    def set_spawn_z(self, value: float | None) -> None:
+        """Override the spawn altitude used on the ``floor_start`` reset path (UC-44 AC1/AC2).
+
+        Called by the training-time airborne-start curriculum (see
+        :class:`drone_fly.train.airborne_curriculum.AirborneStartCurriculumCallback`) to raise the
+        spawn z early in training and anneal it to the floor. ``value`` is the absolute spawn z to
+        use from the next ``reset()`` onward; ``None`` clears the override and restores the UC-37
+        floored spawn (``course.floor_z``). Per-instance and defaulting ``None``, so only the
+        training venv — which alone receives the callback — is affected; eval and standalone-
+        recording envs keep the floored spawn (AC2). Reachable through the SB3 wrapper stack via
+        ``VecEnv.env_method`` (VecNormalize → VecMonitor → DummyVecEnv/SubprocVecEnv delegate
+        ``env_method`` down to this base env). Idempotent and cheap; safe to call every rollout.
+        """
+        self._spawn_z_override = None if value is None else float(value)
 
     @property
     def obs_width(self) -> int:
@@ -280,9 +305,17 @@ class RaceEnv(gym.Env):
         # behaviour — so the floored course is deliberately NOT re-validated.
         if self.config.floor_start:
             sx, sy, _sz = self._course.start_position
-            self._course = dataclasses.replace(
-                self._course, start_position=(sx, sy, self._course.floor_z)
+            # UC-44: the airborne-start curriculum (training-only) may raise the spawn z via
+            # ``set_spawn_z``. With no override set (eval, recording, curriculum-off) the spawn is
+            # the UC-37 floored start — byte-identical to UC-43. The ``max(..., floor_z)`` clamp is
+            # defensive: the schedule is already floor-bounded, but this guarantees we never spawn
+            # below the floor even if an override is set by hand.
+            spawn_z = (
+                self._course.floor_z
+                if self._spawn_z_override is None
+                else max(float(self._spawn_z_override), self._course.floor_z)
             )
+            self._course = dataclasses.replace(self._course, start_position=(sx, sy, spawn_z))
 
         if rcfg.enable_dynamics:
             dynamics = sample_dynamics(self.np_random, rcfg, DynamicsParams())

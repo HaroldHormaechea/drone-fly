@@ -197,7 +197,7 @@ def test_ac4_smoke_train_std_stays_finite_and_does_not_collapse(connectome) -> N
             device="cpu",
             policy_kwargs=build_policy_kwargs(connectome, cfg),
         )
-        loop_mod._apply_hover_bias(model)  # fresh-build init exactly as the training loop does
+        loop_mod._apply_climb_bias(model)  # fresh-build init exactly as the training loop does
 
         std0 = float(torch.exp(model.policy.log_std.detach()).mean())
         assert std0 == pytest.approx(1.0, abs=1e-6)  # frozen at init before any update
