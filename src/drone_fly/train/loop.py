@@ -42,53 +42,57 @@ logger = logging.getLogger(__name__)
 CHECKPOINT_PREFIX = "ppo_racer"
 
 
-def _apply_hover_bias(model) -> float:
-    """Hover-bias a freshly-built PPO policy's throttle mean at init (UC-40, AC3).
+def _apply_climb_bias(model) -> float:
+    """Climb-bias a freshly-built PPO policy's throttle mean at init (UC-40 → UC-44, AC3).
 
     Root cause of the pinned actor (UC-40 diagnosis): with ``net_arch=dict(pi=[])`` the action
     mean is a linear readout whose ``action_net`` is initialized ≈0, and PPO's Gaussian head is
     **unbounded** (not tanh-squashed) — so the initial deterministic throttle is ≈0, and mean-0
-    exploration clipped to ``[0, 1]`` averages well below the ``HOVER_THROTTLE`` (0.5) hover
-    point. The drone therefore never sustains takeoff, never reaches the altitude where the
-    (real, correctly-sized) climb/airborne gradient applies, so every floor-bound trajectory
-    returns the same value → advantages ≈ noise → the policy gradient vanishes and the actor
-    stays frozen at initialization (flat-high std/entropy, success pinned at 0).
+    exploration clipped to ``[0, 1]`` averages well below the hover point. The drone therefore
+    never sustains takeoff, never reaches the altitude where the (real, correctly-sized)
+    climb/airborne gradient applies, so every floor-bound trajectory returns the same value →
+    advantages ≈ noise → the policy gradient vanishes and the actor stays frozen at initialization
+    (flat-high std/entropy, success pinned at 0).
 
-    The fix sets the throttle channel of ``action_net.bias`` to :data:`HOVER_THROTTLE` so the
-    initial deterministic action hovers and exploration centers on the hover point. The drone
-    then floats, the existing potential-based climb/airborne gradient becomes reachable, returns
-    vary, and PPO gets a real advantage signal. This only sets the START point — training is free
-    to move it — and touches nothing in the env/adapter/reward, so no reward invariant is
-    affected. Applied to fresh builds only; a resumed ``PPO.load`` keeps its checkpoint bias.
+    UC-40 first centered the throttle bias on ``HOVER_THROTTLE`` (0.5, net-zero thrust → the drone
+    merely floats). UC-44 **supersedes** that: the throttle channel of ``action_net.bias`` is set to
+    :data:`CLIMB_BIAS_THROTTLE` (0.6, slightly above hover) so the fresh policy's default action
+    produces gentle net-positive **lift** — it collects airborne/climb reward immediately and
+    compounds with the airborne-start reverse curriculum. There is exactly ONE throttle-bias
+    initializer (this function); the hover-bias path is replaced, not duplicated. This only sets the
+    START point — training is free to move it — and touches nothing in the env/adapter/reward, so no
+    reward invariant is affected. Applied to fresh builds only; a resumed ``PPO.load`` keeps its
+    checkpoint bias.
 
     Returns the throttle bias value now set, so callers can gate on it (recommendation #2: the
     deterministic mean is ``bias[0] + W·features``; with the ortho-initialized ``action_net`` the
     ``W·features`` term is small, so the post-bias throttle bias is the dominant term of the
-    initial mean throttle and must land at the hover point).
+    initial mean throttle and must land at the climb-bias point).
     """
     import torch
 
-    from drone_fly.controller.encoding import HOVER_THROTTLE, THROTTLE_INDEX
+    from drone_fly.controller.encoding import CLIMB_BIAS_THROTTLE, THROTTLE_INDEX
 
     # Guard the "unbounded Gaussian mean" assumption the fix relies on: if a future SB3/policy
     # change squashed the output (tanh), biasing the pre-squash mean would NOT land the action at
-    # the hover throttle. Fail loud rather than silently mis-initialize (recommendation #3).
+    # the climb-bias throttle. Fail loud rather than silently mis-initialize (recommendation #3).
     if getattr(model.policy, "squash_output", False):
         raise ValueError(
-            "UC-40 hover-bias assumes an unbounded (non-squashed) Gaussian action mean, but "
+            "UC-44 climb-bias assumes an unbounded (non-squashed) Gaussian action mean, but "
             "model.policy.squash_output is True; biasing action_net.bias would not center the "
-            "throttle on the hover point. Re-examine the hover-bias init before proceeding."
+            "throttle on the climb-bias point. Re-examine the climb-bias init before proceeding."
         )
 
     action_net = model.policy.action_net
     with torch.no_grad():
-        action_net.bias[THROTTLE_INDEX] = float(HOVER_THROTTLE)
+        action_net.bias[THROTTLE_INDEX] = float(CLIMB_BIAS_THROTTLE)
     throttle_bias = float(action_net.bias[THROTTLE_INDEX].item())
     logger.info(
-        "UC-40 hover-bias applied: action_net.bias[throttle]=%.4f (hover point %.4f) — initial "
-        "deterministic throttle now centers on hover so takeoff is reachable.",
+        "UC-44 climb-bias applied: action_net.bias[throttle]=%.4f (climb-bias point %.4f, above "
+        "hover) — initial deterministic throttle now produces net-positive lift so takeoff is "
+        "reachable.",
         throttle_bias,
-        float(HOVER_THROTTLE),
+        float(CLIMB_BIAS_THROTTLE),
     )
     return throttle_bias
 
@@ -504,10 +508,10 @@ def train(
             device=resolved_device,
             policy_kwargs=build_policy_kwargs(connectome, cfg, obs_schema=obs_schema),
         )
-        # UC-40 (AC3): hover-bias the fresh policy's throttle mean so takeoff is reachable.
-        # Fresh builds only — a resumed checkpoint (the branch above) already carries a trained
-        # bias, so re-seeding it would clobber learned behaviour.
-        _apply_hover_bias(model)
+        # UC-40 → UC-44 (AC3): climb-bias the fresh policy's throttle mean (net-positive lift) so
+        # takeoff is reachable. Fresh builds only — a resumed checkpoint (the branch above) already
+        # carries a trained bias, so re-seeding it would clobber learned behaviour.
+        _apply_climb_bias(model)
 
     # Drop SB3's stdout HumanOutputFormat when the TUI owns the screen (CSV/TensorBoard kept).
     model.set_logger(_make_logger(cfg.logs_dir, include_stdout=not tui_enabled))
@@ -554,6 +558,29 @@ def train(
         from drone_fly.train.collision_curriculum import CollisionCurriculumCallback
 
         callbacks.append(CollisionCurriculumCallback(cfg))
+
+    # UC-44: default-on training-time airborne-start reverse curriculum (takeoff-discovery relief).
+    # Raises the training spawn z to the airborne region early in training and anneals it linearly
+    # down to the course floor, pushing the current value into the base envs each rollout via
+    # ``set_spawn_z`` / ``env_method``. The high endpoint is derived HERE from the env's
+    # ``climb_target_height`` above the course floor (not duplicated in TrainConfig). Applied on
+    # BOTH the fresh and resume paths (the callback list feeds ``model.learn`` in either case); the
+    # schedule is stateless in ``num_timesteps`` so a resume continues it correctly. On
+    # ``smoke_train`` the tiny step budget keeps ``num_timesteps`` ≈ 0 → the high airborne spawn →
+    # the smoke run demonstrates the effect (AC8). ONLY the training venv gets this callback, so
+    # eval/recording keep the floored spawn (AC2). Set ``airborne_curriculum_enabled=False`` to
+    # train at the constant floored spawn (byte-identical to UC-43).
+    if cfg.airborne_curriculum_enabled:
+        from drone_fly.train.airborne_curriculum import AirborneStartCurriculumCallback
+
+        ecfg = env_config or EnvConfig()
+        callbacks.append(
+            AirborneStartCurriculumCallback(
+                cfg,
+                floor_z=ecfg.course.floor_z,
+                high_z=ecfg.course.floor_z + ecfg.reward.climb_target_height,
+            )
+        )
 
     if record:
         # UC-05 best-effort training-time capture (documented; eval is the tested primary).

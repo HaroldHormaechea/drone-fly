@@ -308,9 +308,12 @@ physics limit. UC-37 fixes it with two paired changes:
   on the floor** (`z ≈ course.floor_z`, ~zero velocity), the way a real drone begins — instead of
   the artificial mid-air start. The override is applied at the env layer *after* course sampling, so
   the RNG stream and determinism are untouched. Set `floor_start: false` to restore the legacy
-  mid-air start. There is deliberately **no** hover-bias on the action: the neutral (zero) action
-  still maps to ~zero throttle, so the policy must *learn* to command throttle and take off — a
-  floor-start drone under zero action stays on the floor (it does not spontaneously lift).
+  mid-air start. (Historical note: UC-37 originally shipped with *no* action bias — the neutral
+  action mapped to ~zero throttle — but that left the policy unable to discover takeoff. UC-40 added
+  a fresh-build hover-bias and **UC-44 supersedes it with a climb-bias** (`CLIMB_BIAS_THROTTLE` 0.6)
+  so a fresh policy's default action now produces gentle net-positive lift; see the
+  [UC-44 section](#airborne-start-reverse-curriculum--climb-biased-init-uc-44). A resumed checkpoint
+  keeps its trained bias.)
 - **Airborne survival reward (`RewardConfig.airborne_bonus`, default `0.2`).** A small per-step reward
   is paid **only while the drone is airborne** (above the floor band, `floor_z + floor_epsilon`) and
   is exactly **zero on/at the floor** — so the only path to reward is to throttle up and stay up. Since
@@ -598,6 +601,77 @@ is a **deterministic reward-function test** showing sustained climb out-rewards 
 normalization-surviving, relational margin (not an absolute one — VecNormalize makes a global rescale a
 no-op). A `simple`-adapter smoke-train is a wires/finite/no-collapse check only; **behavioral takeoff
 confirmation is deferred to the user's pybullet GPU retrain and is not claimed here.**
+
+### Airborne-start reverse curriculum & climb-biased init (UC-44)
+Seven consecutive reward-shaping use cases (UC-37→43) produced **zero** altitude movement: on a
+565k-step run the drone sat at z ≈ 0.0135 m from episode 50 through episode 900, `ep_rew_mean` glued
+to exactly **−5** (the pure time-penalty floor), success 0 %. The reward-math tests correctly verify
+the climb/airborne gradient is well-formed — so the bottleneck is **not** the reward shape but that
+PPO's policy never outputs sustained above-hover throttle, so the drone never enters the airborne
+region every shaping term targets. A correctly-shaped gradient the policy never experiences teaches
+nothing. UC-44 stops tweaking reward magnitude (the reward function is **completely untouched** — all
+UC-37→43 reward invariants and doc-contract tests stay green) and attacks the **discovery** problem
+directly with two composed levers that change only the spawn **state** and the policy **init**.
+Temporally-correlated exploration (OU / pink noise) is deliberately deferred to a later UC so the
+effect of these two levers can be attributed cleanly.
+
+- **Lever 1 — airborne-start reverse curriculum (training-time only; `TrainConfig`
+  `airborne_curriculum_enabled` default `True`).** Instead of always spawning on the floor (UC-37's
+  floored start), the training envs spawn the drone at an initial altitude that **starts at
+  `climb_target_height` above the floor and anneals linearly down to `floor_z`** over the first
+  `airborne_curriculum_anneal_fraction` (default **0.5**) of `total_timesteps`, then holds it on the
+  floor for the remainder. Early in training the policy experiences the rewarded airborne region from
+  step 0 and only has to learn to **maintain** altitude — far easier than discovering takeoff — and
+  as the spawn anneals to the floor it must learn takeoff itself, now bootstrapped from a
+  hover-competent policy. The schedule (`drone_fly.train.airborne_curriculum.spawn_z_at`) is a pure
+  function of `num_timesteps`: monotone non-increasing, clamped to `[floor_z, high_z]`, returns the
+  high endpoint at step 0 and exactly `floor_z` at/after the anneal end — so a **resumed** run
+  continues it correctly. It is pushed into the envs each rollout by an SB3 callback via
+  `env_method("set_spawn_z", …)`, exactly like the UC-41 collision curriculum. Set
+  `airborne_curriculum_enabled = False` to train at the constant floored spawn (byte-identical to
+  UC-43).
+- **Training-only scope (does not leak into the takeoff measurement).** The curriculum callback is
+  attached to the **training** run only, and `RaceEnv.set_spawn_z` is a per-instance override that
+  defaults to `None`. **Eval and standalone-recording envs** are separate instances that never
+  receive the callback, so they keep spawning on the floor (`z ≈ floor_z`) exactly as before — we
+  still measure **true** takeoff. Note that early-training **in-training** recordings (the
+  `RecordingCallback` on env-0 of the *training* venv) will show the **raised spawn by design** —
+  that recorder is illustrative of the training rollout, not the takeoff measurement; the floored
+  takeoff measurement is the **eval-time** recorder (`evaluate … --record`) and the eval episodes.
+- **Lever 2 — climb-biased throttle init (fresh-build only).** UC-40 initialized a fresh policy's
+  `action_net.bias[THROTTLE_INDEX]` to `HOVER_THROTTLE` (0.5 — net-zero thrust, the drone merely
+  floats). UC-44 **supersedes** that with a new `CLIMB_BIAS_THROTTLE` = **0.6** (in
+  `controller/encoding.py`), slightly above hover, so a fresh policy's default action produces gentle
+  net-positive **lift** and collects airborne/climb reward immediately, compounding with the reverse
+  curriculum. There is exactly **one** throttle-bias initializer (`_apply_climb_bias` in
+  `train/loop.py`) — the hover-bias path is replaced, not duplicated. Same guards as UC-40: it fires
+  **only on a fresh build** (a resumed checkpoint keeps its trained bias) and fails loud if
+  `model.policy.squash_output` is ever `True` (biasing a squashed mean would not land the action on
+  the climb-bias point). `HOVER_THROTTLE` (0.5) is retained as the documented hover reference for the
+  adapter dynamics.
+
+> **⚠️ Fresh-run requirement (read before evaluating this change).** A **valid** test of UC-44
+> requires a **brand-new model with old checkpoints cleared** — both levers are **defeated by
+> resuming from a checkpoint**: the climb-bias init applies only to fresh builds, and a resumed
+> pre-fix checkpoint carries an already-collapsed policy that no spawn schedule can un-collapse. The
+> prior 565k-step run was almost certainly invalidated by resuming (hover-bias only ever applied on
+> fresh builds). Before the retrain, **delete the old checkpoints** (e.g. clear
+> `training/<name>/checkpoints/` or point at a fresh run name) and confirm `resume` does **not** pick
+> up a stale checkpoint, so the climb-bias fires and no collapsed policy is inherited. This is a
+> documentation guarantee, not a code-enforceable one.
+
+**Validation (lab-only; the ~12h GPU retrain stays the user's and is not a CI gate).** Unit tests
+cover the spawn schedule (endpoints, monotonicity, clamp, out-of-range `ValueError`, degenerate
+cases), the training-only scope (eval/recording spawn on the floor), the fresh-only climb-bias init
+and its squash guard, and early-termination compatibility with airborne spawns (a drone spawned
+airborne is not cut by the grounded/no-progress detector within its warm-up window, while a drone
+that then falls to the floor and rests is still grounded-cut). No `racing_env.py` early-termination
+change was needed: the existing `_took_off` latch arms from the spawn state, so an airborne spawn is
+"taken off" at step 0 and the grounded detector already behaves correctly, and the stuck/no-progress
+counters start at 0 (a full window must accumulate before any cut). A short CPU smoke-train
+demonstrates that with an airborne spawn the drone collects airborne/climb reward, `ep_rew` rises
+above the −5 floor, and the action std does not collapse. **Behavioral takeoff confirmation is the
+user's fresh GPU retrain and is not claimed here.**
 
 ### Visualization & recording
 Enable recording in a train/evaluate config with `record: true` (tune cadence via `record_every`);

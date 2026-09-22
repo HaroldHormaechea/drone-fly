@@ -102,6 +102,23 @@ class TrainConfig:
     collision_curriculum_warmup_fraction: float = 0.5
     collision_curriculum_enabled: bool = True
 
+    # UC-44: training-time airborne-start reverse curriculum (takeoff-discovery relief). When
+    # enabled (default), the training envs spawn the drone airborne early in training — starting at
+    # the high endpoint (derived at wire time from ``RewardConfig.climb_target_height`` above the
+    # course floor, not duplicated here) — and anneal the spawn z linearly down to ``floor_z`` over
+    # the first ``airborne_curriculum_anneal_fraction`` of the run, then hold it on the floor for
+    # the remainder. Early on the policy only has to learn to MAINTAIN altitude (far easier than
+    # discovering takeoff); as the spawn anneals to the floor it must learn takeoff, bootstrapped
+    # from a hover-competent policy. Applied ONLY to the training run via the env's ``set_spawn_z``
+    # (see :class:`~drone_fly.train.airborne_curriculum.AirborneStartCurriculumCallback`); eval and
+    # recording envs never receive the callback, so they keep the UC-37 floored spawn and the
+    # takeoff measurement is unchanged. The schedule is a function of ``num_timesteps`` only
+    # (stateless), so it is resume-correct. Set ``airborne_curriculum_enabled=False`` to train at
+    # the constant floored spawn (byte-identical to UC-43). The reward function is untouched, so all
+    # reward-math/doc-contract test stays green.
+    airborne_curriculum_enabled: bool = True
+    airborne_curriculum_anneal_fraction: float = 0.5
+
     seed: int = 0
     vf_arch: list[int] = field(default_factory=lambda: [64, 64])
 
