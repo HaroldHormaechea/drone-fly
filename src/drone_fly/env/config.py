@@ -699,12 +699,16 @@ class RewardConfig:
     # (ground-break) + 1.2 (altitude-hold) = 163.68 < ``completion_bonus`` 200, so a loiter can
     # never out-score a completion. ``climb_gamma`` MUST equal training γ for the shaping to stay
     # return-invariant (the same coupling as UC-39). Appended **last** (after the UC-43 fields) so
-    # every positional ``RewardConfig`` call is unshifted, and all three default to the feature-off
-    # values (flag False, weight 0.0) so pre-UC-50 callers are byte-identical (AC-6). Recommended
-    # ENABLED values (set by the training config, not here): ``altitude_hold_weight`` = 2.0,
-    # ``altitude_band`` = 0.6.
-    enable_altitude_decoupling: bool = False
-    altitude_hold_weight: float = 0.0
+    # every positional ``RewardConfig`` call is unshifted. **Enabled by DEFAULT** (UC-50 follow-up):
+    # the feature ships on with the recommended values below, so a plain ``drone-fly train`` retrain
+    # picks it up without any config surface (the training YAML does not expose reward weights). To
+    # get the pre-UC-50 reward exactly, construct ``RewardConfig(enable_altitude_decoupling=False,
+    # altitude_hold_weight=0.0)`` explicitly. NOTE: turning this on changes ``compute_reward`` for
+    # callers that do not pass ``target_height_above_floor_*`` (they default to 0.0 ⇒ the reference
+    # lower-clamps to ``ground_break_height``); the env's ``racing_env`` call site always passes the
+    # real target-gate height, so training/eval track each gate's own z.
+    enable_altitude_decoupling: bool = True
+    altitude_hold_weight: float = 2.0
     altitude_band: float = 0.6
 
 
