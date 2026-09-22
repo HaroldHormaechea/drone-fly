@@ -39,6 +39,8 @@ def compute_reward(
     airborne: bool = False,
     height_above_floor_prev: float = 0.0,
     height_above_floor_curr: float = 0.0,
+    target_height_above_floor_prev: float = 0.0,
+    target_height_above_floor_curr: float = 0.0,
 ) -> float:
     """Return the scalar step reward.
 
@@ -120,6 +122,48 @@ def compute_reward(
         flat ⇒ F_gb = (γ−1)·``ground_break_weight`` per step, height-independent — a continuous
         handoff to the UC-42 bonus with no double-count. Its per-episode contribution is bounded by
         ≈ ``climb_gamma`` · ``ground_break_weight`` ≪ ``completion_bonus``.
+    target_height_above_floor_prev, target_height_above_floor_curr:
+        Height ABOVE the course floor of the CURRENT TARGET waypoint (``current_target(...)[2] −
+        floor_z``) before and after the step's gate ``advance`` (UC-50). They straddle ``advance``
+        exactly as ``dist_to_target_*`` do, so the potential-based altitude-shortfall term below
+        telescopes across gate transitions. Both default ``0.0`` and are read ONLY when
+        ``cfg.enable_altitude_decoupling`` is ``True`` ⇒ every pre-UC-50 caller is byte-identical.
+
+        **UC-50 — altitude-holding forward-flight decoupling (default OFF).** When
+        ``cfg.enable_altitude_decoupling`` is ``True`` the target-gate height drives two coupled
+        mechanisms that make LEVEL, altitude-holding flight the rewarded path (the safe altitude
+        tracks each gate's own z; the finish leg inherits the last gate's z via ``current_target``):
+
+        * **Progress hard-gate.** The dense progress term is paid only when
+          ``height_above_floor_curr ≥ max(ref_curr − cfg.altitude_band, cfg.ground_break_height)``,
+          where ``ref_curr`` is the target-gate height LOWER-clamped to
+          ``cfg.ground_break_height``. Below that band the POSITIVE
+          progress reward is withheld (subtracted back) — "rush the gate while sinking" earns 0. The
+          withhold only ever REDUCES reward (a below-band retreat, i.e. negative progress, keeps its
+          penalty), so an approach/retreat loop cannot be farmed. The lower edge
+          ``cfg.ground_break_height`` keeps the gate from ever demanding LESS altitude than the
+          UC-43 bootstrap band, so a fresh floor-start policy still takes off (no chicken-and-egg).
+        * **Altitude-hold shaping (potential-based).** Φ_track(h, ref) =
+          ``cfg.altitude_hold_weight`` ·
+          clamp(h − (ref − ``cfg.altitude_band``), 0, ``cfg.altitude_band``) — a NON-NEGATIVE
+          altitude "credit" that is 0 at/below the band's lower edge, rises with height, and
+          saturates at ``altitude_band`` once the drone reaches the reference. One-sided (flat above
+          the reference — no overshoot reward). Per-step F = ``cfg.climb_gamma`` · Φ_track(curr) −
+          Φ_track(prev). It is anchored non-negative on purpose — exactly like the UC-39 climb and
+          UC-43 ground-break potentials — so the shaping leak (γ−1)·Φ is ≤ 0: a climb-then-descend /
+          bob round trip nets ≤ 0 (non-farmable, NO loiter optimum) and hovering BELOW the reference
+          is never positively rewarded. (The naive negative "penalise the shortfall" form −w·(ref−h)
+          would invert this — its positive leak pays a drone to loiter below the reference — so it
+          is deliberately NOT used.) Telescoping holds because the refs straddle ``advance`` and Φ
+          is a pure function of state. The per-episode total is bounded by
+          ≈ ``altitude_hold_weight`` · ``altitude_band`` ≪ ``completion_bonus``. ``cfg.climb_gamma``
+          MUST equal the training γ
+          (same coupling as the UC-39 climb term). ``ref`` is LOWER-clamped to
+          ``cfg.ground_break_height`` (keeps the band non-degenerate for floor-band gates + hands
+          off cleanly to the UC-43 ground-break band); the sizing invariant ``ref − band ≤
+          climb_target_height`` is a documented ``RewardConfig`` constraint, not a runtime clamp.
+
+        When the flag is off none of the above executes and the function is identical to UC-43.
     """
     reward = -cfg.time_penalty
     reward += cfg.progress_weight * (dist_to_target_prev - dist_to_target_curr)
@@ -161,4 +205,52 @@ def compute_reward(
         min(max(height_above_floor_curr, 0.0), cfg.ground_break_height) / cfg.ground_break_height
     )
     reward += cfg.climb_gamma * phi_gb_curr - phi_gb_prev
+    # UC-50: altitude-holding forward-flight decoupling (default OFF ⇒ this whole block is skipped
+    # and the function is byte-identical to UC-43). See the ``target_height_above_floor_*`` params'
+    # docstring for the full contract. Two coupled mechanisms, both keyed off the TARGET GATE height
+    # so the safe altitude tracks each gate's own z (and the finish leg via ``current_target``).
+    if cfg.enable_altitude_decoupling:
+        # Reference altitude = target-gate height above floor, LOWER-clamped to
+        # ``ground_break_height``: this keeps the band non-degenerate for a floor-band gate (whose
+        # raw height above floor may be ≈0) and preserves the clean handoff to the UC-43
+        # ground-break bootstrap. No UPPER/ceiling clamp is applied — the band is ONE-SIDED (it only
+        # penalises being BELOW the reference), and the sizing invariant ``ref − band ≤
+        # climb_target_height`` is a DOCUMENTED config constraint (see ``RewardConfig``), not a
+        # runtime clamp. The clamp is a pure function of the target height, so the potential still
+        # telescopes across ``advance`` (refs straddle it, mirroring the climb term).
+        ref_prev = max(target_height_above_floor_prev, cfg.ground_break_height)
+        ref_curr = max(target_height_above_floor_curr, cfg.ground_break_height)
+        # (a) Progress hard-gate. Pay progress only when height ≥ max(ref_curr − band,
+        # ground_break_height); below that band withhold the POSITIVE progress reward (subtract it
+        # back — only ever reduces reward). A below-band retreat (progress ≤ 0) keeps its penalty ⇒
+        # the gate cannot be farmed by dropping below it and re-approaching. The
+        # ``ground_break_height`` lower edge keeps takeoff bootstrapping (AC-5: no chicken-and-egg).
+        progress = cfg.progress_weight * (dist_to_target_prev - dist_to_target_curr)
+        gate_floor = max(ref_curr - cfg.altitude_band, cfg.ground_break_height)
+        if height_above_floor_curr < gate_floor and progress > 0.0:
+            reward -= progress
+        # (b) Potential-based altitude-hold shaping. Φ_track(h, ref) = altitude_hold_weight ·
+        # clamp(h − (ref − altitude_band), 0, altitude_band) — a NON-NEGATIVE altitude "credit" that
+        # is 0 at/below the band's lower edge (ref − band), rises linearly with height, and
+        # saturates at ``altitude_band`` once the drone reaches the reference. It is the mirror of
+        # the altitude *shortfall* (credit = band − shortfall inside the band) but anchored
+        # non-negative on purpose, exactly like the UC-39 climb and UC-43 ground-break potentials:
+        # a non-negative Φ gives a SAFE leak (γ−1)·Φ ≤ 0, so a bob / climb-then-descend round trip
+        # nets ≤ 0 (no loiter optimum) and holding BELOW the reference is never positively rewarded.
+        # (A negative Φ = −w·shortfall — the naive "penalise the shortfall" form — inverts this: its
+        # leak is POSITIVE, paying a drone to hover below the reference and paying MORE the larger
+        # the shortfall, a farmable loiter incentive; hence the non-negative anchoring here.)
+        # One-sided: flat above the reference (no overshoot reward). Per-step
+        # F = climb_gamma · Φ_track(curr) − Φ_track(prev); telescopes (refs straddle ``advance``,
+        # Φ is a pure function of state) ⇒ non-farmable, round trip nets ≤ 0; per-episode total
+        # bounded by ≈ altitude_hold_weight · altitude_band ≪ completion_bonus.
+        lo_prev = ref_prev - cfg.altitude_band
+        lo_curr = ref_curr - cfg.altitude_band
+        phi_track_prev = cfg.altitude_hold_weight * min(
+            cfg.altitude_band, max(0.0, height_above_floor_prev - lo_prev)
+        )
+        phi_track_curr = cfg.altitude_hold_weight * min(
+            cfg.altitude_band, max(0.0, height_above_floor_curr - lo_curr)
+        )
+        reward += cfg.climb_gamma * phi_track_curr - phi_track_prev
     return float(reward)

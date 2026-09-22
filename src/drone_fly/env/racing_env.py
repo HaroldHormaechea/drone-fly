@@ -480,6 +480,12 @@ class RaceEnv(gym.Env):
     def step(self, action):
         course = self._course
         dist_prev = self._dist_to_target(self._prev_pos)
+        # UC-50: current target gate's height above the floor BEFORE ``advance`` — captured here
+        # (pre-advance) so it straddles the gate transition exactly like ``dist_prev``, letting the
+        # reward's altitude-hold potential telescope. Read-only geometry; consumed by
+        # ``compute_reward`` only when ``RewardConfig.enable_altitude_decoupling`` is set (else
+        # ignored, so the env is byte-identical at runtime with the feature off).
+        target_h_prev = float(current_target(course, self._gates_passed)[2] - course.floor_z)
 
         # UC-46: training-time attitude-authority curriculum. When the authority is reduced (only on
         # the training venv, via ``set_attitude_authority``), scale ONLY the roll/pitch/yaw channels
@@ -513,6 +519,10 @@ class RaceEnv(gym.Env):
 
         # Distance to the (possibly newly-advanced) target, for the progress term.
         dist_curr = self._dist_to_target(state.position)
+        # UC-50: current target gate's height above the floor AFTER ``advance`` (straddles the gate
+        # transition with ``target_h_prev``, mirroring ``dist_curr``), so the reward's altitude-hold
+        # potential telescopes across gate passes exactly like the UC-39 climb term.
+        target_h_curr = float(current_target(course, self._gates_passed)[2] - course.floor_z)
 
         # Obstacle contact (UC-15 AC2): swept per-step detection over the step segment (anti-
         # tunneling), edge-triggered so a sustained overlap is penalised once. NEVER feeds
@@ -723,6 +733,12 @@ class RaceEnv(gym.Env):
             # (``state.position``). Reuses existing sensing — no new observation.
             height_above_floor_prev=float(self._prev_pos[2] - course.floor_z),
             height_above_floor_curr=float(state.position[2] - course.floor_z),
+            # UC-50: current target gate's height above the floor, straddling ``advance`` (see the
+            # captures above). Drives the altitude-hold progress-gate + shortfall potential ONLY
+            # when ``RewardConfig.enable_altitude_decoupling`` is set; ignored (default 0.0)
+            # otherwise, so this call is byte-identical at runtime with the feature off.
+            target_height_above_floor_prev=target_h_prev,
+            target_height_above_floor_curr=target_h_curr,
         )
 
         # UC-16/UC-25/UC-38: a dock does NOT terminate. An episode ends on a valid completion, a

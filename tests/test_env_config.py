@@ -177,21 +177,34 @@ def test_env_config_floor_start_is_last_field() -> None:
 
 
 def test_reward_config_field_order() -> None:
-    """UC-43 (extends UC-39/UC-37): the two ground-break fields are appended **last**, in order,
-    AFTER the three climb fields — so every pre-UC-43 positional ``RewardConfig`` call (which never
-    passed the ground-break fields) stays unshifted. The tail order is pinned exactly:
+    """UC-50 (extends UC-43/UC-39/UC-37): the three altitude-decoupling fields are appended
+    **last**, in order, AFTER the ground-break pair — so every pre-UC-50 positional ``RewardConfig``
+    call
+    (which never passed them) stays unshifted. The full appended tail is pinned exactly:
     ``obstacle_penalty`` → ``airborne_bonus`` → ``climb_weight`` → ``climb_target_height`` →
-    ``climb_gamma`` → ``ground_break_weight`` → ``ground_break_height`` (last)."""
+    ``climb_gamma`` → ``ground_break_weight`` → ``ground_break_height`` →
+    ``enable_altitude_decoupling`` → ``altitude_hold_weight`` → ``altitude_band`` (last)."""
     fields = [f.name for f in dataclasses.fields(RewardConfig)]
-    assert fields[-1] == "ground_break_height"
-    assert fields[-6:] == [
+    assert fields[-1] == "altitude_band"
+    assert fields[-9:] == [
         "airborne_bonus",
         "climb_weight",
         "climb_target_height",
         "climb_gamma",
         "ground_break_weight",
         "ground_break_height",
+        "enable_altitude_decoupling",
+        "altitude_hold_weight",
+        "altitude_band",
     ]
+    # UC-50 tail invariant: the three altitude fields are the last three, in order.
+    assert fields[-3:] == [
+        "enable_altitude_decoupling",
+        "altitude_hold_weight",
+        "altitude_band",
+    ]
+    # The UC-43 pair is immediately before the UC-50 trio (ground_break_height → altitude trio).
+    assert fields.index("ground_break_height") == fields.index("enable_altitude_decoupling") - 1
     # The UC-39 tail invariant still holds (climb_gamma immediately precedes the ground-break pair).
     assert fields.index("climb_gamma") == fields.index("ground_break_weight") - 1
     # The UC-37 tail invariant still holds further back (obstacle_penalty → airborne_bonus).

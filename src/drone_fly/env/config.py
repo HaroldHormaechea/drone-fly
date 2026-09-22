@@ -664,6 +664,48 @@ class RewardConfig:
     # asserts this equality against its source (``EarlyTerminationConfig().floor_epsilon``), not an
     # independent literal.
     ground_break_height: float = 0.05
+    # UC-50 — Altitude-holding forward-flight decoupling (default OFF ⇒ BYTE-IDENTICAL to UC-43).
+    # Fixes the post-UC-48 "rush the gate horizontally and sink" failure: the dense 3D progress term
+    # pays for closing on the gate in ANY direction (including while descending), and nothing
+    # rewards HOLDING altitude (the UC-39/42/43 terms reward altitude *change* and net ≈0 for level
+    # flight). When ``enable_altitude_decoupling`` is True,
+    # :func:`drone_fly.env.reward.compute_reward` (a) HARD-GATES the progress term on altitude —
+    # withholding only the POSITIVE progress reward whenever the drone is below a safe band
+    # referenced to the CURRENT TARGET GATE's height, so diving toward the gate earns no progress
+    # (the withhold only ever REDUCES reward: a below-band retreat still pays its penalty, so an
+    # approach/retreat loop cannot be farmed) — and (b) adds a potential-based altitude-HOLD term
+    # Φ_track(h, ref) = ``altitude_hold_weight`` · clamp(h − (ref − ``altitude_band``), 0,
+    # ``altitude_band``) — a NON-NEGATIVE altitude "credit" (anchored like the UC-39 climb potential
+    # so the shaping leak is ≤ 0 and hovering below the reference is never rewarded), per-step
+    # F = ``climb_gamma`` · Φ_track(curr) − Φ_track(prev), so climbing toward the reference pays and
+    # dropping away costs. Because both terms key off the target-gate height, the safe
+    # altitude TRACKS each gate's own z (gates vary in z); the finish leg inherits the last gate's z
+    # for free via ``geometry.current_target``. In the reward function the reference is
+    # LOWER-clamped to ``ground_break_height`` (``ref_eff = max(target_height_above_floor,
+    # ground_break_height)``), keeping the band non-degenerate for a floor-band gate and handing off
+    # cleanly to the UC-43
+    # ground-break bootstrap (whose ``ground_break_height`` is also the progress-gate's lower edge —
+    # so takeoff still bootstraps and no new chicken-and-egg is introduced). The band is ONE-SIDED
+    # (penalises only being BELOW the reference, never overshoot above it), so there is NO upper /
+    # ceiling clamp and no ``ceiling_z`` argument. SIZING INVARIANT (documented, load-bearing —
+    # enforced by gate placement + the enabled ``altitude_band``, NOT a runtime clamp):
+    # ``ref − band ≤ climb_target_height`` so the band's lower edge never sits above the climb
+    # target and hands off to the UC-43 ground-break band; with band 0.6 this holds for any gate up
+    # to ``climb_target_height`` + 0.6 = 1.6 m above floor. Properties (all unit-testable):
+    # telescoping ⇒ a climb-then-descend / bob round trip nets ≤ 0 (non-farmable, no loiter
+    # optimum); per-episode altitude-hold total bounded by ≈ ``altitude_hold_weight`` ·
+    # ``altitude_band``. ENABLED-VALUE BOUND (loiter < completion, AC-4): with the recommended
+    # 2.0 · 0.6 = 1.2 the total dense shaping is 160 (airborne) + 1.98 (climb) + 0.495
+    # (ground-break) + 1.2 (altitude-hold) = 163.68 < ``completion_bonus`` 200, so a loiter can
+    # never out-score a completion. ``climb_gamma`` MUST equal training γ for the shaping to stay
+    # return-invariant (the same coupling as UC-39). Appended **last** (after the UC-43 fields) so
+    # every positional ``RewardConfig`` call is unshifted, and all three default to the feature-off
+    # values (flag False, weight 0.0) so pre-UC-50 callers are byte-identical (AC-6). Recommended
+    # ENABLED values (set by the training config, not here): ``altitude_hold_weight`` = 2.0,
+    # ``altitude_band`` = 0.6.
+    enable_altitude_decoupling: bool = False
+    altitude_hold_weight: float = 0.0
+    altitude_band: float = 0.6
 
 
 @dataclass(frozen=True)
