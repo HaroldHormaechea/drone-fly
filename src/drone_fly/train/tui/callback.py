@@ -74,6 +74,9 @@ class TuiCallback(BaseCallback):
         self._last_heartbeat: float | None = None
         #: ``num_timesteps`` captured at the current rollout's start, for step-progress math.
         self._rollout_start_timesteps = 0
+        #: UC-52: monotonic timestamp at the current rollout's start, for the collect-vs-optimize
+        #: wall-clock split. ``None`` until the first rollout begins.
+        self._collect_start: float | None = None
 
     def _on_training_start(self) -> None:
         self._start_time = self._now()
@@ -82,6 +85,8 @@ class TuiCallback(BaseCallback):
         """Reset the per-rollout step baseline + heartbeat gate (first step redraws instantly)."""
         self._rollout_start_timesteps = self.num_timesteps
         self._last_heartbeat = None
+        # UC-52: mark the rollout-collection start so _on_rollout_end can report its duration.
+        self._collect_start = self._now()
 
     def _on_step(self) -> bool:
         if not self._enabled:
@@ -119,6 +124,14 @@ class TuiCallback(BaseCallback):
             return
         try:
             self._n_updates += 1
+
+            # UC-52: this rollout's collection wall-clock (start recorded in _on_rollout_start),
+            # fed to the dashboard for the collect-vs-optimize split. The optimize duration is
+            # measured inside ProgressReportingPPO.train() and pushed via set_optimize_duration;
+            # here we own only the collect side. Inside the existing defensive try/except; the
+            # heartbeat / _HEARTBEAT_MIN_INTERVAL path is untouched (AC-3).
+            if self._collect_start is not None:
+                self.dashboard.set_collect_duration(self._now() - self._collect_start)
 
             # ROLLOUT — fresh, from the model buffers (VecMonitor-populated), NOT the logger.
             ep_buf = list(self.model.ep_info_buffer or [])
