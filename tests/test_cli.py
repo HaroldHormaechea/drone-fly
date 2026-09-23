@@ -809,3 +809,139 @@ def test_clean_nothing_to_clean_exits_zero(tmp_path, monkeypatch, capsys) -> Non
     monkeypatch.chdir(tmp_path)
     assert main(["clean", "--yes"]) == 0
     assert "nothing to clean" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# UC-51 — curriculum knobs + ent_coef thread from the YAML into the constructed
+# TrainConfig; the critical total_timesteps wiring fix; set-to-default == omit.
+# Hermetic: the stage `train` is monkeypatched, so nothing trains.
+# --------------------------------------------------------------------------- #
+
+
+def test_uc51_curriculum_knobs_thread_into_trainconfig(tmp_path, monkeypatch) -> None:
+    """AC3: every exposed curriculum knob + ``ent_coef`` set in the YAML reaches the corresponding
+    ``TrainConfig`` field the callbacks consume. The YAML key ``collision_penalty_warmup_fraction``
+    maps to the ``TrainConfig`` field ``collision_curriculum_warmup_fraction`` (the CLI rename);
+    every other name is 1:1."""
+    captured: dict = {}
+
+    def fake_train(train_cfg, **kwargs):
+        captured["cfg"] = train_cfg
+
+    monkeypatch.setattr("drone_fly.train.loop.train", fake_train)
+
+    cfg = _write_config(
+        tmp_path,
+        {
+            "name": "r",
+            "adapter": "simple",
+            "ent_coef": 0.01,
+            "airborne_curriculum_enabled": False,
+            "airborne_curriculum_warmup_fraction": 0.3,
+            "airborne_curriculum_anneal_fraction": 0.9,
+            "attitude_authority_curriculum_enabled": False,
+            "attitude_authority_start": 0.2,
+            "attitude_authority_anneal_fraction": 0.4,
+            "collision_curriculum_enabled": False,
+            "collision_penalty_start": 3.0,
+            "collision_penalty_end": 90.0,
+            "collision_penalty_warmup_fraction": 0.2,
+            "collision_curriculum_hold_fraction": 0.3,
+        },
+    )
+    assert main(["train", "--config", cfg]) == 0
+    tc = captured["cfg"]
+    assert tc.ent_coef == pytest.approx(0.01)
+    assert tc.airborne_curriculum_enabled is False
+    assert tc.airborne_curriculum_warmup_fraction == pytest.approx(0.3)
+    assert tc.airborne_curriculum_anneal_fraction == pytest.approx(0.9)
+    assert tc.attitude_authority_curriculum_enabled is False
+    assert tc.attitude_authority_start == pytest.approx(0.2)
+    assert tc.attitude_authority_anneal_fraction == pytest.approx(0.4)
+    assert tc.collision_curriculum_enabled is False
+    assert tc.collision_penalty_start == pytest.approx(3.0)
+    assert tc.collision_penalty_end == pytest.approx(90.0)
+    # The CLI rename: YAML collision_penalty_warmup_fraction -> TrainConfig field.
+    assert tc.collision_curriculum_warmup_fraction == pytest.approx(0.2)
+    assert tc.collision_curriculum_hold_fraction == pytest.approx(0.3)
+
+
+def test_uc51_total_timesteps_set_on_trainconfig_field_from_cfg_timesteps(
+    tmp_path, monkeypatch
+) -> None:
+    """AC3/AC5 (the critical wiring fix): the CLI sets ``TrainConfig.total_timesteps`` from the YAML
+    ``timesteps`` — the field the curriculum callbacks compute their schedule window against — AND
+    still passes ``total_timesteps`` as the ``train()`` override (keeping the dispatch contract).
+    Before UC-51 only the override was set, so every schedule was pinned to the dataclass default
+    regardless of the configured budget."""
+    captured: dict = {}
+
+    def fake_train(train_cfg, **kwargs):
+        captured["cfg"] = train_cfg
+        captured.update(kwargs)
+
+    monkeypatch.setattr("drone_fly.train.loop.train", fake_train)
+
+    cfg = _write_config(tmp_path, {"name": "r", "adapter": "simple", "timesteps": 2000})
+    assert main(["train", "--config", cfg]) == 0
+    assert captured["cfg"].total_timesteps == 2000  # the field the callbacks read (the fix)
+    assert captured["total_timesteps"] == 2000  # the train() override (unchanged contract)
+
+
+def test_uc51_omitting_timesteps_leaves_the_trainconfig_default(tmp_path, monkeypatch) -> None:
+    """AC6: with ``timesteps`` omitted, ``TrainConfig.total_timesteps`` keeps its (new 2M) dataclass
+    default — the field is only overridden when the YAML sets it."""
+    captured: dict = {}
+    monkeypatch.setattr(
+        "drone_fly.train.loop.train", lambda train_cfg, **k: captured.update({"cfg": train_cfg})
+    )
+    cfg = _write_config(tmp_path, {"name": "r", "adapter": "simple"})
+    assert main(["train", "--config", cfg]) == 0
+    assert captured["cfg"].total_timesteps == 2_000_000
+
+
+def test_uc51_set_to_default_is_byte_identical_to_omit(tmp_path, monkeypatch) -> None:
+    """AC2: a config that sets every curriculum knob to its ``TrainConfig`` default produces a
+    ``TrainConfig`` byte-identical (dataclass ``==``) to one from a bare config that omits them
+    all — the exposure plumbing is lossless (set-to-default == omit)."""
+    from drone_fly.train.config import TrainConfig
+
+    captured_bare: dict = {}
+    captured_default: dict = {}
+
+    monkeypatch.setattr(
+        "drone_fly.train.loop.train",
+        lambda train_cfg, **k: captured_bare.update({"cfg": train_cfg}),
+    )
+    bare = _write_config(tmp_path, {"name": "same", "adapter": "simple"}, name="bare.yaml")
+    assert main(["train", "--config", bare]) == 0
+
+    d = TrainConfig()
+    monkeypatch.setattr(
+        "drone_fly.train.loop.train",
+        lambda train_cfg, **k: captured_default.update({"cfg": train_cfg}),
+    )
+    default_cfg = _write_config(
+        tmp_path,
+        {
+            "name": "same",
+            "adapter": "simple",
+            "ent_coef": d.ent_coef,
+            "airborne_curriculum_enabled": d.airborne_curriculum_enabled,
+            "airborne_curriculum_warmup_fraction": d.airborne_curriculum_warmup_fraction,
+            "airborne_curriculum_anneal_fraction": d.airborne_curriculum_anneal_fraction,
+            "attitude_authority_curriculum_enabled": d.attitude_authority_curriculum_enabled,
+            "attitude_authority_start": d.attitude_authority_start,
+            "attitude_authority_anneal_fraction": d.attitude_authority_anneal_fraction,
+            "collision_curriculum_enabled": d.collision_curriculum_enabled,
+            "collision_penalty_start": d.collision_penalty_start,
+            "collision_penalty_end": d.collision_penalty_end,
+            "collision_penalty_warmup_fraction": d.collision_curriculum_warmup_fraction,
+            "collision_curriculum_hold_fraction": d.collision_curriculum_hold_fraction,
+        },
+        name="default.yaml",
+    )
+    assert main(["train", "--config", default_cfg]) == 0
+
+    # Same run name ⇒ identical models_dir/logs_dir; set-to-default ⇒ identical everything else.
+    assert captured_default["cfg"] == captured_bare["cfg"]

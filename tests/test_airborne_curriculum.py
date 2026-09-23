@@ -49,7 +49,11 @@ _HIGH_Z = 1.0
 # ============================================================================================
 def test_ac1_returns_high_z_at_fraction_zero() -> None:
     """AC1: at ``num_timesteps == 0`` the spawn is the full airborne start (the high endpoint)."""
-    cfg = TrainConfig(total_timesteps=1000, airborne_curriculum_anneal_fraction=0.5)
+    cfg = TrainConfig(
+        total_timesteps=1000,
+        airborne_curriculum_anneal_fraction=0.5,
+        airborne_curriculum_warmup_fraction=0.0,
+    )
     assert spawn_z_at(0, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z) == pytest.approx(_HIGH_Z)
 
 
@@ -57,7 +61,11 @@ def test_ac1_returns_exactly_floor_z_at_and_after_anneal_end() -> None:
     """AC1: at the anneal end (``anneal_fraction × total_timesteps``) and forever after, the spawn
     is held at EXACTLY ``floor_z`` — a strict ``==`` (not ``approx``) so the terminal state is
     byte-identical to the UC-37 floored start (the eval/recording spawn)."""
-    cfg = TrainConfig(total_timesteps=1000, airborne_curriculum_anneal_fraction=0.5)
+    cfg = TrainConfig(
+        total_timesteps=1000,
+        airborne_curriculum_anneal_fraction=0.5,
+        airborne_curriculum_warmup_fraction=0.0,
+    )
     anneal_steps = 500  # 0.5 × 1000
     assert spawn_z_at(anneal_steps, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z) == _FLOOR_Z
     assert spawn_z_at(anneal_steps + 1, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z) == _FLOOR_Z
@@ -66,14 +74,22 @@ def test_ac1_returns_exactly_floor_z_at_and_after_anneal_end() -> None:
 
 def test_ac1_midpoint_is_linear_interpolation() -> None:
     """AC1: halfway through the anneal window the spawn is the linear midpoint of the endpoints."""
-    cfg = TrainConfig(total_timesteps=1000, airborne_curriculum_anneal_fraction=0.5)
+    cfg = TrainConfig(
+        total_timesteps=1000,
+        airborne_curriculum_anneal_fraction=0.5,
+        airborne_curriculum_warmup_fraction=0.0,
+    )
     # anneal_steps = 500; halfway = 250 ⇒ (high + floor) / 2 = 0.5.
     assert spawn_z_at(250, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z) == pytest.approx(0.5)
 
 
 def test_ac1_monotone_non_increasing_across_the_anneal() -> None:
     """AC1: the schedule is monotone NON-INCREASING in ``num_timesteps`` (never climbs back up)."""
-    cfg = TrainConfig(total_timesteps=1000, airborne_curriculum_anneal_fraction=0.5)
+    cfg = TrainConfig(
+        total_timesteps=1000,
+        airborne_curriculum_anneal_fraction=0.5,
+        airborne_curriculum_warmup_fraction=0.0,
+    )
     samples = [spawn_z_at(t, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z) for t in range(0, 1001, 25)]
     for earlier, later in zip(samples, samples[1:], strict=False):
         assert later <= earlier + 1e-12, f"schedule rose: {earlier} → {later}"
@@ -82,7 +98,11 @@ def test_ac1_monotone_non_increasing_across_the_anneal() -> None:
 def test_ac1_clamped_to_floor_high_band() -> None:
     """AC1: the result never dips below ``floor_z`` nor overshoots ``high_z`` — a negative query
     clamps to the high endpoint and any query past the anneal clamps to the floor."""
-    cfg = TrainConfig(total_timesteps=1000, airborne_curriculum_anneal_fraction=0.5)
+    cfg = TrainConfig(
+        total_timesteps=1000,
+        airborne_curriculum_anneal_fraction=0.5,
+        airborne_curriculum_warmup_fraction=0.0,
+    )
     for t in (-100, -1, 0, 1, 123, 250, 499, 500, 501, 5000, 10_000_000):
         z = spawn_z_at(t, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z)
         assert _FLOOR_Z <= z <= _HIGH_Z, f"t={t}: {z} escaped [{_FLOOR_Z}, {_HIGH_Z}]"
@@ -102,8 +122,16 @@ def test_ac1_raises_on_out_of_range_anneal_fraction(bad_fraction: float) -> None
 def test_ac1_boundary_anneal_fractions_are_accepted() -> None:
     """AC1: the inclusive endpoints ``0`` and ``1`` are valid (0 ⇒ curriculum off; 1 ⇒ anneal over
     the whole run). Neither raises."""
-    off = TrainConfig(total_timesteps=1000, airborne_curriculum_anneal_fraction=0.0)
-    full = TrainConfig(total_timesteps=1000, airborne_curriculum_anneal_fraction=1.0)
+    off = TrainConfig(
+        total_timesteps=1000,
+        airborne_curriculum_anneal_fraction=0.0,
+        airborne_curriculum_warmup_fraction=0.0,
+    )
+    full = TrainConfig(
+        total_timesteps=1000,
+        airborne_curriculum_anneal_fraction=1.0,
+        airborne_curriculum_warmup_fraction=0.0,
+    )
     assert spawn_z_at(0, off, floor_z=_FLOOR_Z, high_z=_HIGH_Z) == _FLOOR_Z  # off ⇒ floored
     assert spawn_z_at(0, full, floor_z=_FLOOR_Z, high_z=_HIGH_Z) == pytest.approx(_HIGH_Z)
     assert spawn_z_at(1000, full, floor_z=_FLOOR_Z, high_z=_HIGH_Z) == _FLOOR_Z
@@ -112,7 +140,11 @@ def test_ac1_boundary_anneal_fractions_are_accepted() -> None:
 def test_ac1_degenerate_zero_fraction_is_floored_curriculum_off() -> None:
     """AC1: ``anneal_fraction == 0`` degenerates to the floored UC-37 start at every step — the
     curriculum is off and training spawns on the floor exactly as UC-43."""
-    cfg = TrainConfig(total_timesteps=1000, airborne_curriculum_anneal_fraction=0.0)
+    cfg = TrainConfig(
+        total_timesteps=1000,
+        airborne_curriculum_anneal_fraction=0.0,
+        airborne_curriculum_warmup_fraction=0.0,
+    )
     for t in (0, 1, 500, 1000, 50_000):
         assert spawn_z_at(t, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z) == _FLOOR_Z
 
@@ -120,7 +152,11 @@ def test_ac1_degenerate_zero_fraction_is_floored_curriculum_off() -> None:
 def test_ac1_degenerate_nonpositive_total_timesteps_is_floored() -> None:
     """AC1: a non-positive ``total_timesteps`` (no real anneal window) degenerates to ``floor_z``
     — the schedule can't divide by a zero/negative horizon, so it turns the curriculum off."""
-    cfg = TrainConfig(total_timesteps=0, airborne_curriculum_anneal_fraction=0.5)
+    cfg = TrainConfig(
+        total_timesteps=0,
+        airborne_curriculum_anneal_fraction=0.5,
+        airborne_curriculum_warmup_fraction=0.0,
+    )
     assert spawn_z_at(0, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z) == _FLOOR_Z
 
 
@@ -138,7 +174,11 @@ def test_ac1_env_defensively_clamps_a_below_floor_override_to_the_floor() -> Non
 def test_ac1_is_stateless_and_resume_correct() -> None:
     """AC1: the schedule is a pure function of ``num_timesteps`` (+ cfg / endpoints) — the same
     query returns the same value regardless of call order, so a resumed run continues correctly."""
-    cfg = TrainConfig(total_timesteps=1000, airborne_curriculum_anneal_fraction=0.5)
+    cfg = TrainConfig(
+        total_timesteps=1000,
+        airborne_curriculum_anneal_fraction=0.5,
+        airborne_curriculum_warmup_fraction=0.0,
+    )
     first = [spawn_z_at(t, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z) for t in (0, 250, 500, 750)]
     # Query out of order; each value must be identical to the in-order query (no hidden state).
     assert spawn_z_at(750, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z) == first[3]
@@ -170,7 +210,11 @@ def test_ac2_callback_pushes_scheduled_spawn_z_through_wrapper_stack() -> None:
         assert isinstance(venv.venv, VecMonitor)
         assert isinstance(venv.venv.venv, DummyVecEnv)
 
-        cfg = TrainConfig(total_timesteps=1000, airborne_curriculum_anneal_fraction=0.5)
+        cfg = TrainConfig(
+            total_timesteps=1000,
+            airborne_curriculum_anneal_fraction=0.5,
+            airborne_curriculum_warmup_fraction=0.0,
+        )
         cb = AirborneStartCurriculumCallback(cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z)
         cb.init_callback(_fake_model(venv))
 
@@ -197,7 +241,11 @@ def test_ac2_callback_propagates_to_all_envs_in_a_multi_env_stack() -> None:
     out across the whole DummyVecEnv, not just env 0."""
     venv = build_vec_env(adapter="simple", n_envs=3, training=True, seed=0)
     try:
-        cfg = TrainConfig(total_timesteps=1000, airborne_curriculum_anneal_fraction=0.5)
+        cfg = TrainConfig(
+            total_timesteps=1000,
+            airborne_curriculum_anneal_fraction=0.5,
+            airborne_curriculum_warmup_fraction=0.0,
+        )
         cb = AirborneStartCurriculumCallback(cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z)
         cb.init_callback(_fake_model(venv))
         cb.num_timesteps = 0
@@ -441,3 +489,112 @@ def test_ac8_smoke_train_airborne_spawn_std_does_not_collapse(connectome) -> Non
         )
     finally:
         venv.close()
+
+
+# ============================================================================================
+# UC-51 (AC5 airborne piece) — the warmup HOLD / start-delay reshapes the spawn schedule so the
+# floor descent is the last, isolated stage. The airborne ``warmup_fraction`` holds the spawn fully
+# airborne through the warmup, THEN anneals ``high_z`` -> ``floor_z`` across ``[warmup, anneal]``.
+# (Contrast the collision curriculum, where ``warmup_fraction`` is the RAMP WIDTH.)
+# ============================================================================================
+def test_uc51_spawn_held_high_through_the_entire_warmup_window() -> None:
+    """AC5: with a non-zero warmup the spawn is HELD at ``high_z`` across the whole warmup window
+    ``[0, warmup_steps]`` — the descent does not begin until the warmup ends (the isolation the
+    restagger buys: floor-takeoff comes last)."""
+    cfg = TrainConfig(
+        total_timesteps=1000,
+        airborne_curriculum_warmup_fraction=0.6,
+        airborne_curriculum_anneal_fraction=1.0,
+    )
+    warmup_steps = 600
+    for t in (0, 1, 300, warmup_steps):  # inclusive of the warmup boundary
+        assert spawn_z_at(t, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z) == pytest.approx(_HIGH_Z)
+    # One step past the warmup the descent has begun (strictly below the high endpoint).
+    assert spawn_z_at(warmup_steps + 1, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z) < _HIGH_Z
+
+
+def test_uc51_linear_descent_across_the_warmup_to_anneal_window() -> None:
+    """AC5: between ``warmup_steps`` and ``anneal_steps`` the spawn anneals LINEARLY ``high_z`` ->
+    ``floor_z`` — the ramp midpoint is the linear midpoint of the endpoints."""
+    cfg = TrainConfig(
+        total_timesteps=1000,
+        airborne_curriculum_warmup_fraction=0.6,
+        airborne_curriculum_anneal_fraction=1.0,
+    )
+    # ramp = [600, 1000]; midpoint t=800 ⇒ (high + floor) / 2 = 0.5.
+    assert spawn_z_at(800, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z) == pytest.approx(0.5)
+    # A quarter into the ramp (t=700) ⇒ 0.75 of the way from floor to high.
+    assert spawn_z_at(700, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z) == pytest.approx(0.75)
+
+
+def test_uc51_spawn_reaches_and_holds_floor_at_and_after_anneal_end() -> None:
+    """AC5: at the anneal end (``anneal_fraction × total``) and forever after, the spawn is held at
+    EXACTLY ``floor_z`` — the terminal state is byte-identical to the UC-37 floored start."""
+    cfg = TrainConfig(
+        total_timesteps=1000,
+        airborne_curriculum_warmup_fraction=0.6,
+        airborne_curriculum_anneal_fraction=1.0,
+    )
+    assert spawn_z_at(1000, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z) == _FLOOR_Z
+    assert spawn_z_at(1001, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z) == _FLOOR_Z
+    assert spawn_z_at(50_000, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z) == _FLOOR_Z
+
+
+def test_uc51_warmup_schedule_is_monotone_non_increasing() -> None:
+    """AC5: the warmup+anneal schedule is still monotone NON-INCREASING (holds, then only ever
+    descends) — it never climbs back up."""
+    cfg = TrainConfig(
+        total_timesteps=1000,
+        airborne_curriculum_warmup_fraction=0.6,
+        airborne_curriculum_anneal_fraction=1.0,
+    )
+    samples = [spawn_z_at(t, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z) for t in range(0, 1001, 25)]
+    for earlier, later in zip(samples, samples[1:], strict=False):
+        assert later <= earlier + 1e-12, f"schedule rose: {earlier} → {later}"
+
+
+def test_uc51_warmup_past_anneal_raises() -> None:
+    """AC5 edge / composition backstop: a warmup that runs PAST the anneal window
+    (``warmup_fraction > anneal_fraction``) is a config error — the pure schedule raises
+    ``ValueError`` (defence-in-depth behind the ``ConfigError`` at YAML load)."""
+    cfg = TrainConfig(
+        total_timesteps=1000,
+        airborne_curriculum_warmup_fraction=0.7,
+        airborne_curriculum_anneal_fraction=0.5,
+    )
+    with pytest.raises(ValueError, match="warmup"):
+        spawn_z_at(0, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z)
+
+
+def test_uc51_negative_warmup_raises() -> None:
+    """AC5 edge: a negative warmup fraction is rejected by the pure schedule."""
+    cfg = TrainConfig(
+        total_timesteps=1000,
+        airborne_curriculum_warmup_fraction=-0.1,
+        airborne_curriculum_anneal_fraction=0.5,
+    )
+    with pytest.raises(ValueError, match="warmup"):
+        spawn_z_at(0, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z)
+
+
+def test_uc51_warmup_zero_is_byte_identical_to_the_pre_uc51_single_window_anneal() -> None:
+    """AC5 (byte-identity, AC2 plumbing): ``warmup_fraction == 0.0`` reproduces the pre-UC-51
+    single-window anneal from step 0 EXACTLY — the same linear ``high_z`` -> ``floor_z`` over
+    ``[0, anneal_steps]`` the old ``spawn_z_at`` produced (so an explicit ``warmup: 0.0`` is a
+    lossless opt-back-in to the old shape)."""
+    cfg = TrainConfig(
+        total_timesteps=1000,
+        airborne_curriculum_warmup_fraction=0.0,
+        airborne_curriculum_anneal_fraction=0.5,
+    )
+    anneal_steps = 500  # 0.5 × 1000
+
+    def old_single_window(t: int) -> float:
+        # The pre-UC-51 shape: linear from step 0 across [0, anneal_steps], clamped, floored after.
+        frac = min(max(t / anneal_steps, 0.0), 1.0)
+        return min(max(_HIGH_Z + (_FLOOR_Z - _HIGH_Z) * frac, _FLOOR_Z), _HIGH_Z)
+
+    for t in (0, 1, 125, 250, 375, 499, 500, 501, 1000):
+        assert spawn_z_at(t, cfg, floor_z=_FLOOR_Z, high_z=_HIGH_Z) == pytest.approx(
+            old_single_window(t)
+        ), f"warmup=0 diverged from the old single-window anneal at t={t}"

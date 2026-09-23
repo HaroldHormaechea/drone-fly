@@ -17,10 +17,13 @@ unchanged.
 
 Two pieces live here, mirroring :mod:`drone_fly.train.collision_curriculum`:
 
-* :func:`spawn_z_at` — the **pure** schedule. Absolute spawn z: linear anneal ``high_z`` →
-  ``floor_z`` over ``cfg.airborne_curriculum_anneal_fraction * cfg.total_timesteps`` steps, then
-  held **exactly** at ``floor_z``. Clamped to ``[floor_z, high_z]`` and monotone non-increasing. A
-  function of ``num_timesteps`` only (stateless), so a resumed run continues the schedule correctly.
+* :func:`spawn_z_at` — the **pure** schedule. Absolute spawn z: held at ``high_z`` through a
+  ``cfg.airborne_curriculum_warmup_fraction`` start-delay (UC-51), then linear anneal ``high_z`` →
+  ``floor_z`` across ``[warmup, anneal] * cfg.total_timesteps`` steps, then held **exactly** at
+  ``floor_z``. Clamped to ``[floor_z, high_z]`` and monotone non-increasing. A function of
+  ``num_timesteps`` only (stateless), so a resumed run continues the schedule correctly. The
+  airborne ``warmup_fraction`` is a *hold* (start-delay), unlike the collision curriculum's
+  ``warmup_fraction`` which is the ramp width.
 * :class:`AirborneStartCurriculumCallback` — the SB3 callback that, at the start of training and of
   every rollout, computes :func:`spawn_z_at` for the current ``num_timesteps`` and pushes it into
   every base :class:`~drone_fly.env.racing_env.RaceEnv` via ``training_env.env_method("set_spawn_z",
@@ -42,43 +45,77 @@ from drone_fly.train.config import TrainConfig
 
 
 def spawn_z_at(num_timesteps: int, cfg: TrainConfig, *, floor_z: float, high_z: float) -> float:
-    """Return the absolute spawn z to apply at ``num_timesteps`` env steps (UC-44 AC1).
+    """Return the absolute spawn z to apply at ``num_timesteps`` env steps (UC-44 AC1, UC-51).
 
-    Linear reverse curriculum: the spawn altitude starts at ``high_z`` (at ``num_timesteps == 0``)
-    and anneals to ``floor_z`` over the first ``airborne_curriculum_anneal_fraction *
-    total_timesteps`` steps, then is held **exactly** at ``floor_z`` for the remainder:
+    Reverse curriculum with a **warmup hold / start-delay** (UC-51): the spawn is held at ``high_z``
+    (fully airborne) through the first ``airborne_curriculum_warmup_fraction * total_timesteps``
+    steps, then anneals linearly ``high_z`` → ``floor_z`` across the window
+    ``[warmup_steps, anneal_steps]`` (``anneal_steps = airborne_curriculum_anneal_fraction *
+    total_timesteps``), then is held **exactly** at ``floor_z`` for the remainder:
 
-    * ``num_timesteps <= 0`` → ``high_z`` (full airborne start).
+    * ``num_timesteps <= warmup_steps`` → ``high_z`` (full airborne start, held through the warmup).
     * ``num_timesteps >= anneal_steps`` → ``floor_z`` (the UC-37 floored start, held for the rest).
-    * in between → linear interpolation ``high_z`` → ``floor_z``.
+    * in between → linear interpolation ``high_z`` → ``floor_z`` across ``[warmup_steps,
+      anneal_steps]``.
+
+    .. note::
+
+       The airborne ``warmup_fraction`` is a **hold / start-delay** (the spawn stays fully airborne
+       through this fraction before it begins descending), which is the OPPOSITE of the collision
+       curriculum's ``warmup_fraction`` — there ``warmup_fraction`` is the RAMP WIDTH. UC-51
+       restaggers the defaults so this airborne descent is the last, isolated difficulty stage.
 
     The result is clamped to ``[floor_z, high_z]`` so it never dips below the floor or overshoots
-    the high endpoint, and is monotone non-increasing in ``num_timesteps``. A zero
-    ``anneal_fraction`` (or a non-positive ``total_timesteps``) degenerates to ``floor_z``
-    immediately — the curriculum is
-    off and training spawns on the floor exactly as UC-43. Pure and stateless (depends only on
-    ``num_timesteps`` and ``cfg``), so it is resume-correct.
+    the high endpoint, and is monotone non-increasing in ``num_timesteps``. A degenerate ramp
+    window (``anneal_steps <= warmup_steps`` — including a zero ``anneal_fraction`` — or a
+    non-positive ``total_timesteps``) collapses the descent: the spawn is held airborne through the
+    warmup and drops to ``floor_z`` afterwards. **Byte-identity (UC-51 AC2):** with
+    ``airborne_curriculum_warmup_fraction == 0.0`` the schedule is identical to the pre-UC-51
+    single-window anneal from step 0 (the degenerate case reduces to the old ``floor_z`` guard).
+    Pure and stateless (depends only on ``num_timesteps`` and ``cfg``), so it is resume-correct.
 
     Raises
     ------
     ValueError
         If ``airborne_curriculum_anneal_fraction`` is ``< 0`` or ``> 1`` (an anneal window that
-        would run past the end of training, or run backwards).
+        would run past the end of training, or run backwards), if
+        ``airborne_curriculum_warmup_fraction`` is ``< 0``, or if ``warmup_fraction >
+        anneal_fraction`` (a warmup that would run past the descent window).
     """
     anneal_fraction = float(cfg.airborne_curriculum_anneal_fraction)
+    warmup_fraction = float(cfg.airborne_curriculum_warmup_fraction)
     if anneal_fraction < 0.0 or anneal_fraction > 1.0:
         raise ValueError(
             "airborne curriculum anneal fraction out of range: require "
             f"0 <= anneal_fraction <= 1, got anneal_fraction={anneal_fraction}"
         )
+    if warmup_fraction < 0.0:
+        raise ValueError(
+            "airborne curriculum warmup fraction out of range: require "
+            f"0 <= warmup_fraction, got warmup_fraction={warmup_fraction}"
+        )
+    if warmup_fraction > anneal_fraction:
+        raise ValueError(
+            "airborne curriculum warmup runs past the anneal window: require "
+            f"warmup_fraction <= anneal_fraction, got warmup_fraction={warmup_fraction}, "
+            f"anneal_fraction={anneal_fraction}"
+        )
     floor_z = float(floor_z)
     high_z = float(high_z)
     total = float(cfg.total_timesteps)
+    warmup_steps = warmup_fraction * total
     anneal_steps = anneal_fraction * total
-    # Curriculum off: no anneal window (fraction 0) or degenerate run length → floored start.
-    if anneal_steps <= 0.0 or total <= 0.0:
+    ramp_steps = anneal_steps - warmup_steps
+    # Degenerate: no descent window (fraction 0 / warmup==anneal) or zero-length run. Hold airborne
+    # through any warmup, floor afterwards. With warmup_steps == 0 this reduces to the pre-UC-51
+    # floored-start guard exactly (byte-identity).
+    if ramp_steps <= 0.0 or total <= 0.0:
+        if warmup_steps > 0.0 and float(num_timesteps) < warmup_steps:
+            return high_z
         return floor_z
-    frac = float(num_timesteps) / anneal_steps
+    if float(num_timesteps) <= warmup_steps:
+        return high_z
+    frac = (float(num_timesteps) - warmup_steps) / ramp_steps
     frac = min(max(frac, 0.0), 1.0)  # clamp into [0, 1] so we never overshoot either endpoint
     z = high_z + (floor_z - high_z) * frac
     # Defensive clamp into [floor_z, high_z] (guards against a misconfigured high_z < floor_z too).

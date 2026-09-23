@@ -239,6 +239,25 @@ class TrainRunConfig:
     randomize_repair_pads: bool | None
     strict_capacity: bool
     capacity_floor: int | None
+    # UC-51: training curriculum schedule knobs + ``ent_coef``, surfaced from ``TrainConfig`` so a
+    # schedule experiment costs a config edit, not a code change. All are ``| None``: ``None``
+    # (omitted / null) means "leave the ``TrainConfig`` dataclass default untouched", so setting a
+    # knob to its default is byte-identical to omitting it (AC2). An explicit value is validated
+    # (type + range in :meth:`from_mapping`) and threaded to ``TrainConfig`` by the CLI. NOTE the
+    # collision YAML key is ``collision_penalty_warmup_fraction`` (AC1) — it maps to the
+    # ``TrainConfig.collision_curriculum_warmup_fraction`` field in the CLI; other names are 1:1.
+    ent_coef: float | None
+    airborne_curriculum_enabled: bool | None
+    airborne_curriculum_warmup_fraction: float | None
+    airborne_curriculum_anneal_fraction: float | None
+    attitude_authority_curriculum_enabled: bool | None
+    attitude_authority_start: float | None
+    attitude_authority_anneal_fraction: float | None
+    collision_curriculum_enabled: bool | None
+    collision_penalty_start: float | None
+    collision_penalty_end: float | None
+    collision_penalty_warmup_fraction: float | None
+    collision_curriculum_hold_fraction: float | None
 
     @classmethod
     def from_mapping(cls, mapping: Any) -> TrainRunConfig:
@@ -276,12 +295,103 @@ class TrainRunConfig:
             # trainable-parameter floor (null -> the default in drone_fly.train.health).
             _Spec("strict_capacity", (bool,), default=False),
             _Spec("capacity_floor", (int,)),
+            # UC-51: curriculum schedule knobs + ent_coef. NO ``default`` (omitted / null -> None ->
+            # "leave the TrainConfig default", so set-to-default == omit, AC2). Type-only here; the
+            # numeric range + composition checks run below (each guarded ``is not None``).
+            _Spec("ent_coef", (float,)),
+            _Spec("airborne_curriculum_enabled", (bool,)),
+            _Spec("airborne_curriculum_warmup_fraction", (float,)),
+            _Spec("airborne_curriculum_anneal_fraction", (float,)),
+            _Spec("attitude_authority_curriculum_enabled", (bool,)),
+            _Spec("attitude_authority_start", (float,)),
+            _Spec("attitude_authority_anneal_fraction", (float,)),
+            _Spec("collision_curriculum_enabled", (bool,)),
+            _Spec("collision_penalty_start", (float,)),
+            _Spec("collision_penalty_end", (float,)),
+            _Spec("collision_penalty_warmup_fraction", (float,)),
+            _Spec("collision_curriculum_hold_fraction", (float,)),
         ]
         resolved = _validate("train", mapping, specs)
         resolved["name"] = validate_run_name(resolved["name"])
         if resolved["n_envs"] is not None and resolved["n_envs"] < 1:
             raise ConfigError("train config: 'n_envs' must be >= 1.")
+        cls._validate_curriculum(resolved)
         return cls(**resolved)
+
+    # UC-51 curriculum-knob range + composition validation.
+    #
+    # Fractions (and ``attitude_authority_start``) must lie in ``[0, 1]``; ``ent_coef`` and the
+    # collision penalty endpoints must be non-negative; ``timesteps`` must be >= 1. Composition:
+    # the airborne warmup (a HOLD/start-delay) must not run past the airborne anneal window, and the
+    # collision hold + ramp must fit inside the run. These duplicate the curriculum functions'
+    # ValueError backstops on purpose — this layer fails loud at config-load (exit 2), the functions
+    # guard defense-in-depth. An omitted partner in a composition check resolves to the
+    # ``TrainConfig`` dataclass default (so setting only one side is checked against the effective
+    # run value).
+    _FRACTION_KEYS = (
+        "airborne_curriculum_warmup_fraction",
+        "airborne_curriculum_anneal_fraction",
+        "attitude_authority_start",
+        "attitude_authority_anneal_fraction",
+        "collision_penalty_warmup_fraction",
+        "collision_curriculum_hold_fraction",
+    )
+
+    @staticmethod
+    def _validate_curriculum(resolved: dict[str, Any]) -> None:
+        for key in TrainRunConfig._FRACTION_KEYS:
+            value = resolved.get(key)
+            if value is not None and not (0.0 <= value <= 1.0):
+                raise ConfigError(
+                    f"train config: {key!r} must be between 0 and 1 (inclusive), got {value!r}."
+                )
+        if resolved.get("ent_coef") is not None and resolved["ent_coef"] < 0.0:
+            raise ConfigError(
+                f"train config: 'ent_coef' must be >= 0, got {resolved['ent_coef']!r}."
+            )
+        for key in ("collision_penalty_start", "collision_penalty_end"):
+            value = resolved.get(key)
+            if value is not None and value < 0.0:
+                raise ConfigError(f"train config: {key!r} must be >= 0, got {value!r}.")
+        if resolved.get("timesteps") is not None and resolved["timesteps"] < 1:
+            raise ConfigError("train config: 'timesteps' must be >= 1.")
+
+        # Composition — resolve any omitted partner against the TrainConfig dataclass defaults so a
+        # config that sets only one side of a pair is still checked against the effective run value.
+        from drone_fly.train.config import TrainConfig
+
+        defaults = TrainConfig()
+        air_warmup = resolved.get("airborne_curriculum_warmup_fraction")
+        air_anneal = resolved.get("airborne_curriculum_anneal_fraction")
+        eff_air_warmup = (
+            air_warmup if air_warmup is not None else defaults.airborne_curriculum_warmup_fraction
+        )
+        eff_air_anneal = (
+            air_anneal if air_anneal is not None else defaults.airborne_curriculum_anneal_fraction
+        )
+        if eff_air_warmup > eff_air_anneal:
+            raise ConfigError(
+                "train config: airborne curriculum warmup runs past the anneal window: require "
+                f"airborne_curriculum_warmup_fraction <= airborne_curriculum_anneal_fraction, got "
+                f"effective warmup={eff_air_warmup} and anneal={eff_air_anneal}. The airborne "
+                "warmup is a HOLD/start-delay (spawn stays airborne through it), and its default "
+                f"is {defaults.airborne_curriculum_warmup_fraction}; if you lower "
+                "airborne_curriculum_anneal_fraction, lower the warmup_fraction too."
+            )
+        col_hold = resolved.get("collision_curriculum_hold_fraction")
+        col_warmup = resolved.get("collision_penalty_warmup_fraction")
+        eff_col_hold = (
+            col_hold if col_hold is not None else defaults.collision_curriculum_hold_fraction
+        )
+        eff_col_warmup = (
+            col_warmup if col_warmup is not None else defaults.collision_curriculum_warmup_fraction
+        )
+        if eff_col_hold + eff_col_warmup > 1.0:
+            raise ConfigError(
+                "train config: collision curriculum hold + ramp exceeds the run: require "
+                "collision_curriculum_hold_fraction + collision_penalty_warmup_fraction <= 1, got "
+                f"effective hold={eff_col_hold} and warmup(ramp)={eff_col_warmup}."
+            )
 
 
 @dataclass(frozen=True)
