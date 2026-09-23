@@ -371,12 +371,14 @@ class RaceEnv(gym.Env):
         # can stamp meta.dynamics. Assignment only — no behaviour / RNG effect.
         self._active_dynamics = dynamics
 
-        # UC-57: resolve command latency to whole steps at the active dt, combining the standing
-        # ``command_latency_ms`` (Hz-invariant) with the per-episode domain-randomized latency
-        # (``dynamics.latency_steps``, in BASELINE 20 Hz steps; 0 when randomization is off) in a
-        # SINGLE round. The env owns this resolution and forwards the integer to the adapter — the
-        # adapter no longer reads ``dynamics.latency_steps`` itself. At the 20 Hz baseline with the
-        # default latency this is 0 ⇒ byte-identical.
+        # UC-57: resolve command latency to whole steps at the POLICY ``dt`` (NOT ``inner_dt``):
+        # the CTBR stream updates at the policy rate and the FIFO sits UPSTREAM of the UC-55 inner
+        # rate loop, so latency is counted in policy steps (100 ms → 2 @20 Hz, 5 @50 Hz). This is
+        # the SINGLE authoritative resolution site: it combines the standing ``command_latency_ms``
+        # (Hz-invariant) with the per-episode domain-randomized latency (``dynamics.latency_steps``,
+        # in BASELINE 20 Hz steps; 0 when randomization is off) in ONE round, and forwards the
+        # integer to BOTH backends — neither adapter reads ``dynamics.latency_steps`` itself, so the
+        # two never diverge. At the 20 Hz baseline with the default latency this is 0 (byte-ident).
         resolved_latency = resolve_latency_steps(
             self.config.episode.dt,
             command_latency_ms=self.config.episode.command_latency_ms,

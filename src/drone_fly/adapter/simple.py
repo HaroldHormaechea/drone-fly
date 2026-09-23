@@ -221,8 +221,12 @@ class SimpleDroneAdapter(DroneAdapter):
         self._battery = 1.0
         # UC-19: reset integrity to full. Harmless when disabled (never read/mutated thereafter).
         self._integrity = 1.0
-        # Prime the control-latency buffer with warm-up hover actions so real commands are
-        # delayed by exactly ``_latency`` steps. Empty (and never touched) when latency == 0.
+        # Prime the control-latency buffer with warm-up hover actions so real commands are delayed
+        # by exactly ``_latency`` steps. Empty (and never touched) when latency == 0. UC-57:
+        # ``_latency`` is the env-resolved POLICY-step count (from the single
+        # ``resolve_latency_steps`` site), NOT the raw sampled ``dynamics.latency_steps`` — so at
+        # 50 Hz a 100 ms latency is 5 policy steps and the simple + pybullet FIFOs stay in lockstep
+        # (at dt=0.05 / 0 ms == the sampled int).
         self._action_queue = deque()
         if self._latency > 0:
             warm = sanitize_action(_WARMUP_ACTION)
