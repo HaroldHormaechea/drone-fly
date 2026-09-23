@@ -53,6 +53,12 @@ _MAX_REDRAW_FAILURES = 3
 #: Minimum wall-clock gap between redraw-failure warnings, so a persistent error can't re-flood
 #: the logs and re-introduce the AC-4 spam (E).
 _REDRAW_WARN_INTERVAL = 30.0
+#: UC-52: minimum wall-clock gap between optimize-phase redraws — a dedicated ~1 Hz throttle,
+#: deliberately DISTINCT from the collection heartbeat's ``_HEARTBEAT_MIN_INTERVAL`` (0.25 s,
+#: unchanged) so the optimize loop redraws ~4× less often (the counter mutation stays unconditional
+#: and cheap; only the Rich rebuild is gated). ``begin_optimize`` / ``end_optimize`` bypass the
+#: gate so phase transitions and the first tick are never delayed (AC-3).
+_OPTIMIZE_MIN_INTERVAL = 1.0
 
 
 class TrainingDashboard:
@@ -91,6 +97,11 @@ class TrainingDashboard:
         #: Injectable clocks for the Windows refresh timer (hermetic tests, AC-11).
         self._now = now if now is not None else time.monotonic
         self._sleep = sleep if sleep is not None else time.sleep
+        #: UC-52: timestamp (via ``self._now``) of the last optimize-phase redraw, gating the Rich
+        #: rebuild to ~1 Hz in :meth:`tick_optimize`. ``None`` forces the next tick to redraw at
+        #: once; ``begin_optimize`` / ``end_optimize`` reset it to ``None`` so a phase transition
+        #: and the first post-begin tick redraw immediately (AC-3).
+        self._last_optimize_redraw: float | None = None
 
         # Windows-only state (created in _start when on win32; all no-ops elsewhere).
         self._is_win = False
@@ -129,6 +140,62 @@ class TrainingDashboard:
                 self.model.set_drone_dynamics(summary)
         except Exception as exc:  # noqa: BLE001 - a consumer must not crash training
             logger.warning("dashboard set_drone_dynamics failed: %s", exc)
+
+    # -- optimize-phase sink (UC-52), lock-guarded; never raises into PPO.train() -----------
+
+    def begin_optimize(self, n_epochs, total_minibatches) -> None:
+        """Enter the optimize phase: record ``N``/``M``, reset the 1 Hz gate, redraw at once."""
+        try:
+            with self._lock:
+                self.model.begin_optimize(n_epochs, total_minibatches)
+                self._last_optimize_redraw = None
+                self._redraw_locked()
+        except Exception as exc:  # noqa: BLE001 - a sink glitch must never perturb training
+            logger.warning("dashboard begin_optimize failed: %s", exc)
+
+    def tick_optimize(self, epoch, minibatch) -> None:
+        """Record optimize progress, redrawing at most once per :data:`_OPTIMIZE_MIN_INTERVAL`.
+
+        The counter mutation is unconditional and cheap; only the Rich rebuild is gated (via the
+        injectable ``self._now``), so a fast minibatch loop can't flood the terminal. The first
+        tick after :meth:`begin_optimize` (gate ``None``) always redraws.
+        """
+        try:
+            with self._lock:
+                self.model.tick_optimize(epoch, minibatch)
+                now = self._now()
+                last = self._last_optimize_redraw
+                if last is None or (now - last) >= _OPTIMIZE_MIN_INTERVAL:
+                    self._last_optimize_redraw = now
+                    self._redraw_locked()
+        except Exception as exc:  # noqa: BLE001 - a sink glitch must never perturb training
+            logger.warning("dashboard tick_optimize failed: %s", exc)
+
+    def end_optimize(self) -> None:
+        """Leave the optimize phase: reset the gate and redraw the final (100%) frame at once."""
+        try:
+            with self._lock:
+                self.model.end_optimize()
+                self._last_optimize_redraw = None
+                self._redraw_locked()
+        except Exception as exc:  # noqa: BLE001 - a sink glitch must never perturb training
+            logger.warning("dashboard end_optimize failed: %s", exc)
+
+    def set_collect_duration(self, seconds) -> None:
+        """Record the rollout-collection wall-clock (UC-52). Mutates only — no redraw."""
+        try:
+            with self._lock:
+                self.model.set_collect_duration(seconds)
+        except Exception as exc:  # noqa: BLE001 - a sink glitch must never perturb training
+            logger.warning("dashboard set_collect_duration failed: %s", exc)
+
+    def set_optimize_duration(self, seconds) -> None:
+        """Record the optimize-phase wall-clock (UC-52). Mutates only — no redraw."""
+        try:
+            with self._lock:
+                self.model.set_optimize_duration(seconds)
+        except Exception as exc:  # noqa: BLE001 - a sink glitch must never perturb training
+            logger.warning("dashboard set_optimize_duration failed: %s", exc)
 
     # -- callback-facing, lock-guarded mutation+redraw (UC-32) -----------------------------
 

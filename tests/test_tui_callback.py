@@ -252,6 +252,14 @@ class _RealModelDashboard:
         self.model.update(**kwargs)
         self.redraws += 1
 
+    def set_collect_duration(self, seconds) -> None:
+        # UC-52: _on_rollout_end feeds the collect wall-clock; mirror production (mutate only).
+        self.model.set_collect_duration(seconds)
+
+    def set_optimize_duration(self, seconds) -> None:
+        # UC-52: the optimize wall-clock is fed by ProgressReportingPPO.train() in production.
+        self.model.set_optimize_duration(seconds)
+
     def redraw(self) -> None:
         self.redraws += 1
 

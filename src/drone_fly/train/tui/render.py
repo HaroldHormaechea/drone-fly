@@ -113,6 +113,14 @@ def build_values_panel(model: M.DashboardModel) -> Panel:
     time_col.append(f" steps   {cur_steps:,} / {total_steps:,}\n")
     time_col.append(f" elapsed {M.format_duration(model.elapsed_seconds)}\n")
     time_col.append(f" eta     {M.format_duration(model.eta_seconds())}\n")
+    # UC-52: per-iteration collect-vs-optimize wall-clock split, so the operator sees where each
+    # iteration's time goes (on the large connectome actor the optimize phase dominates). Each
+    # duration is ``—`` until first observed; the percentage is the optimize share of the total.
+    collect_s, optimize_s, optimize_frac = model.phase_split()
+    time_col.append(
+        f" split   c {M.format_duration(collect_s)} · o {M.format_duration(optimize_s)} "
+        f"({M.format_pct(optimize_frac)})\n"
+    )
     # UC-26 AC-11: resolved rollout parallelism (worker count + active backend), e.g.
     # " envs  8 (subproc)" — the value shown is the RESOLVED one, not the raw config input.
     time_col.append(f" envs    {model.n_envs} ({model.backend})")
@@ -175,7 +183,32 @@ def build_trends_panel(model: M.DashboardModel) -> Panel:
     collecting.add_column(justify="right")
     collecting.add_row(collecting_bar, f"collecting {rcur}/{rtgt} ({M.format_pct(rfrac)})")
 
-    body = Group(table, Text("iterations", style="bold"), prog, collecting)
+    # UC-52: the optimize-phase bar, directly below the collecting bar — the region that is
+    # currently frozen at ``collecting 100%`` while ``PPO.train()`` runs. Cumulative fraction is
+    # ``(epoch*M + minibatch)/(N*M)``; the epoch/minibatch text is clamped with ``min`` so a
+    # divergent buffer shape can never render e.g. ``33/32`` (AC-7). Before the first tick / when
+    # not optimizing it degrades to an empty bar + a placeholder label (never raises).
+    ocur, ototal, ofrac = model.optimize_progress()
+    ototal_bar = max(ototal, 1)
+    optimizing_bar = ProgressBar(total=ototal_bar, completed=min(ocur, ototal_bar))
+    n_epochs = model.optimize_total_epochs
+    n_minibatches = model.optimize_total_minibatches
+    if model.is_optimizing and n_epochs > 0 and n_minibatches > 0:
+        # ``optimize_epoch`` is 0-based; show it 1-based ("epoch 1/N") for a natural read.
+        epoch_disp = min(model.optimize_epoch + 1, n_epochs)
+        minibatch_disp = min(model.optimize_minibatch, n_minibatches)
+        optimizing_label = (
+            f"optimizing epoch {epoch_disp}/{n_epochs} · "
+            f"minibatch {minibatch_disp}/{n_minibatches} ({M.format_pct(ofrac)})"
+        )
+    else:
+        optimizing_label = "optimizing —"
+    optimizing = Table.grid(expand=True, padding=(0, 1))
+    optimizing.add_column()
+    optimizing.add_column(justify="right")
+    optimizing.add_row(optimizing_bar, optimizing_label)
+
+    body = Group(table, Text("iterations", style="bold"), prog, collecting, optimizing)
     return Panel(body, title="TRENDS", border_style="cyan")
 
 
@@ -270,9 +303,10 @@ def build_layout(
         # UC-49 AC2: new drone-dynamics top segment. size=4 = 2 content rows (six fields laid out
         # 3 columns × 2 rows) + the panel's 2 border rows, so nothing clips on a normal terminal.
         Layout(build_drone_panel(model), name="drone", size=4),
-        # size=8: 6 TIME-column content lines (UC-32 added the steps line) + the panel's 2 border
-        # rows. Bumped from 7 so the extra steps line isn't clipped.
-        Layout(build_values_panel(model), name="values", size=8),
+        # size=9: 7 TIME-column content lines (UC-52 added the collect/optimize split line, on top
+        # of UC-32's steps line) + the panel's 2 border rows. Bumped from 8 so the split isn't
+        # clipped.
+        Layout(build_values_panel(model), name="values", size=9),
         Layout(build_trends_panel(model), name="trends", ratio=1),
     )
     layout["logs"].update(build_logs_panel(log_lines))
