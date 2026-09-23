@@ -369,8 +369,9 @@ def train(
         :class:`~drone_fly.train.tui.callback.TuiCallback` is appended after it, and
         ``model.learn`` runs inside the dashboard's live session.
     """
-    from stable_baselines3 import PPO
     from stable_baselines3.common.callbacks import CheckpointCallback
+
+    from drone_fly.train.progress_ppo import ProgressReportingPPO
 
     cfg = cfg or TrainConfig()
     steps = total_timesteps if total_timesteps is not None else cfg.total_timesteps
@@ -490,10 +491,10 @@ def train(
 
     if resuming:
         logger.info("Resuming from checkpoint %s (reset_num_timesteps=False).", resume)
-        model = PPO.load(resume, env=venv, device=resolved_device)
+        model = ProgressReportingPPO.load(resume, env=venv, device=resolved_device)
         model.set_env(venv)
     else:
-        model = PPO(
+        model = ProgressReportingPPO(
             "MlpPolicy",
             venv,
             learning_rate=cfg.learning_rate,
@@ -534,6 +535,12 @@ def train(
             # on Windows so it no longer pollutes the screen (AC-7).
             logs_dir=cfg.logs_dir,
         )
+        # UC-52: attach the dashboard as the optimize-phase progress sink so PPO.train()'s
+        # otherwise-hookless gradient loop reports epoch/minibatch progress + its wall-clock to
+        # the TUI. Attached ONLY when the TUI is active; on --no-tui / non-TTY / smoke / a resume
+        # before this point the sink stays unattached and ProgressReportingPPO.train() is
+        # byte-identical to plain PPO (AC-4/AC-8).
+        model.attach_progress_sink(dashboard)
 
     checkpoint_cb = CheckpointCallback(
         save_freq=max(cfg.checkpoint_freq // max(resolved_n_envs, 1), 1),
