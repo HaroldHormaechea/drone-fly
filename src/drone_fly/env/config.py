@@ -29,6 +29,7 @@ import numpy as np
 from drone_fly.adapter.meteor75 import METEOR75_ARM, METEOR75_TW
 from drone_fly.adapter.rate_controller import RateControllerConfig
 from drone_fly.env.obstacles import OBSTACLE_VISION_K
+from drone_fly.env.timing import BASELINE_DT
 
 
 @dataclass(frozen=True)
@@ -762,7 +763,7 @@ class EpisodeConfig:
     ``max_steps`` floor (400) exactly while longer courses get proportionally more time.
     """
 
-    dt: float = 0.05  # control timestep (s) -> 20 Hz
+    dt: float = BASELINE_DT  # control timestep (s) -> 20 Hz baseline (single source in env.timing)
     max_steps: int = 400  # base/floor timeout for a 1-gate course (400 * 0.05s = 20s)
     steps_per_gate: int = 200  # extra step budget granted per gate beyond the first (UC-09)
     # UC-18: extra step budget granted **per rechargeable pad** on the active course, so a
@@ -779,6 +780,24 @@ class EpisodeConfig:
     # budget and ``EpisodeConfig()`` stays byte-identical (AC1). Appended **last** so field order
     # stays UC-18-compatible. Tunable.
     repair_step_allowance: int = 400
+    # UC-57: policy/inner-loop rate decoupling. Appended **last** (after ``repair_step_allowance``)
+    # with byte-identical defaults so every positional/keyword ``EpisodeConfig`` construction is
+    # unshifted and ``EpisodeConfig()`` reduces to the 20 Hz baseline exactly. ``dt`` (above) stays
+    # the authoritative control timestep; the friendly ``control_hz`` YAML knob is converted to
+    # ``dt`` at the run/CLI layer (see :func:`drone_fly.cli._apply_control_rate`), where the RUN
+    # default is 50 Hz — the dataclass stays 20 Hz to preserve the byte-identity culture.
+    #
+    # ``physics_ratio`` is the integer decoupling factor (≥ 1): the UC-55 body-rate PID + pybullet
+    # physics run ``physics_ratio`` inner ticks per policy step, i.e. at ``control_hz ×
+    # physics_ratio`` (pybullet-only — the simple backend integrates at the policy ``dt``, a
+    # deliberate CI-hermeticity scope decision). Default 1 ⇒ single inner tick ⇒ byte-identical.
+    physics_ratio: int = 1
+    # ``command_latency_ms`` is the standing command latency in MILLISECONDS (Hz-invariant): the env
+    # converts it to whole steps at the active ``dt`` via
+    # :func:`drone_fly.env.timing.resolve_latency_steps` (a 100 ms command reproduces the historical
+    # 2-step latency at 20 Hz). Default 0.0 ⇒ no latency buffer ⇒ byte-identical; the UC-57 run
+    # layer also keeps the default 0.0 (AC4 is a conversion property, not a forced 100 ms default).
+    command_latency_ms: float = 0.0
 
 
 @dataclass(frozen=True)

@@ -44,6 +44,7 @@ from drone_fly.env.obstacles import (
 )
 from drone_fly.env.randomization import sample_course, sample_dynamics
 from drone_fly.env.reward import compute_reward
+from drone_fly.env.timing import BASELINE_DT, resolve_latency_steps, scale_step_budget
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,15 @@ class RaceEnv(gym.Env):
         # (byte-identical to UC-18) and the observation width is unchanged.
         self._damage_enabled = bool(self.config.damage.enabled)
 
+        # UC-57: standing command-latency resolved to whole steps at the active dt (sampled=0 here —
+        # the per-episode domain-randomized component, if any, is combined and re-forwarded via
+        # ``reconfigure`` in ``reset``). Covers the no-``reconfigure`` path (floor_start off + no
+        # randomization) so a fixed-course run with a nonzero ``command_latency_ms`` still buffers.
+        standing_latency = resolve_latency_steps(
+            self.config.episode.dt,
+            command_latency_ms=self.config.episode.command_latency_ms,
+            sampled_latency_steps_baseline=0,
+        )
         self.adapter = make_adapter(
             adapter,
             course.start,
@@ -89,6 +99,11 @@ class RaceEnv(gym.Env):
             damage=self.config.damage if self._damage_enabled else None,
             tw_preserving=self.config.pybullet_tw_preserving,
             rate_controller=self.config.rate_controller,
+            # UC-57: policy/inner-loop decoupling (pybullet-only inner loop) + the resolved standing
+            # command-latency FIFO depth (both backends). ``physics_ratio == 1`` + latency 0 keep
+            # every existing construction byte-identical.
+            physics_ratio=self.config.episode.physics_ratio,
+            command_latency_steps=standing_latency,
         )
         self.backend = self.adapter.backend
 
@@ -356,20 +371,41 @@ class RaceEnv(gym.Env):
         # can stamp meta.dynamics. Assignment only — no behaviour / RNG effect.
         self._active_dynamics = dynamics
 
+        # UC-57: resolve command latency to whole steps at the active dt, combining the standing
+        # ``command_latency_ms`` (Hz-invariant) with the per-episode domain-randomized latency
+        # (``dynamics.latency_steps``, in BASELINE 20 Hz steps; 0 when randomization is off) in a
+        # SINGLE round. The env owns this resolution and forwards the integer to the adapter — the
+        # adapter no longer reads ``dynamics.latency_steps`` itself. At the 20 Hz baseline with the
+        # default latency this is 0 ⇒ byte-identical.
+        resolved_latency = resolve_latency_steps(
+            self.config.episode.dt,
+            command_latency_ms=self.config.episode.command_latency_ms,
+            sampled_latency_steps_baseline=(dynamics.latency_steps if dynamics is not None else 0),
+        )
+
         # Apply the per-episode spawn / dynamics before the adapter reset. When every axis is off
         # we skip the call entirely (not even a no-op reconfigure) so the fixed path is byte-
         # identical and never depends on the adapter implementing the hook — a scripted test-double
         # adapter without reconfigure() still works unchanged (AC7). UC-37: ``floor_start`` also
         # requires a reconfigure so the floored spawn z reaches the adapter even on the
         # randomization-off / seed-42 path; the ``hasattr`` guard stays load-bearing (the scripted
-        # ``_ScriptedAdapter`` has no ``reconfigure``).
-        need_reconfigure = rcfg.enable_course or rcfg.enable_dynamics or self.config.floor_start
+        # ``_ScriptedAdapter`` has no ``reconfigure``). UC-57: a nonzero resolved latency also
+        # forces a reconfigure so the converted FIFO depth reaches the adapter without floor_start /
+        # randomization (redundant with the construction-time standing latency, but keeps the
+        # per-episode combined value authoritative when randomization samples latency).
+        need_reconfigure = (
+            rcfg.enable_course
+            or rcfg.enable_dynamics
+            or self.config.floor_start
+            or resolved_latency > 0
+        )
         if need_reconfigure and hasattr(self.adapter, "reconfigure"):
             self.adapter.reconfigure(
                 start=(
                     self._course.start if (rcfg.enable_course or self.config.floor_start) else None
                 ),
                 dynamics=dynamics,
+                latency_steps=resolved_latency,
             )
 
         state = self.adapter.reset(seed=seed)
@@ -403,14 +439,19 @@ class RaceEnv(gym.Env):
         # Effective step budget scales with the active course's gate count (UC-09): a longer
         # course gets proportionally more time so it stays completable. N=1 => 400 exactly.
         episode = self.config.episode
-        self._max_steps = episode.max_steps + episode.steps_per_gate * (self._course.num_gates - 1)
+        # Compose the whole BASELINE (20 Hz) step budget first, then scale it ONCE to the active
+        # control rate (UC-57 AC3). Composing-then-scaling (rather than scaling each addend) keeps a
+        # single ``round`` so the episode-seconds invariant holds exactly and no per-addend rounding
+        # drift accumulates. At the 20 Hz baseline (dt == BASELINE_DT) ``scale_step_budget`` is the
+        # identity, so N=1 => 400 exactly and every pre-UC-57 budget is byte-identical.
+        baseline_budget = episode.max_steps + episode.steps_per_gate * (self._course.num_gates - 1)
         # UC-18: grant extra budget per **rechargeable** pad so a legitimate recharge detour
         # (descend + dwell-to-full + climb-out) can still finish within the timeout — the UC-16
         # "dwell consumes the step budget" pitfall. Added ONLY when ≥1 rechargeable pad is on the
         # active course, so a no-recharge course keeps the exact UC-09 budget (byte-identical, AC5).
         num_recharge_pads = sum(1 for pad in self._course.pads if pad.rechargeable)
         if num_recharge_pads > 0:
-            self._max_steps += episode.recharge_step_allowance * num_recharge_pads
+            baseline_budget += episode.recharge_step_allowance * num_recharge_pads
         # UC-19: symmetric budget for a legitimate **repair** detour (descend + dwell-to-restore +
         # climb-out). Added ONLY when ≥1 repairable pad is on the active course, so a no-repair
         # course keeps the exact UC-09/18 budget (byte-identical, AC1). Independent of the recharge
@@ -418,7 +459,10 @@ class RaceEnv(gym.Env):
         # be needed).
         num_repair_pads = sum(1 for pad in self._course.pads if pad.repairable)
         if num_repair_pads > 0:
-            self._max_steps += episode.repair_step_allowance * num_repair_pads
+            baseline_budget += episode.repair_step_allowance * num_repair_pads
+        # UC-57 AC3: scale the composed baseline budget to the active rate so episode SECONDS are
+        # invariant to the control-Hz change (identity at 20 Hz; ×2.5 at 50 Hz → 400 → 1000).
+        self._max_steps = scale_step_budget(baseline_budget, episode.dt)
         info = {
             "phase": self._phase_str(),
             "backend": self.backend,
@@ -689,6 +733,10 @@ class RaceEnv(gym.Env):
             # otherwise, so this call is byte-identical at runtime with the feature off.
             target_height_above_floor_prev=target_h_prev,
             target_height_above_floor_curr=target_h_curr,
+            # UC-57: scale the two rate/time-extensive terms (time_penalty + graded airborne bonus)
+            # by dt/BASELINE_DT so their per-episode integral is invariant to the control-Hz change
+            # (= 1.0 at the 20 Hz baseline ⇒ byte-identical; 0.4 at 50 Hz).
+            per_step_scale=self.config.episode.dt / BASELINE_DT,
         )
 
         # UC-16/UC-25/UC-38: a dock does NOT terminate. An episode ends on a valid completion, a

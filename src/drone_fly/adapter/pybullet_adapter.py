@@ -19,6 +19,7 @@ the owner's macOS M4, not in the hermetic Linux CI sandbox.
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -32,7 +33,13 @@ from drone_fly.adapter.meteor75 import (
     motor_position_inertia,
 )
 from drone_fly.adapter.rate_controller import RateController, RateControllerConfig
-from drone_fly.adapter.simple import BASE_MASS
+from drone_fly.adapter.simple import _WARMUP_ACTION, BASE_MASS
+
+# NOTE: the UC-57 timing helpers (``pybullet_freqs`` / ``inner_dt`` / ``iteration_count``) live in
+# ``drone_fly.env.timing`` and are imported LAZILY inside the sim-path methods below — never at
+# module top — so importing this module (e.g. to unit-test the pure ``run_inner_control_loop`` /
+# ``ctbr_to_rpm`` helpers) stays light and never drags the whole ``drone_fly.env`` package (nor
+# inverts the adapter-below-env layering at import time). ``env.timing`` itself is a pure leaf.
 
 #: CF2X rigid-body reference constants (UC-48). Documented here so the T/W-preservation
 #: logic is a **pure, hermetic** computation that CI can assert without importing pybullet.
@@ -246,6 +253,61 @@ def ctbr_to_rpm(
     )
 
 
+def run_inner_control_loop(
+    action: np.ndarray,
+    *,
+    iterations: int,
+    inner_dt: float,
+    hover_rpm: float,
+    max_rpm: float,
+    rate_config: RateControllerConfig,
+    rate_controller: RateController,
+    read_gyro,
+    step_physics,
+):
+    """Run ``iterations`` inner control ticks for ONE policy action (UC-57 AC2, decoupled rates).
+
+    This is the pure, **hermetically testable** core of the pybullet step: the connectome policy
+    decides once (the single ``action``), then the UC-55 body-rate PID + physics advance
+    ``iterations`` (== ``physics_ratio``) times at the higher inner rate. It is written against two
+    injected callables so the decoupling ratio and the per-tick PID ``dt`` can be asserted with
+    fakes — no simulator (the class ``step`` wires the real pybullet reads/steps; this function is
+    NOT ``pragma: no cover``):
+
+    * ``read_gyro() -> ndarray`` — the ACHIEVED body rate (rad/s, ``[roll, pitch, yaw]``) sampled
+      fresh BEFORE each inner physics tick (the pybullet gyro ``raw[13:16]``). The loop closes on it
+      every tick, so the PID regulates at the inner rate.
+    * ``step_physics(rpm) -> (DroneState, bool)`` — advance the plant one inner tick with the mixed
+      per-rotor ``rpm`` and return the new state plus whether it collided on THIS tick.
+
+    The held CTBR command is mapped to a body-rate setpoint ONCE (it is constant across the inner
+    ticks — the policy's decision rate is ``control_hz``); each tick reads the gyro, runs the PID at
+    ``inner_dt``, mixes to RPM, and steps physics. **Collision is OR-latched across the ticks and
+    the loop breaks on the first collided tick, returning THAT tick's state** — so the env's
+    ``(prev_z − curr_z)/dt`` crash-speed proxy and the UC-16 dock / UC-53 crash classifiers stay
+    meaningful (they see the contact instant, not a post-contact settled pose). Throttle (index 0)
+    passes through untouched into the mixer, exactly as the single-tick UC-55 path did.
+
+    At ``iterations == 1`` and ``inner_dt == dt`` this is byte-identical to the pre-UC-57 single
+    physics tick: one gyro read, one PID update at ``dt``, one ``mix_to_rpm``, one physics step.
+    """
+    a = sanitize_action(action)
+    # Command → body-rate setpoint ONCE per policy action (held across the inner ticks): the policy
+    # decides at ``control_hz``, only the inner PID/physics run faster.
+    setpoint = rate_config.command_to_setpoint(a[1:4], rate_config.max_body_rate)
+    state = None
+    collided = False
+    for _ in range(int(iterations)):
+        measured_rate = read_gyro()
+        effort = rate_controller.update(setpoint, measured_rate, inner_dt)
+        rpm = mix_to_rpm(a[0], effort, hover_rpm=hover_rpm, max_rpm=max_rpm)
+        state, tick_collided = step_physics(rpm)
+        if tick_collided:
+            collided = True
+            break
+    return state, collided
+
+
 def load_pybullet_drones():
     """Guarded import of the pybullet sim; raise an actionable error if absent.
 
@@ -297,11 +359,24 @@ class PyBulletAdapter(DroneAdapter):
         damage=None,
         tw_preserving: bool = True,
         rate_controller: RateControllerConfig | None = None,
+        physics_ratio: int = 1,
+        command_latency_steps: int = 0,
     ) -> None:  # pragma: no cover - requires the sim; verified on the owner's macOS M4
         self._start = np.asarray(start_position, dtype=np.float64).reshape(3).copy()
         self._floor_z = float(floor_z)
         self._ceiling_z = float(ceiling_z)
         self._dt = float(dt)
+        # UC-57: integer policy/inner-loop decoupling factor (≥ 1). The rate PID + physics run
+        # ``physics_ratio`` inner ticks per policy step (at ``control_hz × physics_ratio``); the
+        # CtrlAviary ``ctrl_freq`` is set to that inner rate in ``_build_env``. Default 1 ⇒ one
+        # inner tick ⇒ byte-identical to the pre-UC-57 single-step path.
+        self._physics_ratio = max(1, int(physics_ratio))
+        # UC-57: command-latency FIFO depth in whole steps at the active rate — the env-resolved
+        # standing value (``command_latency_ms`` converted; per-episode combined value re-forwarded
+        # via ``reconfigure``). Branch A: the FIFO buffers the incoming CTBR action UPSTREAM of the
+        # rate loop (real RC→FC ordering). Default 0 ⇒ no buffer ⇒ byte-identical.
+        self._latency = int(command_latency_steps)
+        self._action_queue: deque[np.ndarray] = deque()
         # UC-48: when True (default) domain-randomized mass is applied T/W-preservingly on the
         # CF2X body (reinterpreted as a CF2X-relative multiplier, RPM band scaled with it) so a
         # heavier drone keeps a flyable thrust-to-weight; False restores the pre-UC-48 degenerate
@@ -333,7 +408,9 @@ class PyBulletAdapter(DroneAdapter):
         self._native_max_rpm = 0.0
         self._pending_dynamics = None
 
-    def reconfigure(self, *, start=None, dynamics=None) -> None:  # pragma: no cover - sim path
+    def reconfigure(
+        self, *, start=None, dynamics=None, latency_steps=None
+    ) -> None:  # pragma: no cover - sim path
         """Best-effort per-episode reconfiguration on the sim backend (UC-08 AC5).
 
         ``start`` updates the spawn used at the next ``_build_env`` (forcing a rebuild so
@@ -341,6 +418,12 @@ class PyBulletAdapter(DroneAdapter):
         drone's rigid body after the env exists. This path is **not asserted** by the
         hermetic suite — the ``SimpleDroneAdapter`` carries the tested reconfigure contract;
         here mass/drag are applied on a best-effort basis and documented as such.
+
+        UC-57: ``latency_steps`` is the env-resolved command-latency FIFO depth in whole steps at
+        the active rate (``command_latency_ms`` + any sampled baseline latency, converted in one
+        round by :func:`drone_fly.env.timing.resolve_latency_steps`). Set ONLY from this argument —
+        this backend, like the numpy one, no longer reads ``dynamics.latency_steps``; ``None``
+        leaves the construction-time standing value untouched.
         """
         if start is not None:
             self._start = np.asarray(start, dtype=np.float64).reshape(3).copy()
@@ -350,6 +433,8 @@ class PyBulletAdapter(DroneAdapter):
         if dynamics is not None:
             self._pending_dynamics = dynamics
             self._apply_dynamics()
+        if latency_steps is not None:
+            self._latency = int(latency_steps)
 
     def _apply_dynamics(self) -> None:  # pragma: no cover - sim path
         """Apply the sampled Meteor75-envelope dynamics to the pybullet body (UC-48/UC-56).
@@ -408,13 +493,22 @@ class PyBulletAdapter(DroneAdapter):
             pass
 
     def _build_env(self):  # pragma: no cover - sim path
-        ctrl_freq = int(round(1.0 / self._dt))
+        # UC-57: the CtrlAviary runs at the INNER rate (``control_hz × physics_ratio``) so each
+        # ``env.step`` is one inner tick; the adapter runs ``physics_ratio`` such ticks per policy
+        # step. ``pybullet_freqs`` sizes ctrl/pyb so pyb_freq is always an integer multiple of
+        # ctrl_freq (fixes the latent ``max(ctrl_freq*4, 240)`` divisibility bug) while staying
+        # ≥ 240 and ≥ 4×ctrl. At (dt=0.05, ratio=1) → ctrl 20 / pyb 240 → byte-identical to today.
+        from drone_fly.env.timing import hz_from_dt, pybullet_freqs
+
+        ctrl_freq, pyb_freq, _pyb_multiplier = pybullet_freqs(
+            hz_from_dt(self._dt), self._physics_ratio
+        )
         env = self._CtrlAviary(
             drone_model=self._DroneModel.CF2X,
             num_drones=1,
             initial_xyzs=self._start.reshape(1, 3),
             physics=self._Physics.PYB,
-            pyb_freq=max(ctrl_freq * 4, 240),
+            pyb_freq=pyb_freq,
             ctrl_freq=ctrl_freq,
             gui=False,
         )
@@ -470,6 +564,14 @@ class PyBulletAdapter(DroneAdapter):
         self._env.reset(seed=seed)
         self._apply_dynamics()  # best-effort mass/drag on the freshly-built body (UC-08)
         self._rate_controller.reset()  # UC-55: clear the inner-loop integrator/prev-error state
+        # UC-57: prime the command-latency FIFO with warm-up hover actions so real commands are
+        # delayed by exactly ``_latency`` steps (mirrors the SimpleDroneAdapter idiom, shared
+        # ``_WARMUP_ACTION`` = exact hover). Empty (and never touched) when latency == 0.
+        self._action_queue = deque()
+        if self._latency > 0:
+            warm = sanitize_action(_WARMUP_ACTION)
+            for _ in range(self._latency):
+                self._action_queue.append(warm)
         return self._read_state(
             self._start[2] <= self._floor_z or self._start[2] >= self._ceiling_z
         )
@@ -477,22 +579,42 @@ class PyBulletAdapter(DroneAdapter):
     def step(self, action: np.ndarray) -> DroneState:  # pragma: no cover - sim path
         if self._env is None:
             self._env = self._build_env()
-        # UC-55 inner-loop rate control. (1) clip to the canonical CTBR box; (2) read the ACHIEVED
-        # body rate (body-frame ``raw[13:16]``) BEFORE stepping — the loop closes on the rate
-        # entering this step (from rest the first read is 0, giving the AC4 byte-identity
-        # reference); (3) map the normalized rpy command to a body-rate setpoint via the (swappable)
-        # curve hook, clamped to ``max_body_rate``; (4) run the PID to a per-axis normalized effort
-        # in [-1,1]; (5) feed that effort — with the SAME sign convention the open-loop command
-        # used — into the pure mixer. Throttle (index 0) passes through untouched.
+        from drone_fly.env.timing import inner_dt, iteration_count
+
+        # UC-57 Branch A: command-latency FIFO UPSTREAM of the rate loop (real RC→FC ordering) —
+        # enqueue the fresh command, apply the oldest pending one. Skipped entirely (bit-identical
+        # to UC-55) when latency == 0.
         a = sanitize_action(action)
-        measured_rate = np.asarray(self._env._getDroneStateVector(0)[13:16], dtype=np.float64)
-        setpoint = self._rate_config.command_to_setpoint(a[1:4], self._rate_config.max_body_rate)
-        effort = self._rate_controller.update(setpoint, measured_rate, self._dt)
-        rpm = mix_to_rpm(a[0], effort, hover_rpm=self._hover_rpm, max_rpm=self._max_rpm)
-        self._env.step(rpm.reshape(1, 4))
-        state = self._read_state(False)
-        z = state.position[2]
-        collided = z <= self._floor_z or z >= self._ceiling_z
+        if self._latency > 0:
+            self._action_queue.append(a)
+            a = self._action_queue.popleft()
+
+        # UC-57 decoupled inner loop. The policy decided once (``a``); the UC-55 rate PID + physics
+        # advance ``physics_ratio`` inner ticks at ``inner_dt = dt / physics_ratio``. Each tick
+        # reads the ACHIEVED body rate (``raw[13:16]``) fresh, runs the PID, mixes to RPM, steps one
+        # inner physics tick. Collision is OR-latched and the loop breaks on the first collided tick
+        # returning THAT tick's state (crash-speed proxy + dock/crash classifiers stay meaningful).
+        # At physics_ratio == 1 and inner_dt == dt this is byte-identical to the UC-55 single tick.
+        def _read_gyro() -> np.ndarray:
+            return np.asarray(self._env._getDroneStateVector(0)[13:16], dtype=np.float64)
+
+        def _step_physics(rpm: np.ndarray) -> tuple[DroneState, bool]:
+            self._env.step(rpm.reshape(1, 4))
+            tick_state = self._read_state(False)
+            z = tick_state.position[2]
+            return tick_state, bool(z <= self._floor_z or z >= self._ceiling_z)
+
+        state, collided = run_inner_control_loop(
+            a,
+            iterations=iteration_count(self._physics_ratio),
+            inner_dt=inner_dt(self._dt, self._physics_ratio),
+            hover_rpm=self._hover_rpm,
+            max_rpm=self._max_rpm,
+            rate_config=self._rate_config,
+            rate_controller=self._rate_controller,
+            read_gyro=_read_gyro,
+            step_physics=_step_physics,
+        )
         if collided:
             state = DroneState(
                 position=state.position,

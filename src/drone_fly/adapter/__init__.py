@@ -42,6 +42,8 @@ def make_adapter(
     damage=None,
     tw_preserving: bool = True,
     rate_controller: RateControllerConfig | None = None,
+    physics_ratio: int = 1,
+    command_latency_steps: int = 0,
 ) -> DroneAdapter:
     """Construct a drone adapter for ``backend`` and log which physics is active.
 
@@ -73,6 +75,22 @@ def make_adapter(
     uses the documented default gains. It is deliberately **not** threaded into the
     ``SimpleDroneAdapter`` — the rate loop is pybullet-only so the numpy CI backend stays
     byte-identical and hermetic (AC9).
+
+    ``physics_ratio`` (UC-57): the integer policy/inner-loop decoupling factor (≥ 1), forwarded
+    **only** to the pybullet backend (mirrors ``rate_controller`` / ``tw_preserving``). There the
+    inner rate PID + physics run ``physics_ratio`` ticks per policy step (at ``control_hz ×
+    physics_ratio``). The simple backend integrates at the policy ``dt`` (physics rate == policy
+    rate) — a deliberate scope decision keeping the hermetic CI backend simple; AC2's "physics+PID ≥
+    policy" is a pybullet-path guarantee (consistent with UC-55 being pybullet-only). Default 1 ⇒ a
+    single inner tick ⇒ byte-identical.
+
+    ``command_latency_steps`` (UC-57): the standing command-latency FIFO depth in **whole steps at
+    the active rate** — already resolved by the env (via
+    :func:`drone_fly.env.timing.resolve_latency_steps`, the single authoritative site that converts
+    ``command_latency_ms`` + any sampled latency to steps). Forwarded to BOTH backends (the FIFO is
+    a control-ordering property, not physics): each
+    buffers the incoming CTBR action by this many steps upstream of its dynamics. Default 0 ⇒ no
+    buffer ⇒ byte-identical. The per-episode combined value is re-forwarded via ``reconfigure``.
     """
     if backend not in ADAPTER_CHOICES:
         raise ValueError(f"adapter must be one of {ADAPTER_CHOICES}, got {backend!r}.")
@@ -95,6 +113,8 @@ def make_adapter(
             damage=damage,
             tw_preserving=tw_preserving,
             rate_controller=rate_controller,
+            physics_ratio=physics_ratio,
+            command_latency_steps=command_latency_steps,
         )
 
     logger.info("Using SimpleDroneAdapter backend (pure-numpy; hermetic, NOT mastery physics).")
@@ -105,6 +125,7 @@ def make_adapter(
         dt=dt,
         battery=battery,
         damage=damage,
+        command_latency_steps=command_latency_steps,
     )
 
 

@@ -419,7 +419,11 @@ def latency_probe(*, dt: float = 0.05, latencies=(0, 1, 2)) -> list[dict]:
     out = []
     for lat in latencies:
         ad = SimpleDroneAdapter(np.array([0.0, 0.0, 50.0]), floor_z=-1.0e9, ceiling_z=1.0e9, dt=dt)
-        ad.reconfigure(dynamics=DynamicsParams(latency_steps=lat))
+        # UC-57: control latency is no longer carried on ``DynamicsParams`` (the env now resolves
+        # command_latency_ms + any sampled baseline latency to whole steps and hands the adapter the
+        # integer via ``reconfigure(latency_steps=...)`` / construction). This probe exercises the
+        # adapter's FIFO at whole-step granularity directly, so it forwards ``lat`` verbatim.
+        ad.reconfigure(latency_steps=lat)
         ad.reset(seed=0)
         az = []
         prev_vz = 0.0

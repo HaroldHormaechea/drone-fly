@@ -41,6 +41,7 @@ def compute_reward(
     height_above_floor_curr: float = 0.0,
     target_height_above_floor_prev: float = 0.0,
     target_height_above_floor_curr: float = 0.0,
+    per_step_scale: float = 1.0,
 ) -> float:
     """Return the scalar step reward.
 
@@ -164,8 +165,23 @@ def compute_reward(
           climb_target_height`` is a documented ``RewardConfig`` constraint, not a runtime clamp.
 
         When the flag is off none of the above executes and the function is identical to UC-43.
+    per_step_scale:
+        Per-step time-scaling factor for the two **rate/time-extensive** reward terms (UC-57).
+        When the control rate changes, an episode spans a different NUMBER of steps for the same
+        wall-clock seconds, so any reward paid *per step* would silently rescale the return. The env
+        passes ``per_step_scale = dt / BASELINE_DT`` (= 0.4 at 50 Hz, 1.0 at the 20 Hz baseline),
+        and it multiplies ONLY the two terms whose per-episode total is proportional to the step
+        count: the ``time_penalty`` (subtracted every step) and the graded ``airborne_bonus``
+        survival reward (paid every airborne step). Both then integrate to a rate-invariant total
+        (2.5× more steps × 0.4 per-step == unchanged), which EXACTLY preserves the documented
+        "loiter < completion" ordering across rates. The progress, gate, completion, collision,
+        obstacle, and the three potential-based shaping terms (climb / ground-break / altitude-hold)
+        are left UNSCALED: progress telescopes over distance (path-extensive, not time-extensive),
+        the event bonuses/penalties are per-event, and the potentials ``γΦ' − Φ`` are already
+        rate-correct by construction (a per-step scale would wrongly shrink them). Default ``1.0``
+        ⇒ every pre-UC-57 caller is byte-identical.
     """
-    reward = -cfg.time_penalty
+    reward = -cfg.time_penalty * per_step_scale
     reward += cfg.progress_weight * (dist_to_target_prev - dist_to_target_curr)
     if event == "gate":
         reward += cfg.gate_bonus / max(1, num_gates)
@@ -183,7 +199,9 @@ def compute_reward(
         # potential leak — into a monotone climb-to-target pull, with no ceiling-seeking above the
         # target. At h == target the payout equals ``airborne_bonus`` (UC-37 behaviour preserved).
         h_frac = min(max(height_above_floor_curr, 0.0), cfg.climb_target_height)
-        reward += cfg.airborne_bonus * (h_frac / cfg.climb_target_height)
+        # UC-57: scale the per-step survival bonus by ``per_step_scale`` (= dt/BASELINE_DT) so its
+        # per-episode integral is rate-invariant (default 1.0 ⇒ byte-identical).
+        reward += per_step_scale * cfg.airborne_bonus * (h_frac / cfg.climb_target_height)
     # UC-39: dense potential-based climb shaping (F = γΦ' − Φ, Φ = w·min(max(h,0), target)).
     # Telescoping ⇒ non-farmable; capped at the target ⇒ no ceiling-seeking; ≈0 on the floor.
     phi_prev = cfg.climb_weight * min(max(height_above_floor_prev, 0.0), cfg.climb_target_height)

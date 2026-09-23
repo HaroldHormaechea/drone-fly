@@ -88,6 +88,7 @@ class SimpleDroneAdapter(DroneAdapter):
         dt: float,
         battery=None,
         damage=None,
+        command_latency_steps: int = 0,
     ) -> None:
         self._start = np.asarray(start_position, dtype=np.float64).reshape(3).copy()
         self._floor_z = float(floor_z)
@@ -100,7 +101,12 @@ class SimpleDroneAdapter(DroneAdapter):
         self._max_thrust = BASE_MAX_THRUST
         self._drag = BASE_LINEAR_DRAG
         self._max_body_rate = BASE_MAX_BODY_RATE
-        self._latency = 0  # control-latency delay in steps (0 == no buffer in the path)
+        # Control-latency delay in **steps at the active rate** (0 == no buffer in the path). UC-57:
+        # the env now OWNS latency resolution (ms + any sampled baseline steps → active-rate steps,
+        # single round) and hands the adapter the resolved integer — at construction (the standing
+        # value, here) and per-episode via ``reconfigure``. The adapter no longer derives latency
+        # from ``dynamics.latency_steps`` itself. Default 0 ⇒ byte-identical.
+        self._latency = int(command_latency_steps)
         self._action_queue: deque[np.ndarray] = deque()
         self._position = self._start.copy()
         self._velocity = np.zeros(3, dtype=np.float64)
@@ -126,14 +132,20 @@ class SimpleDroneAdapter(DroneAdapter):
         self._damage_enabled = damage is not None and bool(damage.enabled)
         self._integrity = 1.0
 
-    def reconfigure(self, *, start=None, dynamics=None) -> None:
+    def reconfigure(self, *, start=None, dynamics=None, latency_steps=None) -> None:
         """Apply a new spawn and/or dynamics for the next episode (UC-08 AC5, AC7).
 
         Called by the env at ``reset()`` **before** :meth:`reset`. Each argument is applied
-        only when not ``None`` — a call with both ``None`` (the disabled-randomization path)
+        only when not ``None`` — a call with all ``None`` (the disabled-randomization path)
         is a pure no-op, leaving the fixed dynamics and spawn untouched (byte-identity). The
         knobs are stored independently: mass and thrust do **not** recompute each other, so
         ``sample_dynamics`` scaling mass alone genuinely perturbs the trajectory.
+
+        UC-57: ``latency_steps`` is the env-resolved control-latency FIFO depth in **whole steps at
+        the active rate** (``command_latency_ms`` + any sampled baseline latency, converted in one
+        round by :func:`drone_fly.env.timing.resolve_latency_steps`). The adapter no longer reads
+        ``dynamics.latency_steps`` — the env owns that conversion — so latency is set ONLY from this
+        argument; ``None`` leaves the current value (the construction-time standing latency).
         """
         if start is not None:
             self._start = np.asarray(start, dtype=np.float64).reshape(3).copy()
@@ -142,7 +154,8 @@ class SimpleDroneAdapter(DroneAdapter):
             self._max_thrust = float(dynamics.max_thrust)
             self._drag = float(dynamics.drag)
             self._max_body_rate = float(dynamics.max_body_rate)
-            self._latency = int(dynamics.latency_steps)
+        if latency_steps is not None:
+            self._latency = int(latency_steps)
 
     def recharge(self, delta: float) -> float:
         """Add ``delta`` charge to the battery, clamped at ``1.0``; return the new charge (UC-18).

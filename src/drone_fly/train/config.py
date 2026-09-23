@@ -43,6 +43,15 @@ class TrainConfig:
     # UC-51: default bumped 1M -> 2M. The restaggered curriculum below isolates floor-takeoff
     # into the final stretch (spawn holds airborne through ~60% then descends to the floor by
     # 100%); at 1M that tail was too short, so the isolated hardest stage gets real budget.
+    #
+    # UC-57 BUDGET GUIDANCE (control rate 50 Hz default): ``total_timesteps`` counts ENV STEPS, and
+    # at the new 50 Hz run default an episode spans ~2.5× more steps per sim-second than at the old
+    # 20 Hz (``episode SECONDS`` are held invariant by scaling ``max_steps`` — see
+    # ``drone_fly.env.timing.scale_step_budget``). So a FIXED ``total_timesteps`` covers ~2.5× LESS
+    # simulated flight time at 50 Hz. When you raise ``control_hz``, scale ``total_timesteps`` up by
+    # roughly the same factor to keep the same sim-time budget (e.g. 2M @20 Hz ≈ 5M @50 Hz). The
+    # curriculum schedules are fraction-of-run based (UC-51), so they re-stretch automatically; only
+    # the absolute compute budget needs the bump.
     total_timesteps: int = 2_000_000
     checkpoint_freq: int = 25_000
     n_envs: int = 1
@@ -53,6 +62,14 @@ class TrainConfig:
     n_steps: int = 2048
     batch_size: int = 64
     n_epochs: int = 10
+    # UC-57 γ / control-rate coupling (READ THIS before changing control_hz): ``gamma`` is a
+    # PER-STEP discount, so its real-time horizon (~ dt/(1−γ)) SHRINKS as the control rate rises —
+    # at 50 Hz the same 0.99 discounts ~2.5× faster in wall-clock than at 20 Hz. Two consequences:
+    # (1) if you want the SAME real-time horizon at a higher rate, raise ``gamma`` toward 1 (this is
+    # a training-judgement knob, deliberately NOT auto-adjusted here); (2) the reward's
+    # ``RewardConfig.climb_gamma`` MUST equal this ``gamma`` for the potential-based climb /
+    # ground-break / altitude-hold shaping to stay telescoping/non-farmable (UC-39) — they are read
+    # per-step and are rate-agnostic ONLY when the two γ agree. Keep them in lockstep at any rate.
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2
