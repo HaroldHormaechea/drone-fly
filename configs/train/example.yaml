@@ -16,7 +16,10 @@ adapter: simple
 # at your provisioned connectome dir (or a pruned slice from `drone-fly prune`) for a real run.
 connectome: tests/fixtures
 
-# Smoke-sized budget so the example finishes quickly. Raise it (e.g. 1_000_000) for a real run.
+# Smoke-sized budget so the example finishes quickly. Raise it (e.g. 2_000_000, the default for a
+# restaggered real run) for a real run. NOTE (UC-51): `timesteps` also sets the curriculum schedule
+# window — the attitude/collision/airborne curricula anneal over fractions of THIS value — so a real
+# run needs a real budget for the isolated floor-takeoff tail to get room.
 timesteps: 2000
 
 # Idempotent resume: continue from the newest checkpoint under training/<name>/checkpoints/
@@ -76,3 +79,42 @@ resume: auto
 #                        # prompts on an interactive TTY and warn-and-continues non-interactively.
 # capacity_floor: null   # UC-23 override for the actor trainable-parameter floor (default 3000,
 #                        # calibrated so the k=2 default slice passes and a k=0 slice trips it).
+#
+# --- Training curriculum schedule + exploration (UC-51) -----------------------------------------
+# All keys below are OPTIONAL and shown with their NEW UC-51 defaults. Omitting a key — or setting
+# it to the value shown — is byte-identical to the default run (set-to-default == omit). Each is
+# validated (type + range) at config load: fractions must be in [0, 1], ent_coef >= 0, the collision
+# penalties >= 0; out-of-range or unknown values fail loud with a clear error (exit 2).
+#
+# The DEFAULT schedule is RESTAGGERED so the three difficulty steps are ISOLATED and floor-takeoff is
+# the last, longest stage — ordered attitude-full (~0.25) < collision-full (~0.5) < spawn-reaches-
+# floor (1.0). Each fraction is a fraction of `timesteps` above.
+#
+# ent_coef: 0.005        # PPO entropy coefficient (exploration). Strictly positive keeps the action
+#                        # distribution exploring long enough to discover takeoff (UC-38/40/41).
+#
+# Attitude-authority curriculum (UC-46): roll/pitch/yaw command authority ramps low->full so a noisy
+# policy can't flip early. Restaggered to reach FULL earliest (~0.25), the first isolated step.
+# attitude_authority_curriculum_enabled: true
+# attitude_authority_start: 0.25            # authority at step 0 (0..1)
+# attitude_authority_anneal_fraction: 0.25  # reaches full authority (1.0) by this fraction
+#
+# Collision-penalty curriculum (UC-39/41): hold-then-ramp crash-cliff relief. The penalty is held
+# low through `hold_fraction`, then ramps to full over `warmup_fraction` (the RAMP WIDTH), reaching
+# full at hold + warmup = 0.4 + 0.1 = 0.5 — the isolated mid-training step (after attitude-full,
+# before the airborne floor descent).
+# collision_curriculum_enabled: true
+# collision_penalty_start: 2.0              # held value through the fly-learning phase
+# collision_penalty_end: 100.0             # full-strength value after the ramp
+# collision_curriculum_hold_fraction: 0.4  # hold the start value through this fraction
+# collision_penalty_warmup_fraction: 0.1   # RAMP WIDTH after the hold (hold + warmup <= 1)
+#
+# Airborne-start curriculum (UC-44): the training spawn is held airborne early, then descends to the
+# floor so floor-takeoff is learned LAST. Restaggered to hold airborne through ~0.6 then reach the
+# floor only at 1.0 — the last, longest, isolated stage.
+#   IMPORTANT semantic contrast: here `warmup_fraction` is a HOLD / START-DELAY (the spawn stays
+#   fully airborne through it before descending), the OPPOSITE of the collision `warmup_fraction`
+#   above (which is the ramp width). They must compose coherently: warmup <= anneal.
+# airborne_curriculum_enabled: true
+# airborne_curriculum_warmup_fraction: 0.6  # HOLD airborne through this fraction (start-delay)
+# airborne_curriculum_anneal_fraction: 1.0  # spawn reaches the floor by this fraction (end of run)

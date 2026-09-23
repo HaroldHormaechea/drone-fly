@@ -430,8 +430,12 @@ pre-UC-50 reward exactly, construct `RewardConfig(enable_altitude_decoupling=Fal
   schedule: it is **held at `TrainConfig.collision_penalty_start` (2) through the first
   `collision_curriculum_hold_fraction` (0.4) of `total_timesteps`** (0–40%, the whole fly-learning
   phase), then **ramped linearly up to `collision_penalty_end` (100)** over the next
-  `collision_curriculum_warmup_fraction` (0.5) of `total_timesteps` (40%→90%), then **held at the
-  full value 100** for the remainder (90–100%). Holding a low penalty through the fly-learning phase
+  `collision_penalty_warmup_fraction` (0.1, the ramp width; the YAML key — the underlying
+  `TrainConfig` field is `collision_curriculum_warmup_fraction`) of `total_timesteps` (40%→50%), then
+  **held at the full value 100** for the remainder (50–100%). *(UC-51 restaggered the ramp width
+  0.5→0.1 so the collision step reaches full strength at ~50% and is isolated from the other two
+  curricula — see the [UC-51 section](#restaggered-curriculum-schedule--exposed-knobs-uc-51).)*
+  Holding a low penalty through the fly-learning phase
   removes the crash barrier while the drone learns to fly — UC-41 found that the earlier from-t=0
   linear ramp re-erected the crash cliff (to ~33 by 16% of training) before the policy had learned
   to fly, so a *failed* takeoff (which trips the grounded cut that pays the collision penalty) stayed
@@ -622,16 +626,25 @@ effect of these two levers can be attributed cleanly.
 
 - **Lever 1 — airborne-start reverse curriculum (training-time only; `TrainConfig`
   `airborne_curriculum_enabled` default `True`).** Instead of always spawning on the floor (UC-37's
-  floored start), the training envs spawn the drone at an initial altitude that **starts at
-  `climb_target_height` above the floor and anneals linearly down to `floor_z`** over the first
-  `airborne_curriculum_anneal_fraction` (default **0.5**) of `total_timesteps`, then holds it on the
-  floor for the remainder. Early in training the policy experiences the rewarded airborne region from
+  floored start), the training envs spawn the drone at an initial altitude that is **held at
+  `climb_target_height` above the floor through a warmup/start-delay
+  (`airborne_curriculum_warmup_fraction`, default **0.6** — UC-51), then anneals linearly down to
+  `floor_z`** across the window `[warmup, anneal]` where `airborne_curriculum_anneal_fraction` is
+  **1.0** (UC-51, up from 0.5), then holds it on the floor for the remainder. With these defaults the
+  spawn stays fully airborne through ~60% of training and reaches the floor only at the very end
+  (100%), making floor-takeoff the last, isolated stage (see the
+  [UC-51 section](#restaggered-curriculum-schedule--exposed-knobs-uc-51)). **Semantic note:** the
+  airborne `warmup_fraction` is a **hold / start-delay** (the spawn stays airborne through it), the
+  opposite of the collision curriculum's `warmup_fraction` (a ramp width); they must compose as
+  `warmup <= anneal`. Early in training the policy experiences the rewarded airborne region from
   step 0 and only has to learn to **maintain** altitude — far easier than discovering takeoff — and
   as the spawn anneals to the floor it must learn takeoff itself, now bootstrapped from a
   hover-competent policy. The schedule (`drone_fly.train.airborne_curriculum.spawn_z_at`) is a pure
   function of `num_timesteps`: monotone non-increasing, clamped to `[floor_z, high_z]`, returns the
-  high endpoint at step 0 and exactly `floor_z` at/after the anneal end — so a **resumed** run
-  continues it correctly. It is pushed into the envs each rollout by an SB3 callback via
+  high endpoint through the warmup and exactly `floor_z` at/after the anneal end — so a **resumed**
+  run continues it correctly. Setting `airborne_curriculum_warmup_fraction = 0.0` reproduces the
+  pre-UC-51 single-window anneal exactly. It is pushed into the envs each rollout by an SB3 callback
+  via
   `env_method("set_spawn_z", …)`, exactly like the UC-41 collision curriculum. Set
   `airborne_curriculum_enabled = False` to train at the constant floored spawn (byte-identical to
   UC-43).
@@ -697,8 +710,11 @@ the mixer, exploration/entropy, and UC-44/UC-45 are all untouched.
   **authority factor** in `RaceEnv.step` before they reach the adapter. **Throttle (index 0) is never
   scaled** — lift authority is untouched, so the drone can always climb. The factor **starts at
   `attitude_authority_start` (default 0.25) and anneals linearly up to `1.0` (full authority)** over
-  the first `attitude_authority_anneal_fraction` (default **0.5**) of `total_timesteps`, then holds
-  full authority for the remainder. Early on a noisy policy physically cannot flip the drone (its
+  the first `attitude_authority_anneal_fraction` (default **0.25** — UC-51, down from 0.5) of
+  `total_timesteps`, then holds full authority for the remainder. This makes attitude authority reach
+  full **earliest** of the three curricula (~25%), the first isolated difficulty step (see the
+  [UC-51 section](#restaggered-curriculum-schedule--exposed-knobs-uc-51)). Early on a noisy policy
+  physically cannot flip the drone (its
   attitude commands are capped to a quarter of their range → it stays roughly level → net thrust stays
   up → it climbs and collects the existing airborne/climb reward); as the authority anneals to full
   the policy regains full maneuvering control, bootstrapped from an upright-and-climbing policy.
@@ -811,6 +827,61 @@ knobs. On the **training** env the TUI and recording show the *live scheduled* (
 **eval/record** time the curriculum callbacks never run, so both sit at their annealed endpoints
 (authority `1.0`, spawn-z = floor). This is observability/guard-only — it changes no training behavior,
 the UC-48 fix, the simple backend, the reward, or the UC-44/UC-46 curricula.
+
+### Restaggered curriculum schedule & exposed knobs (UC-51)
+The three training curricula — attitude authority (UC-46), the collision penalty (UC-41), and the
+airborne spawn (UC-44) — previously all annealed on the same `anneal_fraction ≈ 0.5` schedule, so at
+the 50% mark the spawn dropped to the floor, attitude jumped to full, and the collision penalty
+reached 100 **simultaneously**: one synchronized difficulty cliff the airborne-phase flight skill did
+not survive. UC-51 does two things.
+
+**1. Restaggered defaults — difficulty steps are now isolated, floor-takeoff last.** The default
+schedule is reshaped so the anneals are ordered and separated:
+
+| Curriculum | Knob(s) | Old | New (UC-51) | Reaches full / floor at |
+|---|---|---|---|---|
+| Attitude authority | `attitude_authority_anneal_fraction` | 0.5 | **0.25** | full authority by ~25% (first) |
+| Collision penalty | `collision_curriculum_hold_fraction` / `collision_penalty_warmup_fraction` | 0.4 / 0.5 | 0.4 / **0.1** | full penalty (100) at 0.4+0.1 = ~50% (second) |
+| Airborne spawn | `airborne_curriculum_warmup_fraction` / `airborne_curriculum_anneal_fraction` | — / 0.5 | **0.6** / **1.0** | held airborne through ~60%, floor by 100% (last) |
+
+So the ordering is **attitude-full (~0.25) < collision-full (~0.5) < spawn-reaches-floor (1.0)**, and
+floor-takeoff — the hardest stage — is isolated into the final, longest stretch. Default
+`total_timesteps` is bumped **1M → 2M** so that isolated tail gets real budget.
+
+**New airborne warmup / start-delay.** `airborne_curriculum_warmup_fraction` (new) holds the spawn
+fully airborne through the first fraction of training before it begins descending. **Watch the
+semantic contrast:** the airborne `warmup_fraction` is a **hold/start-delay**, whereas the collision
+`warmup_fraction` is a **ramp width** — opposite meanings on purpose (each mirrors its own curriculum's
+existing shape). The airborne pair must compose as `warmup <= anneal`; setting
+`airborne_curriculum_warmup_fraction = 0.0` reproduces the pre-UC-51 single-window anneal exactly.
+
+**2. Exposed knobs — schedule experiments no longer need a code change.** Every curriculum knob plus
+`ent_coef` and `timesteps` is now settable in the `drone-fly train --config` YAML (previously they
+existed only as `TrainConfig` dataclass defaults behind a fixed whitelist). The full set:
+`ent_coef`; `airborne_curriculum_enabled` / `airborne_curriculum_warmup_fraction` /
+`airborne_curriculum_anneal_fraction`; `attitude_authority_curriculum_enabled` /
+`attitude_authority_start` / `attitude_authority_anneal_fraction`; `collision_curriculum_enabled` /
+`collision_penalty_start` / `collision_penalty_end` / `collision_curriculum_hold_fraction` /
+`collision_penalty_warmup_fraction`. See `configs/train/example.yaml` for each with its default.
+
+Each key is **optional** and validated at config load: fractions (and `attitude_authority_start`)
+must be in `[0, 1]`, `ent_coef >= 0`, the collision penalties `>= 0`, `timesteps >= 1`; the airborne
+`warmup <= anneal` and collision `hold + warmup <= 1` compositions are checked too (resolving an
+omitted partner against the dataclass default). Out-of-range, unknown, or incoherent values fail loud
+with a clear `ConfigError` (exit 2). Setting a knob to its default value is **byte-identical to
+omitting it** — the exposure plumbing is lossless; the restagger changes what "default" *means*, not
+the plumbing.
+
+**Wiring note (bug fixed).** The curriculum callbacks compute their schedule window against
+`TrainConfig.total_timesteps`. Previously the CLI passed the YAML `timesteps` only as the `train()`
+override and never set the dataclass field, so every schedule was pinned to the dataclass default
+regardless of the configured budget. UC-51 sets `TrainConfig.total_timesteps` from the YAML
+`timesteps`, so the schedule now tracks the actual run length.
+
+**Scope.** Training-orchestration + config surface only — reward, env/`racing_env.py`, adapters, the
+PPO policy assembly, and termination are untouched. Whether the restaggered schedule makes the drone
+take off is a behavioral question answered by a fresh GPU retrain (out of scope here); the tests are
+hermetic and assert schedule *shape*, YAML round-trip, and default-parity.
 
 ### Visualization & recording
 Enable recording in a train/evaluate config with `record: true` (tune cadence via `record_every`);
