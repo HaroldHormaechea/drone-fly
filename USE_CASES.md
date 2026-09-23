@@ -63,4 +63,4 @@ Statuses:
 | 51 | [use-cases/51-expose-and-restagger-training-curriculum.md](use-cases/51-expose-and-restagger-training-curriculum.md) | Expose the training curriculum schedule + restagger defaults so floor-takeoff is the last isolated stage | done | 2026-09-23 |
 | 52 | [use-cases/52-optimize-phase-tui-progress.md](use-cases/52-optimize-phase-tui-progress.md) | Optimize-phase progress + collect/optimize timing in the training TUI | done | 2026-09-23 |
 | 53 | [use-cases/53-fix-checkpoint-save-rlock-crash.md](use-cases/53-fix-checkpoint-save-rlock-crash.md) | Fix checkpoint-save crash — exclude the progress sink from PPO serialization | done | 2026-09-23 |
-| 54 | [use-cases/54-expose-ppo-optimization-hyperparameters.md](use-cases/54-expose-ppo-optimization-hyperparameters.md) | Expose PPO optimization hyperparameters (n_epochs, batch_size, n_steps, learning_rate) in the train YAML | in-progress | 2026-09-23 |
+| 54 | [use-cases/54-expose-ppo-optimization-hyperparameters.md](use-cases/54-expose-ppo-optimization-hyperparameters.md) | Expose PPO optimization hyperparameters (n_epochs, batch_size, n_steps, learning_rate) in the train YAML | done | 2026-09-23 |
