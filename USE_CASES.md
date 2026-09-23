@@ -60,3 +60,4 @@ Statuses:
 | 48 | [use-cases/48-fix-pybullet-mass-thrust-tw-preserving.md](use-cases/48-fix-pybullet-mass-thrust-tw-preserving.md) | Make pybullet dynamics randomization thrust-to-weight preserving | done | 2026-09-22 |
 | 49 | [use-cases/49-drone-dynamics-observability.md](use-cases/49-drone-dynamics-observability.md) | Drone-dynamics observability — TUI segment, recording provenance, T/W regression guard | done | 2026-09-22 |
 | 50 | [use-cases/50-reward-altitude-holding-forward-flight.md](use-cases/50-reward-altitude-holding-forward-flight.md) | Reward altitude-holding forward flight — stop trading height for gate-progress | done | 2026-09-22 |
+| 51 | [use-cases/51-expose-and-restagger-training-curriculum.md](use-cases/51-expose-and-restagger-training-curriculum.md) | Expose the training curriculum schedule + restagger defaults so floor-takeoff is the last isolated stage | in-progress | 2026-09-23 |

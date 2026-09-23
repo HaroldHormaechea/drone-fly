@@ -40,7 +40,10 @@ class TrainConfig:
         Number of evaluation episodes (AC5/AC10). Default 20.
     """
 
-    total_timesteps: int = 1_000_000
+    # UC-51: default bumped 1M -> 2M. The restaggered curriculum below isolates floor-takeoff
+    # into the final stretch (spawn holds airborne through ~60% then descends to the floor by
+    # 100%); at 1M that tail was too short, so the isolated hardest stage gets real budget.
+    total_timesteps: int = 2_000_000
     checkpoint_freq: int = 25_000
     n_envs: int = 1
     smoke_timesteps: int = 256
@@ -85,7 +88,7 @@ class TrainConfig:
     # do-nothing floor — the policy committed to do-nothing. Holding the penalty low (2.0) through
     # the whole fly-learning phase (0–40%) keeps the effective penalty inside the invariant-safe
     # band (≤ the climb-shaping bound) so takeoff→progress out-scores do-nothing across that window,
-    # then ramping back to full strength (100) over 40–90% restores precision so the drone doesn't
+    # then ramping back to full strength (100) over 40–50% restores precision so the drone doesn't
     # learn permanently-sloppy floor/ceiling-clipping flight. Applied at rollout time via the env's
     # ``set_collision_penalty`` — the env DEFAULT ``RewardConfig.collision_penalty`` (100) is never
     # changed, so every reward test that asserts 100 is unaffected (minimal test blast radius). The
@@ -96,28 +99,45 @@ class TrainConfig:
     # (enforced in :func:`~drone_fly.train.collision_curriculum.collision_penalty_at`). Set
     # ``collision_curriculum_enabled=False`` to train at the constant env default (byte-identical to
     # pre-UC-39).
+    #
+    # UC-51 (restagger): the ramp width (``collision_curriculum_warmup_fraction``) moves 0.5 -> 0.1
+    # so the collision penalty reaches full strength (100) at hold + warmup = 0.4 + 0.1 = 0.5 of the
+    # run — i.e. the collision difficulty step is isolated to ≈mid-training, AFTER attitude
+    # authority reaches full (~0.25) and BEFORE the airborne spawn begins its floor descent (~0.6).
+    # The long low-penalty UC-41 hold (0–0.4) is preserved unchanged; only the ramp is shortened.
     collision_penalty_start: float = 2.0
     collision_penalty_end: float = 100.0
     collision_curriculum_hold_fraction: float = 0.4
-    collision_curriculum_warmup_fraction: float = 0.5
+    collision_curriculum_warmup_fraction: float = 0.1
     collision_curriculum_enabled: bool = True
 
     # UC-44: training-time airborne-start reverse curriculum (takeoff-discovery relief). When
     # enabled (default), the training envs spawn the drone airborne early in training — starting at
     # the high endpoint (derived at wire time from ``RewardConfig.climb_target_height`` above the
-    # course floor, not duplicated here) — and anneal the spawn z linearly down to ``floor_z`` over
-    # the first ``airborne_curriculum_anneal_fraction`` of the run, then hold it on the floor for
-    # the remainder. Early on the policy only has to learn to MAINTAIN altitude (far easier than
-    # discovering takeoff); as the spawn anneals to the floor it must learn takeoff, bootstrapped
-    # from a hover-competent policy. Applied ONLY to the training run via the env's ``set_spawn_z``
-    # (see :class:`~drone_fly.train.airborne_curriculum.AirborneStartCurriculumCallback`); eval and
+    # course floor, not duplicated here) — held fully airborne through a ``warmup``/start-delay,
+    # then annealed linearly down to ``floor_z`` and held on the floor for the remainder. Early on
+    # the policy only has to learn to MAINTAIN altitude (far easier than discovering takeoff); as
+    # the spawn anneals to the floor it must learn takeoff, bootstrapped from a hover-competent
+    # policy. Applied ONLY to the training run via the env's ``set_spawn_z`` (see
+    # :class:`~drone_fly.train.airborne_curriculum.AirborneStartCurriculumCallback`); eval and
     # recording envs never receive the callback, so they keep the UC-37 floored spawn and the
     # takeoff measurement is unchanged. The schedule is a function of ``num_timesteps`` only
     # (stateless), so it is resume-correct. Set ``airborne_curriculum_enabled=False`` to train at
-    # the constant floored spawn (byte-identical to UC-43). The reward function is untouched, so all
-    # reward-math/doc-contract test stays green.
+    # the constant floored spawn (byte-identical to UC-43). The reward function is untouched, so the
+    # reward-math/doc-contract tests stay green.
+    #
+    # UC-51 (restagger): ``airborne_curriculum_warmup_fraction`` is NEW and makes floor-takeoff the
+    # LAST, isolated stage — the spawn is held fully airborne through the first ``warmup`` of the
+    # run (default 0.6), then anneals ``high_z`` -> ``floor_z`` across ``[warmup, anneal]`` and
+    # holds on the floor. With warmup 0.6 + anneal 1.0 the spawn reaches the floor only at the very
+    # end (1.0), well after attitude-full (~0.25) and collision-full (~0.5). NOTE the semantic
+    # contrast with the collision curriculum: collision's ``warmup_fraction`` is the RAMP WIDTH,
+    # whereas this airborne ``warmup_fraction`` is a HOLD / start-delay (spawn stays airborne
+    # through it). The two must compose coherently: ``warmup <= anneal`` (a warmup past the anneal
+    # window is rejected). ``warmup_fraction = 0.0`` reproduces the pre-UC-51 single-window anneal.
     airborne_curriculum_enabled: bool = True
-    airborne_curriculum_anneal_fraction: float = 0.5
+    airborne_curriculum_warmup_fraction: float = 0.6
+    airborne_curriculum_anneal_fraction: float = 1.0
 
     # UC-46: training-time attitude-authority curriculum (tumbling relief). When enabled (default),
     # the training envs scale the roll/pitch/yaw command channels (action indices 1, 2, 3 — never
@@ -135,9 +155,14 @@ class TrainConfig:
     # resume-correct. Set ``attitude_authority_curriculum_enabled=False`` to train at constant full
     # authority (byte-identical to pre-UC-46). The reward function, the CTBR→RPM mixer, and
     # UC-44/UC-45 are all untouched, so their tests stay green.
+    #
+    # UC-51 (restagger): ``attitude_authority_anneal_fraction`` moves 0.5 -> 0.25 so attitude
+    # authority reaches full EARLIEST of the three curricula (~0.25) — the first, fastest isolated
+    # difficulty step, ordered before collision-full (~0.5) and the airborne floor descent
+    # (~0.6→1.0).
     attitude_authority_curriculum_enabled: bool = True
     attitude_authority_start: float = 0.25
-    attitude_authority_anneal_fraction: float = 0.5
+    attitude_authority_anneal_fraction: float = 0.25
 
     seed: int = 0
     vf_arch: list[int] = field(default_factory=lambda: [64, 64])
