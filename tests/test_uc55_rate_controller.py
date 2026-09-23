@@ -366,3 +366,51 @@ def test_zero_dt_does_not_raise_or_nan() -> None:
     controller = RateController(RateControllerConfig())
     out = controller.update(np.array([1.0, 0.0, 0.0]), np.zeros(3), 0.0)
     assert np.all(np.isfinite(out))
+
+
+# --------------------------------------------------------------------------- #
+# UC-57 — the PID runs at the (finer) inner_dt under rate decoupling.
+# The policy decides at ``control_hz``; the UC-55 rate loop + physics run at
+# ``control_hz × physics_ratio``, so the PID integrates/differentiates at
+# ``inner_dt = dt / physics_ratio`` (via drone_fly.env.timing.inner_dt), NOT the policy dt.
+# --------------------------------------------------------------------------- #
+def test_uc57_pid_converges_at_decoupled_inner_dt() -> None:
+    """UC-57 AC2: with the inner loop decoupled to ``inner_dt = dt/physics_ratio``, the closed-loop
+    rate PID still converges to the commanded setpoint over the SAME real-time horizon. Running the
+    PID at the finer inner timestep (5 s @ 500 Hz here) is well-posed — the derivative/integral use
+    the actual inner ``dt`` passed to ``update`` (the loop is tuned against ``dt`` but stable at a
+    finer step)."""
+    from drone_fly.env.timing import inner_dt
+
+    policy_dt, physics_ratio = 0.02, 10  # 50 Hz policy, 500 Hz inner
+    i_dt = inner_dt(policy_dt, physics_ratio)
+    assert i_dt == pytest.approx(0.002)
+
+    controller = RateController(RateControllerConfig())
+    setpoint = np.array([2.0, -1.5, 1.0])
+    # Same ~5 s horizon as the 20 Hz reference (300 steps × 0.05 s) but at the inner rate.
+    steps = int(round(5.0 / i_dt))
+    rates, _ = _simulate(lambda n: setpoint, steps=steps, controller=controller, dt=i_dt)
+    # Converges close to the command. A small steady-state offset (~a few %) is EXPECTED and
+    # acceptable: the default gains are tuned for dt=0.05 and are NOT retuned for the finer inner
+    # step here — PID retuning at inner_dt is an explicit deferred residual risk (owner verdict).
+    # The hermetic contract is that the loop stays well-posed (finite, bounded, near the setpoint).
+    assert np.all(np.isfinite(rates[-1]))
+    assert np.allclose(rates[-1], setpoint, atol=5e-2), f"final rate {rates[-1]} != {setpoint}"
+
+
+def test_uc57_inner_dt_reduces_to_policy_dt_at_ratio_one() -> None:
+    """UC-57 byte-identity: at ``physics_ratio == 1`` the inner timestep IS the policy dt, so the
+    UC-55 loop the gains were tuned against is unchanged (single inner tick == pre-UC-57 path)."""
+    from drone_fly.env.timing import inner_dt
+
+    assert inner_dt(_DT, 1) == _DT
+
+    # A single decoupled inner tick at ratio 1 produces exactly the pre-UC-57 per-step effort.
+    a = RateController(RateControllerConfig())
+    b = RateController(RateControllerConfig())
+    setpoint = np.array([1.0, -0.5, 0.3])
+    measured = np.array([0.1, 0.0, -0.05])
+    ref = a.update(setpoint, measured, _DT)
+    dec = b.update(setpoint, measured, inner_dt(_DT, 1))
+    assert dec == pytest.approx(ref)

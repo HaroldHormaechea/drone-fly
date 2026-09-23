@@ -612,3 +612,85 @@ def test_uc39_hover_episode_beats_takeoff_then_immediate_crash_at_worst_case_cp(
     # And the crash episode is genuinely worse than even a SINGLE further hover step after takeoff.
     one_more_hover = prefix + _step_climb(h_prev=target, h_curr=target, airborne=True)
     assert one_more_hover > suicide_return
+
+
+# --- UC-57: per_step_scale — rate-invariant episode integral of the per-step terms ----------
+# ``compute_reward`` gains ``per_step_scale`` (= dt/BASELINE_DT), which multiplies ONLY the two
+# genuinely per-step terms — the ``time_penalty`` (subtracted every step) and the graded
+# ``airborne_bonus`` — so that summed over a fixed-SECONDS episode their contribution is invariant
+# to the control rate. Event bonuses/penalties (gate/completion/collision) and the
+# potential-telescoping terms are per-event / rate-correct by construction and are left UNSCALED.
+def _reward_uc57(*, airborne, h_curr, per_step_scale, event=None, collided=False, completed=False):
+    return compute_reward(
+        dist_to_target_prev=0.0,
+        dist_to_target_curr=0.0,
+        event=event,
+        collided=collided,
+        completed=completed,
+        cfg=CFG,
+        airborne=airborne,
+        height_above_floor_prev=h_curr,
+        height_above_floor_curr=h_curr,
+        per_step_scale=per_step_scale,
+    )
+
+
+def test_per_step_scale_default_is_byte_identical() -> None:
+    """AC7 byte-identity: ``per_step_scale`` defaults to 1.0, so an idle step is exactly
+    ``-time_penalty`` — unchanged from every pre-UC-57 caller (which never passes the kwarg)."""
+    assert _reward_uc57(airborne=False, h_curr=0.0, per_step_scale=1.0) == -CFG.time_penalty
+    # Explicit default via the public signature matches the no-kwarg call.
+    assert _step() == _reward_uc57(airborne=False, h_curr=0.0, per_step_scale=1.0)
+
+
+def test_per_step_scale_scales_time_penalty() -> None:
+    """AC5: the per-step time penalty scales linearly with ``per_step_scale`` (= dt/BASELINE_DT)."""
+    assert _reward_uc57(airborne=False, h_curr=0.0, per_step_scale=0.4) == pytest.approx(
+        -CFG.time_penalty * 0.4
+    )
+
+
+def _scaled_contribution(*, airborne, h_curr, scale):
+    """Isolate ONLY the ``per_step_scale``-multiplied terms (time_penalty + graded airborne bonus).
+
+    ``reward(scale) = base_unscaled + scale · scaled_terms`` (the potential-telescoping terms are
+    deliberately left UNSCALED — a per-step scale would break their discounted-return invariance),
+    so ``reward(scale) − reward(0)`` cleanly extracts ``scale · scaled_terms`` regardless of the
+    unscaled potential leak at a constant hold height."""
+    at_scale = _reward_uc57(airborne=airborne, h_curr=h_curr, per_step_scale=scale)
+    at_zero = _reward_uc57(airborne=airborne, h_curr=h_curr, per_step_scale=0.0)
+    return at_scale - at_zero
+
+
+def test_per_step_scale_scales_airborne_bonus() -> None:
+    """AC5: the graded airborne survival bonus scales linearly with ``per_step_scale`` — so at 2.5×
+    the steps (0.4×) each step pays 0.4× of the scaled terms and the per-second bonus is invariant.
+    Isolated from the (unscaled) potential terms via a ``scale=0`` reference."""
+    h = CFG.climb_target_height  # full graded bonus (h_frac == target)
+    one = _scaled_contribution(airborne=True, h_curr=h, scale=1.0)
+    scaled = _scaled_contribution(airborne=True, h_curr=h, scale=0.4)
+    assert scaled == pytest.approx(one * 0.4)
+    # The isolated contribution is genuinely non-zero (guards a silent no-op).
+    assert one != 0.0
+
+
+def test_per_step_scale_episode_integral_is_rate_invariant() -> None:
+    """AC3/AC5 core invariant: hold the drone at the target for a FIXED number of SECONDS and the
+    summed *scaled* per-step reward is invariant to the control rate. Baseline = 800 steps at 20 Hz
+    (per_step_scale 1.0); 50 Hz = 2000 steps at per_step_scale 0.4 — same 40 s of wall-clock.
+    ``800·S(1.0) == 2000·S(0.4)`` because the scaled terms are linear in the scale
+    (``800·1.0·s == 2000·0.4·s``). Isolated from the unscaled potential leak via ``scale=0``."""
+    h = CFG.climb_target_height
+    baseline_integral = 800 * _scaled_contribution(airborne=True, h_curr=h, scale=1.0)
+    fast_integral = 2000 * _scaled_contribution(airborne=True, h_curr=h, scale=0.4)
+    assert fast_integral == pytest.approx(baseline_integral)
+
+
+def test_per_step_scale_leaves_events_and_potentials_unscaled() -> None:
+    """AC5 (documented split): a completion bonus is a per-EVENT payout, NOT a per-step term, so it
+    is invariant to ``per_step_scale`` — only the time penalty underneath it scales."""
+    # Isolate the completion bonus: (completed step) − (idle step) at each scale must be identical.
+    for scale in (1.0, 0.4, 2.0):
+        completed = _reward_uc57(airborne=False, h_curr=0.0, per_step_scale=scale, completed=True)
+        idle = _reward_uc57(airborne=False, h_curr=0.0, per_step_scale=scale)
+        assert completed - idle == pytest.approx(CFG.completion_bonus)
