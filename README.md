@@ -943,6 +943,52 @@ behind ~15 no-takeoff use cases — "acro without a flight controller". UC-55 ad
 > old checkpoints cleared. All new tests are hermetic (no GPU, no training); the behavioral flight
 > verdict is the owner's GPU retrain and is not a CI gate.
 
+### Meteor75 Pro nominal & wide domain randomization (UC-56)
+The nominal plant was the pybullet **CF2X** reference (~0.027 kg, peak T/W ≈ 2.25). UC-56 retargets it
+to a **BetaFPV Meteor75 Pro analog** (75 mm 1S brushless whoop) so acro training (UC-55) runs on a real,
+ownable drone, and **widens the domain-randomization envelope to span whoop → 5" racer** so the policy
+is robust across a broad range and can later be fine-tuned to other drones. Source:
+[BetaFPV Meteor75 Pro product page](https://betafpv.com/products/meteor75-pro-brushless-whoop-quadcopter)
+(accessed 2026-09-23), assuming a 1S pack + 1102-class motors + 40 mm props. See
+`docs/uc56-meteor75-dynamics.md` for full provenance and derivations.
+
+- **Nominal (AC1/AC2)** — mass **0.032 kg** (30–36 g AUW band), peak **T/W 2.5**, wheelbase **75 mm**
+  → arm coordinate `a = wheelbase/(2·√2) ≈ 26.5 mm`, prop **40 mm** (spec-only). Frozen in
+  `src/drone_fly/adapter/meteor75.py` with a cited-source docstring. It is a reparameterization over the
+  CF2X URDF (KF unchanged, no URDF swap): mass / hover-at-throttle-0.5 / peak T/W are **exact**, only the
+  absolute RPM is a non-physical "analog". `PyBulletAdapter._build_env` bakes it onto the fresh body and
+  does **not** touch `_pending_dynamics`, so a randomization-off run flies the exact nominal.
+- **Inertia (AC3)** — a motor-position point-mass model (`meteor75.motor_position_inertia`): four motor
+  masses at the quad-X arm positions `(±a, ±a, 0)` + a central point mass →
+  `Ixx = Iyy = motor_fraction·M·a²`, `Izz = 2·motor_fraction·M·a²` (`motor_fraction = 0.5`, documented).
+  It scales with mass **and** arm length, so it tracks the whole envelope; a hermetic test pins a known
+  geometry → known diagonal.
+- **Wide envelope (AC4/AC5), reusing UC-48** — three **pybullet-only** axes sampled independently per
+  episode (draws appended **last** → seeded streams byte-identical): mass ratio `(1.0, 20.0)` × nominal
+  (~32 g → ~640 g), peak T/W `(2.5, 10.0)`, arm `(0.0265, 0.078)` m. The resolver
+  `resolve_tw_preserving_dynamics` gains an optional `target_tw`: given, `max_rpm = hover_rpm·√target_tw`
+  so peak **T/W = target_tw exactly, independent of mass** (hover stays at throttle 0.5); `None` keeps
+  the pre-UC-56 CF2X path so `test_uc48` stays green. The **simple/CI backend ignores these axes** — its
+  ranges are untouched and it stays byte-identical / free-fall-proof.
+- **YAML knobs (UC-51 pattern)** — `pybullet_mass_ratio_min/max`, `pybullet_tw_min/max`,
+  `pybullet_arm_length_min/max` on the train **and** evaluate config; omit (or `null`) leaves the
+  `RandomizationConfig` default for that side. Active only with `randomize_dynamics: true`. Validated at
+  load: each bound `> 0`, `min <= max`, and T/W `min >= 1` (below-1 peak T/W cannot hover).
+- **Observability (AC7)** — the shared `drone_dynamics_summary` resolves off the Meteor75 nominal and
+  reports `arm_length`; the TUI, recording, and the UC-49 end-to-end T/W regression guard all report the
+  identical retuned plant (nominal peak T/W 2.5).
+- **Not modelled** — per-scale aerodynamic drag and motor-response lag across the ~20× mass range (a
+  single linear-damping range is reused). With KF fixed, the UC-55 rate loop's differential authority
+  varies across the envelope; retuning its gains is deferred to UC-55 (its `rate_*` knobs already allow
+  it).
+
+> **⚠️ Fresh-run requirement.** The plant changed (new nominal + a much wider envelope), so old CF2X-era
+> checkpoints/recordings are invalid — observing behavior needs a **brand-new** GPU retrain. All UC-56
+> tests are hermetic (spec-match, inertia-from-geometry, envelope bounds, T/W invariance, nominal
+> determinism); the behavioral verdict is the owner's retrain and is not a CI gate. A whoop → 5"
+> envelope is very wide — a curriculum over it (or start-narrow-then-widen via the YAML knobs) is a
+> training-strategy choice, out of scope here.
+
 ### Visualization & recording
 Enable recording in a train/evaluate config with `record: true` (tune cadence via `record_every`);
 frames land in that run's `training/<name>/recordings/`. Open `viz/viewer.html` in a browser
