@@ -382,6 +382,12 @@ def _run_train(config_path: str, *, no_tui: bool = False) -> int:
         "collision_penalty_end": cfg.collision_penalty_end,
         "collision_curriculum_warmup_fraction": cfg.collision_penalty_warmup_fraction,
         "collision_curriculum_hold_fraction": cfg.collision_curriculum_hold_fraction,
+        # UC-54: PPO optimization hyperparameters map 1:1 to their TrainConfig fields; the non-None
+        # filter below keeps set-to-default == omit byte-identity (AC3/AC4).
+        "n_epochs": cfg.n_epochs,
+        "batch_size": cfg.batch_size,
+        "n_steps": cfg.n_steps,
+        "learning_rate": cfg.learning_rate,
     }
     overrides = {k: v for k, v in curriculum_overrides.items() if v is not None}
     # CRITICAL FIX (AC3/AC5): the curriculum callbacks compute their schedule window against
