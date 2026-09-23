@@ -763,3 +763,147 @@ def test_uc54_set_to_default_is_accepted() -> None:
     assert cfg.batch_size == 64
     assert cfg.n_steps == 2048
     assert cfg.learning_rate == pytest.approx(3e-4)
+
+
+# --------------------------------------------------------------------------- #
+# UC-56 — pybullet dynamics-envelope range knobs (AC4)
+#
+# Six ``| None`` keys shared by train + evaluate (eval must reproduce the trained plant):
+# pybullet_mass_ratio_{min,max}, pybullet_tw_{min,max}, pybullet_arm_length_{min,max}.
+# Omitted / null -> None (leave the RandomizationConfig default, so set-to-default == omit);
+# validated for positivity, min<=max, and T/W>=1 at config-load.
+# --------------------------------------------------------------------------- #
+_UC56_ENVELOPE_KEYS = (
+    "pybullet_mass_ratio_min",
+    "pybullet_mass_ratio_max",
+    "pybullet_tw_min",
+    "pybullet_tw_max",
+    "pybullet_arm_length_min",
+    "pybullet_arm_length_max",
+)
+# A valid, in-order, positive, T/W>=1 envelope (whoop → 5" racer) for the accept-path tests.
+_UC56_VALID = {
+    "pybullet_mass_ratio_min": 1.0,
+    "pybullet_mass_ratio_max": 20.0,
+    "pybullet_tw_min": 2.5,
+    "pybullet_tw_max": 10.0,
+    "pybullet_arm_length_min": 0.0265,
+    "pybullet_arm_length_max": 0.078,
+}
+
+
+@pytest.mark.parametrize("factory", [TrainRunConfig, EvaluateRunConfig])
+def test_uc56_envelope_keys_default_to_none_when_omitted(factory) -> None:
+    """AC4: omitting the envelope keys leaves them None on BOTH commands (RandomizationConfig
+    default is used downstream, so set-to-default == omit)."""
+    base = {"name": "x"} if factory is TrainRunConfig else {"checkpoint": "c.zip"}
+    cfg = factory.from_mapping(base)
+    for key in _UC56_ENVELOPE_KEYS:
+        assert getattr(cfg, key) is None, f"{key} should default to None"
+
+
+@pytest.mark.parametrize("key", list(_UC56_ENVELOPE_KEYS))
+def test_uc56_envelope_key_explicit_null_is_none(key: str) -> None:
+    """AC4: an explicit YAML ``null`` for any envelope key is treated as omitted (-> None)."""
+    cfg = TrainRunConfig.from_mapping({"name": "x", key: None})
+    assert getattr(cfg, key) is None
+
+
+@pytest.mark.parametrize("factory", [TrainRunConfig, EvaluateRunConfig])
+def test_uc56_envelope_keys_accept_valid_values(factory) -> None:
+    """AC4: a valid, in-order, positive, T/W>=1 envelope is accepted verbatim on both commands."""
+    base = {"name": "x"} if factory is TrainRunConfig else {"checkpoint": "c.zip"}
+    cfg = factory.from_mapping({**base, **_UC56_VALID})
+    for key, value in _UC56_VALID.items():
+        assert getattr(cfg, key) == pytest.approx(value)
+
+
+def test_uc56_envelope_keys_round_trip_through_yaml(tmp_path) -> None:
+    """AC4: the envelope keys survive a real YAML round-trip (load_yaml -> from_mapping)."""
+    import yaml
+
+    p = tmp_path / "train.yaml"
+    p.write_text(yaml.safe_dump({"name": "rt", **_UC56_VALID}), encoding="utf-8")
+    cfg = TrainRunConfig.from_mapping(load_yaml(p))
+    for key, value in _UC56_VALID.items():
+        assert getattr(cfg, key) == pytest.approx(value)
+
+
+@pytest.mark.parametrize("key", list(_UC56_ENVELOPE_KEYS))
+@pytest.mark.parametrize("bad", [0.0, -1.0])
+def test_uc56_envelope_non_positive_rejected(key: str, bad: float) -> None:
+    """AC4: every envelope bound must be > 0 — zero or negative is a ConfigError naming the key."""
+    with pytest.raises(ConfigError, match=key):
+        TrainRunConfig.from_mapping({"name": "x", key: bad})
+
+
+@pytest.mark.parametrize("key", ["pybullet_tw_min", "pybullet_tw_max"])
+def test_uc56_tw_below_one_rejected(key: str) -> None:
+    """AC4: a peak T/W below 1 cannot hover — a ``pybullet_tw_*`` < 1 is rejected (UC-47-style)."""
+    with pytest.raises(ConfigError, match=key):
+        TrainRunConfig.from_mapping({"name": "x", key: 0.5})
+
+
+@pytest.mark.parametrize(
+    ("min_key", "max_key", "lo", "hi"),
+    [
+        ("pybullet_mass_ratio_min", "pybullet_mass_ratio_max", 20.0, 1.0),
+        ("pybullet_tw_min", "pybullet_tw_max", 10.0, 2.5),
+        ("pybullet_arm_length_min", "pybullet_arm_length_max", 0.078, 0.0265),
+    ],
+)
+def test_uc56_inverted_range_rejected(min_key, max_key, lo, hi) -> None:
+    """AC4: an inverted range (min > max) is a ConfigError naming the min key."""
+    with pytest.raises(ConfigError, match=min_key):
+        TrainRunConfig.from_mapping({"name": "x", min_key: lo, max_key: hi})
+
+
+@pytest.mark.parametrize("key", list(_UC56_ENVELOPE_KEYS))
+def test_uc56_envelope_key_rejects_string_type(key: str) -> None:
+    """AC4: type validation — a string for any numeric envelope bound is a type error."""
+    with pytest.raises(ConfigError, match=key):
+        TrainRunConfig.from_mapping({"name": "x", key: "wide"})
+
+
+@pytest.mark.parametrize(
+    ("min_key", "max_key"),
+    [
+        ("pybullet_mass_ratio_min", "pybullet_mass_ratio_max"),
+        ("pybullet_tw_min", "pybullet_tw_max"),
+        ("pybullet_arm_length_min", "pybullet_arm_length_max"),
+    ],
+)
+def test_uc56_partial_range_one_side_is_accepted(min_key, max_key) -> None:
+    """AC4: a partially-specified range (only one side set) is accepted — the CLI fills the unset
+    side from the RandomizationConfig default, so a lone min or max is well-defined."""
+    lo_only = TrainRunConfig.from_mapping({"name": "x", min_key: 2.5})
+    assert getattr(lo_only, min_key) == pytest.approx(2.5)
+    assert getattr(lo_only, max_key) is None
+    hi_only = TrainRunConfig.from_mapping({"name": "x", max_key: 9.0})
+    assert getattr(hi_only, max_key) == pytest.approx(9.0)
+    assert getattr(hi_only, min_key) is None
+
+
+def test_uc56_set_to_default_is_accepted() -> None:
+    """AC4: setting each envelope bound to its RandomizationConfig default is accepted and threads
+    through losslessly (set-to-default == omit); byte-identity is checked end-to-end in CLI."""
+    from drone_fly.env.config import RandomizationConfig
+
+    r = RandomizationConfig()
+    cfg = TrainRunConfig.from_mapping(
+        {
+            "name": "x",
+            "pybullet_mass_ratio_min": r.pybullet_mass_ratio_range[0],
+            "pybullet_mass_ratio_max": r.pybullet_mass_ratio_range[1],
+            "pybullet_tw_min": r.tw_range[0],
+            "pybullet_tw_max": r.tw_range[1],
+            "pybullet_arm_length_min": r.arm_length_range[0],
+            "pybullet_arm_length_max": r.arm_length_range[1],
+        }
+    )
+    assert cfg.pybullet_mass_ratio_min == pytest.approx(r.pybullet_mass_ratio_range[0])
+    assert cfg.pybullet_mass_ratio_max == pytest.approx(r.pybullet_mass_ratio_range[1])
+    assert cfg.pybullet_tw_min == pytest.approx(r.tw_range[0])
+    assert cfg.pybullet_tw_max == pytest.approx(r.tw_range[1])
+    assert cfg.pybullet_arm_length_min == pytest.approx(r.arm_length_range[0])
+    assert cfg.pybullet_arm_length_max == pytest.approx(r.arm_length_range[1])

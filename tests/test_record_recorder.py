@@ -679,6 +679,7 @@ def test_meta_drone_dynamics_present_and_correct_when_set(
         sampled_mass=1.0,
         max_body_rate=4.0,
         tw_preserving=True,
+        pybullet_mass_ratio=1.0,
         spawn_z=1.25,
     )
     doc = _record_with_drone_dynamics(connectome, tmp_path / "act", summary)
@@ -686,9 +687,11 @@ def test_meta_drone_dynamics_present_and_correct_when_set(
     assert "drone_dynamics" in doc["meta"], "meta.drone_dynamics must be present when set"
     block = doc["meta"]["drone_dynamics"]
     assert block["backend"] == "pybullet"
-    assert block["applied_mass"] == pytest.approx(0.027, rel=1e-6)  # resolved, not raw ~1 kg
-    assert block["weight"] == pytest.approx(0.027 * 9.8, rel=1e-6)
-    assert block["thrust_to_weight"] == pytest.approx(2.25, rel=1e-6)
+    # UC-56: the pybullet nominal is the Meteor75 analog (0.032 kg / T/W 2.5), resolved off the
+    # mass-ratio (1.0 → nominal mass), NOT the raw ~1 kg sampled mass.
+    assert block["applied_mass"] == pytest.approx(0.032, rel=1e-6)
+    assert block["weight"] == pytest.approx(0.032 * 9.8, rel=1e-6)
+    assert block["thrust_to_weight"] == pytest.approx(2.5, rel=1e-6)
     assert block["hover_throttle"] == pytest.approx(0.5, abs=1e-6)
     assert block["max_body_rate"] == pytest.approx(4.0)
     assert block["spawn_z"] == pytest.approx(1.25)

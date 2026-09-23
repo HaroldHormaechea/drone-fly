@@ -26,6 +26,7 @@ import pytest
 import yaml
 
 from drone_fly.cli import (
+    _apply_dynamics_envelope,
     _env_config,
     _resolve_config_resume,
     _resolve_train_randomization,
@@ -691,6 +692,72 @@ def test_resolver_dynamics_only_builds_env_without_placement_or_schema() -> None
     assert r.enable_obstacles is False
     assert r.enable_recharge is False
     assert r.enable_repair is False
+
+
+# --------------------------------------------------------------------------- #
+# UC-56 — _apply_dynamics_envelope: fold set envelope knobs into the randomization ranges
+# --------------------------------------------------------------------------- #
+def _dynamics_env_config():
+    """A real env_config with dynamics randomization on (so the envelope ranges are live)."""
+    env_config, _ = _resolve_train_randomization(_train_cfg(randomize_dynamics=True))
+    assert env_config is not None
+    return env_config
+
+
+def test_apply_dynamics_envelope_none_env_config_is_noop() -> None:
+    """AC4: with no env_config (randomization off) the envelope keys are inert — stays ``None``."""
+    cfg = _train_cfg(pybullet_mass_ratio_min=2.0, pybullet_mass_ratio_max=8.0)
+    assert _apply_dynamics_envelope(None, cfg) is None
+
+
+def test_apply_dynamics_envelope_no_keys_is_identity() -> None:
+    """AC4: a config that sets NO envelope key leaves env_config untouched (same ranges)."""
+    env_config = _dynamics_env_config()
+    out = _apply_dynamics_envelope(env_config, _train_cfg())
+    assert out is env_config  # unchanged object — a true no-op
+    assert (
+        out.randomization.pybullet_mass_ratio_range
+        == env_config.randomization.pybullet_mass_ratio_range
+    )
+
+
+def test_apply_dynamics_envelope_threads_full_ranges() -> None:
+    """AC4: fully-specified envelope keys replace all three RandomizationConfig ranges."""
+    env_config = _dynamics_env_config()
+    cfg = _train_cfg(
+        pybullet_mass_ratio_min=1.0,
+        pybullet_mass_ratio_max=8.0,
+        pybullet_tw_min=3.0,
+        pybullet_tw_max=6.0,
+        pybullet_arm_length_min=0.03,
+        pybullet_arm_length_max=0.06,
+    )
+    r = _apply_dynamics_envelope(env_config, cfg).randomization
+    assert r.pybullet_mass_ratio_range == (1.0, 8.0)
+    assert r.tw_range == (3.0, 6.0)
+    assert r.arm_length_range == (0.03, 0.06)
+
+
+def test_apply_dynamics_envelope_partial_range_fills_unset_side_from_default() -> None:
+    """AC4: a lone ``min`` (or ``max``) fills the other side from the current RandomizationConfig
+    default, so a partially-specified range is well-defined and never inverted."""
+    env_config = _dynamics_env_config()
+    default_hi = env_config.randomization.tw_range[1]
+    cfg = _train_cfg(pybullet_tw_min=3.0)  # only the min side set
+    r = _apply_dynamics_envelope(env_config, cfg).randomization
+    assert r.tw_range == (3.0, default_hi)
+    # The untouched axes keep their defaults.
+    assert r.pybullet_mass_ratio_range == env_config.randomization.pybullet_mass_ratio_range
+
+
+def test_apply_dynamics_envelope_only_touches_specified_axes() -> None:
+    """AC4: setting only the mass-ratio axis leaves the T/W and arm ranges at their defaults."""
+    env_config = _dynamics_env_config()
+    cfg = _train_cfg(pybullet_mass_ratio_min=2.0, pybullet_mass_ratio_max=15.0)
+    r = _apply_dynamics_envelope(env_config, cfg).randomization
+    assert r.pybullet_mass_ratio_range == (2.0, 15.0)
+    assert r.tw_range == env_config.randomization.tw_range
+    assert r.arm_length_range == env_config.randomization.arm_length_range
 
 
 def test_resolver_schema_without_randomize_yields_schema_but_no_env() -> None:
