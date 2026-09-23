@@ -86,18 +86,24 @@ resume: auto
 # validated (type + range) at config load: fractions must be in [0, 1], ent_coef >= 0, the collision
 # penalties >= 0; out-of-range or unknown values fail loud with a clear error (exit 2).
 #
-# The DEFAULT schedule is RESTAGGERED so the three difficulty steps are ISOLATED and floor-takeoff is
-# the last, longest stage — ordered attitude-full (~0.25) < collision-full (~0.5) < spawn-reaches-
-# floor (1.0). Each fraction is a fraction of `timesteps` above.
+# The DEFAULT schedule is RESTAGGERED so the difficulty steps are ISOLATED and floor-takeoff is the
+# last, longest stage — collision-full (~0.5) < spawn-reaches-floor (1.0). (UC-55 retired the
+# attitude-authority stage that used to lead this ordering.) Each fraction is a fraction of `timesteps`.
 #
 # ent_coef: 0.005        # PPO entropy coefficient (exploration). Strictly positive keeps the action
 #                        # distribution exploring long enough to discover takeoff (UC-38/40/41).
 #
-# Attitude-authority curriculum (UC-46): roll/pitch/yaw command authority ramps low->full so a noisy
-# policy can't flip early. Restaggered to reach FULL earliest (~0.25), the first isolated step.
-# attitude_authority_curriculum_enabled: true
-# attitude_authority_start: 0.25            # authority at step 0 (0..1)
-# attitude_authority_anneal_fraction: 0.25  # reaches full authority (1.0) by this fraction
+# Attitude-authority curriculum (UC-46): RETIRED in UC-55. It was a crude stand-in for the missing
+# inner-loop rate controller; UC-55 adds that controller and removes these keys. Use the rate-
+# controller gains below to shape the plant instead.
+#
+# Inner-loop rate-controller gains (UC-55): retune the body-rate PID (the "flight controller") from
+# config, no code edit. All OPTIONAL, non-negative; omitting a key — or setting it to its
+# RateControllerConfig default — is byte-identical to the default run. The rate loop is pybullet-only.
+# rate_kp: 0.6              # proportional gain on body-rate error (setpoint - measured)
+# rate_ki: 0.1             # integral gain (anti-windup clamped)
+# rate_kd: 0.02            # derivative gain (damps the noisy full-range regime)
+# rate_max_body_rate: 4.0  # full-stick body-rate clamp (rad/s); +/-1 command -> +/-this setpoint
 #
 # Collision-penalty curriculum (UC-39/41): hold-then-ramp crash-cliff relief. The penalty is held
 # low through `hold_fraction`, then ramps to full over `warmup_fraction` (the RAMP WIDTH), reaching

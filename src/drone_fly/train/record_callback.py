@@ -119,10 +119,6 @@ class RecordingCallback(BaseCallback):
                 backend = self.training_env.get_attr("backend")[0]
                 dyn = self.training_env.get_attr("active_dynamics")[0] or DynamicsParams()
                 try:
-                    attitude_authority = float(self.training_env.get_attr("attitude_authority")[0])
-                except Exception:  # noqa: BLE001 - env may predate the accessor; default full
-                    attitude_authority = 1.0
-                try:
                     spawn_z = self.training_env.get_attr("spawn_z")[0]
                 except Exception:  # noqa: BLE001 - env may predate the accessor; leave unknown
                     spawn_z = None
@@ -133,7 +129,6 @@ class RecordingCallback(BaseCallback):
                         max_body_rate=dyn.max_body_rate,
                         max_thrust=dyn.max_thrust,
                         tw_preserving=self._tw_preserving,
-                        attitude_authority=attitude_authority,
                         spawn_z=spawn_z,
                     )
                 )

@@ -193,10 +193,6 @@ class TuiCallback(BaseCallback):
             backend = venv.get_attr("backend")[0]
             dyn = venv.get_attr("active_dynamics")[0] or DynamicsParams()
             try:
-                attitude_authority = float(venv.get_attr("attitude_authority")[0])
-            except Exception:  # noqa: BLE001 - env may predate the accessor; default to full
-                attitude_authority = 1.0
-            try:
                 spawn_z = venv.get_attr("spawn_z")[0]
             except Exception:  # noqa: BLE001 - env may predate the accessor; leave unknown
                 spawn_z = None
@@ -206,7 +202,6 @@ class TuiCallback(BaseCallback):
                 max_body_rate=dyn.max_body_rate,
                 max_thrust=dyn.max_thrust,
                 tw_preserving=self._tw_preserving,
-                attitude_authority=attitude_authority,
                 spawn_z=spawn_z,
             )
             self.dashboard.set_drone_dynamics(summary)

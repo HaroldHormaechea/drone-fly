@@ -24,6 +24,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from drone_fly.adapter.base import DroneAdapter, DroneState, sanitize_action
+from drone_fly.adapter.rate_controller import RateController, RateControllerConfig
 from drone_fly.adapter.simple import BASE_MASS
 
 #: CF2X rigid-body reference constants (UC-48). Documented here so the T/W-preservation
@@ -132,6 +133,52 @@ _INSTALL_HINT = (
 )
 
 
+def mix_to_rpm(
+    throttle: float,
+    effort_rpy: np.ndarray,
+    *,
+    hover_rpm: float,
+    max_rpm: float,
+    thrust_gain: float = 1.0,
+    rate_gain: float = 0.15,
+) -> np.ndarray:
+    """Pure quad-X mixer: throttle → base RPM + rpy **effort** → differential RPM (UC-55).
+
+    Extracted from :func:`ctbr_to_rpm` so both the open-loop mixer and the inner-loop rate
+    controller (:mod:`drone_fly.adapter.rate_controller`) share one **pure, stateless** mixing
+    convention — the integrator lives only in the controller, keeping this helper (and
+    ``ctbr_to_rpm``) stateless (preserves the purity assertions in ``test_adapter.py`` /
+    ``test_uc47_thrust_pathway.py``).
+
+    ``throttle`` (index 0 of the CTBR action) sets a base RPM around ``hover_rpm``; ``effort_rpy``
+    is a length-3 ``[roll, pitch, yaw]`` control effort in ``[-1, 1]`` — the open-loop command
+    itself (:func:`ctbr_to_rpm`) or the rate controller's normalized output — added as a
+    differential mix across the four rotors using the standard quad-X sign pattern (motors
+    ordered front-right, back-right, back-left, front-left). The result is clipped to
+    ``[0, max_rpm]``.
+
+    The throttle→base formula is unchanged byte-for-byte from the original ``ctbr_to_rpm`` so the
+    analytic hover-throttle inversion in ``dynamics_summary`` stays in sync.
+    """
+    base = hover_rpm + (throttle - 0.5) * 2.0 * (max_rpm - hover_rpm) * thrust_gain
+    roll, pitch, yaw = np.asarray(effort_rpy, dtype=np.float64).reshape(-1)
+    droll = roll * rate_gain * max_rpm
+    dpitch = pitch * rate_gain * max_rpm
+    dyaw = yaw * rate_gain * max_rpm
+    # Quad-X mixing: +roll -> right rotors down/left up; +pitch -> back up/front down;
+    # +yaw -> CW rotors up. Signs per the front-right, back-right, back-left, front-left order.
+    rpm = np.array(
+        [
+            base - droll + dpitch - dyaw,  # front-right (CCW)
+            base - droll - dpitch + dyaw,  # back-right (CW)
+            base + droll - dpitch - dyaw,  # back-left (CCW)
+            base + droll + dpitch + dyaw,  # front-left (CW)
+        ],
+        dtype=np.float64,
+    )
+    return np.clip(rpm, 0.0, max_rpm)
+
+
 def ctbr_to_rpm(
     action: np.ndarray,
     *,
@@ -148,29 +195,22 @@ def ctbr_to_rpm(
     (motors ordered front-right, back-right, back-left, front-left, CCW). The result is
     clipped to ``[0, max_rpm]``.
 
-    This is intentionally a simple, documented mixing rather than a full cascaded rate
-    controller: it is enough to make the canonical action steer the pybullet drone, and it
-    is testable in isolation. The physical fidelity that matters for the mastery bar comes
-    from pybullet's rigid-body integration, not from this mixer.
+    This is the **open-loop feedforward** mix: it maps the *command* directly to differential
+    RPM with no gyro feedback. UC-55 adds the missing inner-loop rate regulation in
+    :class:`~drone_fly.adapter.rate_controller.RateController`, which the pybullet adapter calls
+    before delegating the actual mixing to :func:`mix_to_rpm` (the shared pure helper this
+    function now also uses). This function itself is kept pure and byte-identical so its unit
+    tests and the purity assertions elsewhere continue to hold.
     """
     a = sanitize_action(action)
-    throttle, roll, pitch, yaw = a
-    base = hover_rpm + (throttle - 0.5) * 2.0 * (max_rpm - hover_rpm) * thrust_gain
-    droll = roll * rate_gain * max_rpm
-    dpitch = pitch * rate_gain * max_rpm
-    dyaw = yaw * rate_gain * max_rpm
-    # Quad-X mixing: +roll -> right rotors down/left up; +pitch -> back up/front down;
-    # +yaw -> CW rotors up. Signs per the front-right, back-right, back-left, front-left order.
-    rpm = np.array(
-        [
-            base - droll + dpitch - dyaw,  # front-right (CCW)
-            base - droll - dpitch + dyaw,  # back-right (CW)
-            base + droll - dpitch - dyaw,  # back-left (CCW)
-            base + droll + dpitch + dyaw,  # front-left (CW)
-        ],
-        dtype=np.float64,
+    return mix_to_rpm(
+        a[0],
+        a[1:4],
+        hover_rpm=hover_rpm,
+        max_rpm=max_rpm,
+        thrust_gain=thrust_gain,
+        rate_gain=rate_gain,
     )
-    return np.clip(rpm, 0.0, max_rpm)
 
 
 def load_pybullet_drones():
@@ -203,6 +243,12 @@ class PyBulletAdapter(DroneAdapter):
         UC-48. When ``True`` (default), domain-randomized mass is applied so thrust-to-weight is
         preserved on the CF2X body (see :func:`resolve_tw_preserving_dynamics`); ``False`` restores
         the pre-UC-48 degenerate absolute-mass behavior for opt-out / regression testing.
+    rate_controller:
+        UC-55. Optional :class:`~drone_fly.adapter.rate_controller.RateControllerConfig` for the
+        inner-loop body-rate PID (the missing "flight controller"). ``None`` (default) builds a
+        default-config controller. The loop regulates the commanded body rate toward the achieved
+        rate each :meth:`step` so command noise no longer tumbles the drone; throttle passes
+        through untouched. pybullet-only — the simple backend never receives it (CI hermeticity).
     """
 
     backend = "pybullet"
@@ -217,6 +263,7 @@ class PyBulletAdapter(DroneAdapter):
         battery=None,
         damage=None,
         tw_preserving: bool = True,
+        rate_controller: RateControllerConfig | None = None,
     ) -> None:  # pragma: no cover - requires the sim; verified on the owner's macOS M4
         self._start = np.asarray(start_position, dtype=np.float64).reshape(3).copy()
         self._floor_z = float(floor_z)
@@ -236,6 +283,12 @@ class PyBulletAdapter(DroneAdapter):
         # damage + control-authority model is asserted only on the numpy backend. This backend
         # always reports full integrity (integrity=1.0 default on DroneState).
         self._damage = damage
+        # UC-55: inner-loop body-rate PID. Owns the ONLY integrator/state in the control path
+        # (the mixer stays pure/stateless). ``step`` closes the loop on the measured body rate
+        # (``raw[13:16]``) so a commanded rate is regulated toward the achieved rate — the missing
+        # flight controller that stops command noise from tumbling the drone. pybullet-only.
+        self._rate_config = rate_controller or RateControllerConfig()
+        self._rate_controller = RateController(self._rate_config)
         self._CtrlAviary, self._DroneModel, self._Physics = load_pybullet_drones()
         self._env = None
         self._hover_rpm = 0.0
@@ -361,6 +414,7 @@ class PyBulletAdapter(DroneAdapter):
             self._env = self._build_env()
         self._env.reset(seed=seed)
         self._apply_dynamics()  # best-effort mass/drag on the freshly-built body (UC-08)
+        self._rate_controller.reset()  # UC-55: clear the inner-loop integrator/prev-error state
         return self._read_state(
             self._start[2] <= self._floor_z or self._start[2] >= self._ceiling_z
         )
@@ -368,7 +422,18 @@ class PyBulletAdapter(DroneAdapter):
     def step(self, action: np.ndarray) -> DroneState:  # pragma: no cover - sim path
         if self._env is None:
             self._env = self._build_env()
-        rpm = ctbr_to_rpm(action, hover_rpm=self._hover_rpm, max_rpm=self._max_rpm)
+        # UC-55 inner-loop rate control. (1) clip to the canonical CTBR box; (2) read the ACHIEVED
+        # body rate (body-frame ``raw[13:16]``) BEFORE stepping — the loop closes on the rate
+        # entering this step (from rest the first read is 0, giving the AC4 byte-identity
+        # reference); (3) map the normalized rpy command to a body-rate setpoint via the (swappable)
+        # curve hook, clamped to ``max_body_rate``; (4) run the PID to a per-axis normalized effort
+        # in [-1,1]; (5) feed that effort — with the SAME sign convention the open-loop command
+        # used — into the pure mixer. Throttle (index 0) passes through untouched.
+        a = sanitize_action(action)
+        measured_rate = np.asarray(self._env._getDroneStateVector(0)[13:16], dtype=np.float64)
+        setpoint = self._rate_config.command_to_setpoint(a[1:4], self._rate_config.max_body_rate)
+        effort = self._rate_controller.update(setpoint, measured_rate, self._dt)
+        rpm = mix_to_rpm(a[0], effort, hover_rpm=self._hover_rpm, max_rpm=self._max_rpm)
         self._env.step(rpm.reshape(1, 4))
         state = self._read_state(False)
         z = state.position[2]

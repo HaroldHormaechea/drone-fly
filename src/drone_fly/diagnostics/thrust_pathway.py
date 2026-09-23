@@ -13,8 +13,9 @@ Design constraints (UC-47 AC1/AC7/AC9)
   hermetic pure-mixer / simple-backend analyses) never requires the sim toolchain, so CI
   can import and unit-test it. The hermetic test module MUST NOT touch the pybullet paths.
 * **Diagnostic only.** Nothing here changes reward, curricula, init, the mixer, or training
-  dynamics. It only *reads* the existing code paths. The one training-time lever it reuses,
-  :meth:`RaceEnv.set_attitude_authority`, is used **read-only** as a measurement knob.
+  dynamics. It only *reads* the existing code paths. (UC-55 retired the UC-46 attitude-authority
+  lever this harness once reused as a measurement knob, so the authority sweeps are gone; the
+  UC-47 thrust/mass probes it was built for remain.)
 
 T/W measurement
 ---------------
@@ -40,7 +41,6 @@ from pathlib import Path
 
 import numpy as np
 
-from drone_fly.adapter.base import sanitize_action
 from drone_fly.adapter.pybullet_adapter import ctbr_to_rpm
 from drone_fly.adapter.simple import SimpleDroneAdapter
 from drone_fly.env.config import BatteryConfig, DamageConfig, DynamicsParams
@@ -61,8 +61,6 @@ RATE_GAIN = 0.15
 
 #: Default collective-throttle grid for the sweeps.
 DEFAULT_THROTTLES = (0.0, 0.25, 0.5, 0.75, 1.0)
-#: Default attitude-authority factors for the rate-coupled sweep (UC-46 lever values).
-DEFAULT_AUTHORITIES = (0.25, 0.5, 1.0)
 
 #: Measurement window: total control steps and the leading steps skipped as reset/settle
 #: transient before the velocity fit. Kept small so a rate-coupled cell is read before the
@@ -82,21 +80,6 @@ def make_action(throttle: float, rpy: float | tuple[float, float, float]) -> np.
     else:
         r, p, y = (float(v) for v in rpy)  # type: ignore[misc]
     return np.array([float(throttle), r, p, y], dtype=np.float64)
-
-
-def apply_authority(action: np.ndarray, factor: float) -> np.ndarray:
-    """Apply the UC-46 attitude-authority scaling exactly as ``RaceEnv.step`` does.
-
-    Clip-then-scale: :func:`sanitize_action` first clips the raw action into the canonical
-    CTBR box, THEN the clipped roll/pitch/yaw channels (indices 1..3) are multiplied by
-    ``factor`` — throttle (index 0) is never scaled. This mirrors
-    :meth:`drone_fly.env.racing_env.RaceEnv.set_attitude_authority` so a sweep cell measures
-    the same effective command the training run applied.
-    """
-    a = sanitize_action(action)
-    if factor != 1.0:
-        a[1:4] *= float(factor)
-    return a
 
 
 def mixer_rpms(
@@ -123,7 +106,6 @@ def collective_thrust_proxy(rpms: np.ndarray) -> float:
 def mixer_collective_metrics(
     throttle: float,
     rpy: float,
-    authority: float = 1.0,
     *,
     hover_rpm: float = CF2X_HOVER_RPM,
     max_rpm: float = CF2X_MAX_RPM,
@@ -135,10 +117,11 @@ def mixer_collective_metrics(
     the rpy=0 baseline at the same throttle, the fractional collective **bleed**
     (``1 − proxy/baseline``; positive == lift lost to the rate channels), and how many
     rotors clipped at ``max_rpm``. This is the exact, deterministic quantity the
-    collective-desaturation hypothesis is about — no pybullet needed.
+    collective-desaturation hypothesis is about — no pybullet needed. (UC-55 removed the
+    attitude-authority scaling this once accepted; the command is measured as issued.)
     """
-    act = apply_authority(make_action(throttle, rpy), authority)
-    base = apply_authority(make_action(throttle, 0.0), authority)
+    act = make_action(throttle, rpy)
+    base = make_action(throttle, 0.0)
     rpms = mixer_rpms(act, hover_rpm=hover_rpm, max_rpm=max_rpm, rate_gain=rate_gain)
     rpms0 = mixer_rpms(base, hover_rpm=hover_rpm, max_rpm=max_rpm, rate_gain=rate_gain)
     proxy = collective_thrust_proxy(rpms)
@@ -148,7 +131,6 @@ def mixer_collective_metrics(
     return {
         "throttle": float(throttle),
         "rpy": float(rpy),
-        "authority": float(authority),
         "rpms": [float(v) for v in rpms],
         "sum_sq": proxy,
         "sum_sq_baseline_rpy0": proxy0,
@@ -165,7 +147,6 @@ class Measurement:
     label: str
     throttle: float
     rpy: float
-    authority: float
     mass: float
     a_z: float  # achieved steady vertical acceleration (m/s^2)
     tw: float  # achieved thrust-to-weight = (a_z + g) / g
@@ -179,7 +160,6 @@ class Measurement:
             "label": self.label,
             "throttle": self.throttle,
             "rpy": self.rpy,
-            "authority": self.authority,
             "mass": self.mass,
             "a_z": self.a_z,
             "tw": self.tw,
@@ -237,7 +217,6 @@ class _PyBulletProbe:
         label: str,
         throttle: float,
         rpy: float,
-        authority: float = 1.0,
         dynamics: DynamicsParams | None = None,
         n_steps: int = MEASURE_STEPS,
         skip: int = MEASURE_SKIP,
@@ -246,7 +225,7 @@ class _PyBulletProbe:
         ad = self._adapter
         self._prepare(dynamics)
         mass = CF2X_MASS if dynamics is None else float(dynamics.mass)
-        action = apply_authority(make_action(throttle, rpy), authority)
+        action = make_action(throttle, rpy)
         vz = np.empty(n_steps, dtype=np.float64)
         z = np.empty(n_steps, dtype=np.float64)
         att = np.zeros((n_steps, 3), dtype=np.float64)
@@ -271,7 +250,6 @@ class _PyBulletProbe:
             label=label,
             throttle=float(throttle),
             rpy=float(rpy),
-            authority=float(authority),
             mass=mass,
             a_z=a_z,
             tw=float(tw),
@@ -328,33 +306,29 @@ def rate_coupled_sweep(
     probe: _PyBulletProbe,
     *,
     throttles=DEFAULT_THROTTLES,
-    authorities=DEFAULT_AUTHORITIES,
     dynamics: DynamicsParams | None = None,
     dynamics_label: str = "default",
 ) -> list[dict]:
-    """AC3: T/W with saturated rpy=±1.0 at authority factors, plus the pure-mixer bleed.
+    """AC3: T/W with saturated rpy=+1.0, plus the pure-mixer collective bleed.
 
     Each cell pairs the real-pybullet measured T/W with the exact ``ctbr_to_rpm`` collective
     bleed (``Σ rpm²`` loss vs rpy=0). The verdict rests on these pybullet + pure-mixer
     numbers only — no simple-backend mirror (simple's rate→lift loss is cos-tilt, a
-    different mechanism).
+    different mechanism). (UC-55 retired the attitude-authority dimension; with the inner-loop
+    rate controller now active the command is measured as issued, at full authority.)
     """
     out = []
-    for auth in authorities:
-        for thr in throttles:
-            m = probe.measure(
-                label=f"rate[{dynamics_label}] thr={thr} rpy=+1 auth={auth}",
-                throttle=thr,
-                rpy=1.0,
-                authority=auth,
-                dynamics=dynamics,
-            )
-            mix = mixer_collective_metrics(
-                thr, 1.0, auth, hover_rpm=probe.hover_rpm, max_rpm=probe.max_rpm
-            )
-            cell = m.as_dict()
-            cell["mixer"] = mix
-            out.append(cell)
+    for thr in throttles:
+        m = probe.measure(
+            label=f"rate[{dynamics_label}] thr={thr} rpy=+1",
+            throttle=thr,
+            rpy=1.0,
+            dynamics=dynamics,
+        )
+        mix = mixer_collective_metrics(thr, 1.0, hover_rpm=probe.hover_rpm, max_rpm=probe.max_rpm)
+        cell = m.as_dict()
+        cell["mixer"] = mix
+        out.append(cell)
     return out
 
 
@@ -547,42 +521,18 @@ def _load_recording(path: Path) -> dict:
     return json.loads(raw)
 
 
-def _uc46_authority_estimate(
-    episode_index: int,
-    *,
-    start: float = 0.25,
-    anneal_fraction: float = 0.5,
-    total_timesteps: int = 1_000_000,
-    n_envs: int = 1,
-    dt: float = 0.05,
-    steps_per_episode: int = 20,
-) -> float:
-    """Reconstruct the UC-46 committed authority schedule value at ``episode_index``.
-
-    The committed curriculum anneals authority linearly from ``start`` to ``1.0`` over the
-    first ``anneal_fraction`` of ``total_timesteps``. Episodes here run ~``steps_per_episode``
-    steps, so the training step reached by ``episode_index`` is ``episode_index *
-    steps_per_episode`` — a coarse estimate refined empirically by the trajectory sweep.
-    """
-    anneal_steps = anneal_fraction * total_timesteps
-    step = episode_index * steps_per_episode
-    frac = min(1.0, step / anneal_steps) if anneal_steps > 0 else 1.0
-    return float(start + (1.0 - start) * frac)
-
-
 def replay_recording(
     path: str | Path,
     *,
-    authority_sweep=None,
     dt: float | None = None,
 ) -> dict:
-    """AC6: replay a recording's RAW actions through ``RaceEnv`` (pybullet) and tie back.
+    """AC6: replay a recording's actions through ``RaceEnv`` (pybullet) and tie back.
 
-    The recorder logs the **raw pre-authority-scale** action; the env scales rpy internally
-    by the training-time attitude authority. So this reconstructs the applied authority two
-    ways: (i) the UC-46 schedule estimate, and (ii) an empirical sweep picking the factor
-    that best reproduces the recorded **3-D** trajectory (position RMSE, all axes). Randomization
-    is pinned off and the recorded spawn + mass/drag are applied so the replay is faithful.
+    Replays the recorded action tape once through a faithful env (randomization off, recorded
+    spawn + mass/drag applied) and compares the resulting 3-D trajectory to the recording. (UC-55
+    retired the attitude-authority curriculum, so the env no longer rescales the rpy channels: the
+    former best-fit-authority sweep and its UC-46 schedule estimate are gone — the actions are
+    replayed as issued.)
     """
     from drone_fly.env.config import CourseConfig, EarlyTerminationConfig, EnvConfig
     from drone_fly.env.racing_env import RaceEnv
@@ -608,9 +558,6 @@ def replay_recording(
             latency_steps=int(dyn.get("latency_steps", 0)),
         )
 
-    if authority_sweep is None:
-        authority_sweep = [round(0.20 + 0.05 * k, 2) for k in range(0, 17)]  # 0.20..1.00
-
     # Tall arena, airborne spawn at the recorded start, randomization off, ET off — so the
     # replay integrates the full recorded action tape without early truncation.
     def _build_env() -> RaceEnv:
@@ -622,13 +569,12 @@ def replay_recording(
         )
         return RaceEnv(cfg, adapter="pybullet")
 
-    def _replay_at(factor: float) -> np.ndarray:
+    def _replay() -> np.ndarray:
         env = _build_env()
         try:
             env.reset(seed=0)
             if dynamics is not None:
                 env.adapter.reconfigure(dynamics=dynamics)
-            env.set_attitude_authority(factor)
             out = np.empty((n, 3), dtype=np.float64)
             for i in range(n):
                 _obs, _r, _term, _trunc, info = env.step(actions[i])
@@ -640,11 +586,8 @@ def replay_recording(
     def _rmse(a: np.ndarray, b: np.ndarray) -> float:
         return float(np.sqrt(np.mean(np.sum((a - b) ** 2, axis=1))))
 
-    results = []
-    for f in authority_sweep:
-        traj = _replay_at(f)
-        results.append((f, _rmse(traj, positions), traj))
-    best_f, best_rmse, best_traj = min(results, key=lambda r: r[1])
+    replay_traj = _replay()
+    replay_rmse = _rmse(replay_traj, positions)
 
     # Early free-fall vertical acceleration (m/s^2) from the trajectory — the quantity the UC
     # cites ("~7-8 m/s^2 descent at full throttle"). Measured over the first few steps, before
@@ -658,9 +601,8 @@ def replay_recording(
         t = np.arange(k0, k1, dtype=np.float64) * rec_dt
         return float(np.polyfit(t, vz[k0:k1], 1)[0])
 
-    schedule_est = _uc46_authority_estimate(int(meta.get("episode_index", 0)))
     recorded_az = _descent_az(positions)
-    replay_az = _descent_az(best_traj)
+    replay_az = _descent_az(replay_traj)
     return {
         "recording": str(path),
         "episode_index": int(meta.get("episode_index", -1)),
@@ -670,20 +612,17 @@ def replay_recording(
         "dt": rec_dt,
         "spawn": list(spawn),
         "dynamics": None if dyn is None else dyn,
-        "authority_schedule_estimate": schedule_est,
-        "authority_best_fit": best_f,
-        "best_fit_rmse_m": best_rmse,
-        "rmse_by_authority": {str(f): r for f, r, _ in results},
+        "replay_rmse_m": replay_rmse,
         "recorded_early_descent_a_z": recorded_az,
         "replay_early_descent_a_z": replay_az,
         "recorded_z_start": float(positions[0, 2]),
         "recorded_z_end": float(positions[-1, 2]),
-        "replay_z_end": float(best_traj[-1, 2]),
+        "replay_z_end": float(replay_traj[-1, 2]),
         "lateral_drift_recorded_m": float(
             np.max(np.linalg.norm(positions[:, :2] - positions[0, :2], axis=1))
         ),
         "lateral_drift_replay_m": float(
-            np.max(np.linalg.norm(best_traj[:, :2] - best_traj[0, :2], axis=1))
+            np.max(np.linalg.norm(replay_traj[:, :2] - replay_traj[0, :2], axis=1))
         ),
     }
 
@@ -693,7 +632,6 @@ def run_pybullet_surface(
     *,
     recording: str | Path | None = None,
     throttles=DEFAULT_THROTTLES,
-    authorities=DEFAULT_AUTHORITIES,
 ) -> dict:
     """Run the full real-pybullet characterization and return the surface dict (lazy)."""
     consts = cf2x_constants()
@@ -731,14 +669,12 @@ def run_pybullet_surface(
             "rate_coupled_default_mass": rate_coupled_sweep(
                 probe,
                 throttles=throttles,
-                authorities=authorities,
                 dynamics=None,
                 dynamics_label="default_0.027kg",
             ),
             "rate_coupled_recorded_mass": rate_coupled_sweep(
                 probe,
                 throttles=throttles,
-                authorities=authorities,
                 dynamics=rec_dynamics,
                 dynamics_label=rec_label,
             ),

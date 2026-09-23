@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from drone_fly.adapter.rate_controller import RateControllerConfig
 from drone_fly.env.obstacles import OBSTACLE_VISION_K
 
 
@@ -975,3 +976,11 @@ class EnvConfig:
     # construction. Set False to restore the pre-UC-48 degenerate absolute-mass behavior. This does
     # not change the observation schema, so it is checkpoint/obs byte-compatible.
     pybullet_tw_preserving: bool = True
+    # Inner-loop body-rate controller config (UC-55). Appended **last** (after
+    # ``pybullet_tw_preserving``) with a default-factory value, so every pre-UC-55
+    # positional/keyword ``EnvConfig`` call is unshifted and ``EnvConfig()`` stays byte-compatible.
+    # Only the pybullet backend reads it (forwarded via ``make_adapter``, mirroring
+    # ``pybullet_tw_preserving``); the simple backend never receives it so CI stays hermetic (AC9).
+    # Holds the PID gains + max_body_rate + the swappable command→setpoint curve hook. Does not
+    # change the observation schema, so it is checkpoint/obs byte-compatible.
+    rate_controller: RateControllerConfig = field(default_factory=RateControllerConfig)

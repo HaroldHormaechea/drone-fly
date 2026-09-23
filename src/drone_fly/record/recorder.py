@@ -394,7 +394,6 @@ class ActivationRecorder:
                 "thrust_to_weight": float(ddyn.thrust_to_weight),
                 "hover_throttle": float(ddyn.hover_throttle),
                 "max_body_rate": float(ddyn.max_body_rate),
-                "attitude_authority": float(ddyn.attitude_authority),
                 "spawn_z": (None if ddyn.spawn_z is None else float(ddyn.spawn_z)),
             }
 

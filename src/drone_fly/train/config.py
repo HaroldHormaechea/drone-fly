@@ -139,30 +139,14 @@ class TrainConfig:
     airborne_curriculum_warmup_fraction: float = 0.6
     airborne_curriculum_anneal_fraction: float = 1.0
 
-    # UC-46: training-time attitude-authority curriculum (tumbling relief). When enabled (default),
-    # the training envs scale the roll/pitch/yaw command channels (action indices 1, 2, 3 — never
-    # throttle, index 0) by an authority factor that starts at ``attitude_authority_start`` and
-    # anneals linearly up to ``1.0`` (full authority) over the first
-    # ``attitude_authority_anneal_fraction`` of the run, then holds full authority for the
-    # remainder. Early on a noisy policy cannot flip the drone (it stays roughly level → net thrust
-    # stays up → it can climb and collect the existing airborne/climb reward); as the authority
-    # anneals to full the policy regains full maneuvering control, bootstrapped from an
-    # upright-and-climbing policy. Applied ONLY to the training run via the env's
-    # ``set_attitude_authority`` (see
-    # :class:`~drone_fly.train.attitude_curriculum.AttitudeAuthorityCurriculumCallback`); eval and
-    # recording envs never receive the callback, so they run at full authority and measure true
-    # flight. The schedule is a function of ``num_timesteps`` only (stateless), so it is
-    # resume-correct. Set ``attitude_authority_curriculum_enabled=False`` to train at constant full
-    # authority (byte-identical to pre-UC-46). The reward function, the CTBR→RPM mixer, and
-    # UC-44/UC-45 are all untouched, so their tests stay green.
-    #
-    # UC-51 (restagger): ``attitude_authority_anneal_fraction`` moves 0.5 -> 0.25 so attitude
-    # authority reaches full EARLIEST of the three curricula (~0.25) — the first, fastest isolated
-    # difficulty step, ordered before collision-full (~0.5) and the airborne floor descent
-    # (~0.6→1.0).
-    attitude_authority_curriculum_enabled: bool = True
-    attitude_authority_start: float = 0.25
-    attitude_authority_anneal_fraction: float = 0.25
+    # UC-55: the UC-46 attitude-authority curriculum is retired (its ``attitude_authority_*`` fields
+    # are removed). The inner-loop body-rate controller in the pybullet adapter now stabilizes the
+    # plant against command noise, so the crude command-scaling curriculum — and the iter-81 anneal
+    # landmine it introduced — is obsolete. PID gains for the new loop live in
+    # ``EnvConfig.rate_controller`` (see
+    # :class:`~drone_fly.adapter.rate_controller.RateControllerConfig`)
+    # and are overridable via the ``rate_kp`` / ``rate_ki`` / ``rate_kd`` (+ ``rate_max_body_rate``)
+    # YAML keys, not here — the rate loop is a physics/adapter concern, not a training schedule.
 
     seed: int = 0
     vf_arch: list[int] = field(default_factory=lambda: [64, 64])
