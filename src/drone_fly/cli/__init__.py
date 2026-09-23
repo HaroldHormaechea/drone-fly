@@ -364,9 +364,37 @@ def _run_train(config_path: str, *, no_tui: bool = False) -> int:
     # non-randomized run. ``_env_config`` stays the resolver for evaluate / prune-trained.
     env_config, obs_schema = _resolve_train_randomization(cfg)
 
+    # UC-51: thread the exposed curriculum knobs + ent_coef into TrainConfig. Only values the user
+    # actually set (not None) are passed, so omitting a knob — or setting it to its default — leaves
+    # the TrainConfig dataclass default untouched (set-to-default == omit byte-identity, AC2). The
+    # collision YAML key ``collision_penalty_warmup_fraction`` maps to the TrainConfig field
+    # ``collision_curriculum_warmup_fraction``; every other name is 1:1.
+    curriculum_overrides = {
+        "ent_coef": cfg.ent_coef,
+        "airborne_curriculum_enabled": cfg.airborne_curriculum_enabled,
+        "airborne_curriculum_warmup_fraction": cfg.airborne_curriculum_warmup_fraction,
+        "airborne_curriculum_anneal_fraction": cfg.airborne_curriculum_anneal_fraction,
+        "attitude_authority_curriculum_enabled": cfg.attitude_authority_curriculum_enabled,
+        "attitude_authority_start": cfg.attitude_authority_start,
+        "attitude_authority_anneal_fraction": cfg.attitude_authority_anneal_fraction,
+        "collision_curriculum_enabled": cfg.collision_curriculum_enabled,
+        "collision_penalty_start": cfg.collision_penalty_start,
+        "collision_penalty_end": cfg.collision_penalty_end,
+        "collision_curriculum_warmup_fraction": cfg.collision_penalty_warmup_fraction,
+        "collision_curriculum_hold_fraction": cfg.collision_curriculum_hold_fraction,
+    }
+    overrides = {k: v for k, v in curriculum_overrides.items() if v is not None}
+    # CRITICAL FIX (AC3/AC5): the curriculum callbacks compute their schedule window against
+    # ``TrainConfig.total_timesteps`` (the dataclass field), NOT the ``train()`` ``total_timesteps``
+    # override. Historically the CLI only passed YAML ``timesteps`` as the override and never set
+    # the field, so every curriculum schedule was pinned to the dataclass default regardless of the
+    # configured budget. Setting the field here makes the schedule track the actual run length.
+    if cfg.timesteps is not None:
+        overrides["total_timesteps"] = cfg.timesteps
+
     # Route this run's checkpoints + logs under training/<name>/; every other TrainConfig
     # default is unchanged, so smoke-train (which never comes through here) stays identical.
-    train_cfg = TrainConfig(models_dir=layout.checkpoints, logs_dir=layout.logs)
+    train_cfg = TrainConfig(models_dir=layout.checkpoints, logs_dir=layout.logs, **overrides)
 
     train(
         train_cfg,
