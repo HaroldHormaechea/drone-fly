@@ -31,7 +31,7 @@ import logging
 import gymnasium as gym
 import numpy as np
 
-from drone_fly.adapter import make_adapter, pybullet_available, sanitize_action
+from drone_fly.adapter import make_adapter, pybullet_available
 from drone_fly.controller.encoding import ACTION_DIM, OBS_DIM
 from drone_fly.env import worker_output
 from drone_fly.env.config import DynamicsParams, EnvConfig
@@ -88,6 +88,7 @@ class RaceEnv(gym.Env):
             battery=self.config.battery if self._battery_enabled else None,
             damage=self.config.damage if self._damage_enabled else None,
             tw_preserving=self.config.pybullet_tw_preserving,
+            rate_controller=self.config.rate_controller,
         )
         self.backend = self.adapter.backend
 
@@ -190,16 +191,6 @@ class RaceEnv(gym.Env):
         # neither observed nor checkpointed, so this has no obs-schema / checkpoint-schema impact.
         self._spawn_z_override: float | None = None
 
-        # UC-46: training-time attitude-authority curriculum. Multiplies the roll/pitch/yaw command
-        # channels (action indices 1, 2, 3 — never throttle, index 0) by this factor before they
-        # reach ``adapter.step``, so a noisy early policy cannot flip the drone (it stays roughly
-        # level → net thrust stays up → it can climb). Default ``1.0`` ⇒ full authority, the step
-        # path byte-identical to pre-UC-46. Set ONLY on the training venv via
-        # :meth:`set_attitude_authority` (the curriculum callback); eval/recording envs never
-        # receive it, so they run at full authority and measure true flight (AC3). Per-instance and
-        # neither observed nor checkpointed, so no obs-schema / checkpoint-schema impact.
-        self._attitude_authority: float = 1.0
-
         # UC-45 AC9: the DynamicsParams actually in force for the current episode. Set each
         # reset() to the sampled params when dynamics randomization is on, or None when it is
         # off. Read by the recorder (via active_dynamics) to stamp meta.dynamics so a randomized
@@ -236,23 +227,6 @@ class RaceEnv(gym.Env):
         """
         self._spawn_z_override = None if value is None else float(value)
 
-    def set_attitude_authority(self, factor: float) -> None:
-        """Scale the roll/pitch/yaw command channels used in :meth:`step` (UC-46 AC2/AC3).
-
-        Called by the training-time attitude-authority curriculum (see
-        :class:`drone_fly.train.attitude_curriculum.AttitudeAuthorityCurriculumCallback`) to limit
-        the drone's attitude authority early in training and anneal it up to full. ``factor`` is the
-        multiplier applied to the roll/pitch/yaw action channels (indices 1, 2, 3) from the next
-        ``step()`` onward; throttle (index 0) is never scaled. ``1.0`` restores full authority (the
-        step path is then byte-identical to pre-UC-46). Per-instance and defaulting ``1.0``, so only
-        the training venv — which alone receives the callback — is affected; eval and standalone-
-        recording envs keep full authority and measure true flight (AC3). Reachable through the SB3
-        wrapper stack via ``VecEnv.env_method`` (VecNormalize → VecMonitor →
-        DummyVecEnv/SubprocVecEnv delegate ``env_method`` down to this base env). Idempotent and
-        cheap; safe to call every rollout.
-        """
-        self._attitude_authority = float(factor)
-
     @property
     def obs_width(self) -> int:
         """Width of the emitted observation vector (UC-15).
@@ -283,19 +257,6 @@ class RaceEnv(gym.Env):
         seed→sample mapping). Read-only view — no behaviour change.
         """
         return self._active_dynamics
-
-    @property
-    def attitude_authority(self) -> float:
-        """The live UC-46 attitude-authority curriculum knob (UC-49 observability, read-only).
-
-        The multiplier currently applied to the roll/pitch/yaw command channels in
-        :meth:`step` (see :meth:`set_attitude_authority`). ``1.0`` = full authority. On the
-        training venv this is the live scheduled (mid-anneal) value; eval / recording envs
-        never receive the curriculum callback, so they read the ``1.0`` endpoint. Single live
-        source both UC-49 summary consumers read via ``get_attr``. Read-only — no behaviour
-        change; it simply exposes the existing ``_attitude_authority`` field.
-        """
-        return self._attitude_authority
 
     @property
     def spawn_z(self) -> float:
@@ -487,23 +448,12 @@ class RaceEnv(gym.Env):
         # ignored, so the env is byte-identical at runtime with the feature off).
         target_h_prev = float(current_target(course, self._gates_passed)[2] - course.floor_z)
 
-        # UC-46: training-time attitude-authority curriculum. When the authority is reduced (only on
-        # the training venv, via ``set_attitude_authority``), scale ONLY the roll/pitch/yaw channels
-        # (indices 1, 2, 3) — never throttle (index 0). The ordering is deliberate **clip-then-
-        # scale**: ``sanitize_action`` first clips the raw (unbounded, ``squash_output=False``)
-        # policy sample into the canonical CTBR box, THEN we scale the clipped attitude channels by
-        # the factor. This guarantees a *structural* cap — effective ``|rpy| <= factor`` for ALL
-        # inputs including saturated ones. Scale-then-clip would leak at full-sized commands (the
-        # exact ones that flip the drone), inverting the lever. ``sanitize_action`` returns a fresh
-        # contiguous array, so this never mutates SB3's rollout buffer. The ``!= 1.0`` guard keeps
-        # the default / eval / recording / post-anneal / disabled path byte-identical to pre-UC-46
-        # (a straight ``adapter.step(np.asarray(action, float64))`` as before).
-        if self._attitude_authority != 1.0:
-            a = sanitize_action(action)
-            a[1:4] *= self._attitude_authority
-            state = self.adapter.step(a)
-        else:
-            state = self.adapter.step(np.asarray(action, dtype=np.float64))
+        # UC-55: the attitude-authority curriculum (UC-46) is retired — the inner-loop rate
+        # controller in the pybullet adapter now damps the plant against command noise, so the crude
+        # ``a[1:4] *= authority`` stand-in (and its iter-81 anneal landmine) is gone. The policy
+        # keeps full acro agency; the step just forwards the raw action to the adapter, which owns
+        # the rate loop.
+        state = self.adapter.step(np.asarray(action, dtype=np.float64))
         self._step_count += 1
 
         # UC-37: is the drone airborne (above the floor band) this step? This gates the survival

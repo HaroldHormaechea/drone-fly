@@ -399,29 +399,28 @@ def _summary(**overrides):
         sampled_mass=1.0,
         max_body_rate=4.0,
         tw_preserving=True,
-        attitude_authority=0.75,
         spawn_z=1.5,
     )
     kwargs.update(overrides)
     return drone_dynamics_summary(**kwargs)
 
 
-def test_drone_panel_shows_all_six_fields_from_a_known_summary() -> None:
-    """build_drone_panel renders Weight/T/W/hover/body-rate/attitude/spawn-z headlessly."""
+def test_drone_panel_shows_all_five_fields_from_a_known_summary() -> None:
+    """build_drone_panel renders Weight/T/W/hover/body-rate/spawn-z headlessly. (UC-55 dropped
+    the attitude-authority field along with the curriculum it displayed.)"""
     m = M.DashboardModel(scheduled_iters=488)
     m.set_drone_dynamics(_summary())
     out = _render(build_drone_panel(m))
     assert out.strip()
-    # The six fields' formatted values appear (weight 0.027*9.8=0.26 N, T/W 2.25, hover 0.50,
-    # rate 4.0 rad/s, attitude 0.75, spawn_z 1.50 m).
+    # The five fields' formatted values appear (weight 0.027*9.8=0.26 N, T/W 2.25, hover 0.50,
+    # rate 4.0 rad/s, spawn_z 1.50 m).
     assert "0.26 N" in out  # weight
     assert "2.25" in out  # T/W
     assert "0.50" in out  # hover throttle
     assert "4.0 rad/s" in out  # max body rate
-    assert "0.75" in out  # attitude authority
     assert "1.50 m" in out  # spawn-z
     # Field labels present so an operator can read the segment.
-    for label in ("weight", "T/W", "hover", "rate", "attitude", "spawn_z"):
+    for label in ("weight", "T/W", "hover", "rate", "spawn_z"):
         assert label in out
 
 

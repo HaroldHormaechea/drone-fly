@@ -12,6 +12,7 @@ import logging
 import numpy as np
 
 from drone_fly.adapter.base import DroneAdapter, DroneState, sanitize_action
+from drone_fly.adapter.rate_controller import RateControllerConfig
 from drone_fly.adapter.simple import SimpleDroneAdapter
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ def make_adapter(
     battery=None,
     damage=None,
     tw_preserving: bool = True,
+    rate_controller: RateControllerConfig | None = None,
 ) -> DroneAdapter:
     """Construct a drone adapter for ``backend`` and log which physics is active.
 
@@ -64,6 +66,13 @@ def make_adapter(
     domain-randomized mass thrust-to-weight-preserving (default ``True``). The simple backend
     ignores it — its T/W is already preserved by construction (``BASE_MAX_THRUST = 2·m·g``), so it
     is not threaded into the ``SimpleDroneAdapter`` signature.
+
+    ``rate_controller`` (UC-55): a :class:`~drone_fly.adapter.rate_controller.RateControllerConfig`
+    forwarded **only** to the pybullet backend (mirrors ``tw_preserving``), where it configures the
+    inner-loop body-rate PID that regulates commanded rate toward achieved rate. ``None`` (default)
+    uses the documented default gains. It is deliberately **not** threaded into the
+    ``SimpleDroneAdapter`` — the rate loop is pybullet-only so the numpy CI backend stays
+    byte-identical and hermetic (AC9).
     """
     if backend not in ADAPTER_CHOICES:
         raise ValueError(f"adapter must be one of {ADAPTER_CHOICES}, got {backend!r}.")
@@ -85,6 +94,7 @@ def make_adapter(
             battery=battery,
             damage=damage,
             tw_preserving=tw_preserving,
+            rate_controller=rate_controller,
         )
 
     logger.info("Using SimpleDroneAdapter backend (pure-numpy; hermetic, NOT mastery physics).")
@@ -102,6 +112,7 @@ __all__ = [
     "DroneAdapter",
     "DroneState",
     "SimpleDroneAdapter",
+    "RateControllerConfig",
     "sanitize_action",
     "make_adapter",
     "pybullet_available",

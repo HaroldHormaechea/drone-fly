@@ -692,6 +692,13 @@ above the −5 floor, and the action std does not collapse. **Behavioral takeoff
 user's fresh GPU retrain and is not claimed here.**
 
 ### Attitude-authority curriculum (UC-46)
+> **Retired in UC-55.** This curriculum was a crude stand-in for the missing inner-loop rate
+> controller. UC-55 adds that controller (see [Inner-loop body-rate controller
+> (UC-55)](#inner-loop-body-rate-controller-acro-flight-controller-uc-55)) and **removes** the
+> attitude-authority machinery entirely — the `attitude_authority_*` config/YAML keys, the
+> `set_attitude_authority` env method, and the curriculum module/callback no longer exist. The
+> section below is kept as historical context for the takeoff-saga.
+
 UC-45 proved the recordings are **byte-faithful**, so the drone's failure to fly is real behaviour,
 not a logging artifact: it **tumbles**. Level control is fine (throttle 1.0 + level attitude climbs
 0.9→9.36 m; 0.5 hovers at 0.900 m), but the open-loop CTBR→RPM mixer (`ctbr_to_rpm`; `rate_gain=0.15`
@@ -803,15 +810,16 @@ computation — `drone_dynamics_summary(...) -> DroneDynamicsSummary` in
 `src/drone_fly/adapter/dynamics_summary.py` — derives the summary **once** from UC-48's resolved
 dynamics (`resolve_tw_preserving_dynamics` / `thrust_to_weight`), always from the **resolved
 `applied_mass`** (`native · mass_ratio`), never the raw ~1 kg sampled mass that hid the bug. It reports
-applied mass, weight (`mass·g`), peak T/W, hover throttle, max body-rate, and the live curriculum knobs
-(attitude-authority, spawn-z). It imports **no pybullet** (pure numpy/arithmetic), so it is hermetic
+applied mass, weight (`mass·g`), peak T/W, hover throttle, max body-rate, and the live curriculum knob
+(spawn-z; the UC-46 attitude-authority knob was removed in UC-55). It imports **no pybullet** (pure
+numpy/arithmetic), so it is hermetic
 and CI-gating. The same summary is surfaced in three places, and because they all read the one function
 a display, a recording, and CI can never disagree about the drone's T/W:
 
 - **Training TUI top segment.** A new `build_drone_panel` renders a full-width segment **above** the
-  TIME/TRAIN/ROLLOUT panel showing Weight, T/W, hover throttle, max body-rate, attitude-authority, and
-  spawn-z, refreshed per iteration. A `None` summary (before the first rollout) renders placeholders
-  and never crashes, like every other panel.
+  TIME/TRAIN/ROLLOUT panel showing Weight, T/W, hover throttle, max body-rate, and spawn-z (UC-55
+  removed the attitude-authority field), refreshed per iteration. A `None` summary (before the first
+  rollout) renders placeholders and never crashes, like every other panel.
 - **Recording provenance.** Every recording gains an additive, presence-guarded `meta.drone_dynamics`
   block (beside the UC-45 `git_sha` / `checkpoint` / `dynamics` provenance). It is omitted entirely
   when unset, so pre-UC-49 recordings and no-randomization runs stay byte-for-byte back-compatible;
@@ -822,11 +830,11 @@ a display, a recording, and CI can never disagree about the drone's T/W:
   resolve` seam where the UC-47 bug lived. A build-time `logging.warning` (the `FLYABLE_TW_FLOOR = 1.0`
   tripwire) also fires if a drone is ever configured below hover-capable T/W.
 
-**Curriculum-value convention.** `attitude_authority` and `spawn_z` are the UC-46 / UC-44 curriculum
-knobs. On the **training** env the TUI and recording show the *live scheduled* (mid-anneal) value; at
-**eval/record** time the curriculum callbacks never run, so both sit at their annealed endpoints
-(authority `1.0`, spawn-z = floor). This is observability/guard-only — it changes no training behavior,
-the UC-48 fix, the simple backend, the reward, or the UC-44/UC-46 curricula.
+**Curriculum-value convention.** `spawn_z` is the UC-44 curriculum knob (UC-55 removed the UC-46
+`attitude_authority` knob from this summary). On the **training** env the TUI and recording show the
+*live scheduled* (mid-anneal) value; at **eval/record** time the curriculum callback never runs, so it
+sits at its annealed endpoint (spawn-z = floor). This is observability/guard-only — it changes no
+training behavior, the UC-48 fix, the simple backend, the reward, or the UC-44 curriculum.
 
 ### Restaggered curriculum schedule & exposed knobs (UC-51)
 The three training curricula — attitude authority (UC-46), the collision penalty (UC-41), and the
@@ -840,13 +848,15 @@ schedule is reshaped so the anneals are ordered and separated:
 
 | Curriculum | Knob(s) | Old | New (UC-51) | Reaches full / floor at |
 |---|---|---|---|---|
-| Attitude authority | `attitude_authority_anneal_fraction` | 0.5 | **0.25** | full authority by ~25% (first) |
+| Attitude authority | `attitude_authority_anneal_fraction` | 0.5 | **0.25** | full authority by ~25% (first) — *retired in UC-55* |
 | Collision penalty | `collision_curriculum_hold_fraction` / `collision_penalty_warmup_fraction` | 0.4 / 0.5 | 0.4 / **0.1** | full penalty (100) at 0.4+0.1 = ~50% (second) |
 | Airborne spawn | `airborne_curriculum_warmup_fraction` / `airborne_curriculum_anneal_fraction` | — / 0.5 | **0.6** / **1.0** | held airborne through ~60%, floor by 100% (last) |
 
 So the ordering is **attitude-full (~0.25) < collision-full (~0.5) < spawn-reaches-floor (1.0)**, and
 floor-takeoff — the hardest stage — is isolated into the final, longest stretch. Default
-`total_timesteps` is bumped **1M → 2M** so that isolated tail gets real budget.
+`total_timesteps` is bumped **1M → 2M** so that isolated tail gets real budget. (UC-55 retired the
+attitude-authority curriculum in favor of the inner-loop rate controller, so only the collision and
+airborne curricula remain; the ordering note is kept for historical context.)
 
 **New airborne warmup / start-delay.** `airborne_curriculum_warmup_fraction` (new) holds the spawn
 fully airborne through the first fraction of training before it begins descending. **Watch the
@@ -857,14 +867,16 @@ existing shape). The airborne pair must compose as `warmup <= anneal`; setting
 
 **2. Exposed knobs — schedule experiments no longer need a code change.** Every curriculum knob plus
 `ent_coef` and `timesteps` is now settable in the `drone-fly train --config` YAML (previously they
-existed only as `TrainConfig` dataclass defaults behind a fixed whitelist). The full set:
+existed only as `TrainConfig` dataclass defaults behind a fixed whitelist). The full set
+(**UC-55 removed the three `attitude_authority_*` keys**; UC-55 also added the `rate_kp` / `rate_ki` /
+`rate_kd` / `rate_max_body_rate` rate-controller keys, documented in the [UC-55
+section](#inner-loop-body-rate-controller-acro-flight-controller-uc-55)):
 `ent_coef`; `airborne_curriculum_enabled` / `airborne_curriculum_warmup_fraction` /
-`airborne_curriculum_anneal_fraction`; `attitude_authority_curriculum_enabled` /
-`attitude_authority_start` / `attitude_authority_anneal_fraction`; `collision_curriculum_enabled` /
+`airborne_curriculum_anneal_fraction`; `collision_curriculum_enabled` /
 `collision_penalty_start` / `collision_penalty_end` / `collision_curriculum_hold_fraction` /
 `collision_penalty_warmup_fraction`. See `configs/train/example.yaml` for each with its default.
 
-Each key is **optional** and validated at config load: fractions (and `attitude_authority_start`)
+Each key is **optional** and validated at config load: fractions
 must be in `[0, 1]`, `ent_coef >= 0`, the collision penalties `>= 0`, `timesteps >= 1`; the airborne
 `warmup <= anneal` and collision `hold + warmup <= 1` compositions are checked too (resolving an
 omitted partner against the dataclass default). Out-of-range, unknown, or incoherent values fail loud
@@ -882,6 +894,54 @@ regardless of the configured budget. UC-51 sets `TrainConfig.total_timesteps` fr
 PPO policy assembly, and termination are untouched. Whether the restaggered schedule makes the drone
 take off is a behavioral question answered by a fresh GPU retrain (out of scope here); the tests are
 hermetic and assert schedule *shape*, YAML round-trip, and default-parity.
+
+### Inner-loop body-rate controller (acro flight controller) (UC-55)
+The CTBR action `[throttle, roll, pitch, yaw]` carries collective thrust plus body-**rate** commands,
+but `ctbr_to_rpm` mapped them to motors with a **static open-loop feedforward mix and no gyro
+feedback** — a commanded rate was never regulated toward the achieved rate, so command noise dumped
+raw differential torque and the body tumbled (a null command `[0.5,0,0,0]` hovers with zero drift, but
+full-range noisy rate commands flip the drone 180° within ~1 s). This was the structural root cause
+behind ~15 no-takeoff use cases — "acro without a flight controller". UC-55 adds the missing
+**inner-loop rate PID** and retires the UC-46 attitude-authority curriculum that stood in for it.
+
+- **New controller module** (`src/drone_fly/adapter/rate_controller.py`, hermetic — no pybullet).
+  `RateController.update(setpoint_rpy, measured_rate_rpy, dt)` runs a per-axis PID on
+  `error = setpoint − measured` (integrator anti-windup-clamped to `±integral_limit`, output clipped to
+  `[-1, 1]`) and returns a normalized **effort**. The pybullet adapter reads the achieved body rate
+  (`raw[13:16]`, body-frame) **before** stepping, maps the normalized command to a body-rate setpoint
+  via a swappable curve hook clamped to `max_body_rate`, runs the PID, and feeds the effort into the
+  **same** quad-X mixer the open-loop command used. **Throttle (index 0) passes through untouched.**
+- **Acro, not auto-level.** The loop holds a *rate*, never an *angle* — the policy keeps full acro
+  agency (flips, inverted flight, arbitrary attitudes). It only damps the plant against command noise,
+  mirroring the haltere rate reflex beneath the descending connectome commands.
+- **Feedback polarity is inherited verbatim.** The effort→differential-RPM sign mapping comes straight
+  from the existing mixer convention (no new sign assumption): the loop is correct iff the pre-existing
+  open-loop convention was correct. The hermetic plant used in tests is self-consistent with the
+  controller sign, so it validates the math but **not** the real per-axis pybullet polarity or
+  closed-loop stability — those are part of the owner's fresh GPU/sandbox verdict, not the CI suite.
+- **Config-overridable gains (AC8).** PID gains have documented defaults on
+  `RateControllerConfig` (`kp`/`ki`/`kd`, `max_body_rate` single-sourced from `BASE_MAX_BODY_RATE`,
+  `integral_limit`, and the `command_to_setpoint` curve hook — `linear_rate_curve` by default). They
+  are overridable from the `drone-fly train`/`evaluate` YAML via `rate_kp` / `rate_ki` / `rate_kd`
+  (+ optional `rate_max_body_rate`), threaded into `EnvConfig.rate_controller`. Each is optional,
+  non-negative-validated, and **setting a key to its default is byte-identical to omitting it**.
+- **Parameterizable curve hook (AC10).** The command→setpoint mapping is linear by default but routed
+  through `RateControllerConfig.command_to_setpoint`, so a later nonlinear (Betaflight/Liftoff-style)
+  rates curve can replace it **without touching the policy**.
+- **pybullet-only; CI stays hermetic (AC9).** The rate loop is threaded into the pybullet backend
+  alone (mirroring `pybullet_tw_preserving`); `SimpleDroneAdapter` is left byte-identical. Byte-identity
+  holds for a pure-throttle command when the measured rate is zero (`error = 0 → effort = 0 →`
+  base-only RPM == the pre-UC-55 `ctbr_to_rpm([throttle,0,0,0])`).
+- **Curriculum retired.** The `a[1:4] *= attitude_authority` scaling in `racing_env.py`, its
+  `set_attitude_authority` / `attitude_authority` accessors, the `attitude_curriculum.py` module and
+  its training wiring, the `attitude_authority_*` `TrainConfig`/YAML keys, and the
+  `attitude_authority` field on the drone-dynamics summary/TUI/recording are all removed (no code path
+  scales the rate channels by an authority factor any more).
+
+> **⚠️ Fresh-run requirement.** This changes the control problem: a policy trained on the unstabilized
+> plant will not transfer to the stabilized one, so a valid verdict needs a **brand-new** model with
+> old checkpoints cleared. All new tests are hermetic (no GPU, no training); the behavioral flight
+> verdict is the owner's GPU retrain and is not a CI gate.
 
 ### Visualization & recording
 Enable recording in a train/evaluate config with `record: true` (tune cadence via `record_every`);

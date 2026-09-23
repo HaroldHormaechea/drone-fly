@@ -78,6 +78,39 @@ def _env_config(randomize: bool, randomize_dynamics: bool):
     )
 
 
+def _apply_rate_controller(env_config, cfg):
+    """Fold any set ``rate_*`` gains into ``env_config.rate_controller`` (UC-55, AC8).
+
+    Maps the YAML keys (``rate_kp``/``rate_ki``/``rate_kd``/``rate_max_body_rate``) to the
+    :class:`~drone_fly.adapter.rate_controller.RateControllerConfig` fields, non-None-only: a
+    config that sets no rate key leaves ``env_config`` untouched — ``None`` stays ``None``
+    (byte-identical to pre-UC-55), and setting a key to its default equals omitting it. When at
+    least one gain is set on an otherwise-default (``None``) env config, a fresh :class:`EnvConfig`
+    carrying only the rate override is built so the pybullet backend picks up the retuned loop; an
+    existing (randomized) env config is updated in place via :func:`dataclasses.replace`. The rate
+    loop is pybullet-only, so this never affects the hermetic simple backend.
+    """
+    rate_overrides = {
+        "kp": cfg.rate_kp,
+        "ki": cfg.rate_ki,
+        "kd": cfg.rate_kd,
+        "max_body_rate": cfg.rate_max_body_rate,
+    }
+    rate_overrides = {k: v for k, v in rate_overrides.items() if v is not None}
+    if not rate_overrides:
+        return env_config
+
+    from dataclasses import replace
+
+    from drone_fly.adapter.rate_controller import RateControllerConfig
+    from drone_fly.env.config import EnvConfig
+
+    rate_controller = RateControllerConfig(**rate_overrides)
+    if env_config is None:
+        return EnvConfig(rate_controller=rate_controller)
+    return replace(env_config, rate_controller=rate_controller)
+
+
 def _resolve_train_randomization(cfg):
     """Resolve a train config's randomization into ``(env_config, obs_schema)`` (UC-24).
 
@@ -363,6 +396,9 @@ def _run_train(config_path: str, *, no_tui: bool = False) -> int:
     # default for a bare ``randomize: true``, coherence-checked). Returns (None, None) parity for a
     # non-randomized run. ``_env_config`` stays the resolver for evaluate / prune-trained.
     env_config, obs_schema = _resolve_train_randomization(cfg)
+    # UC-55: fold any set rate-controller gains into the env config (pybullet-only rate loop). No-op
+    # (keeps ``env_config`` as-is, including ``None``) when no rate_* key is set.
+    env_config = _apply_rate_controller(env_config, cfg)
 
     # UC-51: thread the exposed curriculum knobs + ent_coef into TrainConfig. Only values the user
     # actually set (not None) are passed, so omitting a knob — or setting it to its default — leaves
@@ -374,9 +410,9 @@ def _run_train(config_path: str, *, no_tui: bool = False) -> int:
         "airborne_curriculum_enabled": cfg.airborne_curriculum_enabled,
         "airborne_curriculum_warmup_fraction": cfg.airborne_curriculum_warmup_fraction,
         "airborne_curriculum_anneal_fraction": cfg.airborne_curriculum_anneal_fraction,
-        "attitude_authority_curriculum_enabled": cfg.attitude_authority_curriculum_enabled,
-        "attitude_authority_start": cfg.attitude_authority_start,
-        "attitude_authority_anneal_fraction": cfg.attitude_authority_anneal_fraction,
+        # UC-55: the attitude-authority curriculum is retired (its keys are gone); the inner-loop
+        # rate controller replaces it. Rate gains are NOT TrainConfig overrides — they configure the
+        # EnvConfig.rate_controller (physics), threaded via ``_apply_rate_controller`` below.
         "collision_curriculum_enabled": cfg.collision_curriculum_enabled,
         "collision_penalty_start": cfg.collision_penalty_start,
         "collision_penalty_end": cfg.collision_penalty_end,
@@ -446,7 +482,7 @@ def _run_evaluate(config_path: str) -> int:
         episodes=cfg.episodes,
         seed=cfg.seed,
         adapter=cfg.adapter,
-        env_config=_env_config(cfg.randomize, cfg.randomize_dynamics),
+        env_config=_apply_rate_controller(_env_config(cfg.randomize, cfg.randomize_dynamics), cfg),
         device=cfg.device,
         record=cfg.record,
         record_every=record_every,

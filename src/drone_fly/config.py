@@ -250,9 +250,15 @@ class TrainRunConfig:
     airborne_curriculum_enabled: bool | None
     airborne_curriculum_warmup_fraction: float | None
     airborne_curriculum_anneal_fraction: float | None
-    attitude_authority_curriculum_enabled: bool | None
-    attitude_authority_start: float | None
-    attitude_authority_anneal_fraction: float | None
+    # UC-55: inner-loop rate-controller gains, surfaced so the PID can be retuned from ``--config``
+    # without a code edit (AC8). All ``| None``: ``None`` (omitted / null) means "leave the
+    # ``RateControllerConfig`` dataclass default untouched", so setting a knob to its default is
+    # byte-identical to omitting it. Threaded into ``EnvConfig(rate_controller=...)`` by the CLI,
+    # non-None-only. ``rate_max_body_rate`` is the optional full-stick body-rate clamp (rad/s).
+    rate_kp: float | None
+    rate_ki: float | None
+    rate_kd: float | None
+    rate_max_body_rate: float | None
     collision_curriculum_enabled: bool | None
     collision_penalty_start: float | None
     collision_penalty_end: float | None
@@ -312,9 +318,13 @@ class TrainRunConfig:
             _Spec("airborne_curriculum_enabled", (bool,)),
             _Spec("airborne_curriculum_warmup_fraction", (float,)),
             _Spec("airborne_curriculum_anneal_fraction", (float,)),
-            _Spec("attitude_authority_curriculum_enabled", (bool,)),
-            _Spec("attitude_authority_start", (float,)),
-            _Spec("attitude_authority_anneal_fraction", (float,)),
+            # UC-55: inner-loop rate-controller gains (AC8). NO ``default`` (omitted / null -> None
+            # -> "leave the RateControllerConfig default", so set-to-default == omit). Type-only
+            # here; the non-negative range checks run in ``_validate_curriculum`` (guarded).
+            _Spec("rate_kp", (float,)),
+            _Spec("rate_ki", (float,)),
+            _Spec("rate_kd", (float,)),
+            _Spec("rate_max_body_rate", (float,)),
             _Spec("collision_curriculum_enabled", (bool,)),
             _Spec("collision_penalty_start", (float,)),
             _Spec("collision_penalty_end", (float,)),
@@ -348,8 +358,8 @@ class TrainRunConfig:
 
     # UC-51 curriculum-knob range + composition validation.
     #
-    # Fractions (and ``attitude_authority_start``) must lie in ``[0, 1]``; ``ent_coef`` and the
-    # collision penalty endpoints must be non-negative; ``timesteps`` must be >= 1. Composition:
+    # Fractions must lie in ``[0, 1]``; ``ent_coef``, the collision penalty endpoints, and the UC-55
+    # rate-controller gains must be non-negative; ``timesteps`` must be >= 1. Composition:
     # the airborne warmup (a HOLD/start-delay) must not run past the airborne anneal window, and the
     # collision hold + ramp must fit inside the run. These duplicate the curriculum functions'
     # ValueError backstops on purpose — this layer fails loud at config-load (exit 2), the functions
@@ -359,11 +369,12 @@ class TrainRunConfig:
     _FRACTION_KEYS = (
         "airborne_curriculum_warmup_fraction",
         "airborne_curriculum_anneal_fraction",
-        "attitude_authority_start",
-        "attitude_authority_anneal_fraction",
         "collision_penalty_warmup_fraction",
         "collision_curriculum_hold_fraction",
     )
+
+    # UC-55: inner-loop rate-controller knobs that must be non-negative (gains + body-rate clamp).
+    _RATE_KEYS = ("rate_kp", "rate_ki", "rate_kd", "rate_max_body_rate")
 
     @staticmethod
     def _validate_curriculum(resolved: dict[str, Any]) -> None:
@@ -377,6 +388,12 @@ class TrainRunConfig:
             raise ConfigError(
                 f"train config: 'ent_coef' must be >= 0, got {resolved['ent_coef']!r}."
             )
+        # UC-55: rate-controller gains + body-rate clamp must be non-negative (each guarded
+        # ``is not None`` so an omitted key leaves the RateControllerConfig default untouched).
+        for key in TrainRunConfig._RATE_KEYS:
+            value = resolved.get(key)
+            if value is not None and value < 0.0:
+                raise ConfigError(f"train config: {key!r} must be >= 0, got {value!r}.")
         for key in ("collision_penalty_start", "collision_penalty_end"):
             value = resolved.get(key)
             if value is not None and value < 0.0:
@@ -446,6 +463,14 @@ class EvaluateRunConfig:
     name: str | None
     prune: bool
     prune_k: int
+    # UC-55: inner-loop rate-controller gains, mirrored from ``TrainRunConfig`` so an eval run
+    # reproduces the trained plant (the rate loop is a physics property of the pybullet backend).
+    # All ``| None``: ``None`` (omitted / null) means "leave the ``RateControllerConfig`` default
+    # untouched"; threaded into ``EnvConfig(rate_controller=...)`` non-None-only by the CLI.
+    rate_kp: float | None
+    rate_ki: float | None
+    rate_kd: float | None
+    rate_max_body_rate: float | None
 
     @classmethod
     def from_mapping(cls, mapping: Any) -> EvaluateRunConfig:
@@ -467,10 +492,20 @@ class EvaluateRunConfig:
             _Spec("name", (str,)),
             _Spec("prune", (bool,), default=False),
             _Spec("prune_k", (int,), default=DEFAULT_PRUNE_K),
+            # UC-55: rate-controller gains (mirror of the train keys). Type-only here; non-negative
+            # range checked below (each guarded ``is not None`` so omit == leave-default).
+            _Spec("rate_kp", (float,)),
+            _Spec("rate_ki", (float,)),
+            _Spec("rate_kd", (float,)),
+            _Spec("rate_max_body_rate", (float,)),
         ]
         resolved = _validate("evaluate", mapping, specs)
         if resolved["name"] is not None:
             resolved["name"] = validate_run_name(resolved["name"])
+        for key in ("rate_kp", "rate_ki", "rate_kd", "rate_max_body_rate"):
+            value = resolved.get(key)
+            if value is not None and value < 0.0:
+                raise ConfigError(f"evaluate config: {key!r} must be >= 0, got {value!r}.")
         return cls(**resolved)
 
 

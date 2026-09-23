@@ -839,9 +839,6 @@ def test_uc51_curriculum_knobs_thread_into_trainconfig(tmp_path, monkeypatch) ->
             "airborne_curriculum_enabled": False,
             "airborne_curriculum_warmup_fraction": 0.3,
             "airborne_curriculum_anneal_fraction": 0.9,
-            "attitude_authority_curriculum_enabled": False,
-            "attitude_authority_start": 0.2,
-            "attitude_authority_anneal_fraction": 0.4,
             "collision_curriculum_enabled": False,
             "collision_penalty_start": 3.0,
             "collision_penalty_end": 90.0,
@@ -855,9 +852,6 @@ def test_uc51_curriculum_knobs_thread_into_trainconfig(tmp_path, monkeypatch) ->
     assert tc.airborne_curriculum_enabled is False
     assert tc.airborne_curriculum_warmup_fraction == pytest.approx(0.3)
     assert tc.airborne_curriculum_anneal_fraction == pytest.approx(0.9)
-    assert tc.attitude_authority_curriculum_enabled is False
-    assert tc.attitude_authority_start == pytest.approx(0.2)
-    assert tc.attitude_authority_anneal_fraction == pytest.approx(0.4)
     assert tc.collision_curriculum_enabled is False
     assert tc.collision_penalty_start == pytest.approx(3.0)
     assert tc.collision_penalty_end == pytest.approx(90.0)
@@ -930,9 +924,6 @@ def test_uc51_set_to_default_is_byte_identical_to_omit(tmp_path, monkeypatch) ->
             "airborne_curriculum_enabled": d.airborne_curriculum_enabled,
             "airborne_curriculum_warmup_fraction": d.airborne_curriculum_warmup_fraction,
             "airborne_curriculum_anneal_fraction": d.airborne_curriculum_anneal_fraction,
-            "attitude_authority_curriculum_enabled": d.attitude_authority_curriculum_enabled,
-            "attitude_authority_start": d.attitude_authority_start,
-            "attitude_authority_anneal_fraction": d.attitude_authority_anneal_fraction,
             "collision_curriculum_enabled": d.collision_curriculum_enabled,
             "collision_penalty_start": d.collision_penalty_start,
             "collision_penalty_end": d.collision_penalty_end,

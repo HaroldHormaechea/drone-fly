@@ -20,11 +20,12 @@ The signature takes **primitive scalars only** (callers unpack ``DynamicsParams`
 leaf of the adapter package (no import cycle) and is hermetically unit-testable without
 importing pybullet (the underlying helpers are pure numpy/arithmetic).
 
-Curriculum-value convention (AC of UC-44/46 interplay). ``attitude_authority`` and ``spawn_z``
-are the UC-46 / UC-44 training-curriculum knobs. On the **training** env they carry the *live
-scheduled* value (mid-anneal); on **eval / recording** envs — which never receive the curriculum
-callbacks — they sit at their annealed endpoint (authority ``1.0``, ``spawn_z`` = floor). Each
-of the three surfaces documents which it shows.
+Curriculum-value convention (UC-44). ``spawn_z`` is the UC-44 training-curriculum knob. On the
+**training** env it carries the *live scheduled* value (mid-anneal); on **eval / recording** envs —
+which never receive the curriculum callback — it sits at its annealed endpoint (``spawn_z`` =
+floor). Each of the three surfaces documents which it shows. (UC-55 retired the UC-46
+``attitude_authority`` knob together with the inner-loop-less mixer it stood in for, so it is no
+longer part of this summary.)
 """
 
 from __future__ import annotations
@@ -74,8 +75,6 @@ class DroneDynamicsSummary:
         The throttle in ``[0, 1]`` that yields T/W ≈ 1.0 (≈0.5 under the UC-48 fix / simple).
     max_body_rate:
         Full-stick body-rate authority (rad/s).
-    attitude_authority:
-        UC-46 curriculum knob (multiplier on roll/pitch/yaw command channels); ``1.0`` = full.
     spawn_z:
         UC-44 curriculum spawn altitude (m), or ``None`` when unknown.
     """
@@ -86,7 +85,6 @@ class DroneDynamicsSummary:
     thrust_to_weight: float
     hover_throttle: float
     max_body_rate: float
-    attitude_authority: float
     spawn_z: float | None
 
 
@@ -97,7 +95,6 @@ def drone_dynamics_summary(
     max_body_rate: float,
     max_thrust: float | None = None,
     tw_preserving: bool = True,
-    attitude_authority: float = 1.0,
     spawn_z: float | None = None,
 ) -> DroneDynamicsSummary:
     """Compute the one shared :class:`DroneDynamicsSummary` for ``backend`` (AC1).
@@ -114,8 +111,8 @@ def drone_dynamics_summary(
         :data:`~drone_fly.adapter.simple.BASE_MAX_THRUST`. Ignored on the pybullet path.
     ``tw_preserving``
         UC-48 flag forwarded to :func:`resolve_tw_preserving_dynamics` on the pybullet path.
-    ``attitude_authority`` / ``spawn_z``
-        The live curriculum knobs, carried through verbatim for display / provenance.
+    ``spawn_z``
+        The live UC-44 curriculum knob, carried through verbatim for display / provenance.
 
     Guards. ``applied_mass <= 0``, a degenerate pybullet RPM band (``max_rpm <= hover_rpm``), or
     ``max_thrust <= 0`` (simple) each emit a ``logging.warning`` and substitute finite sentinels
@@ -127,7 +124,6 @@ def drone_dynamics_summary(
     """
     backend = str(backend)
     max_body_rate = float(max_body_rate)
-    attitude_authority = float(attitude_authority)
     spawn_z = None if spawn_z is None else float(spawn_z)
 
     if backend == "pybullet":
@@ -195,7 +191,6 @@ def drone_dynamics_summary(
         thrust_to_weight=tw,
         hover_throttle=hover_throttle,
         max_body_rate=max_body_rate,
-        attitude_authority=attitude_authority,
         spawn_z=spawn_z,
     )
 

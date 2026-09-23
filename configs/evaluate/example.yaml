@@ -26,3 +26,10 @@ adapter: simple
 # prune_k: 2             # corridor slack for prune (must match training)
 # randomize: false       # randomize the course per episode (UC-08)
 # randomize_dynamics: false  # randomize dynamics per episode (UC-08)
+# --- Inner-loop rate-controller gains (UC-55; pybullet backend only) ---
+# Mirror the train keys so an eval reproduces the trained plant. All OPTIONAL + non-negative; omitting
+# a key (or setting it to its default) is byte-identical to the default RateControllerConfig.
+# rate_kp: 0.6
+# rate_ki: 0.1
+# rate_kd: 0.02
+# rate_max_body_rate: 4.0

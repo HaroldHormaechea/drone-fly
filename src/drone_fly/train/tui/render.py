@@ -49,16 +49,17 @@ def build_drone_panel(model: M.DashboardModel) -> Panel:
     """New TUI top segment: the per-iteration drone-dynamics summary (UC-49 AC2).
 
     Renders the single shared :class:`~drone_fly.adapter.dynamics_summary.DroneDynamicsSummary`
-    (fed via :meth:`~drone_fly.train.tui.metrics.DashboardModel.set_drone_dynamics`) as six
-    fields — Weight (N), T/W, hover throttle, max body-rate, attitude-authority, spawn-z — laid
-    out across three columns (two fields each) so it fits the layout's ``size=4`` top row on a
-    normal 80-column terminal. Width-tolerant per the UC-33 autosize discipline. When no summary
-    is available yet (``model.drone_dynamics is None``) every field renders the ``—`` placeholder
-    and never raises — degrading gracefully exactly like every other panel.
+    (fed via :meth:`~drone_fly.train.tui.metrics.DashboardModel.set_drone_dynamics`) as five
+    fields — Weight (N), T/W, hover throttle, max body-rate, spawn-z — laid out across three
+    columns so it fits the layout's ``size=4`` top row on a normal 80-column terminal.
+    Width-tolerant per the UC-33 autosize discipline. When no summary is available yet
+    (``model.drone_dynamics is None``) every field renders the ``—`` placeholder and never raises —
+    degrading gracefully exactly like every other panel. (UC-55 retired the UC-46
+    attitude-authority field along with the curriculum it displayed.)
 
-    Curriculum-value convention: on the training env the attitude-authority / spawn-z shown here
-    are the *live scheduled* (mid-anneal) values; at eval/record time they sit at their annealed
-    endpoints (see :mod:`drone_fly.adapter.dynamics_summary`).
+    Curriculum-value convention: on the training env the spawn-z shown here is the *live scheduled*
+    (mid-anneal) value; at eval/record time it sits at its annealed endpoint (see
+    :mod:`drone_fly.adapter.dynamics_summary`).
     """
     summary = model.drone_dynamics
     d = M.PLACEHOLDER
@@ -73,23 +74,21 @@ def build_drone_panel(model: M.DashboardModel) -> Panel:
     tw = _f("thrust_to_weight", lambda v: f"{v:.2f}")
     hover = _f("hover_throttle", lambda v: f"{v:.2f}")
     max_rate = _f("max_body_rate", lambda v: f"{v:.1f} rad/s")
-    authority = _f("attitude_authority", lambda v: f"{v:.2f}")
     spawn_z = _f("spawn_z", lambda v: f"{v:.2f} m")
 
-    # Six fields in three columns × two rows. The Panel title carries the heading, so each column
-    # is exactly two content rows — the layout allots this segment ``size=4`` (2 content + 2 border
-    # rows). Labels are kept short so nothing clips inside the ~56-col left column on an 80-col
-    # terminal; Rich wraps rather than crashes on a narrower one (UC-33 width-tolerance).
+    # Five fields in three columns × up to two rows (UC-55 dropped the attitude-authority field).
+    # The Panel title carries the heading; the layout allots this segment ``size=4`` (2 content + 2
+    # border rows). Labels are kept short so nothing clips inside the ~56-col left column on an
+    # 80-col terminal; Rich wraps rather than crashes on a narrower one (UC-33 width-tolerance).
     col_a = Text()
     col_a.append(f" weight {weight}\n")
     col_a.append(f" rate   {max_rate}")
 
     col_b = Text()
     col_b.append(f" T/W {tw}\n")
-    col_b.append(f" attitude {authority}")
+    col_b.append(f" hover {hover}")
 
     col_c = Text()
-    col_c.append(f" hover {hover}\n")
     col_c.append(f" spawn_z {spawn_z}")
 
     grid = Table.grid(expand=True, padding=(0, 1))
