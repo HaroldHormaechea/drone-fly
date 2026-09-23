@@ -80,6 +80,19 @@ stitching several specialized fields together by hand.
 connectome-seeded agent learns to fly a waypoint course in an open sim. Single-user,
 research-grade, no reliability or multi-user guarantees.
 
+**Project intent (north star).** Two standing intentions guide drone-fly beyond the initial
+prototype and should inform design decisions from here on:
+
+1. **Fly in acro (rate) mode.** The connectome policy is trained to fly using the canonical FPV
+   **acro / rate-mode** control abstraction — commanding collective thrust + body rates (CTBR),
+   with an inner-loop rate controller stabilizing the airframe — **not** auto-level / angle mode.
+   The policy keeps full agency (flips, inverted flight, arbitrary attitudes): it is a pilot
+   flying acro, not an autopilot holding an attitude.
+2. **Add future adapters to other simulators** (and, ultimately, real FPV sims such as Liftoff).
+   The control interface is kept deliberately sim-agnostic so the trained policy can be ported to
+   additional simulators through thin, per-sim adapters — a fine-tune, not a rebuild. Building
+   those adapters is an accepted, intended future direction.
+
 ### Scope decision 1 — Role of the connectome (brain framing)
 
 **Chosen (recommended): connectome-seeded / connectome-constrained neural-net controller.**
