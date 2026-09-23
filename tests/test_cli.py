@@ -945,3 +945,99 @@ def test_uc51_set_to_default_is_byte_identical_to_omit(tmp_path, monkeypatch) ->
 
     # Same run name ⇒ identical models_dir/logs_dir; set-to-default ⇒ identical everything else.
     assert captured_default["cfg"] == captured_bare["cfg"]
+
+
+# --------------------------------------------------------------------------- #
+# UC-54 — the four PPO optimization hyperparameters (n_epochs, batch_size,
+# n_steps, learning_rate) thread from the YAML into the constructed TrainConfig
+# 1:1; set-to-default == omit (byte-identity); bare config -> the existing
+# 10/64/2048/3e-4 defaults. Routed through the real _run_train (NOT the smoke
+# path, which clamps n_steps/batch_size). Hermetic: the stage `train` is
+# monkeypatched, so nothing trains.
+# --------------------------------------------------------------------------- #
+
+
+def test_uc54_ppo_knobs_thread_into_trainconfig(tmp_path, monkeypatch) -> None:
+    """AC3: every PPO optimization knob set in the YAML reaches the corresponding ``TrainConfig``
+    field consumed by PPO construction in ``loop.py``. All four map 1:1 (no rename)."""
+    captured: dict = {}
+
+    def fake_train(train_cfg, **kwargs):
+        captured["cfg"] = train_cfg
+
+    monkeypatch.setattr("drone_fly.train.loop.train", fake_train)
+
+    cfg = _write_config(
+        tmp_path,
+        {
+            "name": "r",
+            "adapter": "simple",
+            "n_epochs": 5,
+            "batch_size": 256,
+            "n_steps": 4096,
+            "learning_rate": 1e-3,
+        },
+    )
+    assert main(["train", "--config", cfg]) == 0
+    tc = captured["cfg"]
+    assert tc.n_epochs == 5
+    assert tc.batch_size == 256
+    assert tc.n_steps == 4096
+    assert tc.learning_rate == pytest.approx(1e-3)
+
+
+def test_uc54_omitting_ppo_knobs_leaves_trainconfig_defaults(tmp_path, monkeypatch) -> None:
+    """AC5 (default-parity): a bare config (none of the four set) reproduces the existing PPO
+    defaults ``n_epochs=10, batch_size=64, n_steps=2048, learning_rate=3e-4`` — the knobs are only
+    overridden when the YAML sets them (None sentinel is never forwarded)."""
+    captured: dict = {}
+    monkeypatch.setattr(
+        "drone_fly.train.loop.train", lambda train_cfg, **k: captured.update({"cfg": train_cfg})
+    )
+    cfg = _write_config(tmp_path, {"name": "r", "adapter": "simple"})
+    assert main(["train", "--config", cfg]) == 0
+    tc = captured["cfg"]
+    assert tc.n_epochs == 10
+    assert tc.batch_size == 64
+    assert tc.n_steps == 2048
+    assert tc.learning_rate == pytest.approx(3e-4)
+
+
+def test_uc54_set_to_default_is_byte_identical_to_omit(tmp_path, monkeypatch) -> None:
+    """AC4: a config that sets every PPO knob to its ``TrainConfig`` default produces a
+    ``TrainConfig`` byte-identical (dataclass ``==``) to one from a bare config that omits them all.
+    Set-to-default IS forwarded (the non-None filter keeps it) but equals the dataclass default, so
+    the plumbing is lossless (set-to-default == omit)."""
+    from drone_fly.train.config import TrainConfig
+
+    captured_bare: dict = {}
+    captured_default: dict = {}
+
+    monkeypatch.setattr(
+        "drone_fly.train.loop.train",
+        lambda train_cfg, **k: captured_bare.update({"cfg": train_cfg}),
+    )
+    bare = _write_config(tmp_path, {"name": "same", "adapter": "simple"}, name="bare54.yaml")
+    assert main(["train", "--config", bare]) == 0
+
+    d = TrainConfig()
+    monkeypatch.setattr(
+        "drone_fly.train.loop.train",
+        lambda train_cfg, **k: captured_default.update({"cfg": train_cfg}),
+    )
+    default_cfg = _write_config(
+        tmp_path,
+        {
+            "name": "same",
+            "adapter": "simple",
+            "n_epochs": d.n_epochs,
+            "batch_size": d.batch_size,
+            "n_steps": d.n_steps,
+            "learning_rate": d.learning_rate,
+        },
+        name="default54.yaml",
+    )
+    assert main(["train", "--config", default_cfg]) == 0
+
+    # Same run name ⇒ identical models_dir/logs_dir; set-to-default ⇒ identical everything else.
+    assert captured_default["cfg"] == captured_bare["cfg"]
