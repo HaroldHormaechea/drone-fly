@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from drone_fly.adapter.meteor75 import METEOR75_ARM, METEOR75_TW
 from drone_fly.adapter.rate_controller import RateControllerConfig
 from drone_fly.env.obstacles import OBSTACLE_VISION_K
 
@@ -365,6 +366,17 @@ class DynamicsParams:
     max_body_rate: float = 4.0  # rad/s at full stick
     max_thrust: float = 2.0 * 1.0 * 9.81  # N (== 2 * BASE_MASS * GRAVITY == 19.62)
     latency_steps: int = 0  # control-latency delay in steps (0 == no delay)
+    # UC-56: pybullet-only Meteor75-envelope axes, appended **last** so every positional /
+    # seeded-stream ``DynamicsParams`` construction is unshifted and byte-identical. The two
+    # backends read DIFFERENT thrust knobs: the **simple** backend uses ``mass`` / ``max_thrust``
+    # (its T/W = ``max_thrust / (mass·g)``) and IGNORES these three fields; the **pybullet** backend
+    # uses ``pybullet_mass_ratio`` (× the Meteor75 nominal mass), ``thrust_to_weight`` (its target
+    # peak T/W) and ``arm_length`` (quad-X arm coordinate for the inertia model), and IGNORES
+    # ``max_thrust``. Defaults reproduce the Meteor75 Pro nominal (ratio 1.0 → nominal mass; T/W
+    # and arm at the nominal), so a ``DynamicsParams()`` on the pybullet path is the nominal (AC2).
+    pybullet_mass_ratio: float = 1.0  # × the Meteor75 nominal mass (pybullet-only)
+    thrust_to_weight: float = METEOR75_TW  # target peak T/W on the pybullet body (pybullet-only)
+    arm_length: float = METEOR75_ARM  # quad-X per-axis arm coordinate, m (pybullet-only)
 
 
 @dataclass(frozen=True)
@@ -544,6 +556,34 @@ class RandomizationConfig:
     #   from BOTH endpoint gates (the binding accept constraint) so pillars survive the evadability
     #   guard at a healthy rate (~70–75% of courses carry ≥1 pillar).
     obstacle_along_margin_frac: float = 0.3
+
+    # -- pybullet dynamics envelope (UC-56) ----------------------------------------------
+    # WIDE **whoop → 5" racer** domain-randomization envelope for the pybullet backend, reusing the
+    # UC-48 T/W-preserving machinery (AC4). These three ranges are drawn **independently per axis**
+    # into the UC-56 ``DynamicsParams`` fields by
+    # :func:`drone_fly.env.randomization.sample_dynamics`
+    # (draws appended **last** so seeded streams stay byte-identical). They are **pybullet-only**:
+    # the simple/CI backend never reads them, so its ranges (``mass_factor_range`` etc.) are
+    # untouched and it stays byte-identical / free-fall-proof (the wide mass axis would otherwise
+    # break the simple point-mass model, hence the pybullet scoping). Appended **last** (after the
+    # UC-35 block) so every prior positional/keyword ``RandomizationConfig`` construction is
+    # unshifted.
+    #
+    # Doc note (AC8): real drones correlate heavy→high-T/W and larger→longer-arm, but these axes are
+    # sampled INDEPENDENTLY here for coverage; call
+    # :func:`drone_fly.adapter.meteor75.envelope_description` with these ranges for the human
+    # summary of the drone span the envelope covers. Per-scale aerodynamic drag and motor lag are
+    # NOT modelled across the ~20× mass range (a single linear-damping range is reused) — a
+    # documented UC-56 simplification.
+    pybullet_mass_ratio_range: tuple[float, float] = (
+        1.0,
+        20.0,
+    )  # × Meteor75 nominal → ~0.032→~0.64 kg (whoop → 5" racer)
+    tw_range: tuple[float, float] = (2.5, 10.0)  # peak thrust-to-weight span
+    arm_length_range: tuple[float, float] = (
+        0.0265,
+        0.078,
+    )  # quad-X arm coordinate (m): ~75 mm whoop → ~5" racer
 
 
 @dataclass(frozen=True)

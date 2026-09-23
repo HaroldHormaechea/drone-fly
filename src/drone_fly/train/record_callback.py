@@ -130,6 +130,11 @@ class RecordingCallback(BaseCallback):
                         max_thrust=dyn.max_thrust,
                         tw_preserving=self._tw_preserving,
                         spawn_z=spawn_z,
+                        # UC-56: pybullet Meteor75-envelope axes so the recorded plant matches the
+                        # env's resolution (ignored on the simple backend).
+                        pybullet_mass_ratio=dyn.pybullet_mass_ratio,
+                        target_tw=dyn.thrust_to_weight,
+                        arm_length=dyn.arm_length,
                     )
                 )
             except Exception:  # noqa: BLE001 - best-effort; recording never breaks training

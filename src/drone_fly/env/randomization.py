@@ -943,10 +943,19 @@ def sample_dynamics(
 ) -> DynamicsParams:
     """Sample a :class:`DynamicsParams` by scaling ``base`` with ``rng`` draws (AC5, AC4).
 
-    Draw order is pinned (mass, drag, thrust, rate, latency) so a seed reproduces the
-    dynamics stream. Mass and thrust are **independent** knobs: the adapter computes
-    ``thrust_acc = throttle * max_thrust / mass``, so scaling mass alone genuinely changes
-    the trajectory (it is not cancelled by a coupled thrust rescale).
+    Draw order is pinned (mass, drag, thrust, rate, latency, then the UC-56 pybullet envelope:
+    mass-ratio, T/W, arm) so a seed reproduces the dynamics stream. Mass and thrust are
+    **independent** knobs: the adapter computes ``thrust_acc = throttle * max_thrust / mass``, so
+    scaling mass alone genuinely changes the trajectory (it is not cancelled by a coupled thrust
+    rescale).
+
+    UC-56: the three pybullet-envelope axes (``pybullet_mass_ratio`` / ``thrust_to_weight`` /
+    ``arm_length``) are drawn as **absolute** samples from their configured ranges (not multipliers
+    of ``base``) — they are the drone parameters the pybullet backend applies directly (a mass-ratio
+    of 5 means "5× the Meteor75 nominal", not "5× the base ratio"). Their draws are appended
+    **last**, after the legacy latency draw, so any seed that reproduced the pre-UC-56 stream still
+    reproduces the first five draws byte-identically; only the tail is new. The simple backend
+    ignores these fields, so its sampled trajectory is unchanged.
     """
     mass = base.mass * float(rng.uniform(*rcfg.mass_factor_range))
     drag = base.drag * float(rng.uniform(*rcfg.drag_factor_range))
@@ -954,10 +963,17 @@ def sample_dynamics(
     max_body_rate = base.max_body_rate * float(rng.uniform(*rcfg.rate_factor_range))
     lo, hi = rcfg.latency_steps_range
     latency_steps = int(rng.integers(int(lo), int(hi) + 1))
+    # UC-56 pybullet-envelope draws — appended LAST so the seeded stream stays byte-identical.
+    pybullet_mass_ratio = float(rng.uniform(*rcfg.pybullet_mass_ratio_range))
+    thrust_to_weight = float(rng.uniform(*rcfg.tw_range))
+    arm_length = float(rng.uniform(*rcfg.arm_length_range))
     return DynamicsParams(
         mass=mass,
         drag=drag,
         max_body_rate=max_body_rate,
         max_thrust=max_thrust,
         latency_steps=latency_steps,
+        pybullet_mass_ratio=pybullet_mass_ratio,
+        thrust_to_weight=thrust_to_weight,
+        arm_length=arm_length,
     )
