@@ -658,3 +658,115 @@ def test_uc51_trainconfig_new_staggered_defaults() -> None:
     # The default schedule is composition-valid on both curricula.
     assert d.airborne_curriculum_warmup_fraction <= d.airborne_curriculum_anneal_fraction
     assert d.collision_curriculum_hold_fraction + d.collision_curriculum_warmup_fraction <= 1.0
+
+
+# --------------------------------------------------------------------------- #
+# UC-54 — the four PPO optimization hyperparameters (n_epochs, batch_size,
+# n_steps: int; learning_rate: float) surfaced in the train YAML, mirroring the
+# UC-51 None-sentinel exposure. Covers:
+# AC1 (accept + type + range reject), AC2 (omitted / explicit-null -> None
+# sentinel so set-to-default == omit), and the lossless YAML round-trip. The
+# end-to-end wiring into TrainConfig, byte-identity, and default-parity live in
+# test_cli.py. All hermetic — no pybullet / GPU.
+# --------------------------------------------------------------------------- #
+
+_UC54_KNOBS = {
+    "n_epochs": 4,
+    "batch_size": 128,
+    "n_steps": 4096,
+    "learning_rate": 1e-3,
+}
+
+
+def test_uc54_train_accepts_all_ppo_knobs() -> None:
+    """AC1: every PPO optimization knob is accepted by ``from_mapping`` and lands verbatim on the
+    resolved ``TrainRunConfig`` (all four names map 1:1 to their ``TrainConfig`` fields — no
+    rename, unlike UC-51's collision warmup)."""
+    cfg = TrainRunConfig.from_mapping({"name": "x", **_UC54_KNOBS})
+    for key, value in _UC54_KNOBS.items():
+        assert getattr(cfg, key) == value, f"{key} did not thread through from_mapping"
+
+
+def test_uc54_ppo_knobs_default_to_none_when_omitted() -> None:
+    """AC2: a bare train config leaves every PPO knob at the ``None`` sentinel, so the CLI forwards
+    nothing and the ``TrainConfig`` dataclass default is used unchanged (set-to-default == omit is
+    realised by never forwarding a ``None``)."""
+    cfg = TrainRunConfig.from_mapping({"name": "x"})
+    for key in _UC54_KNOBS:
+        assert getattr(cfg, key) is None, (
+            f"{key} should default to None (untouched dataclass field)"
+        )
+
+
+@pytest.mark.parametrize("key", list(_UC54_KNOBS))
+def test_uc54_ppo_knob_explicit_null_is_none(key: str) -> None:
+    """AC2: an explicit YAML ``null`` for any PPO knob is treated as omitted (-> ``None``), never
+    coerced — so ``null`` and omission are identical (no ``_Spec`` default)."""
+    cfg = TrainRunConfig.from_mapping({"name": "x", key: None})
+    assert getattr(cfg, key) is None
+
+
+def test_uc54_ppo_knobs_round_trip_through_yaml(tmp_path) -> None:
+    """AC1: the knobs survive a real YAML file round-trip (``load_yaml`` -> ``from_mapping``) with
+    values intact — the exposure path is lossless end-to-end, not just in-memory."""
+    import yaml
+
+    p = tmp_path / "train.yaml"
+    p.write_text(yaml.safe_dump({"name": "rt", **_UC54_KNOBS}), encoding="utf-8")
+    cfg = TrainRunConfig.from_mapping(load_yaml(p))
+    for key, value in _UC54_KNOBS.items():
+        assert getattr(cfg, key) == value
+
+
+@pytest.mark.parametrize("key", ["n_epochs", "batch_size", "n_steps"])
+@pytest.mark.parametrize("bad", [0, -1])
+def test_uc54_int_knob_below_one_rejected(key: str, bad: int) -> None:
+    """AC1: the three integer PPO knobs are range-checked to ``>= 1``; ``0`` or a negative value is
+    a clear ``ConfigError`` naming the key, raised at config-load."""
+    with pytest.raises(ConfigError, match=key):
+        TrainRunConfig.from_mapping({"name": "x", key: bad})
+
+
+@pytest.mark.parametrize("bad", [0.0, -1e-3])
+def test_uc54_learning_rate_non_positive_rejected(bad: float) -> None:
+    """AC1: ``learning_rate`` is strictly ``> 0`` (a zero LR is a degenerate no-op); ``0`` or a
+    negative value is a ``ConfigError``."""
+    with pytest.raises(ConfigError, match="learning_rate"):
+        TrainRunConfig.from_mapping({"name": "x", "learning_rate": bad})
+
+
+@pytest.mark.parametrize("key", ["n_epochs", "batch_size", "n_steps"])
+def test_uc54_int_knob_rejects_bool_type(key: str) -> None:
+    """AC1: the integer knobs are strict ints — a stray ``bool`` (an ``int`` subclass in Python) is
+    a type error, not silently coerced to 0/1."""
+    with pytest.raises(ConfigError, match=key):
+        TrainRunConfig.from_mapping({"name": "x", key: True})
+
+
+@pytest.mark.parametrize("key", list(_UC54_KNOBS))
+def test_uc54_knob_rejects_string_type(key: str) -> None:
+    """AC1: type validation applies to all four — a string for any numeric knob is a type error."""
+    with pytest.raises(ConfigError, match=key):
+        TrainRunConfig.from_mapping({"name": "x", key: "fast"})
+
+
+def test_uc54_set_to_default_is_accepted() -> None:
+    """AC2/AC4: setting each PPO knob to its ``TrainConfig`` default value is accepted and threads
+    through losslessly — the byte-identity guarantee (set-to-default == omit) is exercised
+    end-to-end in ``test_cli``."""
+    from drone_fly.train.config import TrainConfig
+
+    d = TrainConfig()
+    cfg = TrainRunConfig.from_mapping(
+        {
+            "name": "x",
+            "n_epochs": d.n_epochs,
+            "batch_size": d.batch_size,
+            "n_steps": d.n_steps,
+            "learning_rate": d.learning_rate,
+        }
+    )
+    assert cfg.n_epochs == 10
+    assert cfg.batch_size == 64
+    assert cfg.n_steps == 2048
+    assert cfg.learning_rate == pytest.approx(3e-4)

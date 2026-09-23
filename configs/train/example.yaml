@@ -118,3 +118,19 @@ resume: auto
 # airborne_curriculum_enabled: true
 # airborne_curriculum_warmup_fraction: 0.6  # HOLD airborne through this fraction (start-delay)
 # airborne_curriculum_anneal_fraction: 1.0  # spawn reaches the floor by this fraction (end of run)
+#
+# --- PPO optimization hyperparameters (UC-54) ---------------------------------------------------
+# All four keys below are OPTIONAL and shown with their CURRENT defaults. Omitting a key — or setting
+# it to the value shown — is byte-identical to the default run (set-to-default == omit). They tune the
+# optimize-phase speed vs. sample-efficiency / VRAM trade-off surfaced by UC-52 (the optimize phase is
+# ~91% of each iteration's wall-clock). Each is validated at config load: the three ints must be >= 1
+# and learning_rate > 0 (out-of-range or wrong-typed values fail loud with a clear error, exit 2).
+# Note: batch_size need NOT divide n_steps*n_envs — SB3 uses a partial final minibatch (no hard
+# check).
+# n_epochs: 10           # gradient passes over each rollout buffer. Lower = faster iterations but
+#                        # fewer passes (less sample-efficient); e.g. 5 is a ~free speedup lever.
+# batch_size: 64         # minibatch size for each gradient step. Larger = better GPU utilization but
+#                        # more VRAM — watch for OOM on an 8 GB GPU when raising to 128/256.
+# n_steps: 2048          # rollout-buffer size per env. Changes the buffer size (n_steps*n_envs) and
+#                        # therefore the iteration count (total_timesteps / (n_steps*n_envs)).
+# learning_rate: 3e-4    # PPO/Adam step size. Must be strictly > 0.

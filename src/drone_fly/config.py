@@ -258,6 +258,16 @@ class TrainRunConfig:
     collision_penalty_end: float | None
     collision_penalty_warmup_fraction: float | None
     collision_curriculum_hold_fraction: float | None
+    # UC-54: PPO optimization hyperparameters, surfaced from ``TrainConfig`` so the optimize-phase
+    # speed/quality trade-off (UC-52) can be tuned from ``--config`` without a code edit. All are
+    # ``| None``: ``None`` (omitted / null) means "leave the ``TrainConfig`` dataclass default
+    # untouched" (10 / 64 / 2048 / 3e-4), so setting a knob to its default is byte-identical to
+    # omitting it (AC2/AC4). An explicit value is type + range validated in :meth:`from_mapping` and
+    # threaded 1:1 to ``TrainConfig`` by the CLI.
+    n_epochs: int | None
+    batch_size: int | None
+    n_steps: int | None
+    learning_rate: float | None
 
     @classmethod
     def from_mapping(cls, mapping: Any) -> TrainRunConfig:
@@ -310,11 +320,29 @@ class TrainRunConfig:
             _Spec("collision_penalty_end", (float,)),
             _Spec("collision_penalty_warmup_fraction", (float,)),
             _Spec("collision_curriculum_hold_fraction", (float,)),
+            # UC-54: PPO optimization hyperparameters. NO ``default`` (omitted / null -> None ->
+            # "leave the TrainConfig default", so set-to-default == omit, AC2/AC4). Type-only here;
+            # the numeric range checks run below (each guarded ``is not None``). No batch_size vs
+            # buffer divisibility check — SB3 uses a partial final minibatch.
+            _Spec("n_epochs", (int,)),
+            _Spec("batch_size", (int,)),
+            _Spec("n_steps", (int,)),
+            _Spec("learning_rate", (float,)),
         ]
         resolved = _validate("train", mapping, specs)
         resolved["name"] = validate_run_name(resolved["name"])
         if resolved["n_envs"] is not None and resolved["n_envs"] < 1:
             raise ConfigError("train config: 'n_envs' must be >= 1.")
+        # UC-54: PPO optimization hyperparameter ranges — ints >= 1, learning_rate > 0. Each guarded
+        # ``is not None`` so an omitted key leaves the TrainConfig default untouched.
+        for key in ("n_epochs", "batch_size", "n_steps"):
+            value = resolved.get(key)
+            if value is not None and value < 1:
+                raise ConfigError(f"train config: {key!r} must be >= 1, got {value!r}.")
+        if resolved.get("learning_rate") is not None and resolved["learning_rate"] <= 0.0:
+            raise ConfigError(
+                f"train config: 'learning_rate' must be > 0, got {resolved['learning_rate']!r}."
+            )
         cls._validate_curriculum(resolved)
         return cls(**resolved)
 
