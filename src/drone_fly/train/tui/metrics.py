@@ -338,6 +338,20 @@ class DashboardModel:
         # (``n_steps × n_envs``). Fed by :meth:`tick` only — never through :meth:`update`.
         self.rollout_steps = 0
         self.rollout_target = 0
+        # UC-52: optimize-phase (PPO.train()) progress + per-iteration collect/optimize timing.
+        # Fed by :meth:`begin_optimize` / :meth:`tick_optimize` / :meth:`end_optimize` and the two
+        # duration setters — all of which, like :meth:`tick`, leave ``raw``/``history`` untouched
+        # so the last rollout-end snapshot persists in the values panel during optimize (AC-4).
+        # ``optimize_epoch`` is 0-based and ``optimize_minibatch`` is 1-based within an epoch, so
+        # the cumulative fraction ``(epoch*M + minibatch)/(N*M)`` reaches exactly 1.0 on the final
+        # minibatch.
+        self.optimize_epoch = 0
+        self.optimize_total_epochs = 0
+        self.optimize_minibatch = 0
+        self.optimize_total_minibatches = 0
+        self.is_optimizing = False
+        self.collect_seconds: float | None = None
+        self.optimize_seconds: float | None = None
         # Latest raw snapshot for the grouped value panel (None → placeholder, never 0).
         self.raw: dict[str, float | None] = {
             "ep_rew": None,
@@ -427,6 +441,63 @@ class DashboardModel:
         snapshot persists). Uncontended on macOS/Linux, where no timer runs (AC-9).
         """
         self.elapsed_seconds = float(elapsed_seconds)
+
+    def begin_optimize(self, n_epochs, total_minibatches) -> None:
+        """Enter the optimize phase (UC-52): record the ``N``/``M`` totals, reset counters.
+
+        Like :meth:`tick`, deliberately touches neither ``history`` nor ``raw`` so the last
+        rollout-end snapshot persists in the values panel while ``PPO.train()`` runs (AC-4).
+        """
+        self.optimize_total_epochs = int(n_epochs)
+        self.optimize_total_minibatches = int(total_minibatches)
+        self.optimize_epoch = 0
+        self.optimize_minibatch = 0
+        self.is_optimizing = True
+
+    def tick_optimize(self, epoch, minibatch) -> None:
+        """Record optimize progress at ``(epoch, minibatch)`` (UC-52) — no history/raw touch."""
+        self.optimize_epoch = int(epoch)
+        self.optimize_minibatch = int(minibatch)
+
+    def end_optimize(self) -> None:
+        """Leave the optimize phase (UC-52). Keeps the last counters for a clean 100% frame."""
+        self.is_optimizing = False
+
+    def set_collect_duration(self, seconds) -> None:
+        """Record the current iteration's rollout-collection wall-clock (UC-52; None-tolerant)."""
+        self.collect_seconds = _finite(seconds)
+
+    def set_optimize_duration(self, seconds) -> None:
+        """Record the current iteration's optimize-phase wall-clock (UC-52; None-tolerant)."""
+        self.optimize_seconds = _finite(seconds)
+
+    def optimize_progress(self) -> tuple[int, int, float]:
+        """``(cur, total, fraction)`` for the UC-52 optimizing bar.
+
+        ``cur = optimize_epoch*M + optimize_minibatch`` (cumulative minibatches completed),
+        ``total = N*M``, and ``fraction`` reuses :func:`progress_fraction` (clamped to ``[0, 1]``,
+        ``0`` when the totals are unknown). ``cur`` itself is returned unclamped; the renderer
+        clamps the displayed text with ``min(cur, total)`` so a divergent buffer shape can never
+        render e.g. ``33/32`` (AC-7).
+        """
+        m = self.optimize_total_minibatches
+        cur = self.optimize_epoch * m + self.optimize_minibatch
+        total = self.optimize_total_epochs * m
+        return (cur, total, progress_fraction(cur, total))
+
+    def phase_split(self) -> tuple[float | None, float | None, float | None]:
+        """``(collect_seconds, optimize_seconds, optimize_fraction)`` for the UC-52 split line.
+
+        ``optimize_fraction = optimize_s / (collect_s + optimize_s)``, guarded so a missing
+        (``None``) or zero-sum pair yields ``None`` (the renderer shows ``—``) rather than raising.
+        """
+        collect_s = self.collect_seconds
+        optimize_s = self.optimize_seconds
+        if collect_s is None or optimize_s is None:
+            return (collect_s, optimize_s, None)
+        denom = collect_s + optimize_s
+        frac = (optimize_s / denom) if denom > 0 else None
+        return (collect_s, optimize_s, frac)
 
     def set_verdict(self, verdict) -> None:
         """Store the latest health verdict (the UC-23 seam the status bar renders)."""
