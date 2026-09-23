@@ -156,6 +156,53 @@ def test_tw_preserving_false_vs_true_diverge_at_heavy_mass() -> None:
     assert peak_on > 10 * peak_off
 
 
+# --- UC-56: the optional target_tw axis (default None == the CF2X path stays green) ----
+@pytest.mark.parametrize("factor", ALL_FACTORS)
+def test_target_tw_none_is_the_unchanged_cf2x_path(factor: float) -> None:
+    """``target_tw=None`` (the default) is byte-identical to the pre-UC-56 CF2X resolution.
+
+    Backward-compat guard: the new optional axis must not perturb the existing UC-48 path — the
+    resolved band and applied mass are exactly what the no-arg call produces.
+    """
+    sampled_mass = factor * BASE_MASS
+    baseline = resolve_tw_preserving_dynamics(sampled_mass, tw_preserving=True)
+    explicit_none = resolve_tw_preserving_dynamics(sampled_mass, tw_preserving=True, target_tw=None)
+    assert explicit_none == baseline
+
+
+@pytest.mark.parametrize("factor", ALL_FACTORS)
+@pytest.mark.parametrize("target_tw", (1.5, 2.5, 5.0, 10.0))
+def test_target_tw_makes_peak_tw_track_the_target_exactly(factor: float, target_tw: float) -> None:
+    """With ``target_tw`` given, peak T/W equals the target EXACTLY, independent of mass (UC-56).
+
+    This decouples the T/W axis from the nominal so the whoop→5"-racer envelope can sweep T/W and
+    mass independently — the property the UC-56 wide envelope relies on.
+    """
+    sampled_mass = factor * BASE_MASS
+    resolved = resolve_tw_preserving_dynamics(sampled_mass, tw_preserving=True, target_tw=target_tw)
+    peak = thrust_to_weight(resolved.applied_mass, resolved.max_rpm)
+    assert peak == pytest.approx(target_tw, rel=1e-6)
+
+
+@pytest.mark.parametrize("target_tw", (1.5, 2.5, 5.0, 10.0))
+def test_target_tw_leaves_hover_at_half_throttle(target_tw: float) -> None:
+    """Setting ``target_tw`` scales only max RPM — hover_rpm (hover-at-0.5) stays unchanged.
+
+    The hover leg must not move with the T/W target: hover_rpm still scales purely with
+    ``sqrt(mass_ratio)`` off the native baseline, so throttle 0.5 keeps hovering.
+    """
+    sampled_mass = 1.5 * BASE_MASS
+    baseline = resolve_tw_preserving_dynamics(sampled_mass, tw_preserving=True)
+    with_target = resolve_tw_preserving_dynamics(
+        sampled_mass, tw_preserving=True, target_tw=target_tw
+    )
+    assert with_target.hover_rpm == pytest.approx(baseline.hover_rpm)
+    assert with_target.applied_mass == pytest.approx(baseline.applied_mass)
+    # Hover T/W stays unity at the (unchanged) hover_rpm regardless of the T/W target.
+    hover_tw = thrust_to_weight(with_target.applied_mass, with_target.hover_rpm)
+    assert hover_tw == pytest.approx(1.0, abs=1e-3)
+
+
 # --- AC3: hermetic import guard (no pybullet) ------------------------------------------
 def test_import_does_not_pull_in_pybullet_current_session() -> None:
     """Importing the adapter module must not import pybullet in this session (it is lazy)."""

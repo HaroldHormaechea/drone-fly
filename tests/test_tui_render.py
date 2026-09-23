@@ -393,7 +393,8 @@ def test_layout_status_region_autosizes_for_a_multiline_verdict() -> None:
 # UC-49 AC2 — the drone-dynamics top segment
 # --------------------------------------------------------------------------- #
 def _summary(**overrides):
-    """A known DroneDynamicsSummary for the render assertions (pybullet default is T/W 2.25)."""
+    """A known DroneDynamicsSummary for the render assertions (pybullet default is T/W 2.50 —
+    the UC-56 Meteor75 nominal, 0.032 kg / T/W 2.5)."""
     kwargs = dict(
         backend="pybullet",
         sampled_mass=1.0,
@@ -412,10 +413,10 @@ def test_drone_panel_shows_all_five_fields_from_a_known_summary() -> None:
     m.set_drone_dynamics(_summary())
     out = _render(build_drone_panel(m))
     assert out.strip()
-    # The five fields' formatted values appear (weight 0.027*9.8=0.26 N, T/W 2.25, hover 0.50,
+    # The five fields' formatted values appear (weight 0.032*9.8=0.31 N, T/W 2.50, hover 0.50,
     # rate 4.0 rad/s, spawn_z 1.50 m).
-    assert "0.26 N" in out  # weight
-    assert "2.25" in out  # T/W
+    assert "0.31 N" in out  # weight
+    assert "2.50" in out  # T/W
     assert "0.50" in out  # hover throttle
     assert "4.0 rad/s" in out  # max body rate
     assert "1.50 m" in out  # spawn-z
@@ -438,7 +439,7 @@ def test_drone_panel_none_spawn_z_renders_placeholder() -> None:
     m.set_drone_dynamics(_summary(spawn_z=None))
     out = _render(build_drone_panel(m))
     assert out.strip()
-    assert "2.25" in out  # other fields still render
+    assert "2.50" in out  # other fields still render
     assert M.PLACEHOLDER in out  # the spawn_z field degrades to placeholder
 
 
@@ -449,7 +450,7 @@ def test_build_layout_includes_the_drone_segment() -> None:
     out = _render(build_layout(m, ["pybullet build"]))
     assert out.strip()
     assert "T/W" in out
-    assert "2.25" in out
+    assert "2.50" in out
 
 
 def test_build_layout_renders_without_drone_summary() -> None:

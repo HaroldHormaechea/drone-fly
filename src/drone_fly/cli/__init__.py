@@ -111,6 +111,44 @@ def _apply_rate_controller(env_config, cfg):
     return replace(env_config, rate_controller=rate_controller)
 
 
+def _apply_dynamics_envelope(env_config, cfg):
+    """Fold set pybullet dynamics-envelope range knobs into ``env_config.randomization`` (UC-56).
+
+    Maps the ``pybullet_*_min`` / ``pybullet_*_max`` YAML keys to the :class:`RandomizationConfig`
+    range tuples (``pybullet_mass_ratio_range`` / ``tw_range`` / ``arm_length_range``),
+    non-None-only. A config that sets no envelope key leaves ``env_config`` untouched. Unlike the
+    UC-55 rate controller — a physics property in force even without randomization — the envelope
+    ranges are *only* read when dynamics randomization is on, so when ``env_config`` is ``None``
+    (randomization off) the keys are inert and ``env_config`` stays ``None`` (byte-identical). A
+    partially-specified range (only one side set) fills the unset side from the current
+    ``RandomizationConfig`` default for that side, so a lone ``min`` or ``max`` is well-defined.
+    """
+    if env_config is None:
+        return env_config
+
+    ranges = {
+        "pybullet_mass_ratio_range": (cfg.pybullet_mass_ratio_min, cfg.pybullet_mass_ratio_max),
+        "tw_range": (cfg.pybullet_tw_min, cfg.pybullet_tw_max),
+        "arm_length_range": (cfg.pybullet_arm_length_min, cfg.pybullet_arm_length_max),
+    }
+    rand = env_config.randomization
+    overrides = {}
+    for field_name, (lo, hi) in ranges.items():
+        if lo is None and hi is None:
+            continue
+        cur = getattr(rand, field_name)
+        overrides[field_name] = (
+            float(lo) if lo is not None else cur[0],
+            float(hi) if hi is not None else cur[1],
+        )
+    if not overrides:
+        return env_config
+
+    from dataclasses import replace
+
+    return replace(env_config, randomization=replace(rand, **overrides))
+
+
 def _resolve_train_randomization(cfg):
     """Resolve a train config's randomization into ``(env_config, obs_schema)`` (UC-24).
 
@@ -399,6 +437,10 @@ def _run_train(config_path: str, *, no_tui: bool = False) -> int:
     # UC-55: fold any set rate-controller gains into the env config (pybullet-only rate loop). No-op
     # (keeps ``env_config`` as-is, including ``None``) when no rate_* key is set.
     env_config = _apply_rate_controller(env_config, cfg)
+    # UC-56: fold any set pybullet dynamics-envelope range knobs into the env config's randomization
+    # (pybullet-only, only active with dynamics randomization on). No-op — including keeping a
+    # ``None`` env config ``None`` — when no envelope key is set.
+    env_config = _apply_dynamics_envelope(env_config, cfg)
 
     # UC-51: thread the exposed curriculum knobs + ent_coef into TrainConfig. Only values the user
     # actually set (not None) are passed, so omitting a knob — or setting it to its default — leaves
@@ -482,7 +524,9 @@ def _run_evaluate(config_path: str) -> int:
         episodes=cfg.episodes,
         seed=cfg.seed,
         adapter=cfg.adapter,
-        env_config=_apply_rate_controller(_env_config(cfg.randomize, cfg.randomize_dynamics), cfg),
+        env_config=_apply_dynamics_envelope(
+            _apply_rate_controller(_env_config(cfg.randomize, cfg.randomize_dynamics), cfg), cfg
+        ),
         device=cfg.device,
         record=cfg.record,
         record_every=record_every,

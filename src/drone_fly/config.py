@@ -208,6 +208,45 @@ _DEVICE_CHOICES = ("cpu", "cuda", "mps")
 _ADAPTER_CHOICES = ("auto", "simple", "pybullet")
 
 
+# UC-56: pybullet dynamics-envelope range knobs shared by ``train`` and ``evaluate`` (the eval run
+# must reproduce the trained plant). Each entry is ``(min_key, max_key, must_be_ge_one)``: every set
+# bound must be positive; a set ``_min``/``_max`` pair must satisfy ``min <= max``; and the T/W
+# range additionally requires ``min >= 1`` (a peak T/W below 1 cannot hover — UC-47-style). A
+# partially-specified range (one side set) is checked for positivity / T-W only; the CLI fills the
+# unset side from the ``RandomizationConfig`` default (always valid), so it cannot invert the range.
+_DYNAMICS_ENVELOPE_RANGES = (
+    ("pybullet_mass_ratio_min", "pybullet_mass_ratio_max", False),
+    ("pybullet_tw_min", "pybullet_tw_max", True),
+    ("pybullet_arm_length_min", "pybullet_arm_length_max", False),
+)
+
+
+def _validate_dynamics_envelope(command: str, resolved: dict[str, Any]) -> None:
+    """Validate the UC-56 pybullet dynamics-envelope range knobs (positivity, min<=max, T/W>=1).
+
+    Each guarded ``is not None`` so an omitted key leaves the ``RandomizationConfig`` default
+    untouched. Shared by :class:`TrainRunConfig` and :class:`EvaluateRunConfig` so eval reproduces
+    the trained plant under the same constraints. Fails loud at config-load (exit 2).
+    """
+    for min_key, max_key, ge_one in _DYNAMICS_ENVELOPE_RANGES:
+        lo = resolved.get(min_key)
+        hi = resolved.get(max_key)
+        for key, value in ((min_key, lo), (max_key, hi)):
+            if value is not None and value <= 0.0:
+                raise ConfigError(f"{command} config: {key!r} must be > 0, got {value!r}.")
+        if ge_one:
+            for key, value in ((min_key, lo), (max_key, hi)):
+                if value is not None and value < 1.0:
+                    raise ConfigError(
+                        f"{command} config: {key!r} must be >= 1 (a peak thrust-to-weight below 1 "
+                        f"cannot hover), got {value!r}."
+                    )
+        if lo is not None and hi is not None and lo > hi:
+            raise ConfigError(
+                f"{command} config: {min_key!r} ({lo!r}) must be <= {max_key!r} ({hi!r})."
+            )
+
+
 # --- Per-command config dataclasses -------------------------------------------------------
 
 
@@ -274,6 +313,19 @@ class TrainRunConfig:
     batch_size: int | None
     n_steps: int | None
     learning_rate: float | None
+    # UC-56: pybullet dynamics-envelope range knobs (whoop → 5" racer), surfaced so the wide
+    # T/W-preserving envelope can be tuned from ``--config`` without a code edit (AC4). Each range
+    # is a ``_min`` / ``_max`` pair, all ``| None``: ``None`` (omitted / null) means "leave the
+    # ``RandomizationConfig`` range default untouched" for that side, so set-to-default == omit.
+    # Active only with dynamics randomization on (pybullet-only); threaded into
+    # ``RandomizationConfig`` non-None-only by the CLI. Validated (positivity, min<=max, T/W>=1) by
+    # ``_validate_dynamics_envelope``.
+    pybullet_mass_ratio_min: float | None
+    pybullet_mass_ratio_max: float | None
+    pybullet_tw_min: float | None
+    pybullet_tw_max: float | None
+    pybullet_arm_length_min: float | None
+    pybullet_arm_length_max: float | None
 
     @classmethod
     def from_mapping(cls, mapping: Any) -> TrainRunConfig:
@@ -338,6 +390,15 @@ class TrainRunConfig:
             _Spec("batch_size", (int,)),
             _Spec("n_steps", (int,)),
             _Spec("learning_rate", (float,)),
+            # UC-56: pybullet dynamics-envelope range knobs. NO ``default`` (omitted / null -> None
+            # -> "leave the RandomizationConfig range default", so set-to-default == omit).
+            # Type-only here; positivity + min<=max + T/W>=1 in ``_validate_dynamics_envelope``.
+            _Spec("pybullet_mass_ratio_min", (float,)),
+            _Spec("pybullet_mass_ratio_max", (float,)),
+            _Spec("pybullet_tw_min", (float,)),
+            _Spec("pybullet_tw_max", (float,)),
+            _Spec("pybullet_arm_length_min", (float,)),
+            _Spec("pybullet_arm_length_max", (float,)),
         ]
         resolved = _validate("train", mapping, specs)
         resolved["name"] = validate_run_name(resolved["name"])
@@ -354,6 +415,7 @@ class TrainRunConfig:
                 f"train config: 'learning_rate' must be > 0, got {resolved['learning_rate']!r}."
             )
         cls._validate_curriculum(resolved)
+        _validate_dynamics_envelope("train", resolved)
         return cls(**resolved)
 
     # UC-51 curriculum-knob range + composition validation.
@@ -471,6 +533,15 @@ class EvaluateRunConfig:
     rate_ki: float | None
     rate_kd: float | None
     rate_max_body_rate: float | None
+    # UC-56: pybullet dynamics-envelope range knobs, mirrored from ``TrainRunConfig`` so an eval run
+    # reproduces the trained plant's envelope. Same ``| None`` semantics; threaded into
+    # ``RandomizationConfig`` non-None-only by the CLI.
+    pybullet_mass_ratio_min: float | None
+    pybullet_mass_ratio_max: float | None
+    pybullet_tw_min: float | None
+    pybullet_tw_max: float | None
+    pybullet_arm_length_min: float | None
+    pybullet_arm_length_max: float | None
 
     @classmethod
     def from_mapping(cls, mapping: Any) -> EvaluateRunConfig:
@@ -498,6 +569,14 @@ class EvaluateRunConfig:
             _Spec("rate_ki", (float,)),
             _Spec("rate_kd", (float,)),
             _Spec("rate_max_body_rate", (float,)),
+            # UC-56: pybullet dynamics-envelope range knobs (mirror of the train keys). Type-only
+            # here; positivity + min<=max + T/W>=1 checked in ``_validate_dynamics_envelope`` below.
+            _Spec("pybullet_mass_ratio_min", (float,)),
+            _Spec("pybullet_mass_ratio_max", (float,)),
+            _Spec("pybullet_tw_min", (float,)),
+            _Spec("pybullet_tw_max", (float,)),
+            _Spec("pybullet_arm_length_min", (float,)),
+            _Spec("pybullet_arm_length_max", (float,)),
         ]
         resolved = _validate("evaluate", mapping, specs)
         if resolved["name"] is not None:
@@ -506,6 +585,7 @@ class EvaluateRunConfig:
             value = resolved.get(key)
             if value is not None and value < 0.0:
                 raise ConfigError(f"evaluate config: {key!r} must be >= 0, got {value!r}.")
+        _validate_dynamics_envelope("evaluate", resolved)
         return cls(**resolved)
 
 

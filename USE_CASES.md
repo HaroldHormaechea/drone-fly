@@ -65,5 +65,5 @@ Statuses:
 | 53 | [use-cases/53-fix-checkpoint-save-rlock-crash.md](use-cases/53-fix-checkpoint-save-rlock-crash.md) | Fix checkpoint-save crash — exclude the progress sink from PPO serialization | done | 2026-09-23 |
 | 54 | [use-cases/54-expose-ppo-optimization-hyperparameters.md](use-cases/54-expose-ppo-optimization-hyperparameters.md) | Expose PPO optimization hyperparameters (n_epochs, batch_size, n_steps, learning_rate) in the train YAML | done | 2026-09-23 |
 | 55 | [use-cases/55-inner-loop-rate-controller.md](use-cases/55-inner-loop-rate-controller.md) | Inner-loop body-rate controller (acro flight controller) | done | 2026-09-23 |
-| 56 | [use-cases/56-meteor75-dynamics-domain-randomization.md](use-cases/56-meteor75-dynamics-domain-randomization.md) | Retune drone dynamics to a Meteor75 Pro analog + wide domain randomization | pending | 2026-09-23 |
+| 56 | [use-cases/56-meteor75-dynamics-domain-randomization.md](use-cases/56-meteor75-dynamics-domain-randomization.md) | Retune drone dynamics to a Meteor75 Pro analog + wide domain randomization | done | 2026-09-23 |
 | 57 | [use-cases/57-raise-decouple-control-frequency.md](use-cases/57-raise-decouple-control-frequency.md) | Raise & decouple control frequency (policy Hz vs inner-loop/physics Hz) | pending | 2026-09-23 |

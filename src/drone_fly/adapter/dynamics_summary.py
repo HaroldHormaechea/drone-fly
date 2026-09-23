@@ -34,9 +34,12 @@ import logging
 import math
 from dataclasses import dataclass
 
+from drone_fly.adapter.meteor75 import METEOR75_ARM, METEOR75_MASS
 from drone_fly.adapter.pybullet_adapter import (
     CF2X_GRAVITY,
     CF2X_KF,
+    METEOR75_HOVER_RPM,
+    METEOR75_MAX_RPM,
     resolve_tw_preserving_dynamics,
     thrust_to_weight,
 )
@@ -77,6 +80,11 @@ class DroneDynamicsSummary:
         Full-stick body-rate authority (rad/s).
     spawn_z:
         UC-44 curriculum spawn altitude (m), or ``None`` when unknown.
+    arm_length:
+        UC-56 quad-X arm coordinate (m) the plant is configured with, or ``None`` on the simple
+        backend / when unknown. Reported so the TUI, recording and CI guard all describe the same
+        Meteor75-envelope plant (it feeds the point-mass inertia, not T/W or hover). Appended
+        **last** with a ``None`` default so every prior positional construction is unshifted.
     """
 
     backend: str
@@ -86,6 +94,7 @@ class DroneDynamicsSummary:
     hover_throttle: float
     max_body_rate: float
     spawn_z: float | None
+    arm_length: float | None = None
 
 
 def drone_dynamics_summary(
@@ -96,6 +105,9 @@ def drone_dynamics_summary(
     max_thrust: float | None = None,
     tw_preserving: bool = True,
     spawn_z: float | None = None,
+    pybullet_mass_ratio: float = 1.0,
+    target_tw: float | None = None,
+    arm_length: float | None = None,
 ) -> DroneDynamicsSummary:
     """Compute the one shared :class:`DroneDynamicsSummary` for ``backend`` (AC1).
 
@@ -103,9 +115,9 @@ def drone_dynamics_summary(
     caller) so this stays free of any ``drone_fly.env`` import.
 
     ``sampled_mass``
-        The sampler's absolute point-mass (kg). On the pybullet path it is reinterpreted through
-        :func:`resolve_tw_preserving_dynamics`; the summary reports the **resolved
-        ``applied_mass``**, never this raw value.
+        The sampler's absolute point-mass (kg) used by the **simple** backend. On the pybullet path
+        the mass is derived from ``pybullet_mass_ratio`` instead (see below), so this value is
+        ignored there.
     ``max_thrust``
         Simple-backend full-throttle thrust (N); defaults to
         :data:`~drone_fly.adapter.simple.BASE_MAX_THRUST`. Ignored on the pybullet path.
@@ -113,6 +125,14 @@ def drone_dynamics_summary(
         UC-48 flag forwarded to :func:`resolve_tw_preserving_dynamics` on the pybullet path.
     ``spawn_z``
         The live UC-44 curriculum knob, carried through verbatim for display / provenance.
+    ``pybullet_mass_ratio`` / ``target_tw`` / ``arm_length`` (UC-56, pybullet-only)
+        The Meteor75-envelope axes. On the pybullet path the summary resolves off the **Meteor75
+        nominal** constants (mass, hover/max RPM) via :func:`resolve_tw_preserving_dynamics`, using
+        ``pybullet_mass_ratio`` as the mass scale (× the nominal) and ``target_tw`` as the target
+        peak T/W (``None`` → the nominal Meteor75 T/W). ``arm_length`` (``None`` → the Meteor75
+        nominal arm) is reported verbatim so the three surfaces + guard describe the identical
+        plant; it does not affect T/W or hover. All are ignored on the simple path (``arm_length``
+        stays ``None`` there).
 
     Guards. ``applied_mass <= 0``, a degenerate pybullet RPM band (``max_rpm <= hover_rpm``), or
     ``max_thrust <= 0`` (simple) each emit a ``logging.warning`` and substitute finite sentinels
@@ -125,9 +145,23 @@ def drone_dynamics_summary(
     backend = str(backend)
     max_body_rate = float(max_body_rate)
     spawn_z = None if spawn_z is None else float(spawn_z)
+    # UC-56: arm_length is a pybullet-only descriptor. On the pybullet path an unset value falls
+    # back to the Meteor75 nominal arm; on the simple path it is always None.
+    summary_arm_length: float | None = None
 
     if backend == "pybullet":
-        resolved = resolve_tw_preserving_dynamics(sampled_mass, tw_preserving=tw_preserving)
+        # UC-56: resolve off the Meteor75 nominal (mass / hover / max RPM), using the mass RATIO and
+        # target T/W envelope axes — NOT the raw simple-backend ``sampled_mass``.
+        resolved = resolve_tw_preserving_dynamics(
+            pybullet_mass_ratio,
+            tw_preserving=tw_preserving,
+            native_mass=METEOR75_MASS,
+            base_mass=1.0,
+            native_hover_rpm=METEOR75_HOVER_RPM,
+            native_max_rpm=METEOR75_MAX_RPM,
+            target_tw=target_tw,
+        )
+        summary_arm_length = METEOR75_ARM if arm_length is None else float(arm_length)
         applied_mass = float(resolved.applied_mass)
         g = float(CF2X_GRAVITY)
         weight = applied_mass * g
@@ -192,6 +226,7 @@ def drone_dynamics_summary(
         hover_throttle=hover_throttle,
         max_body_rate=max_body_rate,
         spawn_z=spawn_z,
+        arm_length=summary_arm_length,
     )
 
 

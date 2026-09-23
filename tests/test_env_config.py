@@ -19,12 +19,14 @@ import dataclasses
 
 import pytest
 
+from drone_fly.adapter.meteor75 import METEOR75_ARM, METEOR75_TW
 from drone_fly.adapter.simple import BASE_MAX_BODY_RATE
 from drone_fly.env.config import (
     BatteryConfig,
     CourseConfig,
     DamageConfig,
     DockConfig,
+    DynamicsParams,
     EnvConfig,
     EpisodeConfig,
     GateSpec,
@@ -476,9 +478,11 @@ def test_randomization_repair_fields_appended_last_in_order() -> None:
     assert fields.index("recharge_energy_margin") < fields.index("enable_repair")
     i = fields.index("enable_repair")
     assert fields[i : i + 2] == ["enable_repair", "repair_pad_radius"]
-    # UC-35 places its placement-geometry fields as the tail, AFTER the repair block, in order.
+    # UC-35 places its placement-geometry fields AFTER the repair block, in order. UC-56 later
+    # appended three pybullet-envelope range fields as the new tail, so the UC-35 block is now the
+    # seven fields immediately preceding that tail (still contiguous and in order).
     assert fields.index("repair_pad_radius") < fields.index("pad_min_gate_distance")
-    assert fields[-7:] == [
+    assert fields[-10:-3] == [
         "pad_min_gate_distance",
         "drone_radius",
         "obstacle_evasion_margin",
@@ -487,6 +491,8 @@ def test_randomization_repair_fields_appended_last_in_order() -> None:
         "min_obstacle_separation",
         "obstacle_along_margin_frac",
     ]
+    # UC-56 envelope range fields are the actual tail (asserted in detail elsewhere).
+    assert fields[-3:] == ["pybullet_mass_ratio_range", "tw_range", "arm_length_range"]
 
 
 def test_randomization_uc35_placement_geometry_defaults() -> None:
@@ -710,4 +716,69 @@ def test_default_env_config_is_stable_under_uc19_fields() -> None:
     assert EnvConfig().damage == DamageConfig()
     assert EnvConfig().damage.enabled is False
     assert EnvConfig().episode.repair_step_allowance == 400
+
+
+# =====================================================================================
+# UC-56 — DynamicsParams Meteor75 axes + RandomizationConfig envelope (new-fields byte-identity)
+# =====================================================================================
+def test_dynamics_params_uc56_fields_default_to_meteor75_nominal() -> None:
+    """The three pybullet-only axes default to the Meteor75 nominal (ratio 1.0, T/W, arm)."""
+    d = DynamicsParams()
+    assert d.pybullet_mass_ratio == pytest.approx(1.0)
+    assert d.thrust_to_weight == pytest.approx(METEOR75_TW)
+    assert d.arm_length == pytest.approx(METEOR75_ARM)
+
+
+def test_dynamics_params_uc56_fields_are_appended_last() -> None:
+    """The UC-56 axes are the LAST three fields, in order — every prior positional construction is
+    unshifted (byte-identical), the backward-compat guarantee the plan relies on."""
+    names = [f.name for f in dataclasses.fields(DynamicsParams)]
+    assert names[-3:] == ["pybullet_mass_ratio", "thrust_to_weight", "arm_length"]
+    # The legacy leading fields keep their order/position ahead of the new tail.
+    assert names[:5] == ["mass", "drag", "max_body_rate", "max_thrust", "latency_steps"]
+
+
+def test_dynamics_params_legacy_defaults_unchanged() -> None:
+    """The pre-UC-56 fields keep their exact defaults (simple-backend byte-identity)."""
+    d = DynamicsParams()
+    assert d.mass == pytest.approx(1.0)
+    assert d.drag == pytest.approx(0.15)
+    assert d.max_body_rate == pytest.approx(4.0)
+    assert d.max_thrust == pytest.approx(2.0 * 1.0 * 9.81)
+    assert d.latency_steps == 0
+
+
+def test_dynamics_params_is_frozen_and_equality_holds() -> None:
+    """DynamicsParams is a value object — two defaults compare equal; it is immutable."""
+    assert DynamicsParams() == DynamicsParams()
+    with pytest.raises((AttributeError, TypeError)):
+        DynamicsParams().mass = 2.0  # type: ignore[misc]
+
+
+def test_randomization_config_envelope_ranges_are_wide_and_ordered() -> None:
+    """The UC-56 envelope ranges default to a WIDE whoop → 5" racer span, each ``(lo, hi)`` ordered
+    with the nominal at the low end of the T/W range."""
+    r = RandomizationConfig()
+    mr_lo, mr_hi = r.pybullet_mass_ratio_range
+    tw_lo, tw_hi = r.tw_range
+    arm_lo, arm_hi = r.arm_length_range
+    assert mr_lo == pytest.approx(1.0) and mr_hi >= 5.0 and mr_lo < mr_hi
+    assert tw_lo == pytest.approx(METEOR75_TW) and tw_lo < tw_hi
+    assert 0.0 < arm_lo < arm_hi
+    # The nominal arm sits at the low end of the arm range (whoop → larger racer).
+    assert arm_lo == pytest.approx(METEOR75_ARM, abs=1e-3)
+
+
+def test_randomization_config_envelope_ranges_appended_last() -> None:
+    """The three envelope range fields are the LAST three on RandomizationConfig (unshifted)."""
+    names = [f.name for f in dataclasses.fields(RandomizationConfig)]
+    assert names[-3:] == ["pybullet_mass_ratio_range", "tw_range", "arm_length_range"]
+
+
+def test_default_env_config_stable_under_uc56_fields() -> None:
+    """AC: with the UC-56 fields at their defaults, ``EnvConfig()`` equality still holds (inert)."""
+    assert EnvConfig() == EnvConfig()
+    assert EnvConfig().randomization == RandomizationConfig()
+    # Dynamics randomization stays OFF by default → the wide envelope is inert unless enabled.
+    assert EnvConfig().randomization.enable_dynamics is False
     assert EnvConfig().course.pads == ()
