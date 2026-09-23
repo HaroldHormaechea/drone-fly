@@ -61,4 +61,4 @@ Statuses:
 | 49 | [use-cases/49-drone-dynamics-observability.md](use-cases/49-drone-dynamics-observability.md) | Drone-dynamics observability — TUI segment, recording provenance, T/W regression guard | done | 2026-09-22 |
 | 50 | [use-cases/50-reward-altitude-holding-forward-flight.md](use-cases/50-reward-altitude-holding-forward-flight.md) | Reward altitude-holding forward flight — stop trading height for gate-progress | done | 2026-09-22 |
 | 51 | [use-cases/51-expose-and-restagger-training-curriculum.md](use-cases/51-expose-and-restagger-training-curriculum.md) | Expose the training curriculum schedule + restagger defaults so floor-takeoff is the last isolated stage | done | 2026-09-23 |
-| 52 | [use-cases/52-optimize-phase-tui-progress.md](use-cases/52-optimize-phase-tui-progress.md) | Optimize-phase progress + collect/optimize timing in the training TUI | in-progress | 2026-09-23 |
+| 52 | [use-cases/52-optimize-phase-tui-progress.md](use-cases/52-optimize-phase-tui-progress.md) | Optimize-phase progress + collect/optimize timing in the training TUI | done | 2026-09-23 |

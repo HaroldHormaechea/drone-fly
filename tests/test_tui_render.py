@@ -36,12 +36,21 @@ from drone_fly.train.tui.render import (
 )
 
 
-def _render(renderable, *, width: int = 120, no_color: bool = False) -> str:
-    """Render to a string via a headless Console (surfaces lazy Rich errors); never a pty."""
+def _render(
+    renderable, *, width: int = 120, height: int | None = None, no_color: bool = False
+) -> str:
+    """Render to a string via a headless Console (surfaces lazy Rich errors); never a pty.
+
+    ``height`` is passed for full-``build_layout`` renders so the ratio-sized bottom trends panel
+    (grown by UC-52's optimizing bar + the values-panel size bump) isn't squeezed below its content
+    by Rich's default 25-line console.
+    """
     from rich.console import Console
 
     buf = io.StringIO()
-    Console(file=buf, width=width, no_color=no_color, legacy_windows=False).print(renderable)
+    Console(file=buf, width=width, height=height, no_color=no_color, legacy_windows=False).print(
+        renderable
+    )
     return buf.getvalue()
 
 
@@ -94,7 +103,9 @@ def test_values_panel_shows_grouped_time_train_rollout() -> None:
 
 
 def test_trend_rows_and_progress_render() -> None:
-    out = _render(build_layout(_populated_model()))
+    # height=60: UC-52 added a third bar (optimizing) to the trends panel and bumped the values
+    # panel to size=9, so the default 25-line console clips the bottom "iterations" row.
+    out = _render(build_layout(_populated_model()), height=60)
     # the 7 metric labels appear as trend rows
     for label in (
         "success_rate",
@@ -213,6 +224,11 @@ def test_heartbeat_tick_does_not_blank_the_values_panel_render() -> None:
     collecting counters) must NOT blank the six values-panel entries to the '—' placeholder —
     the last rollout's values stay on screen, only the elapsed clock advances."""
     m = _populated_model()  # 6 full updates -> raw fully populated
+    # UC-52 added an always-present collect/optimize "split" line that shows '—' until the first
+    # durations are observed; set them so the ONLY thing that could add a placeholder here is a
+    # (regression) blanking of the six snapshot entries — the invariant this test guards.
+    m.set_collect_duration(12.0)
+    m.set_optimize_duration(46.0)
     before = _render(build_values_panel(m))
     assert M.PLACEHOLDER not in before  # every value present after the snapshot
     assert "-1200" in before  # last ep_rew_mean (-1300 + 5*20)
