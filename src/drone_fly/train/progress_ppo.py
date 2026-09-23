@@ -35,7 +35,10 @@ production sink): ``begin_optimize(n_epochs, total_minibatches)`` /
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 import time
+from pathlib import Path
 
 from stable_baselines3 import PPO
 
@@ -92,6 +95,68 @@ class ProgressReportingPPO(PPO):
     def attach_progress_sink(self, sink) -> None:
         """Attach (or, with ``None``, detach) the optimize-phase progress sink."""
         self._progress_sink = sink
+
+    def _excluded_save_params(self) -> list[str]:
+        """Exclude the transient progress sink from SB3's cloudpickle save (UC-53).
+
+        The attached sink is the live :class:`~drone_fly.train.tui.dashboard.TrainingDashboard`,
+        which holds a ``threading.RLock`` and is therefore unpicklable. SB3 serializes
+        ``self.__dict__`` minus this list, so without ``_progress_sink`` here ``save()`` crashes
+        mid-write with ``TypeError: cannot pickle '_thread.RLock'`` and truncates the checkpoint.
+
+        Calls ``super()`` and appends (never hardcodes SB3's list, which varies by version); the
+        exclusion is a harmless no-op when no sink is attached. On ``load()`` the attribute is
+        simply absent (``getattr(self, "_progress_sink", None) is None``) and ``loop.py``
+        re-attaches a sink when the TUI is active.
+        """
+        return super()._excluded_save_params() + ["_progress_sink"]
+
+    def save(self, path, exclude=None, include=None) -> None:
+        """Atomically write a checkpoint so a failed save never corrupts the target (UC-53).
+
+        Serializes to a uniquely-named temp file **in the same directory** as the resolved final
+        path, then ``os.replace``s it into place — an atomic same-volume rename on both POSIX and
+        Windows/NTFS. A partial/failed serialization (e.g. the historical RLock pickle crash) thus
+        leaves any pre-existing checkpoint byte-intact and never publishes a truncated ``.zip``.
+
+        Composes with :meth:`_excluded_save_params`: the temp is written via ``super().save``,
+        which drops ``_progress_sink``. When ``path`` is a buffer/file-like object rather than a
+        filesystem path, atomic rename is meaningless, so we delegate straight to ``super``.
+        """
+        # Buffer/file-like target: atomic rename is meaningless — delegate to SB3 unchanged.
+        if not isinstance(path, (str, os.PathLike)):
+            return super().save(path, exclude=exclude, include=include)
+
+        # Resolve the final path exactly as SB3's open_path does: append ``.zip`` only when the
+        # caller supplied no extension (any existing suffix is kept verbatim).
+        final = Path(path)
+        if final.suffix == "":
+            final = Path(f"{final}.zip")
+
+        # Match SB3's auto-create-parent behavior (challenger Minor #1) before creating the temp.
+        final.parent.mkdir(parents=True, exist_ok=True)
+
+        # Temp beside the target ⇒ same volume ⇒ os.replace is truly atomic. A NON-EMPTY suffix
+        # keeps SB3's open_path from re-appending ``.zip`` to the temp (double-extension trap).
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f"{final.name}.", suffix=".tmp", dir=str(final.parent)
+        )
+        # Close the temp fd immediately (challenger Minor #2): a lingering handle can block
+        # super().save()'s own open("wb") and the os.replace on Windows.
+        os.close(fd)
+        temp = Path(temp_name)
+
+        try:
+            super().save(str(temp), exclude=exclude, include=include)
+            os.replace(temp, final)
+        except BaseException:
+            # Best-effort cleanup; ``final`` is untouched (only the terminal os.replace writes it).
+            try:
+                if temp.exists():
+                    temp.unlink()
+            except OSError:
+                pass
+            raise
 
     @staticmethod
     def _safe_sink_call(sink, method_name, *args) -> bool:
