@@ -679,7 +679,6 @@ def test_meta_drone_dynamics_present_and_correct_when_set(
         sampled_mass=1.0,
         max_body_rate=4.0,
         tw_preserving=True,
-        attitude_authority=0.6,
         spawn_z=1.25,
     )
     doc = _record_with_drone_dynamics(connectome, tmp_path / "act", summary)
@@ -692,9 +691,9 @@ def test_meta_drone_dynamics_present_and_correct_when_set(
     assert block["thrust_to_weight"] == pytest.approx(2.25, rel=1e-6)
     assert block["hover_throttle"] == pytest.approx(0.5, abs=1e-6)
     assert block["max_body_rate"] == pytest.approx(4.0)
-    assert block["attitude_authority"] == pytest.approx(0.6)
     assert block["spawn_z"] == pytest.approx(1.25)
     # It is a plain JSON-serialisable dict (round-tripped through json.loads already).
+    # (UC-55 dropped the attitude_authority key along with the curriculum it recorded.)
     assert set(block) == {
         "backend",
         "applied_mass",
@@ -702,7 +701,6 @@ def test_meta_drone_dynamics_present_and_correct_when_set(
         "thrust_to_weight",
         "hover_throttle",
         "max_body_rate",
-        "attitude_authority",
         "spawn_z",
     }
 

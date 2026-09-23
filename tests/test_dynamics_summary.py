@@ -56,7 +56,6 @@ def test_pybullet_summary_reports_resolved_applied_mass_not_sampled() -> None:
     assert s.thrust_to_weight == pytest.approx(_NATIVE_PEAK_TW, rel=1e-6)
     assert s.hover_throttle == pytest.approx(0.5, abs=1e-6)
     assert s.max_body_rate == pytest.approx(_DEFAULT_MAX_BODY_RATE)
-    assert s.attitude_authority == pytest.approx(1.0)  # default endpoint
     assert s.spawn_z is None  # not supplied
 
 
@@ -83,16 +82,15 @@ def test_summary_is_frozen() -> None:
 
 
 def test_curriculum_knobs_carry_through_verbatim() -> None:
-    """attitude_authority / spawn_z are carried through unchanged for display + provenance."""
+    """spawn_z is carried through unchanged for display + provenance. (UC-55 retired the
+    attitude-authority knob along with the mixer it stood in for.)"""
     s = drone_dynamics_summary(
         backend="pybullet",
         sampled_mass=1.0,
         max_body_rate=4.0,
         tw_preserving=True,
-        attitude_authority=0.3,
         spawn_z=1.25,
     )
-    assert s.attitude_authority == pytest.approx(0.3)
     assert s.spawn_z == pytest.approx(1.25)
 
 

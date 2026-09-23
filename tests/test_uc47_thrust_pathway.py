@@ -63,12 +63,12 @@ def test_module_object_has_no_pybullet_in_current_session() -> None:
 
 # --- AC3 (central question): pure-mixer collective desaturation ------------------------
 def test_saturated_rate_bleeds_collective_thrust_direction_and_magnitude() -> None:
-    """throttle=1.0 + rpy=±1.0 (full authority) desaturates the collective vs rpy=0.
+    """throttle=1.0 + rpy=±1.0 (full command) desaturates the collective vs rpy=0.
 
     Direction: Σrpm²(rpy=±1) strictly < Σrpm²(rpy=0). Magnitude: the fractional bleed lands
     in the ~0.15–0.25 band expected at rate_gain=0.15, and exactly one rotor clips at max_rpm.
     """
-    m = tp.mixer_collective_metrics(1.0, 1.0, 1.0)
+    m = tp.mixer_collective_metrics(1.0, 1.0)
     # Direction — the collective bleed is real and positive.
     assert m["collective_bleed_fraction"] > 0.0
     assert m["sum_sq"] < m["sum_sq_baseline_rpy0"]
@@ -79,30 +79,17 @@ def test_saturated_rate_bleeds_collective_thrust_direction_and_magnitude() -> No
 
 
 def test_bleed_fraction_matches_measured_value() -> None:
-    """Pin the exact bleed at the canonical (throttle=1, rpy=1, auth=1) cell (~0.208)."""
-    m = tp.mixer_collective_metrics(1.0, 1.0, 1.0)
+    """Pin the exact bleed at the canonical (throttle=1, rpy=1) cell (~0.208)."""
+    m = tp.mixer_collective_metrics(1.0, 1.0)
     assert m["collective_bleed_fraction"] == pytest.approx(0.208125, abs=1e-4)
 
 
 def test_level_command_has_zero_bleed_and_no_clip() -> None:
     """rpy=0 is the baseline: no collective loss, no clipping at hover throttle."""
-    m = tp.mixer_collective_metrics(0.5, 0.0, 1.0)
+    m = tp.mixer_collective_metrics(0.5, 0.0)
     assert m["collective_bleed_fraction"] == pytest.approx(0.0, abs=1e-12)
     assert m["n_clipped"] == 0
     assert m["sum_sq"] == pytest.approx(m["sum_sq_baseline_rpy0"])
-
-
-def test_lower_authority_reduces_bleed() -> None:
-    """Scaling rpy down via attitude authority monotonically reduces collective bleed.
-
-    At the UC-46 committed authority (~0.26) the bleed is small (~5.5% at 0.25); this is the
-    quantitative basis for the plan's finding that the recorded run's mixer bleed was minor.
-    """
-    b_full = tp.mixer_collective_metrics(1.0, 1.0, 1.0)["collective_bleed_fraction"]
-    b_half = tp.mixer_collective_metrics(1.0, 1.0, 0.5)["collective_bleed_fraction"]
-    b_low = tp.mixer_collective_metrics(1.0, 1.0, 0.25)["collective_bleed_fraction"]
-    assert b_full > b_half > b_low > 0.0
-    assert b_low == pytest.approx(0.0552, abs=5e-3)
 
 
 # --- AC7: ctbr_to_rpm purity / statelessness ------------------------------------------
@@ -116,18 +103,6 @@ def test_mixer_is_pure_and_stateless() -> None:
     _ = tp.mixer_rpms(tp.make_action(0.1, -0.9))
     r3 = tp.mixer_rpms(act)
     assert np.array_equal(r1, r3)
-
-
-def test_make_action_does_not_mutate_and_authority_scales_only_rpy() -> None:
-    """apply_authority scales rpy channels (1..3) only; throttle (index 0) is untouched."""
-    raw = tp.make_action(0.8, 1.0)
-    raw_copy = raw.copy()
-    scaled = tp.apply_authority(raw, 0.5)
-    # Input not mutated in place.
-    assert np.array_equal(raw, raw_copy)
-    # Throttle preserved; rpy halved (raw rpy=1.0 clipped to box then *0.5).
-    assert scaled[0] == pytest.approx(0.8)
-    assert scaled[1:4] == pytest.approx(np.array([0.5, 0.5, 0.5]))
 
 
 # --- AC2 (hermetic contrast): simple baseline hovers@0.5 / climbs@1.0 ------------------

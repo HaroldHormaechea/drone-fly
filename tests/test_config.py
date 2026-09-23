@@ -470,9 +470,6 @@ _UC51_KNOBS = {
     "airborne_curriculum_enabled": False,
     "airborne_curriculum_warmup_fraction": 0.3,
     "airborne_curriculum_anneal_fraction": 0.9,
-    "attitude_authority_curriculum_enabled": False,
-    "attitude_authority_start": 0.2,
-    "attitude_authority_anneal_fraction": 0.4,
     "collision_curriculum_enabled": False,
     "collision_penalty_start": 3.0,
     "collision_penalty_end": 90.0,
@@ -527,17 +524,15 @@ def test_uc51_curriculum_knobs_round_trip_through_yaml(tmp_path) -> None:
     [
         "airborne_curriculum_warmup_fraction",
         "airborne_curriculum_anneal_fraction",
-        "attitude_authority_start",
-        "attitude_authority_anneal_fraction",
         "collision_penalty_warmup_fraction",
         "collision_curriculum_hold_fraction",
     ],
 )
 @pytest.mark.parametrize("bad", [-0.1, 1.5, 2.0])
 def test_uc51_fraction_out_of_range_rejected(key: str, bad: float) -> None:
-    """AC1: every fraction knob (and ``attitude_authority_start``) is range-checked to ``[0, 1]``;
-    an out-of-range value is a clear ``ConfigError`` naming the key, raised at config-load (exit 2)
-    rather than deferred to the curriculum function's backstop."""
+    """AC1: every fraction knob is range-checked to ``[0, 1]``; an out-of-range value is a clear
+    ``ConfigError`` naming the key, raised at config-load (exit 2) rather than deferred to the
+    curriculum function's backstop."""
     with pytest.raises(ConfigError, match=key):
         TrainRunConfig.from_mapping({"name": "x", key: bad})
 
@@ -623,9 +618,6 @@ def test_uc51_set_to_default_is_accepted_and_composes() -> None:
             "airborne_curriculum_enabled": d.airborne_curriculum_enabled,
             "airborne_curriculum_warmup_fraction": d.airborne_curriculum_warmup_fraction,
             "airborne_curriculum_anneal_fraction": d.airborne_curriculum_anneal_fraction,
-            "attitude_authority_curriculum_enabled": d.attitude_authority_curriculum_enabled,
-            "attitude_authority_start": d.attitude_authority_start,
-            "attitude_authority_anneal_fraction": d.attitude_authority_anneal_fraction,
             "collision_curriculum_enabled": d.collision_curriculum_enabled,
             "collision_penalty_start": d.collision_penalty_start,
             "collision_penalty_end": d.collision_penalty_end,
@@ -642,15 +634,16 @@ def test_uc51_trainconfig_new_staggered_defaults() -> None:
     what a bare config reproduces (all knobs None -> nothing forwarded -> dataclass defaults):
 
     * ``total_timesteps == 2_000_000`` (AC7 — the isolated floor-takeoff tail gets real budget);
-    * attitude authority anneals to full EARLIEST (fraction 0.25);
     * collision penalty reaches full at hold + warmup = 0.4 + 0.1 = 0.5 (≈ mid-training);
     * airborne spawn holds airborne through warmup 0.6, reaching the floor only at anneal 1.0.
+
+    (UC-55 retired the attitude-authority curriculum, so its former "anneals to full earliest"
+    ordering leg is gone; the collision→floor stagger it fronted is unchanged.)
     """
     from drone_fly.train.config import TrainConfig
 
     d = TrainConfig()
     assert d.total_timesteps == 2_000_000
-    assert d.attitude_authority_anneal_fraction == pytest.approx(0.25)
     assert d.collision_curriculum_hold_fraction == pytest.approx(0.4)
     assert d.collision_curriculum_warmup_fraction == pytest.approx(0.1)
     assert d.airborne_curriculum_warmup_fraction == pytest.approx(0.6)

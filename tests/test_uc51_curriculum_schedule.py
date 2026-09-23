@@ -1,17 +1,22 @@
 """UC-51 (AC4/AC5) — cross-curriculum ordering, isolation, shape, and monotonicity on the NEW
 restaggered defaults.
 
-The three training curricula — attitude authority (UC-46), collision penalty (UC-41), and airborne
-spawn (UC-44) — used to anneal on the same ``anneal_fraction ≈ 0.5`` schedule, stacking three
-difficulty spikes at the 50% mark (the diagnosed synchronized-cliff wall). UC-51 restaggers the
-DEFAULTS so the difficulty steps are isolated and ordered, with floor-takeoff last:
+The training curricula — collision penalty (UC-41) and airborne spawn (UC-44) — used to anneal
+on the same ``anneal_fraction ≈ 0.5`` schedule (alongside the now-retired UC-46 attitude-authority
+curriculum), stacking difficulty spikes at the 50% mark (the diagnosed synchronized-cliff wall).
+UC-51 restaggers the DEFAULTS so the difficulty steps are isolated and ordered, with floor-takeoff
+last:
 
-    attitude_authority_full  <  collision_penalty_full  <  spawn_reaches_floor
+    collision_penalty_full  <  spawn_reaches_floor
+
+(UC-55 retired the attitude-authority curriculum — the inner-loop rate controller makes it
+obsolete — so the ordering it used to lead is gone; the collision→floor ordering it fronted is
+unchanged.)
 
 This module pins that ordering/isolation and each schedule's SHAPE (monotonicity + endpoints) as a
 pure-function property of the default :class:`TrainConfig`. Per AC5 it asserts the **ordering,
 isolation, and monotonicity — NOT the exact fraction values** (those are advisory and may be tuned).
-Fully hermetic: the three schedules are pure functions of ``num_timesteps`` (no pybullet/GPU/env).
+Fully hermetic: the schedules are pure functions of ``num_timesteps`` (no pybullet/GPU/env).
 """
 
 from __future__ import annotations
@@ -19,7 +24,6 @@ from __future__ import annotations
 import pytest
 
 from drone_fly.train.airborne_curriculum import spawn_z_at
-from drone_fly.train.attitude_curriculum import attitude_authority_at
 from drone_fly.train.collision_curriculum import collision_penalty_at
 from drone_fly.train.config import TrainConfig
 
@@ -49,52 +53,33 @@ def _first_step_where(cfg: TrainConfig, predicate) -> int:
     raise AssertionError("predicate never became true across the run")
 
 
-def test_default_schedule_orders_the_three_difficulty_steps_isolated() -> None:
-    """AC4: on the NEW defaults the three curricula reach their hard endpoint in the mandated
-    order — attitude authority FIRST, collision penalty NEXT, airborne floor-takeoff LAST —
-    asserting the ORDERING (strict ``<``), not the exact fractions."""
+def test_default_schedule_orders_the_difficulty_steps_isolated() -> None:
+    """AC4: on the NEW defaults the two remaining curricula reach their hard endpoint in the
+    mandated order — collision penalty FIRST, airborne floor-takeoff LAST — asserting the
+    ORDERING (strict ``<``), not the exact fractions."""
     cfg = TrainConfig()
     end = cfg.collision_penalty_end
 
-    t_attitude_full = _first_step_where(cfg, lambda t: attitude_authority_at(t, cfg) >= 1.0 - 1e-9)
     t_collision_full = _first_step_where(cfg, lambda t: collision_penalty_at(t, cfg) >= end - 1e-6)
     t_spawn_floor = _first_step_where(cfg, lambda t: _spawn(t, cfg) <= _FLOOR_Z + 1e-9)
 
-    assert t_attitude_full < t_collision_full < t_spawn_floor, (
-        f"expected attitude_full ({t_attitude_full}) < collision_full ({t_collision_full}) < "
-        f"spawn_floor ({t_spawn_floor})"
+    assert t_collision_full < t_spawn_floor, (
+        f"expected collision_full ({t_collision_full}) < spawn_floor ({t_spawn_floor})"
     )
 
 
 def test_default_schedule_steps_are_isolated_not_simultaneous() -> None:
-    """AC4/AC5 (the crux — the fix for the synchronized cliff): when each earlier difficulty
-    step reaches full, the LATER curricula are still easy — the spikes do NOT land together.
-    Specifically: when attitude authority reaches full the collision penalty is still below its
-    end value and the spawn is still fully airborne; when the collision penalty reaches full the
-    spawn is STILL fully airborne (its descent has not begun)."""
+    """AC4/AC5 (the crux — the fix for the synchronized cliff): when the earlier difficulty step
+    reaches full, the LATER curriculum is still easy — the spikes do NOT land together.
+    Specifically: when the collision penalty reaches full the spawn is STILL fully airborne (its
+    descent has not begun)."""
     cfg = TrainConfig()
     end = cfg.collision_penalty_end
 
-    t_attitude_full = _first_step_where(cfg, lambda t: attitude_authority_at(t, cfg) >= 1.0 - 1e-9)
     t_collision_full = _first_step_where(cfg, lambda t: collision_penalty_at(t, cfg) >= end - 1e-6)
-
-    # At attitude-full, collision is not yet at full and the spawn is still airborne (held high).
-    assert collision_penalty_at(t_attitude_full, cfg) < end - 1e-6
-    assert _spawn(t_attitude_full, cfg) == pytest.approx(_HIGH_Z)
 
     # At collision-full, the spawn is STILL fully airborne — floor-takeoff is isolated to the tail.
     assert _spawn(t_collision_full, cfg) == pytest.approx(_HIGH_Z)
-
-
-def test_default_attitude_schedule_shape() -> None:
-    """AC5: attitude authority starts at ``attitude_authority_start``, is monotone NON-DECREASING,
-    and reaches full authority (1.0) — the earliest of the three, then holds."""
-    cfg = TrainConfig()
-    assert attitude_authority_at(0, cfg) == pytest.approx(cfg.attitude_authority_start)
-    vals = [attitude_authority_at(t, cfg) for t in _samples(cfg)]
-    for a, b in zip(vals, vals[1:], strict=False):
-        assert b >= a - 1e-12, "attitude authority must be monotone non-decreasing"
-    assert vals[-1] == pytest.approx(1.0)  # full authority by the end
 
 
 def test_default_collision_schedule_shape_reaches_full_by_mid_training() -> None:
@@ -134,7 +119,6 @@ def test_default_schedules_are_composition_valid() -> None:
     cfg = TrainConfig()
     # Neither raises across the whole run (defence-in-depth backstops stay silent on defaults).
     for t in _samples(cfg, n=101):
-        attitude_authority_at(t, cfg)
         collision_penalty_at(t, cfg)
         _spawn(t, cfg)
     assert cfg.airborne_curriculum_warmup_fraction <= cfg.airborne_curriculum_anneal_fraction
