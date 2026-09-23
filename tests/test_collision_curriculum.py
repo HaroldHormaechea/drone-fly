@@ -43,7 +43,11 @@ _ZERO_THRUST = np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32)
 def test_schedule_starts_at_start_value_at_t0() -> None:
     """AC3: the schedule begins at ``collision_penalty_start`` on the very first step (t=0), and any
     pre-start / negative query is clamped to the start value (never below the low endpoint)."""
-    cfg = TrainConfig(total_timesteps=1000)
+    cfg = TrainConfig(
+        total_timesteps=1000,
+        collision_curriculum_hold_fraction=0.4,
+        collision_curriculum_warmup_fraction=0.5,
+    )
     assert collision_penalty_at(0, cfg) == pytest.approx(cfg.collision_penalty_start)
     assert collision_penalty_at(-5, cfg) == pytest.approx(cfg.collision_penalty_start)
 
@@ -52,7 +56,11 @@ def test_schedule_reaches_and_holds_end_value_after_warmup() -> None:
     """AC3 (UC-41): the ramp reaches ``collision_penalty_end`` exactly at the END of the ramp
     (``(hold_fraction + warmup_fraction) × total_timesteps``) — NOT at the warmup boundary alone —
     and holds it flat thereafter (no overshoot)."""
-    cfg = TrainConfig(total_timesteps=1000)  # hold = 0.4×1000 = 400, warmup = 0.5×1000 = 500
+    cfg = TrainConfig(
+        total_timesteps=1000,
+        collision_curriculum_hold_fraction=0.4,
+        collision_curriculum_warmup_fraction=0.5,
+    )  # hold = 0.4×1000 = 400, warmup = 0.5×1000 = 500
     hold = int(cfg.collision_curriculum_hold_fraction * cfg.total_timesteps)  # 400
     warmup = int(cfg.collision_curriculum_warmup_fraction * cfg.total_timesteps)  # 500
     ramp_end = hold + warmup  # 900
@@ -68,7 +76,11 @@ def test_schedule_reaches_and_holds_end_value_after_warmup() -> None:
 def test_schedule_midpoint_is_linear_interpolation() -> None:
     """AC3 (UC-41): halfway through the RAMP (at ``hold_steps + warmup/2``) the penalty is the
     linear midpoint of the endpoints — the interpolation is over the ramp, not from t=0."""
-    cfg = TrainConfig(total_timesteps=1000)  # hold 400, warmup 500; ramp midpoint at t=650
+    cfg = TrainConfig(
+        total_timesteps=1000,
+        collision_curriculum_hold_fraction=0.4,
+        collision_curriculum_warmup_fraction=0.5,
+    )  # hold 400, warmup 500; ramp midpoint at t=650
     hold = int(cfg.collision_curriculum_hold_fraction * cfg.total_timesteps)  # 400
     warmup = int(cfg.collision_curriculum_warmup_fraction * cfg.total_timesteps)  # 500
     ramp_midpoint = hold + warmup // 2  # 650
@@ -81,7 +93,11 @@ def test_schedule_midpoint_is_linear_interpolation() -> None:
 
 def test_schedule_is_monotonic_non_decreasing() -> None:
     """AC3: the schedule never decreases as training progresses (default start ≤ end endpoints)."""
-    cfg = TrainConfig(total_timesteps=1000)
+    cfg = TrainConfig(
+        total_timesteps=1000,
+        collision_curriculum_hold_fraction=0.4,
+        collision_curriculum_warmup_fraction=0.5,
+    )
     vals = [collision_penalty_at(t, cfg) for t in range(0, 1200, 25)]
     for earlier, later in zip(vals, vals[1:], strict=False):
         assert later >= earlier - 1e-9
@@ -103,7 +119,11 @@ def test_schedule_is_stateless_and_resume_correct() -> None:
     point — the value at a timestep is identical however you arrive there. With the hold-then-ramp
     shape, t=300 (total=1000 ⇒ hold_steps=400) now falls in the HOLD phase ⇒ returns the start
     value; a mid-RAMP point (t=650) is verified separately to exercise the interpolation branch."""
-    cfg = TrainConfig(total_timesteps=1000)  # hold_steps = 400, ramp 400→900
+    cfg = TrainConfig(
+        total_timesteps=1000,
+        collision_curriculum_hold_fraction=0.4,
+        collision_curriculum_warmup_fraction=0.5,
+    )  # hold_steps = 400, ramp 400→900
     # Stateless: two queries at the same timestep agree exactly.
     assert collision_penalty_at(300, cfg) == collision_penalty_at(300, cfg)
     # t=300 is inside the hold phase (≤ 400) ⇒ the held start value.
@@ -122,7 +142,11 @@ def test_schedule_holds_start_value_through_the_entire_hold_phase() -> None:
     whole hold phase ``[0, hold_steps]`` — this is what keeps the effective penalty below the
     ~4.8 crash-cliff through the fly-learning window (the observed stall was at ~16% / 159k of a
     1M-step run). If a future change shortens the hold, this test fails loudly."""
-    cfg = TrainConfig(total_timesteps=1_000_000)  # hold_steps = 0.4×1M = 400_000
+    cfg = TrainConfig(
+        total_timesteps=1_000_000,
+        collision_curriculum_hold_fraction=0.4,
+        collision_curriculum_warmup_fraction=0.5,
+    )  # hold_steps = 0.4×1M = 400_000
     hold_steps = int(cfg.collision_curriculum_hold_fraction * cfg.total_timesteps)
     assert hold_steps == 400_000
     # The observed-stall operating point (16% ≈ 159k) sits inside the hold ⇒ still the start value.
@@ -189,7 +213,11 @@ def test_callback_pushes_scheduled_penalty_through_wrapper_stack() -> None:
         assert isinstance(venv.venv, VecMonitor)
         assert isinstance(venv.venv.venv, DummyVecEnv)
 
-        cfg = TrainConfig(total_timesteps=1000)
+        cfg = TrainConfig(
+            total_timesteps=1000,
+            collision_curriculum_hold_fraction=0.4,
+            collision_curriculum_warmup_fraction=0.5,
+        )
         cb = CollisionCurriculumCallback(cfg)
         cb.init_callback(_fake_model(venv))
 
@@ -228,7 +256,11 @@ def test_callback_propagates_to_all_envs_in_a_multi_env_stack() -> None:
     out across the whole DummyVecEnv, not just env 0."""
     venv = build_vec_env(adapter="simple", n_envs=3, training=True, seed=0)
     try:
-        cfg = TrainConfig(total_timesteps=1000)
+        cfg = TrainConfig(
+            total_timesteps=1000,
+            collision_curriculum_hold_fraction=0.4,
+            collision_curriculum_warmup_fraction=0.5,
+        )
         cb = CollisionCurriculumCallback(cfg)
         cb.init_callback(_fake_model(venv))
         cb.num_timesteps = 0

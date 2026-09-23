@@ -444,9 +444,217 @@ def test_uc41_train_config_collision_curriculum_defaults() -> None:
     assert cfg.collision_penalty_start == pytest.approx(2.0), "UC-41 held value below the cliff"
     assert cfg.collision_penalty_end == pytest.approx(100.0), "AC6: full strength preserved"
     assert cfg.collision_curriculum_hold_fraction == pytest.approx(0.4), "UC-41 new hold fraction"
-    assert cfg.collision_curriculum_warmup_fraction == pytest.approx(0.5), "ramp DURATION unchanged"
+    assert cfg.collision_curriculum_warmup_fraction == pytest.approx(0.1), (
+        "UC-51: ramp width shortened 0.5 -> 0.1 so collision reaches full (100) at hold+warmup = "
+        "0.4 + 0.1 = 0.5 of the run (isolated mid-training difficulty step)"
+    )
     # The split must be a valid curriculum shape: 0 ≤ hold and hold + warmup ≤ 1.
     assert cfg.collision_curriculum_hold_fraction >= 0.0
     assert (
         cfg.collision_curriculum_hold_fraction + cfg.collision_curriculum_warmup_fraction <= 1.0
     ), "the default hold+ramp must fit inside the run length (leaves a held-at-end tail)"
+
+
+# --------------------------------------------------------------------------- #
+# UC-51 — curriculum schedule knobs + ent_coef exposed in the train YAML.
+#
+# AC1 (accept + validate + reject), AC2 (omitted / null -> None sentinel so
+# set-to-default == omit), AC6/AC7 (bare TrainRunConfig -> None everywhere and
+# the TrainConfig dataclass carries the NEW staggered defaults). Range +
+# composition rejections mirror (and fail earlier than) the curriculum
+# functions' ValueError backstops. All hermetic — no pybullet / GPU.
+# --------------------------------------------------------------------------- #
+
+_UC51_KNOBS = {
+    "ent_coef": 0.01,
+    "airborne_curriculum_enabled": False,
+    "airborne_curriculum_warmup_fraction": 0.3,
+    "airborne_curriculum_anneal_fraction": 0.9,
+    "attitude_authority_curriculum_enabled": False,
+    "attitude_authority_start": 0.2,
+    "attitude_authority_anneal_fraction": 0.4,
+    "collision_curriculum_enabled": False,
+    "collision_penalty_start": 3.0,
+    "collision_penalty_end": 90.0,
+    "collision_penalty_warmup_fraction": 0.2,
+    "collision_curriculum_hold_fraction": 0.3,
+}
+
+
+def test_uc51_train_accepts_all_curriculum_knobs() -> None:
+    """AC1: every exposed curriculum knob + ``ent_coef`` is accepted by ``from_mapping`` and lands
+    verbatim on the resolved ``TrainRunConfig`` (the YAML key ``collision_penalty_warmup_fraction``
+    is carried on the same-named field; the CLI maps it to ``collision_curriculum_warmup_fraction``
+    on ``TrainConfig``)."""
+    cfg = TrainRunConfig.from_mapping({"name": "x", **_UC51_KNOBS})
+    for key, value in _UC51_KNOBS.items():
+        assert getattr(cfg, key) == value, f"{key} did not thread through from_mapping"
+
+
+def test_uc51_curriculum_knobs_default_to_none_when_omitted() -> None:
+    """AC2/AC7: a bare train config leaves every curriculum knob at the ``None`` sentinel, so
+    the CLI passes nothing and the ``TrainConfig`` dataclass default is used unchanged
+    (set-to-default == omit is realised by never forwarding a ``None``)."""
+    cfg = TrainRunConfig.from_mapping({"name": "x"})
+    for key in _UC51_KNOBS:
+        assert getattr(cfg, key) is None, (
+            f"{key} should default to None (untouched dataclass field)"
+        )
+
+
+@pytest.mark.parametrize("key", list(_UC51_KNOBS))
+def test_uc51_curriculum_knob_explicit_null_is_none(key: str) -> None:
+    """AC2: an explicit YAML ``null`` for any knob is treated as omitted (-> ``None``), never
+    coerced to a value — so ``null`` and omission are identical."""
+    cfg = TrainRunConfig.from_mapping({"name": "x", key: None})
+    assert getattr(cfg, key) is None
+
+
+def test_uc51_curriculum_knobs_round_trip_through_yaml(tmp_path) -> None:
+    """AC1: the knobs survive a real YAML file round-trip (``load_yaml`` -> ``from_mapping``) with
+    values intact — the exposure path is lossless end-to-end, not just in-memory."""
+    import yaml
+
+    p = tmp_path / "train.yaml"
+    p.write_text(yaml.safe_dump({"name": "rt", **_UC51_KNOBS}), encoding="utf-8")
+    cfg = TrainRunConfig.from_mapping(load_yaml(p))
+    for key, value in _UC51_KNOBS.items():
+        assert getattr(cfg, key) == value
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "airborne_curriculum_warmup_fraction",
+        "airborne_curriculum_anneal_fraction",
+        "attitude_authority_start",
+        "attitude_authority_anneal_fraction",
+        "collision_penalty_warmup_fraction",
+        "collision_curriculum_hold_fraction",
+    ],
+)
+@pytest.mark.parametrize("bad", [-0.1, 1.5, 2.0])
+def test_uc51_fraction_out_of_range_rejected(key: str, bad: float) -> None:
+    """AC1: every fraction knob (and ``attitude_authority_start``) is range-checked to ``[0, 1]``;
+    an out-of-range value is a clear ``ConfigError`` naming the key, raised at config-load (exit 2)
+    rather than deferred to the curriculum function's backstop."""
+    with pytest.raises(ConfigError, match=key):
+        TrainRunConfig.from_mapping({"name": "x", key: bad})
+
+
+def test_uc51_ent_coef_negative_rejected() -> None:
+    """AC1: ``ent_coef`` must be non-negative (a negative entropy bonus is meaningless)."""
+    with pytest.raises(ConfigError, match="ent_coef"):
+        TrainRunConfig.from_mapping({"name": "x", "ent_coef": -0.001})
+
+
+@pytest.mark.parametrize("key", ["collision_penalty_start", "collision_penalty_end"])
+def test_uc51_collision_penalty_negative_rejected(key: str) -> None:
+    """AC1: the collision-penalty endpoints must be non-negative."""
+    with pytest.raises(ConfigError, match=key):
+        TrainRunConfig.from_mapping({"name": "x", key: -1.0})
+
+
+@pytest.mark.parametrize("bad", [0, -5])
+def test_uc51_timesteps_below_one_rejected(bad: int) -> None:
+    """AC1: ``timesteps`` must be >= 1 (a zero/negative horizon has no schedule window)."""
+    with pytest.raises(ConfigError, match="timesteps"):
+        TrainRunConfig.from_mapping({"name": "x", "timesteps": bad})
+
+
+def test_uc51_ent_coef_rejects_non_float_type() -> None:
+    """AC1: type validation still applies — a string for a numeric knob is a type error."""
+    with pytest.raises(ConfigError, match="ent_coef"):
+        TrainRunConfig.from_mapping({"name": "x", "ent_coef": "lots"})
+
+
+def test_uc51_enabled_flag_rejects_non_bool_type() -> None:
+    """AC1: the ``*_enabled`` flags are strict bools — a stray int is not silently truthy."""
+    with pytest.raises(ConfigError, match="airborne_curriculum_enabled"):
+        TrainRunConfig.from_mapping({"name": "x", "airborne_curriculum_enabled": 1})
+
+
+def test_uc51_airborne_warmup_past_anneal_rejected_when_explicit() -> None:
+    """AC1 composition: the airborne warmup (a HOLD/start-delay) must not run past the anneal
+    window; ``warmup > anneal`` with both set explicitly is a ``ConfigError``."""
+    with pytest.raises(ConfigError, match="airborne curriculum warmup runs past"):
+        TrainRunConfig.from_mapping(
+            {
+                "name": "x",
+                "airborne_curriculum_warmup_fraction": 0.7,
+                "airborne_curriculum_anneal_fraction": 0.5,
+            }
+        )
+
+
+def test_uc51_airborne_lowering_anneal_alone_trips_composition_against_default_warmup() -> None:
+    """AC1 composition (the documented trap): lowering ``airborne_curriculum_anneal_fraction``
+    below the DEFAULT warmup (0.6) while omitting the warmup is rejected — the omitted partner
+    resolves to the ``TrainConfig`` default, so a user who sets ``anneal: 0.5`` alone is told to
+    lower the warmup too. The message names both effective values and the default warmup."""
+    with pytest.raises(ConfigError, match="airborne curriculum warmup runs past"):
+        TrainRunConfig.from_mapping({"name": "x", "airborne_curriculum_anneal_fraction": 0.5})
+
+
+def test_uc51_collision_hold_plus_warmup_over_one_rejected() -> None:
+    """AC1 composition: the collision hold + ramp must fit inside the run
+    (``hold + warmup <= 1``); a sum > 1 is a ``ConfigError``."""
+    with pytest.raises(ConfigError, match="collision curriculum hold"):
+        TrainRunConfig.from_mapping(
+            {
+                "name": "x",
+                "collision_curriculum_hold_fraction": 0.8,
+                "collision_penalty_warmup_fraction": 0.5,
+            }
+        )
+
+
+def test_uc51_set_to_default_is_accepted_and_composes() -> None:
+    """AC2: setting each knob to its ``TrainConfig`` default value is accepted (composition
+    holds for the default schedule) — the plumbing is lossless and the byte-identity guarantee
+    (set-to-default == omit) is exercised end-to-end in ``test_cli``."""
+    from drone_fly.train.config import TrainConfig
+
+    d = TrainConfig()
+    cfg = TrainRunConfig.from_mapping(
+        {
+            "name": "x",
+            "ent_coef": d.ent_coef,
+            "airborne_curriculum_enabled": d.airborne_curriculum_enabled,
+            "airborne_curriculum_warmup_fraction": d.airborne_curriculum_warmup_fraction,
+            "airborne_curriculum_anneal_fraction": d.airborne_curriculum_anneal_fraction,
+            "attitude_authority_curriculum_enabled": d.attitude_authority_curriculum_enabled,
+            "attitude_authority_start": d.attitude_authority_start,
+            "attitude_authority_anneal_fraction": d.attitude_authority_anneal_fraction,
+            "collision_curriculum_enabled": d.collision_curriculum_enabled,
+            "collision_penalty_start": d.collision_penalty_start,
+            "collision_penalty_end": d.collision_penalty_end,
+            "collision_penalty_warmup_fraction": d.collision_curriculum_warmup_fraction,
+            "collision_curriculum_hold_fraction": d.collision_curriculum_hold_fraction,
+        }
+    )
+    assert cfg.airborne_curriculum_warmup_fraction == pytest.approx(0.6)
+    assert cfg.collision_penalty_warmup_fraction == pytest.approx(0.1)
+
+
+def test_uc51_trainconfig_new_staggered_defaults() -> None:
+    """AC6/AC7: the ``TrainConfig`` dataclass carries the NEW restaggered defaults exactly — this is
+    what a bare config reproduces (all knobs None -> nothing forwarded -> dataclass defaults):
+
+    * ``total_timesteps == 2_000_000`` (AC7 — the isolated floor-takeoff tail gets real budget);
+    * attitude authority anneals to full EARLIEST (fraction 0.25);
+    * collision penalty reaches full at hold + warmup = 0.4 + 0.1 = 0.5 (≈ mid-training);
+    * airborne spawn holds airborne through warmup 0.6, reaching the floor only at anneal 1.0.
+    """
+    from drone_fly.train.config import TrainConfig
+
+    d = TrainConfig()
+    assert d.total_timesteps == 2_000_000
+    assert d.attitude_authority_anneal_fraction == pytest.approx(0.25)
+    assert d.collision_curriculum_hold_fraction == pytest.approx(0.4)
+    assert d.collision_curriculum_warmup_fraction == pytest.approx(0.1)
+    assert d.airborne_curriculum_warmup_fraction == pytest.approx(0.6)
+    assert d.airborne_curriculum_anneal_fraction == pytest.approx(1.0)
+    # The default schedule is composition-valid on both curricula.
+    assert d.airborne_curriculum_warmup_fraction <= d.airborne_curriculum_anneal_fraction
+    assert d.collision_curriculum_hold_fraction + d.collision_curriculum_warmup_fraction <= 1.0
