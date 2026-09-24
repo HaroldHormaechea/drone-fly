@@ -269,6 +269,27 @@ def _validate_control_rate(command: str, resolved: dict[str, Any]) -> None:
         )
 
 
+def _validate_reward(command: str, resolved: dict[str, Any]) -> None:
+    """Validate the UC-58 takeoff-reward knobs (altitude_weight >= 0, altitude_target > 0).
+
+    Like the control-rate knobs these always carry a value (the RewardConfig defaults, folded into
+    every run by ``_apply_reward``), so the checks are unconditional. Shared by
+    :class:`TrainRunConfig` and :class:`EvaluateRunConfig` so an eval reproduces the trained reward.
+    ``altitude_target`` must be strictly positive — it is the normaliser of the altitude fraction.
+    Fails loud at config-load (exit 2).
+    """
+    altitude_weight = resolved.get("altitude_weight")
+    if altitude_weight is not None and altitude_weight < 0.0:
+        raise ConfigError(
+            f"{command} config: 'altitude_weight' must be >= 0, got {altitude_weight!r}."
+        )
+    altitude_target = resolved.get("altitude_target")
+    if altitude_target is not None and altitude_target <= 0.0:
+        raise ConfigError(
+            f"{command} config: 'altitude_target' must be > 0, got {altitude_target!r}."
+        )
+
+
 # --- Per-command config dataclasses -------------------------------------------------------
 
 
@@ -304,9 +325,9 @@ class TrainRunConfig:
     # schedule experiment costs a config edit, not a code change. All are ``| None``: ``None``
     # (omitted / null) means "leave the ``TrainConfig`` dataclass default untouched", so setting a
     # knob to its default is byte-identical to omitting it (AC2). An explicit value is validated
-    # (type + range in :meth:`from_mapping`) and threaded to ``TrainConfig`` by the CLI. NOTE the
-    # collision YAML key is ``collision_penalty_warmup_fraction`` (AC1) — it maps to the
-    # ``TrainConfig.collision_curriculum_warmup_fraction`` field in the CLI; other names are 1:1.
+    # (type + range in :meth:`from_mapping`) and threaded to ``TrainConfig`` by the CLI. (UC-58: the
+    # collision-curriculum knobs that used to live in this group are retired; the airborne-spawn
+    # curriculum knobs map 1:1 to their ``TrainConfig`` fields.)
     ent_coef: float | None
     airborne_curriculum_enabled: bool | None
     airborne_curriculum_warmup_fraction: float | None
@@ -320,11 +341,6 @@ class TrainRunConfig:
     rate_ki: float | None
     rate_kd: float | None
     rate_max_body_rate: float | None
-    collision_curriculum_enabled: bool | None
-    collision_penalty_start: float | None
-    collision_penalty_end: float | None
-    collision_penalty_warmup_fraction: float | None
-    collision_curriculum_hold_fraction: float | None
     # UC-54: PPO optimization hyperparameters, surfaced from ``TrainConfig`` so the optimize-phase
     # speed/quality trade-off (UC-52) can be tuned from ``--config`` without a code edit. All are
     # ``| None``: ``None`` (omitted / null) means "leave the ``TrainConfig`` dataclass default
@@ -358,11 +374,24 @@ class TrainRunConfig:
     control_hz: float
     physics_ratio: int
     command_latency_ms: float
+    # UC-58: takeoff-oriented reward knobs (``altitude_weight`` / ``altitude_target``), exposed so
+    # the sustained level-based altitude reward can be tuned from ``--config`` (AC8). Like the
+    # control-rate knobs above (and unlike the ``| None`` "leave-the-dataclass-default" knobs), they
+    # carry the ``RewardConfig`` defaults directly (0.2 / 1.0) and are ALWAYS folded into the run's
+    # ``EnvConfig.reward`` by ``_apply_reward`` — the reward redesign is default-on for fresh runs.
+    # Validated in ``from_mapping`` (altitude_weight >= 0, altitude_target > 0).
+    altitude_weight: float
+    altitude_target: float
 
     @classmethod
     def from_mapping(cls, mapping: Any) -> TrainRunConfig:
         from drone_fly.connectome.prune import DEFAULT_PRUNE_K
         from drone_fly.controller.obs_schema import NAMED_SCHEMAS
+        from drone_fly.env.config import RewardConfig
+
+        # UC-58: reward-knob defaults sourced from the single-source ``RewardConfig`` (never
+        # re-declared here), so the run-layer default equals the dataclass default (default-on).
+        _reward_defaults = RewardConfig()
 
         specs = [
             _Spec("name", (str,), required=True),
@@ -409,11 +438,6 @@ class TrainRunConfig:
             _Spec("rate_ki", (float,)),
             _Spec("rate_kd", (float,)),
             _Spec("rate_max_body_rate", (float,)),
-            _Spec("collision_curriculum_enabled", (bool,)),
-            _Spec("collision_penalty_start", (float,)),
-            _Spec("collision_penalty_end", (float,)),
-            _Spec("collision_penalty_warmup_fraction", (float,)),
-            _Spec("collision_curriculum_hold_fraction", (float,)),
             # UC-54: PPO optimization hyperparameters. NO ``default`` (omitted / null -> None ->
             # "leave the TrainConfig default", so set-to-default == omit, AC2/AC4). Type-only here;
             # the numeric range checks run below (each guarded ``is not None``). No batch_size vs
@@ -436,9 +460,15 @@ class TrainRunConfig:
             _Spec("control_hz", (float,), default=50.0),
             _Spec("physics_ratio", (int,), default=10),
             _Spec("command_latency_ms", (float,), default=0.0),
+            # UC-58: takeoff-reward knobs — carry the RewardConfig defaults directly (default-on,
+            # like the control-rate knobs). Range (altitude_weight >= 0, altitude_target > 0) in
+            # ``_validate_reward`` below.
+            _Spec("altitude_weight", (float,), default=_reward_defaults.altitude_weight),
+            _Spec("altitude_target", (float,), default=_reward_defaults.altitude_target),
         ]
         resolved = _validate("train", mapping, specs)
         resolved["name"] = validate_run_name(resolved["name"])
+        _validate_reward("train", resolved)
         if resolved["n_envs"] is not None and resolved["n_envs"] < 1:
             raise ConfigError("train config: 'n_envs' must be >= 1.")
         _validate_control_rate("train", resolved)
@@ -456,12 +486,11 @@ class TrainRunConfig:
         _validate_dynamics_envelope("train", resolved)
         return cls(**resolved)
 
-    # UC-51 curriculum-knob range + composition validation.
+    # UC-51 curriculum-knob range + composition validation (UC-58: collision knobs removed).
     #
-    # Fractions must lie in ``[0, 1]``; ``ent_coef``, the collision penalty endpoints, and the UC-55
-    # rate-controller gains must be non-negative; ``timesteps`` must be >= 1. Composition:
-    # the airborne warmup (a HOLD/start-delay) must not run past the airborne anneal window, and the
-    # collision hold + ramp must fit inside the run. These duplicate the curriculum functions'
+    # Fractions must lie in ``[0, 1]``; ``ent_coef`` and the UC-55 rate-controller gains must be
+    # non-negative; ``timesteps`` must be >= 1. Composition: the airborne warmup (a HOLD/start-
+    # delay) must not run past the airborne anneal window. These duplicate the curriculum functions'
     # ValueError backstops on purpose — this layer fails loud at config-load (exit 2), the functions
     # guard defense-in-depth. An omitted partner in a composition check resolves to the
     # ``TrainConfig`` dataclass default (so setting only one side is checked against the effective
@@ -469,8 +498,6 @@ class TrainRunConfig:
     _FRACTION_KEYS = (
         "airborne_curriculum_warmup_fraction",
         "airborne_curriculum_anneal_fraction",
-        "collision_penalty_warmup_fraction",
-        "collision_curriculum_hold_fraction",
     )
 
     # UC-55: inner-loop rate-controller knobs that must be non-negative (gains + body-rate clamp).
@@ -491,10 +518,6 @@ class TrainRunConfig:
         # UC-55: rate-controller gains + body-rate clamp must be non-negative (each guarded
         # ``is not None`` so an omitted key leaves the RateControllerConfig default untouched).
         for key in TrainRunConfig._RATE_KEYS:
-            value = resolved.get(key)
-            if value is not None and value < 0.0:
-                raise ConfigError(f"train config: {key!r} must be >= 0, got {value!r}.")
-        for key in ("collision_penalty_start", "collision_penalty_end"):
             value = resolved.get(key)
             if value is not None and value < 0.0:
                 raise ConfigError(f"train config: {key!r} must be >= 0, got {value!r}.")
@@ -522,20 +545,6 @@ class TrainRunConfig:
                 "warmup is a HOLD/start-delay (spawn stays airborne through it), and its default "
                 f"is {defaults.airborne_curriculum_warmup_fraction}; if you lower "
                 "airborne_curriculum_anneal_fraction, lower the warmup_fraction too."
-            )
-        col_hold = resolved.get("collision_curriculum_hold_fraction")
-        col_warmup = resolved.get("collision_penalty_warmup_fraction")
-        eff_col_hold = (
-            col_hold if col_hold is not None else defaults.collision_curriculum_hold_fraction
-        )
-        eff_col_warmup = (
-            col_warmup if col_warmup is not None else defaults.collision_curriculum_warmup_fraction
-        )
-        if eff_col_hold + eff_col_warmup > 1.0:
-            raise ConfigError(
-                "train config: collision curriculum hold + ramp exceeds the run: require "
-                "collision_curriculum_hold_fraction + collision_penalty_warmup_fraction <= 1, got "
-                f"effective hold={eff_col_hold} and warmup(ramp)={eff_col_warmup}."
             )
 
 
@@ -586,10 +595,19 @@ class EvaluateRunConfig:
     control_hz: float
     physics_ratio: int
     command_latency_ms: float
+    # UC-58: takeoff-reward knobs, mirrored from ``TrainRunConfig`` with the SAME RewardConfig
+    # defaults so an eval reproduces the trained reward. Always folded into the eval env's
+    # ``EnvConfig.reward`` by ``_apply_reward``; validated in ``from_mapping`` (weight >= 0,
+    # target > 0).
+    altitude_weight: float
+    altitude_target: float
 
     @classmethod
     def from_mapping(cls, mapping: Any) -> EvaluateRunConfig:
         from drone_fly.connectome.prune import DEFAULT_PRUNE_K
+        from drone_fly.env.config import RewardConfig
+
+        _reward_defaults = RewardConfig()
 
         specs = [
             _Spec("checkpoint", (str,), required=True),
@@ -625,6 +643,9 @@ class EvaluateRunConfig:
             _Spec("control_hz", (float,), default=50.0),
             _Spec("physics_ratio", (int,), default=10),
             _Spec("command_latency_ms", (float,), default=0.0),
+            # UC-58: takeoff-reward knobs (mirror of the train keys, same RewardConfig defaults).
+            _Spec("altitude_weight", (float,), default=_reward_defaults.altitude_weight),
+            _Spec("altitude_target", (float,), default=_reward_defaults.altitude_target),
         ]
         resolved = _validate("evaluate", mapping, specs)
         if resolved["name"] is not None:
@@ -635,6 +656,7 @@ class EvaluateRunConfig:
                 raise ConfigError(f"evaluate config: {key!r} must be >= 0, got {value!r}.")
         _validate_dynamics_envelope("evaluate", resolved)
         _validate_control_rate("evaluate", resolved)
+        _validate_reward("evaluate", resolved)
         return cls(**resolved)
 
 

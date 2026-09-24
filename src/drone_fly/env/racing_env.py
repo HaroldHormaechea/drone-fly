@@ -185,17 +185,6 @@ class RaceEnv(gym.Env):
         # properly from the spawn state in reset(); declared here for the reset()-skipped path.
         self._took_off = False
 
-        # UC-39: training-time crash-cliff relief. When not None, this value TEMPORARILY overrides
-        # ``config.reward.collision_penalty`` for the reward computation only (applied via
-        # ``dataclasses.replace`` in ``step``), so a training curriculum can ramp the genuine
-        # floor/ceiling/OOB penalty from a low value (while the drone learns to fly) up to the full
-        # value (for precision) WITHOUT changing the env's default ``RewardConfig`` (which stays
-        # 100). Default ``None`` ⇒ the reward path is byte-identical to pre-UC-39; termination
-        # semantics are never affected (a genuine crash still terminates and is still penalised,
-        # just at the active curriculum value). Set from the training loop via
-        # :meth:`set_collision_penalty`.
-        self._collision_penalty_override: float | None = None
-
         # UC-44: training-time airborne-start reverse curriculum. When not None, this absolute z
         # replaces ``course.floor_z`` as the spawn height on the ``floor_start`` reset path, so the
         # drone spawns airborne early in training (learning to MAINTAIN altitude) and anneals down
@@ -212,20 +201,6 @@ class RaceEnv(gym.Env):
         # playback pins the true sampled physics. Purely a read-out — no behaviour change; the
         # sampling itself is unchanged. Declared here so the property is safe before first reset.
         self._active_dynamics: DynamicsParams | None = None
-
-    def set_collision_penalty(self, value: float | None) -> None:
-        """Override the genuine-collision penalty used in reward shaping (UC-39 crash-cliff relief).
-
-        Called by the training-time collision curriculum (see
-        :class:`drone_fly.train.collision_curriculum.CollisionCurriculumCallback`) to ramp the
-        penalty over training. ``value`` is the collision penalty to apply from now on; ``None``
-        clears the override and restores the env default (``config.reward.collision_penalty``, 100).
-        Reward-only: it never changes termination — a genuine crash still ends the episode and is
-        still penalised, just at the supplied magnitude. Idempotent and cheap; safe to call every
-        rollout. Reachable through the SB3 wrapper stack via ``VecEnv.env_method`` (VecNormalize →
-        VecMonitor → DummyVecEnv/SubprocVecEnv delegate ``env_method`` down to this base env).
-        """
-        self._collision_penalty_override = None if value is None else float(value)
 
     def set_spawn_z(self, value: float | None) -> None:
         """Override the spawn altitude used on the ``floor_start`` reset path (UC-44 AC1/AC2).
@@ -487,12 +462,6 @@ class RaceEnv(gym.Env):
     def step(self, action):
         course = self._course
         dist_prev = self._dist_to_target(self._prev_pos)
-        # UC-50: current target gate's height above the floor BEFORE ``advance`` — captured here
-        # (pre-advance) so it straddles the gate transition exactly like ``dist_prev``, letting the
-        # reward's altitude-hold potential telescope. Read-only geometry; consumed by
-        # ``compute_reward`` only when ``RewardConfig.enable_altitude_decoupling`` is set (else
-        # ignored, so the env is byte-identical at runtime with the feature off).
-        target_h_prev = float(current_target(course, self._gates_passed)[2] - course.floor_z)
 
         # UC-55: the attitude-authority curriculum (UC-46) is retired — the inner-loop rate
         # controller in the pybullet adapter now damps the plant against command noise, so the crude
@@ -515,10 +484,6 @@ class RaceEnv(gym.Env):
 
         # Distance to the (possibly newly-advanced) target, for the progress term.
         dist_curr = self._dist_to_target(state.position)
-        # UC-50: current target gate's height above the floor AFTER ``advance`` (straddles the gate
-        # transition with ``target_h_prev``, mirroring ``dist_curr``), so the reward's altitude-hold
-        # potential telescopes across gate passes exactly like the UC-39 climb term.
-        target_h_curr = float(current_target(course, self._gates_passed)[2] - course.floor_z)
 
         # Obstacle contact (UC-15 AC2): swept per-step detection over the step segment (anti-
         # tunneling), edge-triggered so a sustained overlap is penalised once. NEVER feeds
@@ -685,59 +650,46 @@ class RaceEnv(gym.Env):
             elif self._stuck_counter >= self._et_stuck_window:
                 early_termination = "stuck"
 
-        # UC-38: decouple the no-progress/timeout cut from the collision penalty. ``crash`` keeps
-        # its narrow meaning — a GENUINE floor/ceiling/OOB collision (raw ``state.collided`` and
-        # not a controlled dock, pre-takeoff-suppressed above) — and is the ONLY signal that eats
-        # ``collision_penalty`` on its own. ``penalize_collision`` is the reward-side flag: a real
-        # crash always pays the penalty (and dominates a same-step stuck cut, since ``crash`` wins
-        # here regardless of ``early_termination``), and the GROUNDED cut also pays it (AC-3: a
-        # post-takeoff drop back onto the floor is a failed flight). The no-progress ("stuck") cut
-        # and a pure ``max_steps`` timeout are penalty-free — "stayed airborne but ran out of time /
-        # stopped progressing" must not be punished like smashing into the floor, or UC-37's
-        # +airborne_bonus survival gradient is swamped by the −collision_penalty terminal (the −105
-        # trap). The termination reason is reported independently via ``info["early_termination"]``.
-        penalize_collision = crash or (early_termination == "grounded")
+        # UC-58: ``penalize_collision`` is now crash-only. ``crash`` keeps its narrow meaning — a
+        # GENUINE floor/ceiling/OOB collision (raw ``state.collided`` and not a controlled dock,
+        # pre-takeoff-suppressed above) — and is the ONLY signal that eats ``collision_penalty``.
+        # CRITICAL (UC-58 anti-suicide): the GROUNDED early-termination cut is now penalty-FREE (it
+        # was ``crash or (early_termination == "grounded")`` through UC-38–UC-51). A gentle
+        # grounded-rest after a failed takeoff must not pay −collision_penalty, or a failed takeoff
+        # attempt would cost −100 vs a penalty-free do-nothing floor — re-creating the early-
+        # termination trap the (now-retired) UC-39/41 crash-cliff curriculum papered over. With the
+        # new sustained ``altitude_reward`` supplying the takeoff/hold gradient and no per-step
+        # ``time_penalty``, holding altitude strictly beats settling back down, so the grounded cut
+        # only needs to BOUND the episode (still terminates via ``early_termination`` below), not
+        # punish it. The no-progress ("stuck") cut and a pure ``max_steps`` timeout remain penalty-
+        # free too. The termination reason is reported independently via
+        # ``info["early_termination"]``.
+        penalize_collision = crash
 
-        # UC-39: crash-cliff relief. When the training curriculum has set an override (via
-        # ``set_collision_penalty``), apply it for THIS step's reward only by cloning the reward
-        # config with the ramped ``collision_penalty``. Default None ⇒ ``reward_cfg is
-        # self.config.reward`` (byte-identical); the env default (100) is never mutated and
-        # termination is untouched.
+        # UC-58: the UC-39/41 crash-cliff collision-penalty override is retired (the whole training-
+        # time collision curriculum is gone). The reward always uses the env's default RewardConfig;
+        # a genuine crash pays the fixed ``collision_penalty`` and termination is unaffected.
         reward_cfg = self.config.reward
-        if self._collision_penalty_override is not None:
-            reward_cfg = dataclasses.replace(
-                reward_cfg, collision_penalty=self._collision_penalty_override
-            )
 
         reward = compute_reward(
             dist_to_target_prev=dist_prev,
             dist_to_target_curr=dist_curr,
             event=event,
-            # UC-16/UC-38: pass ``penalize_collision`` — a genuine crash OR a grounded cut earns
-            # the collision_penalty; a controlled dock, a no-progress ("stuck") cut, and a pure
-            # timeout do not. A raw floor/ceiling contact still eats collision_penalty as before.
+            # UC-58: pass ``penalize_collision`` — ONLY a genuine (non-dock) floor/ceiling/OOB crash
+            # earns the collision_penalty. A controlled dock, a grounded cut (penalty-free post-
+            # takeoff drop), a no-progress ("stuck") cut, and a pure timeout do not.
             collided=penalize_collision,
             completed=completed,
             cfg=reward_cfg,
             num_gates=course.num_gates,
             obstacle_contact=obstacle_contact,
-            # UC-37 (AC5): pay the survival bonus only while airborne (above the floor band); zero
-            # on/at the floor, so sitting on the ground earns nothing.
-            airborne=airborne,
-            # UC-39 (AC1/AC2): dense potential-based climb reward. Altitude above the floor at this
-            # step's START (``self._prev_pos``, set at the end of the previous step) and END
-            # (``state.position``). Reuses existing sensing — no new observation.
-            height_above_floor_prev=float(self._prev_pos[2] - course.floor_z),
+            # UC-58: drone altitude above the floor AFTER the step — drives the sustained, level-
+            # based, saturating altitude reward (the takeoff/hold signal), paid every step from h=0.
+            # Reuses existing sensing — no new observation.
             height_above_floor_curr=float(state.position[2] - course.floor_z),
-            # UC-50: current target gate's height above the floor, straddling ``advance`` (see the
-            # captures above). Drives the altitude-hold progress-gate + shortfall potential ONLY
-            # when ``RewardConfig.enable_altitude_decoupling`` is set; ignored (default 0.0)
-            # otherwise, so this call is byte-identical at runtime with the feature off.
-            target_height_above_floor_prev=target_h_prev,
-            target_height_above_floor_curr=target_h_curr,
-            # UC-57: scale the two rate/time-extensive terms (time_penalty + graded airborne bonus)
-            # by dt/BASELINE_DT so their per-episode integral is invariant to the control-Hz change
-            # (= 1.0 at the 20 Hz baseline ⇒ byte-identical; 0.4 at 50 Hz).
+            # UC-57: scale the (single, per-step) altitude reward by dt/BASELINE_DT so its per-
+            # episode integral is invariant to the control-Hz change (= 1.0 at the 20 Hz baseline ⇒
+            # byte-identical; 0.4 at 50 Hz).
             per_step_scale=self.config.episode.dt / BASELINE_DT,
         )
 
@@ -752,12 +704,12 @@ class RaceEnv(gym.Env):
             "phase": self._phase_str(),
             "backend": self.backend,
             "event": event,
-            # UC-16/UC-38: ``collided`` reports whether the collision penalty was charged — True
-            # for a genuine floor/ceiling/OOB crash AND for a grounded (post-takeoff drop) cut,
-            # False for a controlled dock, a no-progress ("stuck") cut, and a pure timeout. It no
-            # longer falsely claims a collision for a no-progress cut (AC-4); the authoritative
-            # termination reason is ``info["early_termination"]``. No downstream consumer reads
-            # ``collided`` (only ``is_success``), so flipping it on stuck cuts is safe.
+            # UC-16/UC-58: ``collided`` reports whether the collision penalty was charged — True
+            # ONLY for a genuine floor/ceiling/OOB crash. It is False for a controlled dock, a
+            # grounded cut (UC-58: a post-takeoff drop back to the floor is now penalty-free), a
+            # no-progress ("stuck") cut, and a pure timeout. The authoritative termination reason is
+            # ``info["early_termination"]``. No downstream consumer reads ``collided`` (only
+            # ``is_success``), so this is safe.
             "collided": bool(penalize_collision),
             # UC-16: authoritative docked flag, surfaced via ``info`` ONLY (the observation vector
             # is byte-identical — no obs-schema block, no checkpoint invalidation, AC6). LEVEL/

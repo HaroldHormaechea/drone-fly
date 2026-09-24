@@ -64,12 +64,11 @@ class TrainConfig:
     n_epochs: int = 10
     # UC-57 γ / control-rate coupling (READ THIS before changing control_hz): ``gamma`` is a
     # PER-STEP discount, so its real-time horizon (~ dt/(1−γ)) SHRINKS as the control rate rises —
-    # at 50 Hz the same 0.99 discounts ~2.5× faster in wall-clock than at 20 Hz. Two consequences:
-    # (1) if you want the SAME real-time horizon at a higher rate, raise ``gamma`` toward 1 (this is
-    # a training-judgement knob, deliberately NOT auto-adjusted here); (2) the reward's
-    # ``RewardConfig.climb_gamma`` MUST equal this ``gamma`` for the potential-based climb /
-    # ground-break / altitude-hold shaping to stay telescoping/non-farmable (UC-39) — they are read
-    # per-step and are rate-agnostic ONLY when the two γ agree. Keep them in lockstep at any rate.
+    # at 50 Hz the same 0.99 discounts ~2.5× faster in wall-clock than at 20 Hz. If you want the
+    # SAME real-time horizon at a higher rate, raise ``gamma`` toward 1 (this is a training-
+    # judgement knob, deliberately NOT auto-adjusted here). UC-58: the old
+    # ``RewardConfig.climb_gamma`` coupling note is gone — the potential-based climb / ground-break
+    # / altitude-hold shaping was retired, so no reward term needs to track the training γ any more.
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2
@@ -92,46 +91,20 @@ class TrainConfig:
     # returning to the flat-high std of the UC-38 era.
     ent_coef: float = 0.005
 
-    # UC-39/41 — training-time collision-penalty CURRICULUM (crash-cliff relief, default on). The
-    # genuine floor/ceiling/OOB collision penalty follows a HOLD-THEN-RAMP schedule: held at
-    # ``collision_penalty_start`` through the first ``collision_curriculum_hold_fraction`` of
-    # ``total_timesteps``, then ramped LINEARLY up to ``collision_penalty_end`` over the next
-    # ``collision_curriculum_warmup_fraction``, then held at the end value for the remainder.
-    # Rationale: PPO propagates the −100 crash terminal back onto the "throttle up" actions that
-    # begin any takeoff, giving them negative advantage. UC-39 relieved this with a from-t=0 linear
-    # ramp, but UC-41 found that ramp re-erected the crash cliff to ~33 by 16% of training (the
-    # observed stall point) regardless of the start value, so a *failed* takeoff (which trips the
-    # grounded cut that PAYS the collision penalty) stayed more negative than the penalty-free
-    # do-nothing floor — the policy committed to do-nothing. Holding the penalty low (2.0) through
-    # the whole fly-learning phase (0–40%) keeps the effective penalty inside the invariant-safe
-    # band (≤ the climb-shaping bound) so takeoff→progress out-scores do-nothing across that window,
-    # then ramping back to full strength (100) over 40–50% restores precision so the drone doesn't
-    # learn permanently-sloppy floor/ceiling-clipping flight. Applied at rollout time via the env's
-    # ``set_collision_penalty`` — the env DEFAULT ``RewardConfig.collision_penalty`` (100) is never
-    # changed, so every reward test that asserts 100 is unaffected (minimal test blast radius). The
-    # schedule is a function of ``num_timesteps`` only (stateless), so it is resume-correct. End
-    # value 100 keeps AC6 (floor-shortcut still loses to completion) and the anti-suicide bound
-    # holds at every value. ``collision_curriculum_hold_fraction`` and
-    # ``collision_curriculum_warmup_fraction`` must satisfy ``0 ≤ hold`` and ``hold + warmup ≤ 1``
-    # (enforced in :func:`~drone_fly.train.collision_curriculum.collision_penalty_at`). Set
-    # ``collision_curriculum_enabled=False`` to train at the constant env default (byte-identical to
-    # pre-UC-39).
-    #
-    # UC-51 (restagger): the ramp width (``collision_curriculum_warmup_fraction``) moves 0.5 -> 0.1
-    # so the collision penalty reaches full strength (100) at hold + warmup = 0.4 + 0.1 = 0.5 of the
-    # run — i.e. the collision difficulty step is isolated to ≈mid-training, AFTER attitude
-    # authority reaches full (~0.25) and BEFORE the airborne spawn begins its floor descent (~0.6).
-    # The long low-penalty UC-41 hold (0–0.4) is preserved unchanged; only the ramp is shortened.
-    collision_penalty_start: float = 2.0
-    collision_penalty_end: float = 100.0
-    collision_curriculum_hold_fraction: float = 0.4
-    collision_curriculum_warmup_fraction: float = 0.1
-    collision_curriculum_enabled: bool = True
+    # UC-58: the UC-39/41 training-time collision-penalty curriculum fields
+    # (``collision_penalty_start`` / ``collision_penalty_end`` /
+    # ``collision_curriculum_hold_fraction`` / ``collision_curriculum_warmup_fraction`` /
+    # ``collision_curriculum_enabled``) are retired. The curriculum existed to relieve a crash cliff
+    # that only bit because the (now-removed) per-step ``time_penalty`` and the grounded cut paying
+    # ``collision_penalty`` made a failed takeoff more negative than doing nothing. UC-58 removes
+    # that trap at the source, so the curriculum, its schedule (``collision_penalty_at``), and its
+    # callback (``CollisionCurriculumCallback``) are gone.
 
     # UC-44: training-time airborne-start reverse curriculum (takeoff-discovery relief). When
     # enabled (default), the training envs spawn the drone airborne early in training — starting at
-    # the high endpoint (derived at wire time from ``RewardConfig.climb_target_height`` above the
-    # course floor, not duplicated here) — held fully airborne through a ``warmup``/start-delay,
+    # the high endpoint (derived at wire time from ``RewardConfig.altitude_target`` above the
+    # course floor — UC-58: was ``climb_target_height`` — not duplicated here) — held fully airborne
+    # through a ``warmup``/start-delay,
     # then annealed linearly down to ``floor_z`` and held on the floor for the remainder. Early on
     # the policy only has to learn to MAINTAIN altitude (far easier than discovering takeoff); as
     # the spawn anneals to the floor it must learn takeoff, bootstrapped from a hover-competent

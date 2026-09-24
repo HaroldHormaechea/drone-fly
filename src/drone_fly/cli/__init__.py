@@ -181,6 +181,34 @@ def _apply_control_rate(env_config, cfg):
     return replace(env_config, episode=episode)
 
 
+def _apply_reward(env_config, cfg):
+    """Fold the UC-58 takeoff-reward knobs into ``env_config.reward`` (AC8).
+
+    Mirrors :func:`_apply_control_rate`: the reward knobs (``altitude_weight`` /
+    ``altitude_target``) carry the ``RewardConfig`` defaults directly, so this ALWAYS runs — the
+    redesigned takeoff reward is default-on for every CLI train/eval run (AC8), and a config that
+    sets the knobs to their defaults is reward-equivalent to omitting them. When ``env_config`` is
+    ``None``
+    (no randomization) a fresh :class:`EnvConfig` is built carrying only the resolved reward; an
+    existing (randomized / rate / control-rate) env config has its reward replaced. The dataclass
+    ``RewardConfig`` default already equals these values, so this is byte-identical to the default
+    reward when nothing is overridden.
+    """
+    from dataclasses import replace
+
+    from drone_fly.env.config import EnvConfig, RewardConfig
+
+    base_reward = env_config.reward if env_config is not None else RewardConfig()
+    reward = replace(
+        base_reward,
+        altitude_weight=cfg.altitude_weight,
+        altitude_target=cfg.altitude_target,
+    )
+    if env_config is None:
+        return EnvConfig(reward=reward)
+    return replace(env_config, reward=reward)
+
+
 def _resolve_train_randomization(cfg):
     """Resolve a train config's randomization into ``(env_config, obs_schema)`` (UC-24).
 
@@ -477,12 +505,14 @@ def _run_train(config_path: str, *, no_tui: bool = False) -> int:
     # ALWAYS runs (the run-layer default is 50 Hz), so this materialises an EnvConfig even when
     # randomization left it None — every CLI train run defaults to 50 Hz (AC1).
     env_config = _apply_control_rate(env_config, cfg)
+    # UC-58: fold the takeoff-reward knobs into the env config's RewardConfig. ALWAYS runs (the
+    # reward redesign is default-on), materialising an EnvConfig even when randomization left None.
+    env_config = _apply_reward(env_config, cfg)
 
     # UC-51: thread the exposed curriculum knobs + ent_coef into TrainConfig. Only values the user
     # actually set (not None) are passed, so omitting a knob — or setting it to its default — leaves
-    # the TrainConfig dataclass default untouched (set-to-default == omit byte-identity, AC2). The
-    # collision YAML key ``collision_penalty_warmup_fraction`` maps to the TrainConfig field
-    # ``collision_curriculum_warmup_fraction``; every other name is 1:1.
+    # the TrainConfig dataclass default untouched (set-to-default == omit byte-identity, AC2).
+    # (UC-58: the collision-curriculum overrides are retired; the remaining names map 1:1.)
     curriculum_overrides = {
         "ent_coef": cfg.ent_coef,
         "airborne_curriculum_enabled": cfg.airborne_curriculum_enabled,
@@ -491,11 +521,7 @@ def _run_train(config_path: str, *, no_tui: bool = False) -> int:
         # UC-55: the attitude-authority curriculum is retired (its keys are gone); the inner-loop
         # rate controller replaces it. Rate gains are NOT TrainConfig overrides — they configure the
         # EnvConfig.rate_controller (physics), threaded via ``_apply_rate_controller`` below.
-        "collision_curriculum_enabled": cfg.collision_curriculum_enabled,
-        "collision_penalty_start": cfg.collision_penalty_start,
-        "collision_penalty_end": cfg.collision_penalty_end,
-        "collision_curriculum_warmup_fraction": cfg.collision_penalty_warmup_fraction,
-        "collision_curriculum_hold_fraction": cfg.collision_curriculum_hold_fraction,
+        # UC-58: the collision-penalty curriculum overrides are retired (whole curriculum is gone).
         # UC-54: PPO optimization hyperparameters map 1:1 to their TrainConfig fields; the non-None
         # filter below keeps set-to-default == omit byte-identity (AC3/AC4).
         "n_epochs": cfg.n_epochs,
@@ -560,11 +586,16 @@ def _run_evaluate(config_path: str) -> int:
         episodes=cfg.episodes,
         seed=cfg.seed,
         adapter=cfg.adapter,
-        # UC-57: ``_apply_control_rate`` is outermost and ALWAYS runs, so an eval reproduces the
-        # trained plant at the SAME 50 Hz default (never a 20 Hz plant under a 50 Hz policy).
-        env_config=_apply_control_rate(
-            _apply_dynamics_envelope(
-                _apply_rate_controller(_env_config(cfg.randomize, cfg.randomize_dynamics), cfg), cfg
+        # UC-57/UC-58: ``_apply_reward`` and ``_apply_control_rate`` are outermost and ALWAYS run,
+        # so an eval reproduces the trained plant at the SAME 50 Hz default (never a 20 Hz plant
+        # under a 50 Hz policy) AND under the SAME default-on takeoff reward it was trained with.
+        env_config=_apply_reward(
+            _apply_control_rate(
+                _apply_dynamics_envelope(
+                    _apply_rate_controller(_env_config(cfg.randomize, cfg.randomize_dynamics), cfg),
+                    cfg,
+                ),
+                cfg,
             ),
             cfg,
         ),

@@ -551,32 +551,24 @@ def train(
 
     callbacks: list = [checkpoint_cb]
 
-    # UC-39/41: default-on training-time collision-penalty curriculum (crash-cliff relief). Follows
-    # a hold-then-ramp schedule — the genuine-crash penalty is held at ``collision_penalty_start``
-    # through the hold fraction of the run (the whole fly-learning phase), then ramped up to
-    # ``collision_penalty_end`` over the warmup fraction, then held at the end value — pushing the
-    # current value into the base envs each rollout via ``env_method``. Applied on BOTH the fresh
-    # and resume paths (the callback list feeds ``model.learn`` in either case); the schedule is
-    # stateless in ``num_timesteps`` so a resume continues it correctly. On ``smoke_train`` the tiny
-    # step budget keeps the value at ``collision_penalty_start`` (still inside the hold) — enough to
-    # prove the wiring end-to-end. Set ``collision_curriculum_enabled=False`` to train at the
-    # constant env default (pre-UC-39).
-    if cfg.collision_curriculum_enabled:
-        from drone_fly.train.collision_curriculum import CollisionCurriculumCallback
-
-        callbacks.append(CollisionCurriculumCallback(cfg))
+    # UC-58: the UC-39/41 training-time collision-penalty curriculum (crash-cliff relief) is
+    # retired. It papered over an early-termination trap caused by the (now-removed) per-step
+    # ``time_penalty`` plus the grounded cut paying ``collision_penalty``; UC-58 fixes the trap at
+    # the source (no ``time_penalty``, grounded-rest penalty-free, one ``altitude_reward``),
+    # so the curriculum — and its ``set_collision_penalty`` env override — are no longer needed.
 
     # UC-44: default-on training-time airborne-start reverse curriculum (takeoff-discovery relief).
     # Raises the training spawn z to the airborne region early in training and anneals it linearly
     # down to the course floor, pushing the current value into the base envs each rollout via
-    # ``set_spawn_z`` / ``env_method``. The high endpoint is derived HERE from the env's
-    # ``climb_target_height`` above the course floor (not duplicated in TrainConfig). Applied on
-    # BOTH the fresh and resume paths (the callback list feeds ``model.learn`` in either case); the
-    # schedule is stateless in ``num_timesteps`` so a resume continues it correctly. On
-    # ``smoke_train`` the tiny step budget keeps ``num_timesteps`` ≈ 0 → the high airborne spawn →
-    # the smoke run demonstrates the effect (AC8). ONLY the training venv gets this callback, so
-    # eval/recording keep the floored spawn (AC2). Set ``airborne_curriculum_enabled=False`` to
-    # train at the constant floored spawn (byte-identical to UC-43).
+    # ``set_spawn_z`` / ``env_method``. The high endpoint is derived HERE from the env's reward
+    # ``altitude_target`` above the course floor (UC-58: was ``climb_target_height`` before the
+    # reward redesign; not duplicated in TrainConfig). This is a purely GEOMETRIC use of the target
+    # altitude (a spawn anchor) — the spawn curriculum stays reward-decoupled. Applied on BOTH the
+    # fresh and resume paths (the callback list feeds ``model.learn`` either way); the schedule is
+    # stateless in ``num_timesteps`` so a resume continues it correctly. On ``smoke_train`` the tiny
+    # step budget keeps ``num_timesteps`` ≈ 0 → the high airborne spawn → the smoke run shows it
+    # (AC8). ONLY the training venv gets this callback, so eval/recording keep the floored spawn
+    # (AC2). Set ``airborne_curriculum_enabled=False`` to train at the constant floored spawn.
     if cfg.airborne_curriculum_enabled:
         from drone_fly.train.airborne_curriculum import AirborneStartCurriculumCallback
 
@@ -585,7 +577,7 @@ def train(
             AirborneStartCurriculumCallback(
                 cfg,
                 floor_z=ecfg.course.floor_z,
-                high_z=ecfg.course.floor_z + ecfg.reward.climb_target_height,
+                high_z=ecfg.course.floor_z + ecfg.reward.altitude_target,
             )
         )
 
