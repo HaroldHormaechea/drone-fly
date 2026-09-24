@@ -505,8 +505,40 @@ function computeGlobalPeak(cache) {
 // per-frame or against the fixed global peak (AC5), mapped through a "hot" colormap, and drawn
 // under the outline polygon (AC4). Degrades to auto-fit splats with no outline for non-anatomical
 // or legacy recordings (AC8).
+// UC-60 (AC1): size #brain-canvas to the active view's natural projected aspect ratio instead of a
+// forced square, so the (much wider-than-tall) fly brain reads as a short image. Fixed mode → the
+// registered outline bbox aspect for this plane; degraded mode → the in-view points' bbox aspect.
+// The box stays WIDTH-DRIVEN (CSS height derives from aspect-ratio), and the value is written ONLY
+// when it changes, so re-deriving the backing store never feeds back into layout — no ResizeObserver
+// oscillation (same write-on-change invariant as UC-59's fixed-box canvases).
+function applyBrainAspect() {
+  const canvas = el("brain-canvas");
+  if (!canvas || !state.data) return;
+  const viewKey = el("map-view-select").value;
+  const plane = MAP_VIEW_PRESETS[viewKey] || "xz";
+  const [a0, a1] = PROJECTIONS[plane] || PROJECTIONS.xz;
+  const partition = ensurePartition();
+  let extU, extV;
+  if (partition.boundary != null) {
+    const outline = typeof BRAIN_OUTLINE !== "undefined" ? BRAIN_OUTLINE : null;
+    const mn = outline.bbox3d.min, mx = outline.bbox3d.max;
+    extU = mx[a0] - mn[a0];
+    extV = mx[a1] - mn[a1];
+  } else {
+    const b = bounds(partition.points);
+    extU = b.maxX - b.minX;
+    extV = b.maxY - b.minY;
+  }
+  if (!(extU > 0) || !(extV > 0)) return;
+  const next = (extU / extV).toFixed(4);
+  if (canvas.dataset.aspect === next) return; // write-on-change only
+  canvas.dataset.aspect = next;
+  canvas.style.aspectRatio = next;
+}
+
 function drawBrainMap() {
   const canvas = el("brain-canvas");
+  applyBrainAspect(); // UC-60: dynamic outline-hugging aspect (AC1) before backing-store sizing
   resizeBackingStore(canvas); // UC-59: DPR-aware backing store from the stable CSS box (AC4)
   const ctx = canvas.getContext("2d");
   const W = canvas.width, H = canvas.height, pad = 18;
@@ -1338,11 +1370,15 @@ el("speed-select").addEventListener("change", (ev) => {
   state.speed = parseFloat(ev.target.value) || 1;
 });
 
-// Changing the view plane invalidates the per-view cache (screen positions, outline polygon,
-// global peak all depend on the plane), so drop it and let drawBrainMap rebuild.
+// Changing the view plane invalidates BOTH per-view caches: the brain-map cache (screen positions,
+// outline polygon, global peak) AND the boundary partition (UC-60: in/out membership + buckets are
+// view-dependent). Drop both, rebuild the boxes for the new view's buckets, then redraw the panel.
 el("map-view-select").addEventListener("change", () => {
   state.mapCache = null;
+  state.partition = null;
+  buildSomalessBoxes();
   drawBrainMap();
+  drawBoxes();
 });
 
 // Intensity normalization toggle (AC5): per-frame vs fixed global scale. The global peak is
