@@ -42,17 +42,20 @@ const MAP_MIN_WEIGHT = 2 / 255; // skip near-rest neurons (perf; deviation-from-
 // "range" is quantization noise is NOT blown up to full brightness — it stays proportionally dim.
 const MAP_GAIN_MIN_RANGE = 0.05;
 
-// ---- UC-28 / UC-59: soma-less afferents + modality overlay ----------------------------
-// Soma-less afferents are placed in a schematic fly body around the brain (placement ===
-// "schematic"). UC-28 splatted them (fainter) into the brain-canvas; UC-59 RELOCATES them out
-// of the brain map entirely — the brain map now shows only real-anatomy neurons (maximized),
-// and the soma-less afferents render in the tagged boxes strip below it (see bucketSomaless /
-// buildSomalessBoxes / drawBoxes). Their animated activation (the signal the old faint splat
-// carried) is preserved in those per-box mini heatmaps.
+// ---- UC-28 / UC-59 / UC-60: relocated afferents + modality overlay --------------------
+// UC-28 splatted soma-less afferents (fainter) into the brain-canvas; UC-59 relocated them out of
+// the brain map into the tagged boxes below. UC-60 GENERALISES the relocation rule: a neuron is
+// relocated iff its projected position falls OUTSIDE the registered brain outline for the active
+// view (partitionByBoundary), not by a "schematic" placement tag — so the brain map shows only
+// in-boundary neurons (maximized) and the out-of-boundary afferents render in the tagged boxes strip
+// below it (see partitionByBoundary / ensurePartition / buildSomalessBoxes / drawBoxes). Their
+// animated activation (the signal the old faint splat carried) is preserved in those per-box mini
+// heatmaps.
 // Modality-tag overlay colours (AC-7). Exactly the recorder's RECORDED_MODALITIES set — vision
-// / proprioceptive / hunger. `damage` is intentionally absent (MaleCNS has no nociceptive
-// label; documented as unavailable, never faked). The overlay is drawn ON TOP of the hot
-// activation colormap and does not replace it.
+// / proprioceptive / hunger. `damage` is intentionally absent — damage/nociception: unavailable
+// (no MaleCNS label); documented as unavailable, never faked. (UC-60 removed the descriptive HTML
+// legend under the brain map, but this JS comment keeps that "damage/nociception unavailable"
+// provenance in-source.) The overlay is drawn ON TOP of the hot activation colormap, not replacing it.
 const MODALITY_COLORS = {
   vision: "#4fc3f7",
   proprioceptive: "#81c784",
@@ -123,6 +126,7 @@ const state = {
   speed: 1,
   mapNorm: "frame", // brain-map intensity normalization: "frame" (per-frame) | "global" (AC5)
   mapCache: null, // per-view brain-map cache (screen positions, transform, global peak) — see ensureMapCache
+  partition: null, // UC-60: per-(view,doc) boundary partition {viewKey, points, inside, buckets, boundary} — ensurePartition
   somaBoxes: null, // UC-59: per-recording soma-less tagged boxes [{canvas, indices}] — see buildSomalessBoxes
   lastTs: 0,
   acc: 0,
@@ -177,6 +181,7 @@ function loadDocument(doc, name) {
   state.frame = 0;
   state.playing = false;
   state.mapCache = null; // rebuilt lazily by ensureMapCache() on the next brain-map draw
+  state.partition = null; // UC-60: boundary partition rebuilt for this recording (before buildSomalessBoxes)
   state.actGain = null; // per-neuron temporal auto-gain, recomputed lazily for this recording
   const normSel = el("map-norm-select");
   state.mapNorm = normSel && normSel.value === "global" ? "global" : "frame";
@@ -375,39 +380,36 @@ function ensureMapCache(W, H, pad) {
   const c = state.mapCache;
   if (c && c.viewKey === viewKey && c.W === W && c.H === H) return c;
 
-  const pos = state.data.meta.positions;
   const plane = MAP_VIEW_PRESETS[viewKey] || "xz";
   const [a0, a1] = PROJECTIONS[plane] || PROJECTIONS.xz;
-  const pts = projectedPoints();
-  const anatomical = /^anatomical/i.test(pos.source || "");
-  // UC-59: soma-less afferents (placement === "schematic") are relocated to the tagged boxes and
-  // no longer stamp into the brain map; size the transform to the REAL-ANATOMY points only so the
-  // brain fills the canvas (AC4). `anatPts` masks schematic entries to null.
-  const placement = pos.placement || null;
-  const isSchematic = (i) => placement != null && placement[i] === "schematic";
-  const anatPts = pts.map((p, i) => (isSchematic(i) ? null : p));
-  const hasAnat = anatPts.some(Boolean);
-  // ⟨C1⟩ Missing-asset guard: `typeof` on an undeclared identifier never throws. Without the
-  // asset (or for non-anatomical/legacy recordings) we degrade to auto-fit splats, no outline.
+  // UC-60: the in/out-of-boundary partition (computed once per (view, doc)) is the single source of
+  // truth for which neurons stamp into the brain map. `inside[i]` (voxel-space point-in-boundary)
+  // AND a non-null projected point ⇒ the neuron stays in the brain; out-of-boundary / null-point
+  // neurons are relocated to the tagged boxes and contribute no splat.
+  const partition = ensurePartition();
+  const pts = partition.points;
+  const inside = partition.inside;
+  const boundary = partition.boundary;
+  // ⟨C1⟩ Missing-asset guard: `typeof` on an undeclared identifier never throws. `boundary != null`
+  // means anatomical recording + registered outline present → fixed outline-hugging transform;
+  // otherwise we degrade to auto-fit splats over all points, no outline, no boxes.
   const outline = typeof BRAIN_OUTLINE !== "undefined" ? BRAIN_OUTLINE : null;
-  const fixed = anatomical && hasAnat && outline != null;
+  const fixed = boundary != null;
 
   let tf, poly = null;
   if (fixed) {
+    // UC-60 (AC2): size the fixed transform to the registered outline bounding box ALONE — dropping
+    // UC-59's union with the in-view point bounds, which stretched the view toward distant neurons.
+    // Out-of-outline neurons are boxed (not drawn on-canvas), so the map fills to the outline only.
     const mn = outline.bbox3d.min, mx = outline.bbox3d.max;
-    // UC-59: size the fixed transform to the UNION of the registered outline bbox and the
-    // NON-schematic points' bounds — so any real-anatomy neuron sitting just outside the outline
-    // still stays on-canvas, while the schematic body clusters (now boxed) no longer widen it.
-    const b = bounds(anatPts);
-    const uMin = Math.min(mn[a0], b.minX), uMax = Math.max(mx[a0], b.maxX);
-    const vMin = Math.min(mn[a1], b.minY), vMax = Math.max(mx[a1], b.maxY);
+    const uMin = mn[a0], uMax = mx[a0], vMin = mn[a1], vMax = mx[a1];
     tf = makeTransform(W, H, pad, uMin, uMax, vMin, vMax);
-    const pl = outline.planes && outline.planes[viewKey];
-    if (pl && pl.polygon) poly = pl.polygon.map(([u, v]) => tf.pt(u, v));
+    // Draw the outline only when this view ships a real polygon (bbox-fallback views have none).
+    if (boundary.kind === "polygon") poly = boundary.polygon.map(([u, v]) => tf.pt(u, v));
   } else {
-    // AC8 graceful degradation: fit the splats to whatever real-anatomy points exist (schematic
-    // excluded); fall back to all points only when there are no non-schematic ones at all.
-    const b = bounds(hasAnat ? anatPts : pts);
+    // AC8/degrade (non-anatomical/legacy/no asset): boundary disabled → auto-fit ALL points, no
+    // outline, no boxes (every neuron stays in-canvas — the documented no-outline behaviour).
+    const b = bounds(pts);
     tf = makeTransform(W, H, pad, b.minX, b.maxX, b.minY, b.maxY);
   }
 
@@ -418,12 +420,12 @@ function ensureMapCache(W, H, pad) {
   const bw = Math.max(1, Math.ceil(W / MAP_SS)), bh = Math.max(1, Math.ceil(H / MAP_SS));
   const sx = new Int32Array(pts.length), sy = new Int32Array(pts.length);
   const valid = new Uint8Array(pts.length);
-  // UC-59: only real-anatomy neurons stamp into the brain map. Schematic entries are masked to
-  // null in anatPts, so they get valid=0 here — they contribute no splat, and drawModalityOverlay
+  // UC-60: only in-boundary neurons with a projected point stamp into the brain map. Relocated
+  // (out-of-boundary or null-point) neurons get valid=0 — no splat — and drawModalityOverlay
   // auto-drops their rings via the same !valid[i] guard (their modality now shows in the boxes).
   for (let i = 0; i < pts.length; i++) {
-    const p = anatPts[i];
-    if (!p) continue; // null (schematic, or no coords on this plane) → does not contribute
+    const p = pts[i];
+    if (!inside[i] || !p) continue; // valid[i] = inside[i] && points[i] != null
     const xy = tf.pt(p[0], p[1]);
     sx[i] = Math.round(xy[0] / MAP_SS);
     sy[i] = Math.round(xy[1] / MAP_SS);
@@ -503,8 +505,40 @@ function computeGlobalPeak(cache) {
 // per-frame or against the fixed global peak (AC5), mapped through a "hot" colormap, and drawn
 // under the outline polygon (AC4). Degrades to auto-fit splats with no outline for non-anatomical
 // or legacy recordings (AC8).
+// UC-60 (AC1): size #brain-canvas to the active view's natural projected aspect ratio instead of a
+// forced square, so the (much wider-than-tall) fly brain reads as a short image. Fixed mode → the
+// registered outline bbox aspect for this plane; degraded mode → the in-view points' bbox aspect.
+// The box stays WIDTH-DRIVEN (CSS height derives from aspect-ratio), and the value is written ONLY
+// when it changes, so re-deriving the backing store never feeds back into layout — no ResizeObserver
+// oscillation (same write-on-change invariant as UC-59's fixed-box canvases).
+function applyBrainAspect() {
+  const canvas = el("brain-canvas");
+  if (!canvas || !state.data) return;
+  const viewKey = el("map-view-select").value;
+  const plane = MAP_VIEW_PRESETS[viewKey] || "xz";
+  const [a0, a1] = PROJECTIONS[plane] || PROJECTIONS.xz;
+  const partition = ensurePartition();
+  let extU, extV;
+  if (partition.boundary != null) {
+    const outline = typeof BRAIN_OUTLINE !== "undefined" ? BRAIN_OUTLINE : null;
+    const mn = outline.bbox3d.min, mx = outline.bbox3d.max;
+    extU = mx[a0] - mn[a0];
+    extV = mx[a1] - mn[a1];
+  } else {
+    const b = bounds(partition.points);
+    extU = b.maxX - b.minX;
+    extV = b.maxY - b.minY;
+  }
+  if (!(extU > 0) || !(extV > 0)) return;
+  const next = (extU / extV).toFixed(4);
+  if (canvas.dataset.aspect === next) return; // write-on-change only
+  canvas.dataset.aspect = next;
+  canvas.style.aspectRatio = next;
+}
+
 function drawBrainMap() {
   const canvas = el("brain-canvas");
+  applyBrainAspect(); // UC-60: dynamic outline-hugging aspect (AC1) before backing-store sizing
   resizeBackingStore(canvas); // UC-59: DPR-aware backing store from the stable CSS box (AC4)
   const ctx = canvas.getContext("2d");
   const W = canvas.width, H = canvas.height, pad = 18;
@@ -639,55 +673,132 @@ function resizeBackingStore(canvas) {
   return true;
 }
 
-// Partition the soma-less (schematic) neurons into modality-tagged buckets. PURE, DOM-free, and
-// SELF-CONTAINED (its known-tag set is inlined — NO closure over module-scope constants) so it can
-// be extracted from source and executed under node in isolation. It is the SINGLE source of truth
-// for box grouping: both buildSomalessBoxes (DOM) and drawBoxes consume its output; neither
-// re-derives the partition. Contract (UC-59 AC5/AC7):
-//   - considers ONLY placement[i] === "schematic"; every such neuron lands in EXACTLY one bucket;
+// ---- UC-60: pure boundary partition (AC3/AC4/AC5/AC13) --------------------------------
+// Even-odd (ray-cast) point-in-polygon test, evaluated in the SAME VOXEL space the registered
+// outline polygon and projectedPoints() share — so the in/out decision is transform-independent
+// (it does not depend on the screen fit). PURE, DOM-free, and SELF-CONTAINED (no closure over any
+// module-scope constant) so it can be extracted from source and executed under node in isolation.
+// `pt` = [u, v]; `polygon` = [[u, v], ...] (the concave registered outline). Handles concavity.
+function pointInPolygon(pt, polygon) {
+  if (!pt || !polygon || polygon.length < 3) return false;
+  const x = pt[0], y = pt[1];
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i][0], yi = polygon[i][1];
+    const xj = polygon[j][0], yj = polygon[j][1];
+    const intersect = ((yi > y) !== (yj > y)) &&
+      (x < ((xj - xi) * (y - yi)) / ((yj - yi) || 1e-12) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+// Axis-aligned bounding-box containment in voxel space — the documented fallback for a view whose
+// registered outline has no polygon (per-view degrade #1). `bbox = {minX, minY, maxX, maxY}`.
+// PURE, DOM-free, SELF-CONTAINED (no module-scope closure) → node-executable in isolation.
+function pointInBBox(pt, bbox) {
+  if (!pt || !bbox) return false;
+  return pt[0] >= bbox.minX && pt[0] <= bbox.maxX &&
+    pt[1] >= bbox.minY && pt[1] <= bbox.maxY;
+}
+
+// Partition neurons into "inside the brain outline" (stay in the brain map) vs relocated-to-a-box,
+// purely from their projected VOXEL-space positions (AC3). For each neuron i: a present point that
+// is INSIDE `boundary` → `inside[i] = true` (stays in the brain); a present point OUTSIDE the
+// boundary, OR a null point (no coords on this plane), → `inside[i] = false` and the neuron is
+// pushed into its modality bucket (AC5). `boundary` = {kind:"polygon", polygon} |
+// {kind:"bbox", bbox} | null; `boundary` null/undefined disables the test → every neuron stays
+// inside and buckets = [] (documented non-anatomical / no-outline degrade).
+// PURE, DOM-free; depends ONLY on its two module-siblings pointInPolygon / pointInBBox (the
+// known-tag set is inlined — NO other module-scope closure) so the THREE sources concatenate and
+// run under node. It is the SINGLE source of truth for box grouping: both buildSomalessBoxes (DOM)
+// and ensureMapCache consume its output; neither re-derives the partition. Bucketing is
+// byte-identical to the retired bucketSomaless:
 //   - modality "vision" → "vision (external)", "proprioceptive" → "proprioceptive",
-//     "hunger" → "hunger"; ANY other value ("", null/undefined, or an unknown/legacy tag) →
+//     "hunger" → "hunger"; ANY other value ("", null/undefined, unknown/legacy tag) →
 //     the catch-all "other (untagged)" (none dropped);
 //   - fixed bucket order (vision, proprioceptive, hunger, other); zero-member buckets omitted;
-//   - zero schematic neurons (or no placement array) → [] (empty result).
-function bucketSomaless(placement, modality) {
+//   - every relocated neuron lands in EXACTLY one bucket.
+function partitionByBoundary(points, boundary, modality) {
   const KNOWN = ["vision", "proprioceptive", "hunger"];
   const TITLES = { vision: "vision (external)", proprioceptive: "proprioceptive", hunger: "hunger" };
   const OTHER_KEY = "other";
   const OTHER_TITLE = "other (untagged)";
   const order = ["vision", "proprioceptive", "hunger", OTHER_KEY];
   const members = { vision: [], proprioceptive: [], hunger: [], other: [] };
-  const n = placement ? placement.length : 0;
+  const n = points ? points.length : 0;
+  const inside = new Array(n);
   for (let i = 0; i < n; i++) {
-    if (placement[i] !== "schematic") continue;
+    const p = points[i];
+    let isIn;
+    if (!boundary) isIn = true; // boundary disabled → keep every neuron in the brain
+    else if (!p) isIn = false; // no projected coords on this plane → relocate
+    else if (boundary.kind === "bbox") isIn = pointInBBox(p, boundary.bbox);
+    else isIn = pointInPolygon(p, boundary.polygon);
+    inside[i] = isIn;
+    if (isIn) continue;
     const tag = modality ? modality[i] : null;
     if (KNOWN.indexOf(tag) !== -1) members[tag].push(i);
     else members[OTHER_KEY].push(i);
   }
-  const out = [];
+  const buckets = [];
   for (const key of order) {
     if (!members[key].length) continue;
-    out.push({ key, title: key === OTHER_KEY ? OTHER_TITLE : TITLES[key], indices: members[key] });
+    buckets.push({ key, title: key === OTHER_KEY ? OTHER_TITLE : TITLES[key], indices: members[key] });
   }
-  return out;
+  return { inside, buckets };
 }
 
-// (Re)build the soma-less tagged-boxes DOM for the current recording — one outlined box per
-// non-empty modality bucket (bucketSomaless is the single source of truth), each a top-center title
-// + a mini heatmap canvas that drawBoxes animates. Zero schematic (or a legacy file with no
-// placement) → a single muted note, no layout break. Records [{canvas, indices}] in state.somaBoxes.
+// Resolve the boundary used for the in/out test on a given view. Anatomical recording + registered
+// outline present: the outline polygon for that plane ({kind:"polygon"}); a view whose outline has
+// no polygon: the outline's projected bbox for that plane ({kind:"bbox"}, degrade #1); a
+// non-anatomical / no-asset recording: null (boundary disabled → all in-canvas, no boxes, degrade #2).
+function boundaryForView(viewKey) {
+  const pos = state.data.meta.positions || {};
+  const anatomical = /^anatomical/i.test(pos.source || "");
+  const outline = typeof BRAIN_OUTLINE !== "undefined" ? BRAIN_OUTLINE : null;
+  if (!anatomical || !outline) return null;
+  const plane = MAP_VIEW_PRESETS[viewKey] || "xz";
+  const [a0, a1] = PROJECTIONS[plane] || PROJECTIONS.xz;
+  const pl = outline.planes && outline.planes[viewKey];
+  if (pl && pl.polygon) return { kind: "polygon", polygon: pl.polygon };
+  const mn = outline.bbox3d.min, mx = outline.bbox3d.max;
+  return { kind: "bbox", bbox: { minX: mn[a0], minY: mn[a1], maxX: mx[a0], maxY: mx[a1] } };
+}
+
+// Compute (once per (view, document)) the boundary partition: the voxel-space projected points, the
+// per-neuron inside/out flags, the relocated-neuron modality buckets, and the resolved boundary.
+// Cached on state.partition keyed by viewKey — invalidated by loadDocument and a map-view change,
+// but NOT by a modality-tag change (membership is position-based; the dropdown only drives the
+// overlay highlight). Kept OFF the per-frame path (AC9/perf): point-in-polygon runs once per view.
+function ensurePartition() {
+  const viewKey = el("map-view-select").value;
+  const c = state.partition;
+  if (c && c.viewKey === viewKey) return c;
+  const points = projectedPoints();
+  const boundary = boundaryForView(viewKey);
+  const modality = state.data.meta.modality || null;
+  const { inside, buckets } = partitionByBoundary(points, boundary, modality);
+  state.partition = { viewKey, points, inside, buckets, boundary };
+  return state.partition;
+}
+
+// (Re)build the relocated-neuron tagged-boxes DOM for the current recording+view — one outlined box
+// per non-empty modality bucket (ensurePartition().buckets is the single source of truth), each a
+// top-center title + a mini heatmap canvas that drawBoxes animates. No out-of-boundary neurons (or a
+// boundary-disabled recording) → a single muted note, no layout break. Records [{canvas, indices}]
+// in state.somaBoxes. Rebuilt on load AND on a map-view change (the partition is view-dependent).
 function buildSomalessBoxes() {
   const host = el("somaless-boxes");
   state.somaBoxes = null;
   if (!host) return;
   host.textContent = "";
   if (!state.data) return;
-  const pos = state.data.meta.positions || {};
-  const buckets = bucketSomaless(pos.placement || null, state.data.meta.modality || null);
+  const buckets = ensurePartition().buckets;
   if (!buckets.length) {
     const note = document.createElement("div");
     note.className = "soma-empty";
-    note.textContent = "no soma-less afferents in this recording";
+    note.textContent = "all neurons shown within the brain map";
     host.appendChild(note);
     return;
   }
@@ -1259,11 +1370,15 @@ el("speed-select").addEventListener("change", (ev) => {
   state.speed = parseFloat(ev.target.value) || 1;
 });
 
-// Changing the view plane invalidates the per-view cache (screen positions, outline polygon,
-// global peak all depend on the plane), so drop it and let drawBrainMap rebuild.
+// Changing the view plane invalidates BOTH per-view caches: the brain-map cache (screen positions,
+// outline polygon, global peak) AND the boundary partition (UC-60: in/out membership + buckets are
+// view-dependent). Drop both, rebuild the boxes for the new view's buckets, then redraw the panel.
 el("map-view-select").addEventListener("change", () => {
   state.mapCache = null;
+  state.partition = null;
+  buildSomalessBoxes();
   drawBrainMap();
+  drawBoxes();
 });
 
 // Intensity normalization toggle (AC5): per-frame vs fixed global scale. The global peak is

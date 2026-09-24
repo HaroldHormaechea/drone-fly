@@ -70,28 +70,13 @@
             </label>
           </div>
         </div>
-        <!-- Real-anatomy brain (maximized) on top; soma-less afferents relocated into the
-             tagged boxes strip below it (built per-recording by buildSomalessBoxes). -->
+        <!-- In-boundary brain (maximized, outline-hugging) on top; out-of-boundary neurons
+             relocated into the tagged boxes strip below it (built per-view by buildSomalessBoxes).
+             UC-60: the two descriptive legend blocks that used to sit here were removed to declutter
+             the shortened panel (AC10). -->
         <div class="anatomical-body">
-          <canvas id="brain-canvas" width="440" height="440"></canvas>
+          <canvas id="brain-canvas" width="440" height="220"></canvas>
           <div id="somaless-boxes" class="somaless-boxes"></div>
-        </div>
-        <div class="legend">
-          activation intensity
-          <span class="intensity-ramp" aria-hidden="true"></span>
-          low <span class="hint">→</span> high · summed activation of neurons whose somas fall
-          there, over a static registered brain outline
-        </div>
-        <div class="legend">
-          The brain map shows only real-anatomy neurons (maximized). <em>Soma-less afferents</em>
-          are relocated into the tagged boxes below, grouped by modality —
-          <span class="dot mod-vision"></span> vision (external),
-          <span class="dot mod-proprioceptive"></span> proprioceptive,
-          <span class="dot mod-hunger"></span> hunger, and a catch-all
-          <b>other (untagged)</b> box for any afferent with no known modality tag (none dropped).
-          Each box animates its neurons' live activation over the timeline. The modality overlay
-          rings tagged real-anatomy neurons on the brain map ·
-          <span class="hint">damage/nociception: unavailable (no MaleCNS label)</span>
         </div>
       </section>
 
