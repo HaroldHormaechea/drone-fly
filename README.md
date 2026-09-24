@@ -1176,18 +1176,26 @@ Enable recording in a train/evaluate config with `record: true` (tune cadence vi
 frames land in that run's `training/<name>/recordings/`. Open `viz/viewer.html` in a browser
 (dependency-free, `file://`-safe) and load a recording — no server or build step.
 
-**Three-zone layout (UC-59).** The top row holds two side-by-side panels — the **anatomical brain
-map** (left, given the majority of the row) and the **flight actions** trace panel (right) — and the
-**3D flight view** spans the full content width in a panel below them, as the primary focus. The top
-row collapses to a single column at narrow viewport widths. The brain map is an MRI/fMRI-style
-activation heatmap over a static, spatially-registered MaleCNS brain outline (`viz/brain_outline.js`,
-`top-down` / `front` / `side` presets + a per-frame ↔ global intensity toggle). The 3D flight view is
-driven by the recorded `meta.course` geometry — controls: **drag** to **rotate**, mouse **wheel** to
-**zoom**, the same view presets, and a `0.25`× slow-inspection speed. Regenerate the outline with
+**Three-zone layout (UC-59, refined UC-60).** The top row holds two side-by-side panels — the
+**anatomical brain map** (left, given the majority of the row) and the **flight actions** trace panel
+(right) — and the **3D flight view** spans the full content width in a panel below them, as the
+primary focus. Since UC-60 the two top panels are rendered at **equal height** (each stretches to the
+taller of the two, via `align-items: stretch`), and the top row collapses to a single column at narrow
+viewport widths. The brain map is an MRI/fMRI-style activation heatmap over a static,
+spatially-registered MaleCNS brain outline (`viz/brain_outline.js`, `top-down` / `front` / `side`
+presets + a per-frame ↔ global intensity toggle). The 3D flight view is driven by the recorded
+`meta.course` geometry — controls: **drag** to **rotate**, mouse **wheel** to **zoom**, the same view
+presets, and a `0.25`× slow-inspection speed. Regenerate the outline with
 `uv run python scripts/build_brain_outline.py`.
 
-The canvases are DPR-aware and resize with the layout (the brain map keeps a square, width-driven box
-and the boxes strip a fixed height, so resizing never oscillates). To visually verify the layout
+Since UC-60 the brain canvas is **sized tight to the registered outline's projected shape** — its
+aspect ratio is set per view from the outline's bounding box (the fly brain is much wider than tall,
+so the image is **short**, not a forced square) — and the fixed voxel→canvas transform is sized to the
+**outline bounding box alone** (no longer unioned with distant out-of-outline neurons), so the brain
+fills its canvas without stretching. The aspect is written only when it changes, so the DPR-aware
+backing store never feeds back into layout. The canvases are DPR-aware and resize with the layout (the
+brain box is width-driven with a dynamic outline-derived aspect, and the boxes strip a fixed height,
+so resizing never oscillates). To visually verify the layout
 against an actual render, use the dev-only headless-browser screenshot helper (not shipped in the
 viewer, not a runtime dependency, never imported by the test suite):
 
@@ -1233,23 +1241,33 @@ offset by a bounded multiple of the brain's own bounding box (`MAX_BODY_OFFSET_F
 `REGION_CLUSTER_RADIUS_FRAC`), so the brain stays ≥ `BRAIN_DOMINANCE_MIN_FRACTION` of the total
 rendered extent.
 
-**Soma-less afferents live in tagged boxes (UC-59).** The brain map itself now shows **only
-real-anatomy neurons** (maximized to fill the panel). Soma-less afferents (`placement="schematic"`)
-are no longer splatted into the brain — they are relocated into a strip of **outlined, top-titled
-boxes** below the map, grouped by their `meta.modality` tag: **vision (external)**,
-**proprioceptive**, **hunger**, and a catch-all **other (untagged)** box that absorbs any afferent
-with no known modality tag (empty string, unknown, or legacy). Every soma-less neuron lands in
-exactly one box and none are dropped; empty boxes are omitted and a recording with no soma-less
-afferents shows a short muted note. Each box is a mini heatmap that **animates its members' live
-activation** over the timeline (play / scrub / speed), preserving the signal the old schematic-body
-splat carried, just reorganized. The partition is a single pure function (`bucketSomaless`) shared by
-the box builder and the animator.
+**Out-of-boundary neurons live in tagged boxes (UC-59, generalised UC-60).** The brain map itself
+shows **only neurons inside the registered brain outline** (maximized to fill the panel). Since UC-60
+the relocation rule is **geometric, not tag-based**: a neuron is relocated iff its projected position
+falls **outside the brain outline polygon for the active view** — recomputed whenever you switch the
+`top-down` / `front` / `side` preset, so the partition always matches what is drawn. (This replaces
+UC-59's `placement="schematic"` rule; the point-in-polygon test runs in voxel space, independent of
+the screen transform.) Relocated neurons move into a strip of **outlined, top-titled boxes** below the
+map, grouped by their `meta.modality` tag: **vision (external)**, **proprioceptive**, **hunger**, and a
+catch-all **other (untagged)** box that absorbs any afferent with no known modality tag (empty string,
+unknown, or legacy). Every relocated neuron lands in exactly one box and none are dropped; empty boxes
+are omitted and a recording with no out-of-boundary neurons shows a short muted note. The boxes sit
+compactly just beneath the now-shorter brain. Each box is a mini heatmap that **animates its members'
+live activation** over the timeline (play / scrub / speed), preserving the signal the old splat
+carried, just reorganized. The partition is a single pure, DOM-free function (`partitionByBoundary`,
+built on `pointInPolygon` / `pointInBBox`) shared by the box builder and the brain-map stamp; it is
+computed once per `(view, recording)` and cached, never per animation frame. A view whose outline has
+no registered polygon falls back to the outline bounding box, and a non-anatomical / no-outline
+recording disables the test entirely (all neurons stay in-canvas, no boxes) — both documented degrades.
+The descriptive legend text that previously sat under the brain map was removed in UC-60 to declutter
+the shortened panel.
 
 **Modality toggle (UC-28).** The brain-map panel has a **modality** selector that overlays rings
 on the UC-13 modality populations — `vision`, `proprioceptive`, and `hunger` — on top of the hot
-activation colormap (it does not replace the colours). Since UC-59 the rings apply to the
-real-anatomy neurons shown on the brain map; the modality of soma-less afferents is now conveyed by
-their tagged boxes (above) instead. The populations are the real biological labels tagged per-neuron
+activation colormap (it does not replace the colours). The rings apply to the in-boundary neurons
+shown on the brain map; the modality of relocated (out-of-boundary) neurons is conveyed by their
+tagged boxes (above) instead. Toggling the modality selector does not re-partition the map (membership
+is position-based) — it only draws or hides the overlay rings. The populations are the real biological labels tagged per-neuron
 in `meta.modality` at record time (fail-soft: a modality absent from the slice is simply not tagged).
 `damage`/nociception is **unavailable** — MaleCNS ships no nociceptive label and there is no modality
 rule for it — so it is documented as absent rather than faked.
