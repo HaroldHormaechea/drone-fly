@@ -406,7 +406,15 @@ directly with two coupled levers.
 | Altitude-hold (UC-50, **default on**) | potential-based, weight `altitude_hold_weight`, band `altitude_band` | when `enable_altitude_decoupling`; `F = γ·Φ_track(curr) − Φ_track(prev)`, `Φ_track(h, ref) = altitude_hold_weight·clamp(h − (ref − altitude_band), 0, altitude_band)`, `ref = max(target-gate height above floor, ground_break_height)` — a **non-negative** altitude credit (anchored like Climb ⇒ leak ≤ 0, bob nets ≤ 0, no loiter optimum), one-sided (flat above `ref`), reference tracks the current target-gate z. Shipped enabled: weight 2.0, band 0.6 m (sizing invariant `ref − band ≤ climb_target_height`) |
 
 The reward-column values are the env **defaults** (`RewardConfig` constants); keep this table in sync
-with any future reward change. **UC-50 altitude/forward decoupling ships ON by default**
+with any future reward change. **Control-rate scaling (UC-57).** The two *per-step, time-extensive*
+terms — **Time penalty** and **Hover / airborne** — are multiplied by `per_step_scale = dt /
+BASELINE_DT` (`BASELINE_DT = 0.05` = the 20 Hz baseline; `= 1.0` at 20 Hz, `= 0.4` at the 50 Hz run
+default) so their *per-episode integral* is invariant to the control rate: at 50 Hz an episode has
+~2.5× more steps, each paying 0.4×, for the same total (this preserves the documented
+loiter < completion ordering across rates). All other terms are left unscaled — Progress telescopes
+over distance (path-, not time-extensive), the gate/completion/collision/obstacle terms are
+per-event, and the three potential-based shapers (Climb / Ground-breaking / Altitude-hold) are
+already rate-correct by construction (`γΦ' − Φ`). **UC-50 altitude/forward decoupling ships ON by default**
 (`enable_altitude_decoupling=True`, `altitude_hold_weight=2.0`, `altitude_band=0.6`) so a plain
 `drone-fly train` retrain uses it (the training YAML does not expose reward weights). To recover the
 pre-UC-50 reward exactly, construct `RewardConfig(enable_altitude_decoupling=False, altitude_hold_weight=0.0)`.
@@ -988,6 +996,62 @@ is robust across a broad range and can later be fine-tuned to other drones. Sour
 > determinism); the behavioral verdict is the owner's retrain and is not a CI gate. A whoop → 5"
 > envelope is very wide — a curriculum over it (or start-narrow-then-widen via the YAML knobs) is a
 > training-strategy choice, out of scope here.
+
+### Raised & decoupled control frequency (UC-57)
+The policy control loop ran at **20 Hz** (`dt = 0.05`), which is low for agile acro flight and for a
+stable inner rate loop (UC-55). UC-57 raises the **run-layer default to 50 Hz** and **decouples** the
+three rates in play — the expensive ~25k-neuron policy decides at `control_hz`, while the UC-55 rate
+PID **and** physics run at `control_hz × physics_ratio` (matching real drones, where the FC loop rate
+exceeds the RC/setpoint rate, and biology, where descending commands are slower than the haltere
+reflex). The task is held **invariant in real-time terms**: episode duration in *seconds* is
+preserved and command latency is expressed in *milliseconds*, so changing Hz never silently alters
+the task or the latency semantics.
+
+- **Byte-identity split (the load-bearing design).** All rate-dependent quantities derive from a
+  single `BASELINE_DT = 0.05` in the new pure module **`drone_fly.env.timing`** (dt↔Hz,
+  `scale_step_budget`, `resolve_latency_steps`, `inner_rate/inner_dt/iteration_count`,
+  `pybullet_freqs`). The **dataclass defaults stay 20 Hz** (`EpisodeConfig.dt = BASELINE_DT`,
+  `physics_ratio = 1`, `command_latency_ms = 0.0`) so `EnvConfig()` and the ~31-file byte-identity
+  test culture are untouched; the **50 Hz default lives only at the run/CLI layer** (`control_hz=50`,
+  `physics_ratio=10`, `command_latency_ms=0.0`, applied identically to **train and evaluate** so a
+  50 Hz-trained policy is never evaluated on a 20 Hz plant). At `dt=0.05, ratio=1` every helper
+  reduces to today's values exactly.
+- **Constant episode seconds (AC3).** `RaceEnv` composes the whole baseline step budget
+  (`max_steps + steps_per_gate·(N−1) + pad allowances`) then scales it **once** via
+  `scale_step_budget` (`round(steps · BASELINE_DT/dt)`): identity at 20 Hz, ×2.5 at 50 Hz
+  (400 → 1000), so `steps · dt` — the wall-clock seconds — is invariant.
+- **Hz-invariant latency (AC4).** Command latency is specified in **ms** and converted to whole steps
+  at the active rate in one round (`resolve_latency_steps`), summing the standing `command_latency_ms`
+  with any domain-randomized latency (drawn in baseline steps). A 100 ms command reproduces the
+  historical **2-step** latency at 20 Hz and **5 steps** at 50 Hz. The default stays **0.0 ms** (no
+  forced 100 ms default — AC4 is a conversion *property*, not a runtime default). The env owns the
+  conversion and hands both backends the resolved integer; a minimal FIFO (present on both the simple
+  and pybullet backends) buffers the CTBR action upstream of the rate loop.
+- **Decoupled inner loop (AC2, pybullet).** `PyBulletAdapter.step` runs `physics_ratio` inner ticks
+  per policy step (read gyro → PID at `inner_dt = dt/physics_ratio` → mix → one physics tick), with
+  collision OR-latched across ticks and returning the first collided tick's state. `pybullet_freqs`
+  sizes the CtrlAviary so `pyb_freq` is always an integer multiple of `ctrl_freq` (fixes a latent
+  `max(ctrl_freq·4, 240)` divisibility bug) while staying ≥ 240 and ≥ 4×inner. The **simple/CI backend
+  integrates at the policy `dt`** (physics rate == policy rate) — a deliberate hermeticity scope call,
+  consistent with the rate loop being pybullet-only.
+- **Reward correctness (AC5).** The two per-step, time-extensive reward terms (`time_penalty`,
+  graded `airborne_bonus`) are scaled by `dt/BASELINE_DT` so their per-episode integral is
+  rate-invariant (see the reward-table note above); the potential-based shapers are already
+  rate-correct. **γ coupling:** `gamma` is a per-step discount, so its real-time horizon shrinks as
+  the rate rises — raise `gamma` toward 1 to keep the same horizon, and keep `RewardConfig.climb_gamma`
+  **equal to** the training `gamma` (the shapers telescope only when they agree).
+- **YAML knobs (UC-51 pattern).** `control_hz`, `physics_ratio`, `command_latency_ms` on the train
+  **and** evaluate config (defaults 50 / 10 / 0). Validated at load: `control_hz > 0`,
+  `physics_ratio` int ≥ 1, `command_latency_ms ≥ 0`.
+- **Budget guidance.** `total_timesteps` counts env steps; at 50 Hz an episode spans ~2.5× more steps
+  per sim-second, so a fixed budget covers ~2.5× less simulated flight time — scale `total_timesteps`
+  up with `control_hz` to keep the same sim-time budget (e.g. 2M @20 Hz ≈ 5M @50 Hz).
+
+> **⚠️ Fresh-run requirement.** The default plant rate changed (20 → 50 Hz, with a decoupled inner
+> loop), so old 20 Hz checkpoints are not directly comparable — the behavioral verdict needs a
+> **brand-new** GPU retrain. All UC-57 tests are hermetic (rate plumbing, seconds-invariance,
+> latency-ms→steps conversion, decoupling ratio, `pyb_freq` multiples, ratio-1 byte-identity); the
+> behavioral verdict is deferred to the owner's retrain and is not a CI gate.
 
 ### Visualization & recording
 Enable recording in a train/evaluate config with `record: true` (tune cadence via `record_every`);

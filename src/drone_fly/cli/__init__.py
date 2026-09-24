@@ -149,6 +149,38 @@ def _apply_dynamics_envelope(env_config, cfg):
     return replace(env_config, randomization=replace(rand, **overrides))
 
 
+def _apply_control_rate(env_config, cfg):
+    """Fold the UC-57 control-rate knobs into ``env_config.episode`` (AC1/AC2/AC4/AC6).
+
+    Converts the friendly ``control_hz`` YAML knob to the authoritative ``EpisodeConfig.dt``
+    (``dt = 1 / control_hz``) and threads ``physics_ratio`` + ``command_latency_ms`` alongside it.
+    Unlike ``_apply_rate_controller`` / ``_apply_dynamics_envelope`` — which no-op (keeping
+    ``env_config`` as-is, incl. ``None``) when their keys are unset — this ALWAYS runs, because the
+    control-rate knobs carry the RUN-LAYER defaults (50 Hz / ratio 10 / 0 ms): "runs default to
+    50 Hz" (AC1) means every CLI train/eval run gets a 50 Hz episode even with nothing set. When
+    ``env_config`` is ``None`` (no randomization) a fresh :class:`EnvConfig` is built carrying only
+    the resolved episode; an existing (randomized) env config has its episode replaced. The
+    dataclass ``EpisodeConfig`` default stays 20 Hz, so non-CLI callers remain byte-identical — the
+    50 Hz default lives HERE, at the run layer, exactly as the byte-identity split requires.
+    """
+    from dataclasses import replace
+
+    from drone_fly.env.config import EnvConfig, EpisodeConfig
+    from drone_fly.env.timing import dt_from_hz
+
+    dt = dt_from_hz(cfg.control_hz)
+    base_episode = env_config.episode if env_config is not None else EpisodeConfig()
+    episode = replace(
+        base_episode,
+        dt=dt,
+        physics_ratio=cfg.physics_ratio,
+        command_latency_ms=cfg.command_latency_ms,
+    )
+    if env_config is None:
+        return EnvConfig(episode=episode)
+    return replace(env_config, episode=episode)
+
+
 def _resolve_train_randomization(cfg):
     """Resolve a train config's randomization into ``(env_config, obs_schema)`` (UC-24).
 
@@ -441,6 +473,10 @@ def _run_train(config_path: str, *, no_tui: bool = False) -> int:
     # (pybullet-only, only active with dynamics randomization on). No-op — including keeping a
     # ``None`` env config ``None`` — when no envelope key is set.
     env_config = _apply_dynamics_envelope(env_config, cfg)
+    # UC-57: convert control_hz → EpisodeConfig.dt and thread physics_ratio + command_latency_ms.
+    # ALWAYS runs (the run-layer default is 50 Hz), so this materialises an EnvConfig even when
+    # randomization left it None — every CLI train run defaults to 50 Hz (AC1).
+    env_config = _apply_control_rate(env_config, cfg)
 
     # UC-51: thread the exposed curriculum knobs + ent_coef into TrainConfig. Only values the user
     # actually set (not None) are passed, so omitting a knob — or setting it to its default — leaves
@@ -524,8 +560,13 @@ def _run_evaluate(config_path: str) -> int:
         episodes=cfg.episodes,
         seed=cfg.seed,
         adapter=cfg.adapter,
-        env_config=_apply_dynamics_envelope(
-            _apply_rate_controller(_env_config(cfg.randomize, cfg.randomize_dynamics), cfg), cfg
+        # UC-57: ``_apply_control_rate`` is outermost and ALWAYS runs, so an eval reproduces the
+        # trained plant at the SAME 50 Hz default (never a 20 Hz plant under a 50 Hz policy).
+        env_config=_apply_control_rate(
+            _apply_dynamics_envelope(
+                _apply_rate_controller(_env_config(cfg.randomize, cfg.randomize_dynamics), cfg), cfg
+            ),
+            cfg,
         ),
         device=cfg.device,
         record=cfg.record,

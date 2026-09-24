@@ -28,6 +28,7 @@ from drone_fly.env.config import (
     GateSpec,
     ObstacleSpec,
     ObstacleVisionConfig,
+    PadSpec,
     RandomizationConfig,
     default_obstacle_course,
     default_pad_course,
@@ -315,6 +316,67 @@ def test_reset_info_exposes_target_gate() -> None:
     env = make_env(EnvConfig(), adapter="simple")
     _obs, info = env.reset(seed=0)
     assert info["target_gate"] == 0
+
+
+# --- UC-57 AC3: max_steps scales with the control rate → episode SECONDS invariant ----
+def test_default_dt_budget_is_byte_identical_at_20hz() -> None:
+    """UC-57 byte-identity: the dataclass default (dt=0.05, physics_ratio=1) leaves the UC-09 budget
+    exactly as before — N=1⇒400, N=3⇒800 — because ``scale_step_budget`` is the identity at the
+    20 Hz baseline. Nothing about the pre-UC-57 step budget changes for a default env."""
+    env1 = make_env(EnvConfig(course=single_gate_course()), adapter="simple")
+    env1.reset(seed=0)
+    assert env1.config.episode.dt == 0.05
+    assert env1._max_steps == 400
+
+    env3 = make_env(EnvConfig(), adapter="simple")
+    env3.reset(seed=0)
+    assert env3._max_steps == 800
+
+
+def test_max_steps_scales_and_keeps_episode_seconds_invariant_20_vs_50hz() -> None:
+    """UC-57 AC3: raising the control rate scales ``_max_steps`` inversely with dt so wall-clock
+    SECONDS per episode are invariant. Asserted at 20 Hz (dt=0.05) vs 50 Hz (dt=0.02) on a
+    multi-gate + recharge-pad course (exercises the whole COMPOSITE budget being scaled once)."""
+    course = CourseConfig(
+        gates=(
+            GateSpec(center=(2.0, 0.0, 1.0), aperture=0.6),
+            GateSpec(center=(3.5, 0.0, 1.0), aperture=0.6),
+        ),
+        finish_x=6.0,
+        pads=(PadSpec(center=(2.5, 0.0), radius=0.5, rechargeable=True),),
+    )
+
+    def _budget_and_seconds(dt: float) -> tuple[int, float]:
+        cfg = EnvConfig(course=course, episode=EpisodeConfig(dt=dt))
+        env = make_env(cfg, adapter="simple")
+        env.reset(seed=0)
+        return env._max_steps, env._max_steps * dt
+
+    steps_20, seconds_20 = _budget_and_seconds(0.05)
+    steps_50, seconds_50 = _budget_and_seconds(0.02)
+
+    # 50 Hz grants 2.5× the steps of 20 Hz (dt 0.05 → 0.02).
+    assert steps_50 == pytest.approx(steps_20 * 2.5, abs=1)
+    # …and the episode SECONDS are invariant across the rate change (AC3).
+    assert seconds_50 == pytest.approx(seconds_20, rel=1e-3)
+
+
+def test_truncation_fires_at_the_scaled_budget_at_50hz() -> None:
+    """UC-57 AC3: at 50 Hz the truncation still fires at the scaled step budget. A baseline
+    ``max_steps=8`` at 20 Hz becomes ``round(8 · 0.05/0.02) = 20`` steps at 50 Hz — same 0.4 s."""
+    cfg = EnvConfig(episode=EpisodeConfig(dt=0.02, max_steps=8, steps_per_gate=0))
+    env = make_env(cfg, adapter="simple")
+    env.reset(seed=0)
+    assert env._max_steps == 20  # 8 × 2.5
+    truncated = False
+    steps = 0
+    for _ in range(80):
+        _obs, _r, terminated, truncated, _info = env.step(HOVER)
+        steps += 1
+        if terminated or truncated:
+            break
+    assert truncated is True
+    assert steps == 20
 
 
 # --- AC11: fixed dynamics -----------------------------------------------------------
@@ -1030,7 +1092,7 @@ def test_battery_depletion_triggers_soft_crash_termination() -> None:
 # ===========================================================================
 # UC-18 — recharge pads: dock-to-recharge, course-variation, load-bearing (AC1/AC2/AC5/AC6)
 # ===========================================================================
-from drone_fly.env.config import PadSpec  # noqa: E402
+# (``PadSpec`` is imported at module top — used by the UC-57 seconds-invariance test above.)
 
 
 class _BatteryDockScriptedAdapter:

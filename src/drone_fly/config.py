@@ -247,6 +247,28 @@ def _validate_dynamics_envelope(command: str, resolved: dict[str, Any]) -> None:
             )
 
 
+def _validate_control_rate(command: str, resolved: dict[str, Any]) -> None:
+    """Validate the UC-57 control-rate knobs (control_hz > 0, physics_ratio ≥ 1, latency ≥ 0).
+
+    Unlike the ``| None`` "leave-default" knobs these always carry a value (the run-layer
+    defaults), so the checks are unconditional. Shared by :class:`TrainRunConfig` and
+    :class:`EvaluateRunConfig` so eval runs a 50 Hz policy on the SAME plant. Fails loud (exit 2).
+    """
+    control_hz = resolved.get("control_hz")
+    if control_hz is not None and control_hz <= 0.0:
+        raise ConfigError(f"{command} config: 'control_hz' must be > 0, got {control_hz!r}.")
+    physics_ratio = resolved.get("physics_ratio")
+    if physics_ratio is not None and physics_ratio < 1:
+        raise ConfigError(
+            f"{command} config: 'physics_ratio' must be an integer >= 1, got {physics_ratio!r}."
+        )
+    command_latency_ms = resolved.get("command_latency_ms")
+    if command_latency_ms is not None and command_latency_ms < 0.0:
+        raise ConfigError(
+            f"{command} config: 'command_latency_ms' must be >= 0, got {command_latency_ms!r}."
+        )
+
+
 # --- Per-command config dataclasses -------------------------------------------------------
 
 
@@ -326,6 +348,16 @@ class TrainRunConfig:
     pybullet_tw_max: float | None
     pybullet_arm_length_min: float | None
     pybullet_arm_length_max: float | None
+    # UC-57: policy control rate + inner-loop/physics decoupling + Hz-invariant command latency,
+    # exposed so a rate experiment costs a config edit (AC1/AC6). Unlike the ``| None`` "leave the
+    # dataclass default" knobs above, these carry the RUN-LAYER defaults directly (50 Hz / ratio
+    # 10 / 0 ms — the intended UC-57 default), converted to the 20 Hz-baseline ``EpisodeConfig`` by
+    # ``_apply_control_rate`` in the CLI. The dataclass stays 20 Hz so byte-identity is preserved
+    # for the non-CLI callers; the CLI is where "runs default to 50 Hz" lives. Validated in
+    # ``from_mapping`` (control_hz > 0, physics_ratio int ≥ 1, command_latency_ms ≥ 0).
+    control_hz: float
+    physics_ratio: int
+    command_latency_ms: float
 
     @classmethod
     def from_mapping(cls, mapping: Any) -> TrainRunConfig:
@@ -399,11 +431,17 @@ class TrainRunConfig:
             _Spec("pybullet_tw_max", (float,)),
             _Spec("pybullet_arm_length_min", (float,)),
             _Spec("pybullet_arm_length_max", (float,)),
+            # UC-57: run-layer control-rate knobs carry the 50 Hz / ratio 10 / 0 ms RUN defaults
+            # directly (NOT ``| None`` — these ARE the "runs default to 50 Hz" contract, AC1).
+            _Spec("control_hz", (float,), default=50.0),
+            _Spec("physics_ratio", (int,), default=10),
+            _Spec("command_latency_ms", (float,), default=0.0),
         ]
         resolved = _validate("train", mapping, specs)
         resolved["name"] = validate_run_name(resolved["name"])
         if resolved["n_envs"] is not None and resolved["n_envs"] < 1:
             raise ConfigError("train config: 'n_envs' must be >= 1.")
+        _validate_control_rate("train", resolved)
         # UC-54: PPO optimization hyperparameter ranges — ints >= 1, learning_rate > 0. Each guarded
         # ``is not None`` so an omitted key leaves the TrainConfig default untouched.
         for key in ("n_epochs", "batch_size", "n_steps"):
@@ -542,6 +580,12 @@ class EvaluateRunConfig:
     pybullet_tw_max: float | None
     pybullet_arm_length_min: float | None
     pybullet_arm_length_max: float | None
+    # UC-57: control-rate knobs, mirrored from ``TrainRunConfig`` with the SAME run-layer defaults
+    # (50 Hz / ratio 10 / 0 ms) so an eval never silently runs a 50 Hz-trained policy on a 20 Hz
+    # plant (AC1). Converted to the ``EpisodeConfig`` by ``_apply_control_rate`` in the CLI.
+    control_hz: float
+    physics_ratio: int
+    command_latency_ms: float
 
     @classmethod
     def from_mapping(cls, mapping: Any) -> EvaluateRunConfig:
@@ -577,6 +621,10 @@ class EvaluateRunConfig:
             _Spec("pybullet_tw_max", (float,)),
             _Spec("pybullet_arm_length_min", (float,)),
             _Spec("pybullet_arm_length_max", (float,)),
+            # UC-57: control-rate knobs (mirror of the train keys, same 50 Hz / 10 / 0 ms defaults).
+            _Spec("control_hz", (float,), default=50.0),
+            _Spec("physics_ratio", (int,), default=10),
+            _Spec("command_latency_ms", (float,), default=0.0),
         ]
         resolved = _validate("evaluate", mapping, specs)
         if resolved["name"] is not None:
@@ -586,6 +634,7 @@ class EvaluateRunConfig:
             if value is not None and value < 0.0:
                 raise ConfigError(f"evaluate config: {key!r} must be >= 0, got {value!r}.")
         _validate_dynamics_envelope("evaluate", resolved)
+        _validate_control_rate("evaluate", resolved)
         return cls(**resolved)
 
 

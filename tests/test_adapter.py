@@ -226,13 +226,18 @@ def _rollout(adapter: SimpleDroneAdapter, actions, seed: int = 3) -> list[np.nda
 
 
 def test_reconfigure_updates_start_mass_drag_and_rate() -> None:
-    """reconfigure() applies a new spawn and each dynamics knob independently (AC5)."""
+    """reconfigure() applies a new spawn and each dynamics knob independently (AC5).
+
+    UC-57 contract change: latency is NO LONGER carried on ``DynamicsParams`` — the env owns the
+    ms→steps conversion (:func:`drone_fly.env.timing.resolve_latency_steps`) and hands the adapter
+    the already-resolved integer via the dedicated ``latency_steps=`` reconfigure kwarg. The
+    ``DynamicsParams.latency_steps`` field still exists (it is the per-episode *sampled baseline*
+    the env feeds into the resolver) but the adapter no longer reads it directly."""
     ad = _adapter()
     ad.reconfigure(
         start=np.array([1.0, -2.0, 1.5]),
-        dynamics=DynamicsParams(
-            mass=1.3, drag=0.25, max_body_rate=6.0, max_thrust=25.0, latency_steps=2
-        ),
+        dynamics=DynamicsParams(mass=1.3, drag=0.25, max_body_rate=6.0, max_thrust=25.0),
+        latency_steps=2,
     )
     # Spawn reflected at the next reset.
     st = ad.reset(seed=0)
@@ -243,6 +248,16 @@ def test_reconfigure_updates_start_mass_drag_and_rate() -> None:
     assert ad._max_body_rate == 6.0
     assert ad._max_thrust == 25.0
     assert ad._latency == 2
+
+
+def test_reconfigure_ignores_dynamics_latency_steps_field() -> None:
+    """UC-57: the adapter no longer derives its FIFO depth from ``dynamics.latency_steps`` — the
+    env owns the ms+sampled→active-rate conversion and passes the resolved integer via the
+    ``latency_steps=`` kwarg. A reconfigure that sets ``DynamicsParams(latency_steps=3)`` but omits
+    the kwarg must leave the adapter's latency untouched (guards the two paths from diverging)."""
+    ad = _adapter()
+    ad.reconfigure(dynamics=DynamicsParams(latency_steps=3))
+    assert ad._latency == 0  # kwarg omitted ⇒ construction-time standing latency (0) preserved
 
 
 def test_reconfigure_none_args_are_a_no_op() -> None:
@@ -292,7 +307,7 @@ def test_latency_n_delays_the_command_stream_by_exactly_n() -> None:
 
     for n in (1, 2, 3):
         delayed = _adapter()
-        delayed.reconfigure(dynamics=DynamicsParams(latency_steps=n))
+        delayed.reconfigure(latency_steps=n)  # UC-57: latency via the dedicated kwarg
         delayed_pos = _rollout(delayed, actions, seed=1)
 
         # Reference (latency 0): the APPLIED stream is [warm]*N ++ actions. The delayed
@@ -315,7 +330,7 @@ def test_latency_n_actually_differs_from_latency_zero() -> None:
     actions = [rng.uniform([0.2, -0.5, -0.5, -0.5], [1.0, 0.5, 0.5, 0.5]) for _ in range(30)]
     zero = _adapter()
     two = _adapter()
-    two.reconfigure(dynamics=DynamicsParams(latency_steps=2))
+    two.reconfigure(latency_steps=2)  # UC-57: latency via the dedicated kwarg
     assert not np.array_equal(
         np.array(_rollout(zero, actions, seed=1)), np.array(_rollout(two, actions, seed=1))
     )

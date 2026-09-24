@@ -421,12 +421,30 @@ def test_episode_config_recharge_step_allowance_default() -> None:
 
 
 def test_episode_config_repair_step_allowance_is_the_last_field() -> None:
-    """UC-19 (retargets the UC-18 last-field test): ``repair_step_allowance`` is appended **after**
-    ``recharge_step_allowance`` so ``EpisodeConfig()`` stays byte-identical to UC-09/18.
-    ``recharge_step_allowance`` is now second-to-last."""
+    """UC-57 (retargets the UC-19 last-field test): the rate-decoupling fields ``physics_ratio``
+    then ``command_latency_ms`` are appended **after** ``repair_step_allowance`` so
+    ``EpisodeConfig()`` stays byte-identical to UC-09/18/19. The pre-UC-57 ordering invariant still
+    holds within its block (``recharge_step_allowance`` immediately precedes
+    ``repair_step_allowance``); ``command_latency_ms`` is now the true last field, with
+    ``physics_ratio`` immediately before it."""
     fields = [f.name for f in dataclasses.fields(EpisodeConfig)]
-    assert fields[-1] == "repair_step_allowance"
+    assert fields[-1] == "command_latency_ms"
+    assert fields.index("physics_ratio") == fields.index("command_latency_ms") - 1
+    assert fields.index("repair_step_allowance") == fields.index("physics_ratio") - 1
     assert fields.index("recharge_step_allowance") == fields.index("repair_step_allowance") - 1
+
+
+def test_episode_config_uc57_fields_default_to_baseline() -> None:
+    """UC-57 AC1/AC4 byte-identity: the dataclass defaults stay at the 20 Hz baseline — ``dt`` is
+    ``BASELINE_DT``, ``physics_ratio`` is 1 (single inner tick) and ``command_latency_ms`` is 0.0
+    (no FIFO). The 50 Hz run default lives at the CLI/YAML layer, NOT the dataclass, so every
+    non-CLI ``EpisodeConfig()`` caller is unchanged."""
+    from drone_fly.env.timing import BASELINE_DT
+
+    ep = EpisodeConfig()
+    assert ep.dt == BASELINE_DT == 0.05
+    assert ep.physics_ratio == 1
+    assert ep.command_latency_ms == 0.0
 
 
 # --- RandomizationConfig recharge axis — off/neutral defaults, appended LAST (AC3/AC5) -----
