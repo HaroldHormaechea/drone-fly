@@ -792,48 +792,51 @@ def test_viewer_assets_pass_node_check(asset: str) -> None:
 
 # --- UC-28: full-coverage body-schematic render + modality overlay (static viewer checks) ------
 def test_viewer_js_renders_display3d_full_coverage() -> None:
-    """AC-1/AC-2: viewer.js prefers ``display3d`` (full-coverage finite render coords) for points.
+    """AC-1/AC-2 (UC-60): viewer.js still consumes ``display3d`` for full-coverage projected
+    points, but the fixed-mode brain transform is now sized to the registered outline bounding
+    box **ALONE** — UC-59's union with the out-of-outline point bounds is dropped (AC2), because
+    out-of-boundary neurons are relocated to the boxes rather than stretched into the canvas.
 
-    Static assertion (CI is headless): the point projector consumes ``positions.display3d`` so
-    every neuron — real soma or schematic body — is placed on any plane, and the fixed-mode
-    transform is widened to the UNION of the registered outline bbox and the display3d extent so
-    body clusters placed outside the brain bbox are not clipped off-canvas.
+    Supersedes the UC-28/UC-59 assertion that the transform was *widened* to the union of the
+    outline bbox and the display3d extent. Static assertion (CI is headless).
     """
     js = (_VIZ / "viewer.js").read_text()
     assert "display3d" in js, "viewer.js must consume positions.display3d for full coverage"
-    # Fixed-mode transform widened to outline.bbox3d ∪ display3d extent (else clusters clip).
-    assert "bbox3d" in js
-    assert "Math.min(" in js and "Math.max(" in js  # the union widening arithmetic
+    cache_src = _extract_js_function(js, "ensureMapCache")
+    # Fixed transform sized to the outline bbox ALONE: uMin/uMax/vMin/vMax read straight off
+    # outline.bbox3d min/max for the plane axes — no union widening with point bounds (AC2).
+    assert "bbox3d" in cache_src, "ensureMapCache fixed branch must size to outline.bbox3d"
+    norm = re.sub(r"\s+", "", cache_src)
+    assert "uMin=mn[a0],uMax=mx[a0],vMin=mn[a1],vMax=mx[a1]" in norm, (
+        "UC-60: the fixed transform must be sized to the outline bbox alone (no union widening)"
+    )
 
 
-def test_viewer_js_excludes_schematic_from_brain_stamp() -> None:
-    """UC-59 AC4: schematic (soma-less) neurons are EXCLUDED from the brain map stamp.
+def test_viewer_js_excludes_out_of_boundary_from_brain_stamp() -> None:
+    """UC-60 AC3/AC4: the brain-map stamp is gated by the BOUNDARY partition — only in-boundary
+    neurons with a projected point splat into the brain map; out-of-boundary (or null-point)
+    neurons are relocated to the tagged boxes and contribute no splat.
 
-    Supersedes the UC-28 ``test_viewer_js_distinguishes_schematic_from_anatomical`` (authorized
-    test evolution): UC-28 splatted schematic neurons into ``brain-canvas`` at a reduced weight
-    (``SCHEMATIC_SPLAT_WEIGHT``); UC-59 relocates them entirely into the tagged boxes strip, so
-    the brain map is maximized to real-anatomy neurons only (AC4). The down-weight constant is
-    therefore gone, and instead ``ensureMapCache`` masks schematic entries so they never stamp.
-
-    Static assertion (CI is headless): the viewer still reads ``positions.placement`` and keys on
-    ``"schematic"``, but the old splat-weight constant is removed and the cache build masks
-    schematic points to ``null`` (→ ``valid=0``) so they contribute no splat to the brain map.
+    Supersedes UC-59's ``test_viewer_js_excludes_schematic_from_brain_stamp`` (authorized test
+    evolution): exclusion is no longer keyed on a ``"schematic"`` placement tag (``isSchematic``
+    is gone) but on ``partitionByBoundary``'s per-neuron ``inside[]`` flag. The UC-28 schematic
+    splat-weight constant stays removed. Static assertion (CI is headless).
     """
     js = (_VIZ / "viewer.js").read_text()
-    assert "placement" in js
-    assert '"schematic"' in js or "'schematic'" in js
-    # The UC-28 schematic splat is gone — schematic neurons no longer stamp into the brain map.
+    # The UC-28 schematic splat weight stays gone (UC-59 removed it; the boxes carry that signal).
     assert "SCHEMATIC_SPLAT_WEIGHT" not in js, (
-        "UC-59 removes the schematic splat: SCHEMATIC_SPLAT_WEIGHT must be gone from the brain map"
+        "the schematic splat-weight constant must stay removed"
     )
-    # ensureMapCache masks schematic entries so they are excluded from the stamp (AC4).
+    # The old placement-tag masking is gone — exclusion is boundary-based now.
+    assert "isSchematic" not in js, "UC-60 replaces isSchematic masking with the boundary partition"
+    assert "anatPts" not in js, "the old anatomical-points buffer must be gone"
     cache_src = _extract_js_function(js, "ensureMapCache")
-    assert "isSchematic" in cache_src, (
-        "ensureMapCache must identify schematic neurons to exclude them from the brain stamp"
-    )
-    normalised = re.sub(r"\s+", "", cache_src)
-    assert "isSchematic(i)?null:p" in normalised, (
-        "ensureMapCache must mask schematic points to null so they get valid=0 (no brain splat)"
+    # ensureMapCache reads the boundary partition (single source of truth) ...
+    assert "ensurePartition()" in cache_src, "ensureMapCache must consume the boundary partition"
+    norm = re.sub(r"\s+", "", cache_src)
+    # ... and stamps a neuron only when it is inside the boundary AND has a projected point.
+    assert "if(!inside[i]||!p)continue" in norm, (
+        "ensureMapCache must gate the stamp on inside[i] && points[i] != null (boundary partition)"
     )
 
 
@@ -870,59 +873,137 @@ def test_viewer_html_has_modality_tag_select_off_default() -> None:
     assert selected == ["off"], f"modality overlay must default to 'off'; got {selected}"
 
 
-def test_viewer_html_documents_damage_unavailable() -> None:
-    """AC-7 honesty: the viewer legend documents damage/nociception as unavailable (no fake tag)."""
-    html = (_VIZ / "viewer.html").read_text().lower()
-    assert "damage" in html and "unavailable" in html
+# NOTE (UC-60 AC10): ``test_viewer_html_documents_damage_unavailable`` was REMOVED here — the
+# descriptive brain-map legend (which carried the "damage/nociception: unavailable" text) is deleted
+# from viewer.html to declutter the shortened panel. The honesty guarantee is preserved by
+# ``test_viewer_js_has_modality_overlay_toggle`` (below), which greps the retained viewer.js
+# comment.
 
 
 # --- UC-59: three-zone layout + animated tagged soma-less boxes -------------------------
-# CI is headless (no browser), so UC-59's structure/wiring is validated statically and the
-# grouping logic is proven by EXECUTING the pure `bucketSomaless` partition under `node`. The
-# visual verification (AC10 — a real render of the three zones) CANNOT run in this sandbox (no
-# chromium/chrome/playwright) and is a documented MANUAL step (see the coverage summary + PR).
+# CI is headless (no browser), so UC-60's structure/wiring is validated statically and the
+# boundary-partition logic is proven by EXECUTING the pure ``partitionByBoundary`` (plus its two
+# module-siblings ``pointInPolygon`` / ``pointInBBox``) under `node`. UC-60 RETIRED
+# ``bucketSomaless``: box membership is now position-based (outside the brain outline → boxed),
+# not placement-tag based. The visual verification (AC12 — a real render of the shortened brain +
+# relocated boxes) CANNOT run in this sandbox (no chromium/chrome/playwright) and is a documented
+# MANUAL step (see the coverage summary + PR).
 
 _SOMALESS_TITLES = ("vision (external)", "proprioceptive", "hunger", "other (untagged)")
 
+# A synthetic axis-aligned square outline in voxel space, reused by the partition cases below.
+# "inside" points fall within it (stay in the brain map); "outside" points are relocated to boxes.
+_SQUARE = [[0, 0], [10, 0], [10, 10], [0, 10]]
+_SQUARE_BOUNDARY = {"kind": "polygon", "polygon": _SQUARE}
+_IN = [5, 5]  # clearly inside _SQUARE
+_OUT = [50, 50]  # clearly outside _SQUARE
 
-def _run_bucket_somaless(cases: list[dict], tmp_path: Path) -> list[list[dict]]:
-    """Execute the *real* ``bucketSomaless`` from viewer.js under node against synthetic inputs.
 
-    Extracts the pure, self-contained partition function from source (no closure over module
-    scope — it is written to be node-executable in isolation) and drives it with the given
-    ``{placement, modality}`` cases, returning the parsed bucket lists. This is the hermetic
-    proof of AC5/AC7/AC11 grouping semantics — no browser, no fixture file.
-    """
+def _run_node_json(src: str, tmp_path: Path, what: str):
+    """Write ``src`` to a temp .mjs, execute it under node, and return the parsed JSON stdout."""
     node = shutil.which("node")
     if node is None:
-        pytest.skip("node not available — cannot execute bucketSomaless")
-    src = _extract_js_function((_VIZ / "viewer.js").read_text(), "bucketSomaless")
-    driver = (
-        src
-        + "\nconst CASES = "
-        + json.dumps(cases)
-        + ";\nconst out = CASES.map((c) => bucketSomaless(c.placement, c.modality));"
-        + "\nprocess.stdout.write(JSON.stringify(out));\n"
-    )
-    script = tmp_path / "bucket_driver.mjs"
-    script.write_text(driver)
+        pytest.skip(f"node not available — cannot execute {what}")
+    script = tmp_path / f"{what}_driver.mjs"
+    script.write_text(src)
     result = subprocess.run([node, str(script)], capture_output=True, text=True)
-    assert result.returncode == 0, f"node execution of bucketSomaless failed:\n{result.stderr}"
+    assert result.returncode == 0, f"node execution of {what} failed:\n{result.stderr}"
     return json.loads(result.stdout)
 
 
-def test_bucketsomaless_partitions_schematic_neurons_under_node(tmp_path: Path) -> None:
-    """AC5/AC7/AC11: every soma-less (schematic) neuron lands in EXACTLY one titled bucket.
+def _run_partition(cases: list[dict], tmp_path: Path) -> list[dict]:
+    """Execute the *real* ``partitionByBoundary`` from viewer.js under node on synthetic inputs.
 
-    Executes the real partition under node: only ``placement[i]==="schematic"`` neurons are
-    considered, each appears in exactly one bucket, the titles/order are the documented set, and
-    non-schematic neurons are ignored entirely.
+    Concatenates the three pure, self-contained module siblings straight from source
+    (``pointInPolygon`` + ``pointInBBox`` + ``partitionByBoundary`` — none closes over module
+    scope, so they run under node in isolation) and drives ``partitionByBoundary(points, boundary,
+    modality)`` per case, returning the parsed ``{inside, buckets}`` objects. This is the hermetic
+    proof of AC3/AC5/AC13 grouping semantics — no browser, no fixture file.
     """
-    # i0 vision(schematic)→vision · i1 vision(anatomical)→ignored · i2 proprioceptive(schematic)
-    # · i3 ""(schematic)→other · i4 "banana"(schematic, legacy/unknown)→other · i5 computed→ignored
-    placement = ["schematic", "anatomical", "schematic", "schematic", "schematic", "computed"]
+    js = (_VIZ / "viewer.js").read_text()
+    src = (
+        _extract_js_function(js, "pointInPolygon")
+        + "\n"
+        + _extract_js_function(js, "pointInBBox")
+        + "\n"
+        + _extract_js_function(js, "partitionByBoundary")
+        + "\nconst CASES = "
+        + json.dumps(cases)
+        + ";\nconst out = CASES.map((c) => partitionByBoundary(c.points, c.boundary, c.modality));"
+        + "\nprocess.stdout.write(JSON.stringify(out));\n"
+    )
+    return _run_node_json(src, tmp_path, "partitionByBoundary")
+
+
+def test_point_in_polygon_against_real_outline_and_square(tmp_path: Path) -> None:
+    """AC13: the pure ``pointInPolygon`` ray-cast test is correct against the REAL registered
+    ``BRAIN_OUTLINE`` polygons (all three views) and a synthetic square — executed under node.
+
+    Concatenates the real ``brain_outline.js`` asset with the extracted ``pointInPolygon`` so the
+    test runs against the shipped concave polygons, not a stand-in. Checks: each plane's polygon
+    centroid is inside; a far point is outside; the square's inside/outside/near-edge behaviour is
+    correct; degenerate (<3 vertices) and null inputs return ``false`` (no throw).
+    """
+    js = (_VIZ / "viewer.js").read_text()
+    outline_src = (_VIZ / "brain_outline.js").read_text()
+    driver = (
+        outline_src
+        + "\n"
+        + _extract_js_function(js, "pointInPolygon")
+        + "\nfunction centroid(poly){let x=0,y=0;for(const p of poly){x+=p[0];y+=p[1];}"
+        + "return [x/poly.length, y/poly.length];}"
+        + "\nconst square = "
+        + json.dumps(_SQUARE)
+        + ";"
+        + "\nconst res = {};"
+        + "\nfor (const k of ['top','front','side']) {"
+        + "\n  const poly = BRAIN_OUTLINE.planes[k].polygon;"
+        + "\n  res[k] = { centroidInside: pointInPolygon(centroid(poly), poly),"
+        + "\n             farOutside: pointInPolygon([1e9, 1e9], poly) };"
+        + "\n}"
+        + "\nres.square = {"
+        + "\n  inside: pointInPolygon([5,5], square),"
+        + "\n  outside: pointInPolygon([50,50], square),"
+        + "\n  nearInside: pointInPolygon([0.01,5], square),"
+        + "\n  nearOutside: pointInPolygon([-0.01,5], square),"
+        + "\n  onEdgeIsBool: typeof pointInPolygon([5,0], square) === 'boolean',"
+        + "\n  degenerate: pointInPolygon([1,1], [[0,0],[2,2]]),"
+        + "\n  nullPt: pointInPolygon(null, square),"
+        + "\n};"
+        + "\nprocess.stdout.write(JSON.stringify(res));\n"
+    )
+    res = _run_node_json(driver, tmp_path, "pointInPolygon")
+    for plane in ("top", "front", "side"):
+        assert res[plane]["centroidInside"] is True, f"{plane} outline centroid must be inside"
+        assert res[plane]["farOutside"] is False, f"a far point must be outside the {plane} outline"
+    sq = res["square"]
+    assert sq["inside"] is True and sq["outside"] is False
+    assert sq["nearInside"] is True, "a point just inside an edge must read inside"
+    assert sq["nearOutside"] is False, "a point just outside an edge must read outside"
+    assert sq["onEdgeIsBool"] is True, "an on-edge point must return a deterministic boolean"
+    assert sq["degenerate"] is False, "a <3-vertex polygon must be treated as no boundary (false)"
+    assert sq["nullPt"] is False, "a null point must be outside (false), never a throw"
+
+
+def test_partition_relocates_out_of_boundary_neurons_under_node(tmp_path: Path) -> None:
+    """AC3/AC5/AC13: every OUT-OF-BOUNDARY (or null-point) neuron lands in EXACTLY one titled box;
+    in-boundary neurons stay in the brain map and are never boxed.
+
+    Executes the real ``partitionByBoundary`` under node: ``inside[i]`` is true only for a present
+    point inside the boundary; outside/null points are relocated, each into exactly one bucket, with
+    the documented titles/order; no in-boundary neuron leaks into a box.
+    """
+    # i0 inside/vision→stays · i1 outside/vision→box · i2 outside/proprioceptive→box
+    # · i3 null/""→box(other) · i4 outside/"banana"(legacy)→box(other) · i5 inside/None→stays
+    points = [_IN, _OUT, _OUT, None, [99, 99], _IN]
     modality = ["vision", "vision", "proprioceptive", "", "banana", None]
-    [buckets] = _run_bucket_somaless([{"placement": placement, "modality": modality}], tmp_path)
+    [res] = _run_partition(
+        [{"points": points, "boundary": _SQUARE_BOUNDARY, "modality": modality}], tmp_path
+    )
+    buckets = res["buckets"]
+
+    # In/out flags: only the two inside points stay in the brain.
+    assert res["inside"] == [True, False, False, False, False, True]
 
     # Titles + order: hunger omitted (zero members); others in the fixed order.
     assert [b["title"] for b in buckets] == [
@@ -931,54 +1012,81 @@ def test_bucketsomaless_partitions_schematic_neurons_under_node(tmp_path: Path) 
         "other (untagged)",
     ]
     by_title = {b["title"]: b["indices"] for b in buckets}
-    assert by_title["vision (external)"] == [0]
+    assert by_title["vision (external)"] == [1]
     assert by_title["proprioceptive"] == [2]
-    # "" AND an unknown/legacy tag both fall into the catch-all — none dropped.
+    # A null-point neuron AND an unknown/legacy tag both fall into the catch-all — none dropped.
     assert by_title["other (untagged)"] == [3, 4]
 
-    # Partition property: every schematic index appears in exactly one bucket; no anatomical/
-    # computed neuron leaks in; no duplicates.
-    schematic_idx = {i for i, p in enumerate(placement) if p == "schematic"}
+    # Partition property: every relocated (inside==False) index appears in exactly one bucket; no
+    # in-boundary neuron leaks in; no duplicates.
+    relocated_idx = {i for i, ins in enumerate(res["inside"]) if not ins}
     all_indices = [i for b in buckets for i in b["indices"]]
-    assert sorted(all_indices) == sorted(schematic_idx)
+    assert sorted(all_indices) == sorted(relocated_idx)
     assert len(all_indices) == len(set(all_indices)), "a neuron appeared in more than one bucket"
 
 
-def test_bucketsomaless_full_tagset_fixed_order_under_node(tmp_path: Path) -> None:
-    """AC7: with all tags present the four documented boxes appear in the fixed order.
+def test_partition_full_tagset_fixed_order_under_node(tmp_path: Path) -> None:
+    """AC5: with all tags present (all neurons out-of-boundary) the four documented boxes appear in
+    the fixed order.
 
     Also proves ``null``/``undefined``/unknown modality values all collapse into the single
     catch-all box.
     """
-    placement = ["schematic"] * 6
+    points = [_OUT] * 6  # all outside the square → all relocated
     # vision, proprioceptive, hunger, then "" / null / unknown → all "other (untagged)".
     modality = ["vision", "proprioceptive", "hunger", "", None, "legacy-tag"]
-    [buckets] = _run_bucket_somaless([{"placement": placement, "modality": modality}], tmp_path)
-    assert [b["title"] for b in buckets] == list(_SOMALESS_TITLES)
-    other = next(b for b in buckets if b["title"] == "other (untagged)")
+    [res] = _run_partition(
+        [{"points": points, "boundary": _SQUARE_BOUNDARY, "modality": modality}], tmp_path
+    )
+    assert res["inside"] == [False] * 6
+    assert [b["title"] for b in res["buckets"]] == list(_SOMALESS_TITLES)
+    other = next(b for b in res["buckets"] if b["title"] == "other (untagged)")
     assert other["indices"] == [3, 4, 5]
 
 
-def test_bucketsomaless_omits_zero_member_and_empty_cases_under_node(tmp_path: Path) -> None:
-    """AC5 edge cases: zero-member buckets omitted; zero-schematic and no-``placement`` → empty."""
-    cases = [
-        # (a) only vision schematic → single box, hunger/proprioceptive/other omitted.
-        {"placement": ["schematic", "schematic"], "modality": ["vision", "vision"]},
-        # (b) no schematic neurons at all → empty result.
-        {"placement": ["anatomical", "computed"], "modality": ["vision", "hunger"]},
-        # (c) no placement array (legacy file) → empty result.
-        {"placement": None, "modality": ["vision"]},
-        # (d) schematic present but NO modality array → all fall into the catch-all.
-        {"placement": ["schematic", "schematic"], "modality": None},
-    ]
-    only_vision, no_schematic, no_placement, no_modality = _run_bucket_somaless(cases, tmp_path)
+def test_partition_bbox_boundary_under_node(tmp_path: Path) -> None:
+    """AC9 degrade #1: a view whose outline has no polygon uses a ``{kind:"bbox"}`` boundary; the
+    partition then routes the in/out test through ``pointInBBox`` (inclusive on the edges)."""
+    bbox = {"kind": "bbox", "bbox": {"minX": 0, "minY": 0, "maxX": 10, "maxY": 10}}
+    # inside · on-corner (inclusive → inside) · outside-x · outside-y
+    points = [[5, 5], [10, 10], [11, 5], [5, 11]]
+    modality = ["vision", "vision", "hunger", None]
+    [res] = _run_partition([{"points": points, "boundary": bbox, "modality": modality}], tmp_path)
+    assert res["inside"] == [True, True, False, False]
+    # Only the two out-of-bbox neurons are boxed: hunger (i2) and other/None (i3).
+    assert [b["title"] for b in res["buckets"]] == ["hunger", "other (untagged)"]
+    by_title = {b["title"]: b["indices"] for b in res["buckets"]}
+    assert by_title["hunger"] == [2]
+    assert by_title["other (untagged)"] == [3]
 
-    assert [b["title"] for b in only_vision] == ["vision (external)"]
-    assert only_vision[0]["indices"] == [0, 1]
-    assert no_schematic == []
-    assert no_placement == []
-    assert [b["title"] for b in no_modality] == ["other (untagged)"]
-    assert no_modality[0]["indices"] == [0, 1]
+
+def test_partition_omits_zero_member_and_empty_cases_under_node(tmp_path: Path) -> None:
+    """AC5/AC9 edge cases: zero-member buckets omitted; all-inside and ``boundary=null`` → all
+    inside with NO buckets; no-modality → everything relocated into the catch-all."""
+    cases = [
+        # (a) only vision out-of-boundary → single box, others omitted.
+        {"points": [_OUT, _OUT], "boundary": _SQUARE_BOUNDARY, "modality": ["vision", "vision"]},
+        # (b) all neurons inside the boundary → no boxes at all.
+        {"points": [_IN, _IN], "boundary": _SQUARE_BOUNDARY, "modality": ["vision", "hunger"]},
+        # (c) boundary disabled (null) → every neuron stays inside, buckets = [] (degrade #2).
+        {"points": [_OUT], "boundary": None, "modality": ["vision"]},
+        # (d) out-of-boundary present but NO modality array → all fall into the catch-all.
+        {"points": [_OUT, _OUT], "boundary": _SQUARE_BOUNDARY, "modality": None},
+    ]
+    only_vision, all_inside, no_boundary, no_modality = _run_partition(cases, tmp_path)
+
+    assert [b["title"] for b in only_vision["buckets"]] == ["vision (external)"]
+    assert only_vision["buckets"][0]["indices"] == [0, 1]
+
+    assert all_inside["inside"] == [True, True]
+    assert all_inside["buckets"] == []
+
+    # boundary=null → every neuron kept in the brain map, zero buckets.
+    assert no_boundary["inside"] == [True]
+    assert no_boundary["buckets"] == []
+
+    assert [b["title"] for b in no_modality["buckets"]] == ["other (untagged)"]
+    assert no_modality["buckets"][0]["indices"] == [0, 1]
 
 
 def test_viewer_html_has_three_zone_layout() -> None:
@@ -1013,13 +1121,13 @@ def test_viewer_html_has_three_zone_layout() -> None:
     assert i_flight > i_bottom, "flight-canvas (3D scene) must live in the bottom zone, not the top"
 
 
-def test_viewer_css_bottom_zone_is_full_width_and_brain_maximized() -> None:
-    """AC1/AC4: the bottom 3D zone spans full content width; the brain box drives its own size.
+def test_viewer_css_bottom_zone_full_width_brain_dynamic_and_panels_equal_height() -> None:
+    """AC1/AC4/AC8 (UC-60): the bottom 3D zone spans full width; the brain canvas is NO LONGER a
+    forced ``1/1`` square (its aspect is JS-driven to hug the outline — AC1); and the two top
+    panels are equal height via ``.top-zones { align-items: stretch }`` (AC8).
 
-    Structural CSS check: ``.top-zones`` is a 2-column grid (brain ‖ actions) that collapses to
-    one column at narrow widths (AC2 reflow); the brain canvas is a width-driven square via
-    ``aspect-ratio`` (a stable box NOT derived from the backing store — no ResizeObserver loop);
-    the soma-box strip height is capped so the brain keeps the panel majority (AC4).
+    Supersedes UC-59's "width-driven square" check (authorized test evolution). Structural CSS
+    assertion.
     """
     css = (_VIZ / "viewer.css").read_text()
     norm = re.sub(r"\s+", " ", css)
@@ -1028,28 +1136,39 @@ def test_viewer_css_bottom_zone_is_full_width_and_brain_maximized() -> None:
     assert re.search(
         r"@media[^{]*max-width[^{]*\{[^}]*\.top-zones[^}]*grid-template-columns:\s*1fr", norm
     ), ".top-zones must collapse to a single column at narrow widths (AC2 reflow)"
-    # Brain canvas is a width-driven square via aspect-ratio (stable box, no resize feedback).
+    # AC8: equal-height top panels — the top-zones row stretches both panels to the taller.
+    assert re.search(r"\.top-zones\s*\{[^}]*align-items:\s*stretch", norm), (
+        ".top-zones must use align-items: stretch for equal-height top panels (AC8)"
+    )
+    # AC1: #brain-canvas still declares an aspect-ratio (JS overrides it per view for the
+    # outline-hugging shape) but is NO LONGER a forced 1/1 square.
     assert re.search(r"#brain-canvas[^}]*aspect-ratio", norm), (
-        "#brain-canvas must be a width-driven square (aspect-ratio) — AC4 + no resize loop"
+        "#brain-canvas must still declare an aspect-ratio (JS-driven outline-hugging default)"
+    )
+    assert not re.search(r"#brain-canvas[^}]*aspect-ratio:\s*1\s*/\s*1", norm), (
+        "UC-60: #brain-canvas must no longer be a forced 1/1 square (AC1)"
     )
     # Full-width 3D flight canvas.
     assert re.search(r"#flight-canvas[^}]*width:\s*100%", norm), "#flight-canvas must be full width"
-    # Soma-box strip is present and height-capped so the brain keeps the majority (AC4).
+    # Soma-box strip is present.
     assert ".somaless-boxes" in css and ".soma-box" in css
 
 
-def test_viewer_html_has_somaless_boxes_host_and_documented_titles() -> None:
-    """AC5/AC7: the tagged-boxes host exists and the four documented box titles are present.
+def test_viewer_html_has_somaless_boxes_host_and_js_documents_titles() -> None:
+    """AC5/AC10 (UC-60): the tagged-boxes host exists (empty — JS fills it per view) and the four
+    box titles are authored in ``partitionByBoundary`` (the single source of truth).
 
-    The box titles are authored in ``bucketSomaless`` (the single source of truth) and mirrored
-    in the legend copy; assert both carry the exact documented wording incl. the catch-all.
+    UC-60 removed the descriptive brain-map legend that previously *also* carried the titles in
+    ``viewer.html`` (AC10 declutter), so the titles now live ONLY in JS and are injected into the
+    boxes at runtime — they are no longer static HTML text. This supersedes the UC-59 assertion
+    that the legend copy mirrored the titles (authorized test evolution).
     """
     html = (_VIZ / "viewer.html").read_text()
     js = (_VIZ / "viewer.js").read_text()
     assert 'id="somaless-boxes"' in html, "viewer.html must host the soma-less tagged boxes"
+    src = _extract_js_function(js, "partitionByBoundary")
     for title in _SOMALESS_TITLES:
-        assert title in js, f"bucketSomaless must title a box {title!r}"
-        assert title in html, f"viewer.html legend must document the box title {title!r}"
+        assert title in src, f"partitionByBoundary must title a box {title!r}"
 
 
 def test_viewer_js_wires_drawboxes_into_renderall() -> None:
