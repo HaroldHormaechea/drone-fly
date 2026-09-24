@@ -362,8 +362,8 @@ def test_reward_per_step_scale_integral_is_rate_invariant() -> None:
     from drone_fly.env.config import RewardConfig
     from drone_fly.env.reward import compute_reward
 
-    cfg = RewardConfig(enable_altitude_decoupling=False, altitude_hold_weight=0.0)
-    h = cfg.climb_target_height
+    cfg = RewardConfig()
+    h = cfg.altitude_target  # saturated altitude ⇒ the per-step altitude term is at its ceiling
 
     def scaled(scale):
         kw = dict(
@@ -373,8 +373,6 @@ def test_reward_per_step_scale_integral_is_rate_invariant() -> None:
             collided=False,
             completed=False,
             cfg=cfg,
-            airborne=True,
-            height_above_floor_prev=h,
             height_above_floor_curr=h,
         )
         return compute_reward(**kw, per_step_scale=scale) - compute_reward(**kw, per_step_scale=0.0)

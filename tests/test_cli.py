@@ -886,10 +886,9 @@ def test_clean_nothing_to_clean_exits_zero(tmp_path, monkeypatch, capsys) -> Non
 
 
 def test_uc51_curriculum_knobs_thread_into_trainconfig(tmp_path, monkeypatch) -> None:
-    """AC3: every exposed curriculum knob + ``ent_coef`` set in the YAML reaches the corresponding
-    ``TrainConfig`` field the callbacks consume. The YAML key ``collision_penalty_warmup_fraction``
-    maps to the ``TrainConfig`` field ``collision_curriculum_warmup_fraction`` (the CLI rename);
-    every other name is 1:1."""
+    """AC3: every exposed (surviving) curriculum knob + ``ent_coef`` set in the YAML reaches the
+    corresponding ``TrainConfig`` field the callbacks consume. UC-58 retired the collision-penalty
+    curriculum, so only the airborne-spawn curriculum knobs remain; every name is 1:1."""
     captured: dict = {}
 
     def fake_train(train_cfg, **kwargs):
@@ -906,11 +905,6 @@ def test_uc51_curriculum_knobs_thread_into_trainconfig(tmp_path, monkeypatch) ->
             "airborne_curriculum_enabled": False,
             "airborne_curriculum_warmup_fraction": 0.3,
             "airborne_curriculum_anneal_fraction": 0.9,
-            "collision_curriculum_enabled": False,
-            "collision_penalty_start": 3.0,
-            "collision_penalty_end": 90.0,
-            "collision_penalty_warmup_fraction": 0.2,
-            "collision_curriculum_hold_fraction": 0.3,
         },
     )
     assert main(["train", "--config", cfg]) == 0
@@ -919,12 +913,6 @@ def test_uc51_curriculum_knobs_thread_into_trainconfig(tmp_path, monkeypatch) ->
     assert tc.airborne_curriculum_enabled is False
     assert tc.airborne_curriculum_warmup_fraction == pytest.approx(0.3)
     assert tc.airborne_curriculum_anneal_fraction == pytest.approx(0.9)
-    assert tc.collision_curriculum_enabled is False
-    assert tc.collision_penalty_start == pytest.approx(3.0)
-    assert tc.collision_penalty_end == pytest.approx(90.0)
-    # The CLI rename: YAML collision_penalty_warmup_fraction -> TrainConfig field.
-    assert tc.collision_curriculum_warmup_fraction == pytest.approx(0.2)
-    assert tc.collision_curriculum_hold_fraction == pytest.approx(0.3)
 
 
 def test_uc51_total_timesteps_set_on_trainconfig_field_from_cfg_timesteps(
@@ -991,11 +979,6 @@ def test_uc51_set_to_default_is_byte_identical_to_omit(tmp_path, monkeypatch) ->
             "airborne_curriculum_enabled": d.airborne_curriculum_enabled,
             "airborne_curriculum_warmup_fraction": d.airborne_curriculum_warmup_fraction,
             "airborne_curriculum_anneal_fraction": d.airborne_curriculum_anneal_fraction,
-            "collision_curriculum_enabled": d.collision_curriculum_enabled,
-            "collision_penalty_start": d.collision_penalty_start,
-            "collision_penalty_end": d.collision_penalty_end,
-            "collision_penalty_warmup_fraction": d.collision_curriculum_warmup_fraction,
-            "collision_curriculum_hold_fraction": d.collision_curriculum_hold_fraction,
         },
         name="default.yaml",
     )
@@ -1003,6 +986,64 @@ def test_uc51_set_to_default_is_byte_identical_to_omit(tmp_path, monkeypatch) ->
 
     # Same run name ⇒ identical models_dir/logs_dir; set-to-default ⇒ identical everything else.
     assert captured_default["cfg"] == captured_bare["cfg"]
+
+
+# --------------------------------------------------------------------------- #
+# UC-58 — ``_apply_reward`` folds the takeoff-reward knobs (altitude_weight /
+# altitude_target) into the run's EnvConfig.reward for BOTH train and evaluate
+# (AC8). Mirrors the UC-57 ``_apply_control_rate`` pattern: it ALWAYS runs
+# (knobs carry the RewardConfig defaults) and is byte-identical to the default
+# reward when nothing is overridden. Hermetic — no training.
+# --------------------------------------------------------------------------- #
+def test_apply_reward_folds_defaults_into_a_fresh_env_config() -> None:
+    """AC8: with no env_config (no randomization) ``_apply_reward`` builds a fresh EnvConfig whose
+    reward carries the shipped defaults — the redesigned reward is default-on for a bare run."""
+    from drone_fly.cli import _apply_reward
+    from drone_fly.config import TrainRunConfig
+    from drone_fly.env.config import RewardConfig
+
+    rc = RewardConfig()
+    cfg = TrainRunConfig.from_mapping({"name": "x"})
+    reward = _apply_reward(None, cfg).reward
+    assert reward.altitude_weight == pytest.approx(rc.altitude_weight)
+    assert reward.altitude_target == pytest.approx(rc.altitude_target)
+
+
+def test_apply_reward_folds_overrides() -> None:
+    """AC8: explicit YAML knobs land on the folded reward."""
+    from drone_fly.cli import _apply_reward
+    from drone_fly.config import TrainRunConfig
+
+    cfg = TrainRunConfig.from_mapping({"name": "x", "altitude_weight": 0.5, "altitude_target": 1.5})
+    reward = _apply_reward(None, cfg).reward
+    assert reward.altitude_weight == pytest.approx(0.5)
+    assert reward.altitude_target == pytest.approx(1.5)
+
+
+def test_apply_reward_yields_identical_reward_for_train_and_eval() -> None:
+    """AC8 (train/eval symmetry): ``_apply_reward`` produces the SAME reward config for a train and
+    an evaluate run carrying the same knobs — an eval reproduces the trained reward exactly."""
+    from drone_fly.cli import _apply_reward
+    from drone_fly.config import EvaluateRunConfig, TrainRunConfig
+
+    knobs = {"altitude_weight": 0.35, "altitude_target": 1.25}
+    t = TrainRunConfig.from_mapping({"name": "x", **knobs})
+    e = EvaluateRunConfig.from_mapping({"name": "x", "checkpoint": "c.zip", **knobs})
+    assert _apply_reward(None, t).reward == _apply_reward(None, e).reward
+
+
+def test_apply_reward_preserves_other_env_config_fields() -> None:
+    """AC8: folding the reward replaces ONLY ``EnvConfig.reward`` — an existing env config's other
+    fields (here a customised episode) are preserved via ``dataclasses.replace``."""
+    from drone_fly.cli import _apply_reward
+    from drone_fly.config import TrainRunConfig
+    from drone_fly.env.config import EnvConfig, EpisodeConfig
+
+    base = EnvConfig(episode=EpisodeConfig(max_steps=123))
+    cfg = TrainRunConfig.from_mapping({"name": "x", "altitude_weight": 0.5})
+    out = _apply_reward(base, cfg)
+    assert out.episode.max_steps == 123  # untouched
+    assert out.reward.altitude_weight == pytest.approx(0.5)  # folded
 
 
 # --------------------------------------------------------------------------- #

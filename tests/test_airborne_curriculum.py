@@ -39,7 +39,8 @@ from drone_fly.train.airborne_curriculum import AirborneStartCurriculumCallback,
 from drone_fly.train.config import TrainConfig
 
 # High/low endpoints used by the pure-schedule tests. floor_z = 0.0 (the course floor), high_z = 1.0
-# (floor + climb_target_height), the same endpoints the training loop derives at wire time.
+# (floor + altitude_target — UC-58; was climb_target_height), the same endpoints the training loop
+# derives at wire time.
 _FLOOR_Z = 0.0
 _HIGH_Z = 1.0
 
@@ -374,9 +375,12 @@ def test_ac5_airborne_spawn_not_grounded_or_stuck_cut_within_warmup_window() -> 
 
 
 def test_ac5_airborne_spawn_then_fall_to_floor_and_rest_is_grounded_cut() -> None:
-    """AC5: grounded semantics are preserved — a drone that spawned airborne (took-off at step 0)
-    and then falls to the floor and RESTS there is grounded-cut exactly as UC-36, paying the
-    collision penalty (a failed flight), once the grounded counter fills its window."""
+    """AC5: grounded TERMINATION semantics are preserved — a drone that spawned airborne (took-off
+    at step 0) and then falls to the floor and RESTS there is grounded-cut exactly as UC-36, once
+    the grounded counter fills its window. UC-58: the cut is now PENALTY-FREE (``collided=False``) —
+    a gentle grounded-rest after a failed takeoff must not pay −collision_penalty, or it would
+    re-create the early-termination trap. The grounded detector still BOUNDS the episode; only a
+    genuine crash pays the penalty."""
     # Airborne spawn (z=1.0 ⇒ took_off), then rest on the floor (z=0.0, in the band, zero velocity).
     positions = [(0.0, 0.0, 1.0)] + [(0.0, 0.0, 0.0)] * 6
     env = _env_with(
@@ -395,7 +399,9 @@ def test_ac5_airborne_spawn_then_fall_to_floor_and_rest_is_grounded_cut() -> Non
     assert info["early_termination"] == "grounded", (
         "an airborne-spawned drone that falls to the floor and rests is grounded-cut (UC-36)"
     )
-    assert info["collided"] is True  # a grounded cut folds into crash accounting (paid penalty)
+    # UC-58: the grounded cut is penalty-free — it terminates the episode but does NOT pay
+    # −collision_penalty (only a genuine crash does). This is the anti-suicide guarantee (AC1/AC2).
+    assert info["collided"] is False
 
 
 # ============================================================================================
@@ -403,12 +409,12 @@ def test_ac5_airborne_spawn_then_fall_to_floor_and_rest_is_grounded_cut() -> Non
 # ============================================================================================
 def test_ac8_airborne_spawn_collects_reward_above_time_penalty_floor() -> None:
     """AC8 (reward clause, hermetic — numpy adapter, no pybullet): an airborne spawn that holds
-    altitude collects airborne/climb reward, so the episode return clears the −5 pure-time-penalty
-    floor a floored do-nothing episode is glued to. The cut is the penalty-free stuck cut (it
-    stayed airborne but made no forward progress), NOT a paid crash — so the positive survival
-    gradient is not swamped."""
+    altitude collects the sustained UC-58 altitude reward, so the episode return is strictly
+    positive (well clear of the 0 a floored do-nothing episode now earns — ``time_penalty`` is
+    retired). The cut is the penalty-free stuck cut (it stayed airborne but made no forward
+    progress), NOT a paid crash — so the positive altitude gradient is not swamped."""
     env = make_env(EnvConfig(), adapter="simple")
-    env.set_spawn_z(1.0)  # spawn at climb_target_height (the curriculum's early high endpoint)
+    env.set_spawn_z(1.0)  # spawn at altitude_target (the curriculum's early high endpoint)
     env.reset(seed=0)
     band = env._course.floor_z + env._et_floor_epsilon
     total = 0.0
@@ -424,9 +430,9 @@ def test_ac8_airborne_spawn_collects_reward_above_time_penalty_floor() -> None:
         if terminated or truncated:
             break
     assert airborne_steps > 0, "the drone must actually spend time airborne to collect the reward"
-    assert total > -5.0, (
-        f"airborne-spawn episode return {total:.3f} must clear the −5 time-penalty floor a floored "
-        f"do-nothing episode is glued to"
+    assert total > 0.0, (
+        f"airborne-spawn episode return {total:.3f} must be strictly positive — the sustained "
+        f"UC-58 altitude reward pays every airborne step (a floored do-nothing episode earns ≈ 0)"
     )
     # It stayed airborne but stopped progressing ⇒ penalty-free stuck cut, not a paid crash.
     assert info.get("early_termination") == "stuck"
@@ -470,7 +476,7 @@ def test_ac8_smoke_train_airborne_spawn_std_does_not_collapse(connectome) -> Non
         cb = AirborneStartCurriculumCallback(
             cfg,
             floor_z=ecfg.course.floor_z,
-            high_z=ecfg.course.floor_z + ecfg.reward.climb_target_height,
+            high_z=ecfg.course.floor_z + ecfg.reward.altitude_target,
         )
         model.learn(total_timesteps=4096, callback=cb)
 

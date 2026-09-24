@@ -181,16 +181,27 @@ def test_env_config_floor_start_is_last_field() -> None:
 
 
 def test_reward_config_field_order() -> None:
-    """UC-50 (extends UC-43/UC-39/UC-37): the three altitude-decoupling fields are appended
-    **last**, in order, AFTER the ground-break pair — so every pre-UC-50 positional ``RewardConfig``
-    call
-    (which never passed them) stays unshifted. The full appended tail is pinned exactly:
-    ``obstacle_penalty`` → ``airborne_bonus`` → ``climb_weight`` → ``climb_target_height`` →
-    ``climb_gamma`` → ``ground_break_weight`` → ``ground_break_height`` →
-    ``enable_altitude_decoupling`` → ``altitude_hold_weight`` → ``altitude_band`` (last)."""
+    """UC-58 (redesign): the four accreted altitude terms (``airborne_bonus`` / ``climb_*`` /
+    ``ground_break_*`` / the ``altitude_hold_*`` decoupling trio) and the per-step ``time_penalty``
+    are RETIRED and replaced by the two takeoff-reward fields ``altitude_weight`` /
+    ``altitude_target``, appended **last** in that order. The full tail is pinned exactly:
+    ``gate_bonus`` → ``completion_bonus`` → ``collision_penalty`` → ``obstacle_penalty`` →
+    ``altitude_weight`` → ``altitude_target`` (last)."""
     fields = [f.name for f in dataclasses.fields(RewardConfig)]
-    assert fields[-1] == "altitude_band"
-    assert fields[-9:] == [
+    assert fields[-1] == "altitude_target"
+    assert fields[-2:] == ["altitude_weight", "altitude_target"]
+    assert fields == [
+        "progress_weight",
+        "gate_bonus",
+        "completion_bonus",
+        "collision_penalty",
+        "obstacle_penalty",
+        "altitude_weight",
+        "altitude_target",
+    ]
+    # The retired fields are GONE — no dead/duplicate reward knobs remain (AC6).
+    for retired in (
+        "time_penalty",
         "airborne_bonus",
         "climb_weight",
         "climb_target_height",
@@ -200,47 +211,30 @@ def test_reward_config_field_order() -> None:
         "enable_altitude_decoupling",
         "altitude_hold_weight",
         "altitude_band",
-    ]
-    # UC-50 tail invariant: the three altitude fields are the last three, in order.
-    assert fields[-3:] == [
-        "enable_altitude_decoupling",
-        "altitude_hold_weight",
-        "altitude_band",
-    ]
-    # The UC-43 pair is immediately before the UC-50 trio (ground_break_height → altitude trio).
-    assert fields.index("ground_break_height") == fields.index("enable_altitude_decoupling") - 1
-    # The UC-39 tail invariant still holds (climb_gamma immediately precedes the ground-break pair).
-    assert fields.index("climb_gamma") == fields.index("ground_break_weight") - 1
-    # The UC-37 tail invariant still holds further back (obstacle_penalty → airborne_bonus).
-    assert fields.index("obstacle_penalty") == fields.index("airborne_bonus") - 1
+    ):
+        assert retired not in fields, f"retired RewardConfig field '{retired}' must be gone (UC-58)"
 
 
-def test_uc37_floor_start_and_airborne_bonus_defaults() -> None:
-    """UC-37 AC1/AC5/AC6a: the shipped defaults — floor start ON, and a small survival bonus that is
-    strictly net-positive against the per-step time penalty (a gradient toward takeoff)."""
-    assert EnvConfig().floor_start is True  # floor start is the new default (AC1)
+def test_uc58_altitude_reward_defaults() -> None:
+    """UC-58 AC3/AC4/AC8: the shipped takeoff-reward defaults — floor start ON, the sustained
+    level-based altitude reward with weight 0.2 / target 1.0 m, both in valid ranges (weight ≥ 0,
+    target > 0)."""
+    assert EnvConfig().floor_start is True  # floor start is the default (a takeoff must start low)
     rc = RewardConfig()
-    assert rc.airborne_bonus == pytest.approx(0.2)  # UC-42 raised the survival bonus 0.1→0.2 (AC5)
-    assert rc.airborne_bonus > rc.time_penalty  # net per airborne step is positive (AC6a)
+    assert rc.altitude_weight == pytest.approx(0.2)  # per-step payout at/above the target
+    assert rc.altitude_target == pytest.approx(1.0)  # saturation altitude above the floor (m)
+    assert rc.altitude_weight >= 0.0
+    assert rc.altitude_target > 0.0
 
 
-def test_uc39_climb_reward_defaults_and_gamma_coupling() -> None:
-    """UC-39 AC1/AC2: the shipped climb-shaping constants, and the load-bearing Note-4 coupling that
-    ``climb_gamma`` MUST equal the training discount γ for the potential-based shaping to stay
-    policy-invariant (Ng et al. 1999)."""
-    from drone_fly.train.config import TrainConfig
-
+def test_uc58_altitude_ceiling_below_completion_bonus() -> None:
+    """UC-58 AC5: the per-episode altitude-reward ceiling over the default 800-step budget
+    (``altitude_weight × 800 = 160``) is strictly below ``completion_bonus`` (200), so loitering at
+    altitude scores below completing the course (objective hierarchy)."""
     rc = RewardConfig()
-    assert rc.climb_weight == pytest.approx(2.0)
-    assert rc.climb_target_height == pytest.approx(1.0)
-    assert rc.climb_gamma == pytest.approx(0.99)
-    # Note 4: the climb discount must track the training γ or the shaping stops being invariant.
-    assert rc.climb_gamma == pytest.approx(TrainConfig().gamma)
-    # Per-episode climb bound γ·w·target ≪ completion, and ≤ a normalised 3-gate gate_bonus (AC2).
-    climb_bound = rc.climb_gamma * rc.climb_weight * rc.climb_target_height
-    assert climb_bound == pytest.approx(1.98)
-    assert climb_bound < rc.completion_bonus
-    assert climb_bound <= rc.gate_bonus / 3  # ≤ normalised gate bonus on the default 3-gate course
+    altitude_ceiling = rc.altitude_weight * 800  # max_steps 400 + steps_per_gate 200 × 2 gates
+    assert altitude_ceiling == pytest.approx(160.0)
+    assert altitude_ceiling < rc.completion_bonus
 
 
 def test_env_config_default_course_has_no_pads() -> None:
