@@ -42,12 +42,13 @@ const MAP_MIN_WEIGHT = 2 / 255; // skip near-rest neurons (perf; deviation-from-
 // "range" is quantization noise is NOT blown up to full brightness — it stays proportionally dim.
 const MAP_GAIN_MIN_RANGE = 0.05;
 
-// ---- UC-28: full-coverage body-schematic placement + modality overlay -----------------
+// ---- UC-28 / UC-59: soma-less afferents + modality overlay ----------------------------
 // Soma-less afferents are placed in a schematic fly body around the brain (placement ===
-// "schematic"); to keep them visually distinct from real-anatomy neurons (AC-6) — beyond the
-// spatial separation the placement itself gives — their heatmap splat is stamped at a reduced
-// weight so a schematic dot never reads as bright as a real soma.
-const SCHEMATIC_SPLAT_WEIGHT = 0.55;
+// "schematic"). UC-28 splatted them (fainter) into the brain-canvas; UC-59 RELOCATES them out
+// of the brain map entirely — the brain map now shows only real-anatomy neurons (maximized),
+// and the soma-less afferents render in the tagged boxes strip below it (see bucketSomaless /
+// buildSomalessBoxes / drawBoxes). Their animated activation (the signal the old faint splat
+// carried) is preserved in those per-box mini heatmaps.
 // Modality-tag overlay colours (AC-7). Exactly the recorder's RECORDED_MODALITIES set — vision
 // / proprioceptive / hunger. `damage` is intentionally absent (MaleCNS has no nociceptive
 // label; documented as unavailable, never faked). The overlay is drawn ON TOP of the hot
@@ -122,6 +123,7 @@ const state = {
   speed: 1,
   mapNorm: "frame", // brain-map intensity normalization: "frame" (per-frame) | "global" (AC5)
   mapCache: null, // per-view brain-map cache (screen positions, transform, global peak) — see ensureMapCache
+  somaBoxes: null, // UC-59: per-recording soma-less tagged boxes [{canvas, indices}] — see buildSomalessBoxes
   lastTs: 0,
   acc: 0,
 };
@@ -182,6 +184,7 @@ function loadDocument(doc, name) {
   renderMetaBar(doc, name);
   renderPositionSource(doc.meta.positions);
   renderFlightLegend(doc.meta.action_layout);
+  buildSomalessBoxes(); // UC-59: (re)build the soma-less tagged boxes for this recording
   renderOutcome(doc.outcome);
 
   // (Re)build the 3D flight scene: tear down any previous controller (AC9), create a fresh
@@ -247,6 +250,7 @@ function renderAll() {
   const n = state.data.frames.activations.length;
   el("frame-label").textContent = `frame ${state.frame} / ${Math.max(0, n - 1)}`;
   drawBrainMap();
+  drawBoxes(); // UC-59: animate the soma-less tagged boxes on the same timeline (AC6/AC8)
   drawActions();
   if (flight) flight.render();
 }
@@ -376,26 +380,34 @@ function ensureMapCache(W, H, pad) {
   const [a0, a1] = PROJECTIONS[plane] || PROJECTIONS.xz;
   const pts = projectedPoints();
   const anatomical = /^anatomical/i.test(pos.source || "");
-  const hasAny = pts.some(Boolean);
+  // UC-59: soma-less afferents (placement === "schematic") are relocated to the tagged boxes and
+  // no longer stamp into the brain map; size the transform to the REAL-ANATOMY points only so the
+  // brain fills the canvas (AC4). `anatPts` masks schematic entries to null.
+  const placement = pos.placement || null;
+  const isSchematic = (i) => placement != null && placement[i] === "schematic";
+  const anatPts = pts.map((p, i) => (isSchematic(i) ? null : p));
+  const hasAnat = anatPts.some(Boolean);
   // ⟨C1⟩ Missing-asset guard: `typeof` on an undeclared identifier never throws. Without the
   // asset (or for non-anatomical/legacy recordings) we degrade to auto-fit splats, no outline.
   const outline = typeof BRAIN_OUTLINE !== "undefined" ? BRAIN_OUTLINE : null;
-  const fixed = anatomical && hasAny && outline != null;
+  const fixed = anatomical && hasAnat && outline != null;
 
   let tf, poly = null;
   if (fixed) {
     const mn = outline.bbox3d.min, mx = outline.bbox3d.max;
-    // UC-28: widen the fixed transform to the UNION of the registered outline bbox and the
-    // display3d extent, so schematic body clusters placed OUTSIDE the brain bbox stay on-canvas
-    // (a bare outline-bbox transform would clip them off the edges).
-    const b = bounds(pts);
+    // UC-59: size the fixed transform to the UNION of the registered outline bbox and the
+    // NON-schematic points' bounds — so any real-anatomy neuron sitting just outside the outline
+    // still stays on-canvas, while the schematic body clusters (now boxed) no longer widen it.
+    const b = bounds(anatPts);
     const uMin = Math.min(mn[a0], b.minX), uMax = Math.max(mx[a0], b.maxX);
     const vMin = Math.min(mn[a1], b.minY), vMax = Math.max(mx[a1], b.maxY);
     tf = makeTransform(W, H, pad, uMin, uMax, vMin, vMax);
     const pl = outline.planes && outline.planes[viewKey];
     if (pl && pl.polygon) poly = pl.polygon.map(([u, v]) => tf.pt(u, v));
   } else {
-    const b = bounds(pts); // AC8 graceful degradation: fit the splats to whatever points exist
+    // AC8 graceful degradation: fit the splats to whatever real-anatomy points exist (schematic
+    // excluded); fall back to all points only when there are no non-schematic ones at all.
+    const b = bounds(hasAnat ? anatPts : pts);
     tf = makeTransform(W, H, pad, b.minX, b.maxX, b.minY, b.maxY);
   }
 
@@ -406,22 +418,20 @@ function ensureMapCache(W, H, pad) {
   const bw = Math.max(1, Math.ceil(W / MAP_SS)), bh = Math.max(1, Math.ceil(H / MAP_SS));
   const sx = new Int32Array(pts.length), sy = new Int32Array(pts.length);
   const valid = new Uint8Array(pts.length);
-  // UC-28 AC-6: per-neuron splat weight — schematic (body) neurons stamp fainter than real
-  // anatomy so they are visually distinct (in addition to being spatially separated).
-  const placement = pos.placement || null;
-  const wmul = new Float32Array(pts.length);
+  // UC-59: only real-anatomy neurons stamp into the brain map. Schematic entries are masked to
+  // null in anatPts, so they get valid=0 here — they contribute no splat, and drawModalityOverlay
+  // auto-drops their rings via the same !valid[i] guard (their modality now shows in the boxes).
   for (let i = 0; i < pts.length; i++) {
-    const p = pts[i];
-    if (!p) continue; // null coords on a non-default plane don't contribute there (as today)
+    const p = anatPts[i];
+    if (!p) continue; // null (schematic, or no coords on this plane) → does not contribute
     const xy = tf.pt(p[0], p[1]);
     sx[i] = Math.round(xy[0] / MAP_SS);
     sy[i] = Math.round(xy[1] / MAP_SS);
     valid[i] = 1;
-    wmul[i] = placement && placement[i] === "schematic" ? SCHEMATIC_SPLAT_WEIGHT : 1.0;
   }
 
   const cache = {
-    viewKey, W, H, plane, tf, poly, fixed, bw, bh, sx, sy, valid, wmul, ascale, aoffset,
+    viewKey, W, H, plane, tf, poly, fixed, bw, bh, sx, sy, valid, ascale, aoffset,
     gainLo, gainInv,
     buf: new Float32Array(bw * bh),
     img: el("brain-canvas").getContext("2d").createImageData(bw, bh),
@@ -435,7 +445,7 @@ function ensureMapCache(W, H, pad) {
 // Zero the accumulation buffer and stamp every active neuron's weighted Gaussian into it for
 // one frame's activations. Returns the frame's peak intensity (for per-frame normalization).
 function stampFrame(cache, act) {
-  const { buf, bw, bh, sx, sy, valid, wmul, ascale, aoffset, gainLo, gainInv } = cache;
+  const { buf, bw, bh, sx, sy, valid, ascale, aoffset, gainLo, gainInv } = cache;
   buf.fill(0);
   const R = MAP_KERNEL.R, size = MAP_KERNEL.size, kd = MAP_KERNEL.data;
   let peak = 0;
@@ -445,10 +455,10 @@ function stampFrame(cache, act) {
     // NOT the raw code: a resting neuron (real ≈ 0) is dark, so only deviations light up and fade
     // as the state evolves. Then apply per-neuron temporal auto-gain — stretch to this neuron's own
     // episode min→max (floored divisor) so slow, small swings still fill the dark→bright range and
-    // the map visibly animates. UC-28: schematic neurons stamp fainter (AC-6) via the per-neuron wmul.
+    // the map visibly animates. UC-59: only real-anatomy neurons reach here (valid[i]===0 for schematic).
     const mag = Math.abs(act[i] * ascale + aoffset);
     const g = clamp01((mag - gainLo[i]) * gainInv[i]);
-    const w = g * (wmul ? wmul[i] : 1.0);
+    const w = g;
     if (w < MAP_MIN_WEIGHT) continue; // perf: skip near-silent (near-rest) neurons
     const cx = sx[i], cy = sy[i];
     for (let dy = -R; dy <= R; dy++) {
@@ -495,6 +505,7 @@ function computeGlobalPeak(cache) {
 // or legacy recordings (AC8).
 function drawBrainMap() {
   const canvas = el("brain-canvas");
+  resizeBackingStore(canvas); // UC-59: DPR-aware backing store from the stable CSS box (AC4)
   const ctx = canvas.getContext("2d");
   const W = canvas.width, H = canvas.height, pad = 18;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -608,6 +619,127 @@ function drawActions() {
   ctx.strokeStyle = "rgba(255,255,255,0.7)";
   ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, H); ctx.stroke();
+}
+
+// ---- UC-59: soma-less tagged boxes ----------------------------------------------------
+// Shared DPR-aware backing-store sizer (mirrors createFlight3D.resize): set canvas.width/height
+// from the element's CURRENT CSS box × min(DPR, 2). Both #brain-canvas and each .soma-box-canvas
+// have a stable CSS box that is NOT derived from the backing store (brain = width-driven square via
+// aspect-ratio:1/1; boxes = fixed strip height), so re-deriving the backing store here never feeds
+// back into layout — no ResizeObserver oscillation. Returns true when the backing store changed.
+function resizeBackingStore(canvas) {
+  const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+  const cssW = canvas.clientWidth || canvas.width || 1;
+  const cssH = canvas.clientHeight || canvas.height || 1;
+  const w = Math.max(1, Math.round(cssW * dpr));
+  const h = Math.max(1, Math.round(cssH * dpr));
+  if (canvas.width === w && canvas.height === h) return false;
+  canvas.width = w;
+  canvas.height = h;
+  return true;
+}
+
+// Partition the soma-less (schematic) neurons into modality-tagged buckets. PURE, DOM-free, and
+// SELF-CONTAINED (its known-tag set is inlined — NO closure over module-scope constants) so it can
+// be extracted from source and executed under node in isolation. It is the SINGLE source of truth
+// for box grouping: both buildSomalessBoxes (DOM) and drawBoxes consume its output; neither
+// re-derives the partition. Contract (UC-59 AC5/AC7):
+//   - considers ONLY placement[i] === "schematic"; every such neuron lands in EXACTLY one bucket;
+//   - modality "vision" → "vision (external)", "proprioceptive" → "proprioceptive",
+//     "hunger" → "hunger"; ANY other value ("", null/undefined, or an unknown/legacy tag) →
+//     the catch-all "other (untagged)" (none dropped);
+//   - fixed bucket order (vision, proprioceptive, hunger, other); zero-member buckets omitted;
+//   - zero schematic neurons (or no placement array) → [] (empty result).
+function bucketSomaless(placement, modality) {
+  const KNOWN = ["vision", "proprioceptive", "hunger"];
+  const TITLES = { vision: "vision (external)", proprioceptive: "proprioceptive", hunger: "hunger" };
+  const OTHER_KEY = "other";
+  const OTHER_TITLE = "other (untagged)";
+  const order = ["vision", "proprioceptive", "hunger", OTHER_KEY];
+  const members = { vision: [], proprioceptive: [], hunger: [], other: [] };
+  const n = placement ? placement.length : 0;
+  for (let i = 0; i < n; i++) {
+    if (placement[i] !== "schematic") continue;
+    const tag = modality ? modality[i] : null;
+    if (KNOWN.indexOf(tag) !== -1) members[tag].push(i);
+    else members[OTHER_KEY].push(i);
+  }
+  const out = [];
+  for (const key of order) {
+    if (!members[key].length) continue;
+    out.push({ key, title: key === OTHER_KEY ? OTHER_TITLE : TITLES[key], indices: members[key] });
+  }
+  return out;
+}
+
+// (Re)build the soma-less tagged-boxes DOM for the current recording — one outlined box per
+// non-empty modality bucket (bucketSomaless is the single source of truth), each a top-center title
+// + a mini heatmap canvas that drawBoxes animates. Zero schematic (or a legacy file with no
+// placement) → a single muted note, no layout break. Records [{canvas, indices}] in state.somaBoxes.
+function buildSomalessBoxes() {
+  const host = el("somaless-boxes");
+  state.somaBoxes = null;
+  if (!host) return;
+  host.textContent = "";
+  if (!state.data) return;
+  const pos = state.data.meta.positions || {};
+  const buckets = bucketSomaless(pos.placement || null, state.data.meta.modality || null);
+  if (!buckets.length) {
+    const note = document.createElement("div");
+    note.className = "soma-empty";
+    note.textContent = "no soma-less afferents in this recording";
+    host.appendChild(note);
+    return;
+  }
+  const boxes = [];
+  for (const b of buckets) {
+    const box = document.createElement("div");
+    box.className = "soma-box";
+    const title = document.createElement("div");
+    title.className = "soma-box-title";
+    title.textContent = b.title;
+    const canvas = document.createElement("canvas");
+    canvas.className = "soma-box-canvas";
+    box.appendChild(title);
+    box.appendChild(canvas);
+    host.appendChild(box);
+    boxes.push({ canvas, indices: b.indices });
+  }
+  state.somaBoxes = boxes;
+}
+
+// Animate each tagged box's member neurons' live activation — a mini per-box heatmap, redrawn from
+// renderAll on play/scrub/speed (AC6/AC8). Reuses ensureActivationGain() (the exact
+// magnitude-from-rest→[0,1] signal the old schematic-body splat carried) and hotColormap(), packing
+// members into a near-square grid of cells. No-op for recordings with no soma-less afferents.
+function drawBoxes() {
+  const boxes = state.somaBoxes;
+  if (!boxes || !boxes.length || !state.data) return;
+  const act = state.data.frames.activations[state.frame];
+  if (!act) return;
+  const { lo, inv, ascale, aoffset } = ensureActivationGain();
+  for (const box of boxes) {
+    resizeBackingStore(box.canvas);
+    const ctx = box.canvas.getContext("2d");
+    const W = box.canvas.width, H = box.canvas.height;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = "#0a0c17"; // near-black backdrop, matching the other canvases
+    ctx.fillRect(0, 0, W, H);
+    const idx = box.indices, M = idx.length;
+    if (!M) continue;
+    const cols = Math.max(1, Math.round(Math.sqrt((M * W) / Math.max(1, H))));
+    const cw = W / cols, ch = H / Math.ceil(M / cols);
+    for (let k = 0; k < M; k++) {
+      const i = idx[k];
+      const mag = Math.abs(act[i] * ascale + aoffset);
+      const t = clamp01((mag - lo[i]) * inv[i]);
+      const rgb = hotColormap(t);
+      const x = (k % cols) * cw, y = Math.floor(k / cols) * ch;
+      ctx.fillStyle = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+      ctx.fillRect(Math.floor(x), Math.floor(y), Math.ceil(cw), Math.ceil(ch));
+    }
+  }
 }
 
 // ---- 3D flight scene ------------------------------------------------------------------
@@ -1154,6 +1286,24 @@ if (modalitySelect) {
 el("view-select").addEventListener("change", (ev) => {
   if (flight) flight.applyPreset(ev.target.value);
 });
+
+// UC-59: keep the DPR-aware anatomical canvases crisp when the layout reflows (window resize, the
+// top-zones collapsing to one column, the boxes strip wrapping). Both #brain-canvas and the
+// .soma-box-canvas elements have a stable CSS box that is INDEPENDENT of their backing store (brain:
+// width-driven square via aspect-ratio; boxes: fixed strip height), so re-deriving the backing store
+// in the redraw never changes the CSS box → no feedback loop (mirrors the #flight-canvas precedent).
+// Redraw only the anatomical panel; inert (guarded on state.data) before a file is loaded.
+if (typeof ResizeObserver !== "undefined") {
+  const anatomicalRO = new ResizeObserver(() => {
+    if (!state.data) return;
+    drawBrainMap();
+    drawBoxes();
+  });
+  const brainCanvas = el("brain-canvas");
+  const boxesHost = el("somaless-boxes");
+  if (brainCanvas) anatomicalRO.observe(brainCanvas);
+  if (boxesHost) anatomicalRO.observe(boxesHost);
+}
 
 function tick(ts) {
   if (!state.playing || !state.data) return;
