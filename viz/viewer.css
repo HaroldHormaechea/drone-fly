@@ -53,7 +53,11 @@ code { background: #00000040; padding: 1px 5px; border-radius: 4px; }
 .speed, .axes { color: var(--muted); }
 select { background: #0c0f1c; color: var(--ink); border: 1px solid #2a2f4a; border-radius: 5px; padding: 4px 6px; }
 
-.panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 18px; }
+/* UC-59 three-zone layout: brain ‖ actions on top (side-by-side, ~3:2), full-width 3D flight
+ * below. The top zones collapse to a single column at narrow viewport widths (AC2). */
+.top-zones { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 18px; align-items: start; }
+.bottom-zone { margin-top: 18px; }
+@media (max-width: 760px) { .top-zones { grid-template-columns: 1fr; } }
 .panel { background: var(--panel); border-radius: 10px; padding: 14px; }
 .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
 .panel-tools { display: flex; align-items: center; gap: 10px; }
@@ -95,7 +99,34 @@ footer { color: var(--muted); font-size: 12px; border-top: 1px solid #22263d; ma
 
 /* 3D flight panel: single reused 2D canvas, drag-to-orbit / wheel-to-zoom.
  * Fixed CSS height gives ResizeObserver a stable box (no layout feedback loop with
- * the DPR-scaled backing store); width tracks the panel. */
-#flight-canvas { width: 100%; height: 320px; cursor: grab; touch-action: none; }
+ * the DPR-scaled backing store); width tracks the panel. Full-width bottom zone → taller. */
+#flight-canvas { width: 100%; height: 420px; cursor: grab; touch-action: none; }
 #flight-canvas:active { cursor: grabbing; }
 #flight-3d-legend { margin-top: 6px; }
+
+/* UC-59 anatomical panel body: the maximized brain on top, the soma-less tagged-boxes strip
+ * below. The brain keeps the panel majority (AC4) via a square width-driven box; the boxes
+ * strip is height-capped. */
+.anatomical-body { display: flex; flex-direction: column; gap: 10px; }
+/* Width-driven square box: CSS height is derived from `aspect-ratio`, NOT the DPR-scaled
+ * backing store, so the ResizeObserver-driven resize never feeds back into layout (mirrors the
+ * #flight-canvas fixed-box precedent). */
+#brain-canvas { width: 100%; height: auto; aspect-ratio: 1 / 1; }
+
+/* Soma-less tagged boxes (UC-59): each an outlined container with a top-center title and a mini
+ * activation heatmap canvas. Laid out in a wrapping row, height-capped so the brain keeps the
+ * panel majority; scrolls if all four boxes are present. */
+.somaless-boxes {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  max-height: 168px; overflow-y: auto; align-content: flex-start;
+}
+.soma-box {
+  flex: 1 1 130px; min-width: 120px;
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 6px 8px 8px; background: #10131f;
+  border: 1px solid #2a2f4a; border-radius: 8px;
+}
+.soma-box-title { text-align: center; font-size: 11px; font-weight: 600; color: var(--ink); }
+/* Fixed strip height → stable, backing-store-independent CSS box (no resize feedback loop). */
+.soma-box-canvas { width: 100%; height: 46px; }
+.soma-empty { color: var(--muted); font-size: 12px; font-style: italic; padding: 6px 2px; }

@@ -37,7 +37,8 @@
       </label>
     </section>
 
-    <div class="panels">
+    <!-- UC-59 three-zone layout: brain ‖ actions on top, full-width 3D flight below. -->
+    <div class="top-zones">
       <section class="panel">
         <div class="panel-head">
           <h2>Anatomical brain map <span class="hint">(view presets)</span></h2>
@@ -69,7 +70,12 @@
             </label>
           </div>
         </div>
-        <canvas id="brain-canvas" width="440" height="440"></canvas>
+        <!-- Real-anatomy brain (maximized) on top; soma-less afferents relocated into the
+             tagged boxes strip below it (built per-recording by buildSomalessBoxes). -->
+        <div class="anatomical-body">
+          <canvas id="brain-canvas" width="440" height="440"></canvas>
+          <div id="somaless-boxes" class="somaless-boxes"></div>
+        </div>
         <div class="legend">
           activation intensity
           <span class="intensity-ramp" aria-hidden="true"></span>
@@ -77,19 +83,31 @@
           there, over a static registered brain outline
         </div>
         <div class="legend">
-          real-anatomy (brain) neurons render brighter; <em>schematic</em> body neurons
-          (soma-less afferents placed around the brain) are fainter and spatially separated.
-          Modality overlay rings tagged neurons:
-          <span class="dot mod-vision"></span> vision
-          <span class="dot mod-proprioceptive"></span> proprioceptive
-          <span class="dot mod-hunger"></span> hunger ·
+          The brain map shows only real-anatomy neurons (maximized). <em>Soma-less afferents</em>
+          are relocated into the tagged boxes below, grouped by modality —
+          <span class="dot mod-vision"></span> vision (external),
+          <span class="dot mod-proprioceptive"></span> proprioceptive,
+          <span class="dot mod-hunger"></span> hunger, and a catch-all
+          <b>other (untagged)</b> box for any afferent with no known modality tag (none dropped).
+          Each box animates its neurons' live activation over the timeline. The modality overlay
+          rings tagged real-anatomy neurons on the brain map ·
           <span class="hint">damage/nociception: unavailable (no MaleCNS label)</span>
         </div>
       </section>
 
       <section class="panel">
         <div class="panel-head">
-          <h2>Flight <span class="hint">(actions &amp; 3D path)</span></h2>
+          <h2>Flight actions <span class="hint">(control channels)</span></h2>
+        </div>
+        <canvas id="actions-canvas" width="440" height="230"></canvas>
+        <div class="legend" id="flight-legend"></div>
+      </section>
+    </div>
+
+    <div class="bottom-zone">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Flight <span class="hint">(3D path)</span></h2>
           <div class="panel-tools">
             <label class="axes">
               view
@@ -101,9 +119,7 @@
             </label>
           </div>
         </div>
-        <canvas id="actions-canvas" width="440" height="230"></canvas>
         <canvas id="flight-canvas" width="440" height="300"></canvas>
-        <div class="legend" id="flight-legend"></div>
         <div class="legend" id="flight-3d-legend">
           drag to rotate · wheel to zoom ·
           <span class="dot" style="background:#66bb6a"></span> start

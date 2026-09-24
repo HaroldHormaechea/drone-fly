@@ -100,6 +100,29 @@ def _options(select_body: str) -> list[tuple[str, bool]]:
     return out
 
 
+def _extract_js_function(js: str, name: str) -> str:
+    """Return the full source of ``function <name>(...) { ... }`` via balanced-brace matching.
+
+    Used both to isolate a pure function for hermetic execution under ``node`` (UC-59's
+    ``bucketSomaless``) and to scope a static assertion to one function's body. The extracted
+    functions contain no ``{``/``}`` inside string literals, so a simple depth counter is exact.
+    """
+    marker = f"function {name}"
+    start = js.find(marker)
+    assert start != -1, f"viewer.js has no `function {name}`"
+    brace = js.find("{", start)
+    assert brace != -1, f"`function {name}` has no body"
+    depth = 0
+    for i in range(brace, len(js)):
+        if js[i] == "{":
+            depth += 1
+        elif js[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return js[start : i + 1]
+    raise AssertionError(f"unbalanced braces extracting `function {name}`")
+
+
 # --- AC5/AC8/AC9 the recorded file carries the full viewer contract --------------------
 def test_recorded_file_satisfies_viewer_contract(recorded_doc: dict) -> None:
     doc = recorded_doc
@@ -783,17 +806,35 @@ def test_viewer_js_renders_display3d_full_coverage() -> None:
     assert "Math.min(" in js and "Math.max(" in js  # the union widening arithmetic
 
 
-def test_viewer_js_distinguishes_schematic_from_anatomical() -> None:
-    """AC-6: schematic (body) neurons are rendered distinguishably from real-anatomy neurons.
+def test_viewer_js_excludes_schematic_from_brain_stamp() -> None:
+    """UC-59 AC4: schematic (soma-less) neurons are EXCLUDED from the brain map stamp.
 
-    Static assertion: the viewer reads ``positions.placement`` and stamps ``"schematic"`` splats
-    at a reduced weight (a named constant) so a schematic dot never reads as bright as a real
-    soma — visual distinction on top of the spatial separation the placement gives.
+    Supersedes the UC-28 ``test_viewer_js_distinguishes_schematic_from_anatomical`` (authorized
+    test evolution): UC-28 splatted schematic neurons into ``brain-canvas`` at a reduced weight
+    (``SCHEMATIC_SPLAT_WEIGHT``); UC-59 relocates them entirely into the tagged boxes strip, so
+    the brain map is maximized to real-anatomy neurons only (AC4). The down-weight constant is
+    therefore gone, and instead ``ensureMapCache`` masks schematic entries so they never stamp.
+
+    Static assertion (CI is headless): the viewer still reads ``positions.placement`` and keys on
+    ``"schematic"``, but the old splat-weight constant is removed and the cache build masks
+    schematic points to ``null`` (→ ``valid=0``) so they contribute no splat to the brain map.
     """
     js = (_VIZ / "viewer.js").read_text()
     assert "placement" in js
     assert '"schematic"' in js or "'schematic'" in js
-    assert "SCHEMATIC_SPLAT_WEIGHT" in js, "viewer.js must down-weight schematic splats (AC-6)"
+    # The UC-28 schematic splat is gone — schematic neurons no longer stamp into the brain map.
+    assert "SCHEMATIC_SPLAT_WEIGHT" not in js, (
+        "UC-59 removes the schematic splat: SCHEMATIC_SPLAT_WEIGHT must be gone from the brain map"
+    )
+    # ensureMapCache masks schematic entries so they are excluded from the stamp (AC4).
+    cache_src = _extract_js_function(js, "ensureMapCache")
+    assert "isSchematic" in cache_src, (
+        "ensureMapCache must identify schematic neurons to exclude them from the brain stamp"
+    )
+    normalised = re.sub(r"\s+", "", cache_src)
+    assert "isSchematic(i)?null:p" in normalised, (
+        "ensureMapCache must mask schematic points to null so they get valid=0 (no brain splat)"
+    )
 
 
 def test_viewer_js_has_modality_overlay_toggle() -> None:
@@ -833,3 +874,238 @@ def test_viewer_html_documents_damage_unavailable() -> None:
     """AC-7 honesty: the viewer legend documents damage/nociception as unavailable (no fake tag)."""
     html = (_VIZ / "viewer.html").read_text().lower()
     assert "damage" in html and "unavailable" in html
+
+
+# --- UC-59: three-zone layout + animated tagged soma-less boxes -------------------------
+# CI is headless (no browser), so UC-59's structure/wiring is validated statically and the
+# grouping logic is proven by EXECUTING the pure `bucketSomaless` partition under `node`. The
+# visual verification (AC10 — a real render of the three zones) CANNOT run in this sandbox (no
+# chromium/chrome/playwright) and is a documented MANUAL step (see the coverage summary + PR).
+
+_SOMALESS_TITLES = ("vision (external)", "proprioceptive", "hunger", "other (untagged)")
+
+
+def _run_bucket_somaless(cases: list[dict], tmp_path: Path) -> list[list[dict]]:
+    """Execute the *real* ``bucketSomaless`` from viewer.js under node against synthetic inputs.
+
+    Extracts the pure, self-contained partition function from source (no closure over module
+    scope — it is written to be node-executable in isolation) and drives it with the given
+    ``{placement, modality}`` cases, returning the parsed bucket lists. This is the hermetic
+    proof of AC5/AC7/AC11 grouping semantics — no browser, no fixture file.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available — cannot execute bucketSomaless")
+    src = _extract_js_function((_VIZ / "viewer.js").read_text(), "bucketSomaless")
+    driver = (
+        src
+        + "\nconst CASES = "
+        + json.dumps(cases)
+        + ";\nconst out = CASES.map((c) => bucketSomaless(c.placement, c.modality));"
+        + "\nprocess.stdout.write(JSON.stringify(out));\n"
+    )
+    script = tmp_path / "bucket_driver.mjs"
+    script.write_text(driver)
+    result = subprocess.run([node, str(script)], capture_output=True, text=True)
+    assert result.returncode == 0, f"node execution of bucketSomaless failed:\n{result.stderr}"
+    return json.loads(result.stdout)
+
+
+def test_bucketsomaless_partitions_schematic_neurons_under_node(tmp_path: Path) -> None:
+    """AC5/AC7/AC11: every soma-less (schematic) neuron lands in EXACTLY one titled bucket.
+
+    Executes the real partition under node: only ``placement[i]==="schematic"`` neurons are
+    considered, each appears in exactly one bucket, the titles/order are the documented set, and
+    non-schematic neurons are ignored entirely.
+    """
+    # i0 vision(schematic)→vision · i1 vision(anatomical)→ignored · i2 proprioceptive(schematic)
+    # · i3 ""(schematic)→other · i4 "banana"(schematic, legacy/unknown)→other · i5 computed→ignored
+    placement = ["schematic", "anatomical", "schematic", "schematic", "schematic", "computed"]
+    modality = ["vision", "vision", "proprioceptive", "", "banana", None]
+    [buckets] = _run_bucket_somaless([{"placement": placement, "modality": modality}], tmp_path)
+
+    # Titles + order: hunger omitted (zero members); others in the fixed order.
+    assert [b["title"] for b in buckets] == [
+        "vision (external)",
+        "proprioceptive",
+        "other (untagged)",
+    ]
+    by_title = {b["title"]: b["indices"] for b in buckets}
+    assert by_title["vision (external)"] == [0]
+    assert by_title["proprioceptive"] == [2]
+    # "" AND an unknown/legacy tag both fall into the catch-all — none dropped.
+    assert by_title["other (untagged)"] == [3, 4]
+
+    # Partition property: every schematic index appears in exactly one bucket; no anatomical/
+    # computed neuron leaks in; no duplicates.
+    schematic_idx = {i for i, p in enumerate(placement) if p == "schematic"}
+    all_indices = [i for b in buckets for i in b["indices"]]
+    assert sorted(all_indices) == sorted(schematic_idx)
+    assert len(all_indices) == len(set(all_indices)), "a neuron appeared in more than one bucket"
+
+
+def test_bucketsomaless_full_tagset_fixed_order_under_node(tmp_path: Path) -> None:
+    """AC7: with all tags present the four documented boxes appear in the fixed order.
+
+    Also proves ``null``/``undefined``/unknown modality values all collapse into the single
+    catch-all box.
+    """
+    placement = ["schematic"] * 6
+    # vision, proprioceptive, hunger, then "" / null / unknown → all "other (untagged)".
+    modality = ["vision", "proprioceptive", "hunger", "", None, "legacy-tag"]
+    [buckets] = _run_bucket_somaless([{"placement": placement, "modality": modality}], tmp_path)
+    assert [b["title"] for b in buckets] == list(_SOMALESS_TITLES)
+    other = next(b for b in buckets if b["title"] == "other (untagged)")
+    assert other["indices"] == [3, 4, 5]
+
+
+def test_bucketsomaless_omits_zero_member_and_empty_cases_under_node(tmp_path: Path) -> None:
+    """AC5 edge cases: zero-member buckets omitted; zero-schematic and no-``placement`` → empty."""
+    cases = [
+        # (a) only vision schematic → single box, hunger/proprioceptive/other omitted.
+        {"placement": ["schematic", "schematic"], "modality": ["vision", "vision"]},
+        # (b) no schematic neurons at all → empty result.
+        {"placement": ["anatomical", "computed"], "modality": ["vision", "hunger"]},
+        # (c) no placement array (legacy file) → empty result.
+        {"placement": None, "modality": ["vision"]},
+        # (d) schematic present but NO modality array → all fall into the catch-all.
+        {"placement": ["schematic", "schematic"], "modality": None},
+    ]
+    only_vision, no_schematic, no_placement, no_modality = _run_bucket_somaless(cases, tmp_path)
+
+    assert [b["title"] for b in only_vision] == ["vision (external)"]
+    assert only_vision[0]["indices"] == [0, 1]
+    assert no_schematic == []
+    assert no_placement == []
+    assert [b["title"] for b in no_modality] == ["other (untagged)"]
+    assert no_modality[0]["indices"] == [0, 1]
+
+
+def test_viewer_html_has_three_zone_layout() -> None:
+    """AC1/AC2/AC3: brain top-left ‖ actions top-right, full-width 3D flight below.
+
+    Structural (CI is headless): the two upper panels live inside ``.top-zones`` (brain first =
+    left, actions second = right) and the 3D flight scene lives in the ``.bottom-zone`` after
+    them. Index ordering proves the zone membership without executing the layout.
+    """
+    html = (_VIZ / "viewer.html").read_text()
+    i_top = html.find('class="top-zones"')
+    i_bottom = html.find('class="bottom-zone"')
+    assert i_top != -1, "viewer.html must define a .top-zones container"
+    assert i_bottom != -1, "viewer.html must define a .bottom-zone container"
+    assert i_top < i_bottom, ".top-zones must come before .bottom-zone"
+
+    i_brain = html.find('id="brain-canvas"')
+    i_actions = html.find('id="actions-canvas"')
+    i_flight = html.find('id="flight-canvas"')
+    for name, idx in (
+        ("brain-canvas", i_brain),
+        ("actions-canvas", i_actions),
+        ("flight-canvas", i_flight),
+    ):
+        assert idx != -1, f"viewer.html missing #{name}"
+
+    # Brain (top-left) and actions (top-right) are BOTH inside the top zone, brain first.
+    assert i_top < i_brain < i_actions < i_bottom, (
+        "top zone must hold brain (left) then actions (right), both above the bottom zone"
+    )
+    # The 3D flight scene is the full-width bottom zone — a SEPARATE zone from the actions (AC3).
+    assert i_flight > i_bottom, "flight-canvas (3D scene) must live in the bottom zone, not the top"
+
+
+def test_viewer_css_bottom_zone_is_full_width_and_brain_maximized() -> None:
+    """AC1/AC4: the bottom 3D zone spans full content width; the brain box drives its own size.
+
+    Structural CSS check: ``.top-zones`` is a 2-column grid (brain ‖ actions) that collapses to
+    one column at narrow widths (AC2 reflow); the brain canvas is a width-driven square via
+    ``aspect-ratio`` (a stable box NOT derived from the backing store — no ResizeObserver loop);
+    the soma-box strip height is capped so the brain keeps the panel majority (AC4).
+    """
+    css = (_VIZ / "viewer.css").read_text()
+    norm = re.sub(r"\s+", " ", css)
+    # Two-column top grid that reflows to a single column at narrow widths (AC2).
+    assert ".top-zones" in css and "grid-template-columns" in css
+    assert re.search(
+        r"@media[^{]*max-width[^{]*\{[^}]*\.top-zones[^}]*grid-template-columns:\s*1fr", norm
+    ), ".top-zones must collapse to a single column at narrow widths (AC2 reflow)"
+    # Brain canvas is a width-driven square via aspect-ratio (stable box, no resize feedback).
+    assert re.search(r"#brain-canvas[^}]*aspect-ratio", norm), (
+        "#brain-canvas must be a width-driven square (aspect-ratio) — AC4 + no resize loop"
+    )
+    # Full-width 3D flight canvas.
+    assert re.search(r"#flight-canvas[^}]*width:\s*100%", norm), "#flight-canvas must be full width"
+    # Soma-box strip is present and height-capped so the brain keeps the majority (AC4).
+    assert ".somaless-boxes" in css and ".soma-box" in css
+
+
+def test_viewer_html_has_somaless_boxes_host_and_documented_titles() -> None:
+    """AC5/AC7: the tagged-boxes host exists and the four documented box titles are present.
+
+    The box titles are authored in ``bucketSomaless`` (the single source of truth) and mirrored
+    in the legend copy; assert both carry the exact documented wording incl. the catch-all.
+    """
+    html = (_VIZ / "viewer.html").read_text()
+    js = (_VIZ / "viewer.js").read_text()
+    assert 'id="somaless-boxes"' in html, "viewer.html must host the soma-less tagged boxes"
+    for title in _SOMALESS_TITLES:
+        assert title in js, f"bucketSomaless must title a box {title!r}"
+        assert title in html, f"viewer.html legend must document the box title {title!r}"
+
+
+def test_viewer_js_wires_drawboxes_into_renderall() -> None:
+    """AC6/AC8: the tagged boxes animate on the shared timeline — drawBoxes runs in renderAll.
+
+    Static assertion: ``renderAll`` (which fires on play/scrub/speed) invokes ``drawBoxes()``,
+    which reuses ``ensureActivationGain`` + ``hotColormap`` (the exact signal the old splat
+    carried), and the boxes are (re)built per recording via ``buildSomalessBoxes``.
+    """
+    js = (_VIZ / "viewer.js").read_text()
+    render_all = _extract_js_function(js, "renderAll")
+    assert "drawBoxes()" in render_all, "renderAll must call drawBoxes() (AC6/AC8 animation)"
+    # drawBoxes reuses the existing magnitude-from-rest gain + hot colormap (preserved signal).
+    draw_boxes = _extract_js_function(js, "drawBoxes")
+    assert "ensureActivationGain()" in draw_boxes
+    assert "hotColormap(" in draw_boxes
+    # The boxes are rebuilt for each loaded recording.
+    assert "function buildSomalessBoxes" in js
+    assert "buildSomalessBoxes()" in js, "buildSomalessBoxes must be invoked on load"
+
+
+def test_viewer_js_boxes_are_responsive_without_resize_loop() -> None:
+    """AC1 (responsive sizing) without the fixed-canvas pitfall: a DPR-aware backing store + a
+    guarded ResizeObserver that cannot feed back into layout (canvases have a backing-store-
+    independent CSS box, so re-deriving the backing store never changes the CSS box).
+    """
+    js = (_VIZ / "viewer.js").read_text()
+    assert "function resizeBackingStore" in js, "viewer.js must define the shared DPR-aware sizer"
+    assert "resizeBackingStore(" in js
+    assert "ResizeObserver" in js  # (also asserted by the 3D-panel test; kept local for clarity)
+
+
+def test_screenshot_helper_exists_and_parses_but_is_not_imported(tmp_path: Path) -> None:
+    """AC10: the dev-only headless-render helper ships under scripts/, parses under node, and is
+    NEVER imported by the test suite (keeping the gate hermetic).
+
+    The real render (AC10) cannot be produced in THIS sandbox (no chromium/chrome/playwright), so
+    the helper degrades honestly and the visual inspection is a documented MANUAL step referenced
+    in the PR — not asserted here. We only prove the helper exists and is syntactically valid.
+    """
+    helper = _REPO_ROOT / "scripts" / "screenshot_viewer.mjs"
+    assert helper.is_file(), "missing scripts/screenshot_viewer.mjs (dev-only render helper)"
+    # It must NOT leak into the hermetic gate: no OTHER pytest module imports/runs it. (This file
+    # is excluded — it names the helper only in prose/assertions above, never executing it.)
+    this_file = Path(__file__).resolve()
+    tests_dir = _REPO_ROOT / "tests"
+    for test_file in tests_dir.rglob("*.py"):
+        if test_file.resolve() == this_file:
+            continue
+        text = test_file.read_text()
+        assert "screenshot_viewer" not in text, (
+            f"{test_file.name} references screenshot_viewer — the helper must stay out of the "
+            "hermetic pytest gate (it needs a real browser; run it manually for AC10)"
+        )
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available — cannot `node --check` the helper")
+    result = subprocess.run([node, "--check", str(helper)], capture_output=True, text=True)
+    assert result.returncode == 0, f"`node --check screenshot_viewer.mjs` failed:\n{result.stderr}"
