@@ -1176,11 +1176,29 @@ Enable recording in a train/evaluate config with `record: true` (tune cadence vi
 frames land in that run's `training/<name>/recordings/`. Open `viz/viewer.html` in a browser
 (dependency-free, `file://`-safe) and load a recording — no server or build step.
 
-Two panels: an MRI/fMRI-style activation heatmap over a static, spatially-registered MaleCNS brain
-outline (`viz/brain_outline.js`, `top-down` / `front` / `side` presets + a per-frame ↔ global
-intensity toggle), and a **3D flight view** driven by the recorded `meta.course` geometry. 3D
-controls: **drag** to **rotate**, mouse **wheel** to **zoom**, the same view presets, and a `0.25`×
-slow-inspection speed. Regenerate the outline with `uv run python scripts/build_brain_outline.py`.
+**Three-zone layout (UC-59).** The top row holds two side-by-side panels — the **anatomical brain
+map** (left, given the majority of the row) and the **flight actions** trace panel (right) — and the
+**3D flight view** spans the full content width in a panel below them, as the primary focus. The top
+row collapses to a single column at narrow viewport widths. The brain map is an MRI/fMRI-style
+activation heatmap over a static, spatially-registered MaleCNS brain outline (`viz/brain_outline.js`,
+`top-down` / `front` / `side` presets + a per-frame ↔ global intensity toggle). The 3D flight view is
+driven by the recorded `meta.course` geometry — controls: **drag** to **rotate**, mouse **wheel** to
+**zoom**, the same view presets, and a `0.25`× slow-inspection speed. Regenerate the outline with
+`uv run python scripts/build_brain_outline.py`.
+
+The canvases are DPR-aware and resize with the layout (the brain map keeps a square, width-driven box
+and the boxes strip a fixed height, so resizing never oscillates). To visually verify the layout
+against an actual render, use the dev-only headless-browser screenshot helper (not shipped in the
+viewer, not a runtime dependency, never imported by the test suite):
+
+```
+npm i -D playwright && npx playwright install chromium   # one-time, local dev only
+node scripts/screenshot_viewer.mjs [out.png]             # renders viz/viewer.html with a synthetic recording
+```
+
+It renders the viewer with a small inline synthetic recording and saves a PNG. With no headless
+Chromium available it prints a clear message and exits non-zero rather than pretending to succeed, so
+CI stays hermetic — run it locally where Chromium is installed to produce the image.
 
 The 3D flight view renders the course's **landing pads** and **obstacles** as floor-anchored discs,
 each with a legend entry. Pads are coloured by kind — **recharge** pads are green (`#00e676`),
@@ -1213,15 +1231,28 @@ schematic render coords live in a separate always-finite `display3d` field, flag
 `placement="schematic"`. A **brain-scale guardrail** keeps the brain dominant: body clusters are
 offset by a bounded multiple of the brain's own bounding box (`MAX_BODY_OFFSET_FACTOR` +
 `REGION_CLUSTER_RADIUS_FRAC`), so the brain stays ≥ `BRAIN_DOMINANCE_MIN_FRACTION` of the total
-rendered extent. In the viewer, schematic (body) neurons are drawn fainter than real-anatomy
-neurons and are spatially separated, so a schematic dot is never mistaken for a real soma.
+rendered extent.
+
+**Soma-less afferents live in tagged boxes (UC-59).** The brain map itself now shows **only
+real-anatomy neurons** (maximized to fill the panel). Soma-less afferents (`placement="schematic"`)
+are no longer splatted into the brain — they are relocated into a strip of **outlined, top-titled
+boxes** below the map, grouped by their `meta.modality` tag: **vision (external)**,
+**proprioceptive**, **hunger**, and a catch-all **other (untagged)** box that absorbs any afferent
+with no known modality tag (empty string, unknown, or legacy). Every soma-less neuron lands in
+exactly one box and none are dropped; empty boxes are omitted and a recording with no soma-less
+afferents shows a short muted note. Each box is a mini heatmap that **animates its members' live
+activation** over the timeline (play / scrub / speed), preserving the signal the old schematic-body
+splat carried, just reorganized. The partition is a single pure function (`bucketSomaless`) shared by
+the box builder and the animator.
 
 **Modality toggle (UC-28).** The brain-map panel has a **modality** selector that overlays rings
 on the UC-13 modality populations — `vision`, `proprioceptive`, and `hunger` — on top of the hot
-activation colormap (it does not replace the colours). The populations are the real biological
-labels tagged per-neuron in `meta.modality` at record time (fail-soft: a modality absent from the
-slice is simply not tagged). `damage`/nociception is **unavailable** — MaleCNS ships no nociceptive
-label and there is no modality rule for it — so it is documented as absent rather than faked.
+activation colormap (it does not replace the colours). Since UC-59 the rings apply to the
+real-anatomy neurons shown on the brain map; the modality of soma-less afferents is now conveyed by
+their tagged boxes (above) instead. The populations are the real biological labels tagged per-neuron
+in `meta.modality` at record time (fail-soft: a modality absent from the slice is simply not tagged).
+`damage`/nociception is **unavailable** — MaleCNS ships no nociceptive label and there is no modality
+rule for it — so it is documented as absent rather than faked.
 
 **Positions are provisioned at slice time, not per training run (UC-27).** When a connectome
 artifact is created — by `prune` (the slice), `fetch-connectome` (the base download), or
