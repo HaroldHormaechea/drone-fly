@@ -67,4 +67,4 @@ Statuses:
 | 55 | [use-cases/55-inner-loop-rate-controller.md](use-cases/55-inner-loop-rate-controller.md) | Inner-loop body-rate controller (acro flight controller) | done | 2026-09-23 |
 | 56 | [use-cases/56-meteor75-dynamics-domain-randomization.md](use-cases/56-meteor75-dynamics-domain-randomization.md) | Retune drone dynamics to a Meteor75 Pro analog + wide domain randomization | done | 2026-09-23 |
 | 57 | [use-cases/57-raise-decouple-control-frequency.md](use-cases/57-raise-decouple-control-frequency.md) | Raise & decouple control frequency (policy Hz vs inner-loop/physics Hz) | done | 2026-09-23 |
-| 58 | [use-cases/58-takeoff-reward-redesign.md](use-cases/58-takeoff-reward-redesign.md) | Takeoff-oriented reward redesign (eliminate the early-termination trap) | pending | 2026-09-24 |
+| 58 | [use-cases/58-takeoff-reward-redesign.md](use-cases/58-takeoff-reward-redesign.md) | Takeoff-oriented reward redesign (eliminate the early-termination trap) | done | 2026-09-24 |

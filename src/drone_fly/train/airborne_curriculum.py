@@ -7,7 +7,8 @@ never experiences teaches nothing. The bottleneck is therefore takeoff **discove
 shape. This curriculum attacks discovery directly, without touching the reward function.
 
 Instead of always spawning on the floor (UC-37 forces spawn z → ``course.floor_z``), the training
-envs spawn the drone at an initial altitude that begins at/near ``climb_target_height`` early in
+envs spawn the drone at an initial altitude that begins at/near the reward ``altitude_target``
+(UC-58; was ``climb_target_height`` before the reward redesign) early in
 training and **anneals linearly toward the floor** as training progresses. Early on the policy
 experiences the rewarded airborne region from step 0 and only has to learn to *maintain* altitude
 (far easier than discovering takeoff); as the spawn anneals to the floor it must learn takeoff
@@ -15,15 +16,14 @@ itself, now bootstrapped from a hover-competent policy. The terminal state of th
 UC-37 floored start, which is also the eval/recording spawn — so the takeoff measurement is
 unchanged.
 
-Two pieces live here, mirroring :mod:`drone_fly.train.collision_curriculum`:
+Two pieces live here (the sibling collision-penalty curriculum was retired in UC-58):
 
 * :func:`spawn_z_at` — the **pure** schedule. Absolute spawn z: held at ``high_z`` through a
   ``cfg.airborne_curriculum_warmup_fraction`` start-delay (UC-51), then linear anneal ``high_z`` →
   ``floor_z`` across ``[warmup, anneal] * cfg.total_timesteps`` steps, then held **exactly** at
   ``floor_z``. Clamped to ``[floor_z, high_z]`` and monotone non-increasing. A function of
   ``num_timesteps`` only (stateless), so a resumed run continues the schedule correctly. The
-  airborne ``warmup_fraction`` is a *hold* (start-delay), unlike the collision curriculum's
-  ``warmup_fraction`` which is the ramp width.
+  airborne ``warmup_fraction`` is a *hold* (start-delay), not a ramp width.
 * :class:`AirborneStartCurriculumCallback` — the SB3 callback that, at the start of training and of
   every rollout, computes :func:`spawn_z_at` for the current ``num_timesteps`` and pushes it into
   every base :class:`~drone_fly.env.racing_env.RaceEnv` via ``training_env.env_method("set_spawn_z",

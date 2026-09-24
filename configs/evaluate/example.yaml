@@ -33,3 +33,8 @@ adapter: simple
 # rate_ki: 0.1
 # rate_kd: 0.02
 # rate_max_body_rate: 4.0
+# --- Takeoff reward (UC-58) ---
+# Mirror the train reward knobs so an eval reproduces the trained reward. Both OPTIONAL, shown with
+# their RewardConfig defaults; validated at load (altitude_weight >= 0, altitude_target > 0).
+# altitude_weight: 0.2   # per-step payout at/above the target
+# altitude_target: 1.0   # target hover altitude (m) above the floor at which the reward saturates

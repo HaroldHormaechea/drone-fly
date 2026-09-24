@@ -282,12 +282,15 @@ of dragging to the horizon, UC-36), while the no-progress detector keeps the mor
 `stuck_window` (default **100** = 5 s @ 20 Hz) so a slow-but-recovering flight isn't cut prematurely.
 Either one reaching its window ends the episode (`terminated=True`), with an additive
 `info["early_termination"]` key reporting `"grounded"`, `"stuck"`, or `None` as the authoritative
-reason. **UC-38 decoupled the penalty from the cut** (see the UC-38 note below): a genuine
-floor/ceiling/out-of-bounds collision and the **grounded** cut (a previously-airborne drone that
-dropped back onto the floor — a failed flight) keep the `collision_penalty` and set
-`info["collided"]=True`; the **no-progress ("stuck")** cut and a pure `max_steps` timeout terminate
-**penalty-free** with `info["collided"]=False`, so a peaceful airborne timeout is no longer punished
-like a crash. The legitimate UC-16 docked/servicing state is **exempt** while service is
+reason. **UC-38 decoupled the penalty from the cut, and UC-58 made every early-termination cut
+penalty-free** (see the UC-58 note below): ONLY a genuine floor/ceiling/out-of-bounds collision keeps
+the `collision_penalty` and sets `info["collided"]=True`. The **grounded** cut (a previously-airborne
+drone that dropped back onto the floor), the **no-progress ("stuck")** cut, and a pure `max_steps`
+timeout all terminate **penalty-free** with `info["collided"]=False`. UC-58 flipped the grounded cut
+from paying the penalty to penalty-free on purpose: with the redesigned reward there is no per-step
+`time_penalty` to "escape", so a gentle grounded-rest after a failed takeoff must not cost −100 (that
+would re-create the early-termination trap the reward redesign eliminates); the cut still BOUNDS the
+episode, it just no longer punishes it. The legitimate UC-16 docked/servicing state is **exempt** while service is
 *productive* (battery or integrity strictly improving) — a drone that docks once then idles is still
 cut once improvement stops. Because the counters start at 0 and need a full window of qualifying
 steps, a normally-flying or promptly-crashing episode is byte-identical to before (no obs-schema,
@@ -297,6 +300,13 @@ All five thresholds (`floor_epsilon`, `stuck_window`, `grounded_window`, `progre
 `rest_speed_epsilon`) are documented, tunable constants.
 
 ### Floor start & airborne survival reward (UC-37)
+> **Partly superseded by UC-58.** The **floor start** (`EnvConfig.floor_start`, default `True`) is
+> KEPT. The **airborne survival reward** (`airborne_bonus`) described here was replaced by the single
+> UC-58 Altitude reward and no longer exists as a separate term. The historical prose below still
+> references `airborne_bonus` / `time_penalty` / `climb_target_height` — see the reward table and
+> [Takeoff-oriented reward redesign (UC-58)](#takeoff-oriented-reward-redesign-uc-58) for the current
+> reward.
+
 Early training used to "fall like a rock": the drone spawned **mid-air** (`start_z_range=(0.7,1.5)`)
 and, with the policy's near-zero initial throttle, simply dropped from height, while the reward had
 **no dense survival term** — so every episode ended at the −100 crash cliff, returns were flat
@@ -347,6 +357,11 @@ reflects the new floor-start default; airborne-start reward/termination paths an
 preserved.
 
 ### Decoupled early-termination penalty (UC-38)
+> **Updated by UC-58.** UC-38 kept the **grounded** cut paying `collision_penalty` (only the stuck /
+> timeout cuts were made penalty-free). UC-58 went further and made the **grounded** cut penalty-free
+> too — see the [early-termination section](#grounded--no-progress-early-termination-uc-25-uc-36) above.
+> The bullet below describing the grounded cut as still paying the penalty is historical.
+
 Even with UC-37's survival reward, training still converged to a non-flying policy (`ep_rew` pinned
 near **−105**, 0 % success): a floor-sitting or non-progressing drone was cut by the no-progress
 detector, and `racing_env.py` folded **every** early-termination cut into `crash=True`, so the cut
@@ -388,36 +403,45 @@ and the policy learns "attempting flight leads to disaster — don't". UC-39 att
 directly with two coupled levers.
 
 **Reward table (single source of truth).** Every term the env applies, with its shipped
-`RewardConfig` value and when it fires:
+`RewardConfig` value and when it fires.
+
+> **Reward redesigned from scratch in UC-58.** Once the plant became flight-capable (UC-55 rate loop
+> + UC-56 Meteor75 T/W 2.5), the reward accreted across UC-37→50 was shown to *incentivize early
+> termination* (reward-vs-episode-length correlation **−0.87** — shorter episodes scored better). The
+> `time_penalty`, `airborne_bonus`, UC-39 `climb_*`, UC-43 `ground_break_*`, and UC-50 `altitude_hold_*`
+> terms were **retired** and replaced by ONE sustained, level-based, saturating **Altitude** reward
+> paid every step from `h=0`. The table below is the CURRENT reward; the UC-37/39/42/43/50 narrative
+> in the following sections is kept as historical context (see
+> [Takeoff-oriented reward redesign (UC-58)](#takeoff-oriented-reward-redesign-uc-58) for the rationale).
 
 | Action | Reward | Condition |
 |---|---|---|
 | Progress | +1.0 × Δdist | per step, for closing distance to the current target waypoint (`progress_weight`) |
-| Ground-breaking | potential-based, weight 0.5, band 0.05 m | per step of upward progress in the sub-threshold band; `F = γ·Φ_gb(curr) − Φ_gb(prev)`, `Φ_gb(h) = 0.5·min(max(h, 0), 0.05)/0.05` (UC-43; `ground_break_weight` / `ground_break_height` = airborne threshold) |
-| Climb | potential-based, weight 2.0, target 1.0 m | per step of upward progress toward the hover target; `F = γ·Φ(curr) − Φ(prev)`, `Φ(h) = 2.0·min(max(h, 0), 1.0)` (`climb_weight` / `climb_target_height` / `climb_gamma`) |
-| Hover / airborne | +0.2 × min(h, target)/target | per step while above the floor band; **altitude-graded** (UC-42) — 0 at the floor band, ramping linearly to +0.2 at `climb_target_height` (1.0 m) and flat above it (`airborne_bonus`) |
-| Time penalty | −0.05 | every step (`time_penalty`) |
+| Altitude (takeoff / hold) | +0.2 × min(h, target)/target | **per step from h=0** — sustained, level-based, saturating: 0 at the floor, ramping linearly to +0.2 at `altitude_target` (1.0 m) and flat above it. The takeoff/hold signal (`altitude_weight` / `altitude_target`, UC-58) |
 | Gate passed | +10 / N | on a validly passed gate, normalised by gate count N (`gate_bonus`) |
-| Course completed | +200 | on a valid all-gates-then-finish (`completion_bonus`; raised 100 → 200 in UC-42 to preserve the loiter < completion bound after the airborne bump) |
-| Collision (floor/ceiling/OOB) | −100 | on a genuine crash; terminates the episode (`collision_penalty` — see the training curriculum below) |
+| Course completed | +200 | on a valid all-gates-then-finish (`completion_bonus`) |
+| Collision (floor/ceiling/OOB) | −100 | on a genuine crash; terminates the episode (`collision_penalty`) |
 | Obstacle contact | −50 | edge-triggered once per distinct pillar contact; non-terminating (`obstacle_penalty`) |
-| No-progress / timeout cut | 0 | penalty-free (UC-38) |
-| Altitude progress-gate (UC-50, **default on**) | withholds the **positive** Progress reward | when `enable_altitude_decoupling` and `height < max(ref − altitude_band, ground_break_height)`, where `ref` = current target-gate height above floor, lower-clamped to `ground_break_height` (one-sided — no ceiling clamp). Only ever *reduces* reward (a below-band retreat keeps its penalty ⇒ non-farmable); the `ground_break_height` lower edge keeps takeoff bootstrapping |
-| Altitude-hold (UC-50, **default on**) | potential-based, weight `altitude_hold_weight`, band `altitude_band` | when `enable_altitude_decoupling`; `F = γ·Φ_track(curr) − Φ_track(prev)`, `Φ_track(h, ref) = altitude_hold_weight·clamp(h − (ref − altitude_band), 0, altitude_band)`, `ref = max(target-gate height above floor, ground_break_height)` — a **non-negative** altitude credit (anchored like Climb ⇒ leak ≤ 0, bob nets ≤ 0, no loiter optimum), one-sided (flat above `ref`), reference tracks the current target-gate z. Shipped enabled: weight 2.0, band 0.6 m (sizing invariant `ref − band ≤ climb_target_height`) |
+| Grounded / stuck / timeout cut | 0 | **penalty-free** (UC-58/38) — a post-takeoff grounded-rest, a no-progress ("stuck") cut, or a pure `max_steps` timeout ends the episode but is never punished (only a *genuine* crash pays `collision_penalty`) |
 
 The reward-column values are the env **defaults** (`RewardConfig` constants); keep this table in sync
-with any future reward change. **Control-rate scaling (UC-57).** The two *per-step, time-extensive*
-terms — **Time penalty** and **Hover / airborne** — are multiplied by `per_step_scale = dt /
-BASELINE_DT` (`BASELINE_DT = 0.05` = the 20 Hz baseline; `= 1.0` at 20 Hz, `= 0.4` at the 50 Hz run
-default) so their *per-episode integral* is invariant to the control rate: at 50 Hz an episode has
-~2.5× more steps, each paying 0.4×, for the same total (this preserves the documented
-loiter < completion ordering across rates). All other terms are left unscaled — Progress telescopes
-over distance (path-, not time-extensive), the gate/completion/collision/obstacle terms are
-per-event, and the three potential-based shapers (Climb / Ground-breaking / Altitude-hold) are
-already rate-correct by construction (`γΦ' − Φ`). **UC-50 altitude/forward decoupling ships ON by default**
-(`enable_altitude_decoupling=True`, `altitude_hold_weight=2.0`, `altitude_band=0.6`) so a plain
-`drone-fly train` retrain uses it (the training YAML does not expose reward weights). To recover the
-pre-UC-50 reward exactly, construct `RewardConfig(enable_altitude_decoupling=False, altitude_hold_weight=0.0)`.
+with any future reward change. **Control-rate scaling (UC-57).** The single *per-step, time-extensive*
+term — **Altitude** — is multiplied by `per_step_scale = dt / BASELINE_DT` (`BASELINE_DT = 0.05` = the
+20 Hz baseline; `= 1.0` at 20 Hz, `= 0.4` at the 50 Hz run default) so its *per-episode integral* is
+invariant to the control rate: at 50 Hz an episode has ~2.5× more steps, each paying 0.4×, for the
+same total (this preserves the documented loiter < completion ordering across rates). All other terms
+are left unscaled — Progress telescopes over distance (path-, not time-extensive), and the
+gate/completion/collision/obstacle terms are per-event. **Default-on:** the redesigned reward ships on
+for every fresh run; `altitude_weight` / `altitude_target` are exposed in the train and evaluate YAML
+(defaults 0.2 / 1.0). There are no longer any potential-based shaping terms, so the old
+`climb_gamma == training γ` coupling is gone.
+
+> **Superseded by UC-58.** Both levers below (the `climb_*` potential and the training-time
+> collision-penalty curriculum) were **retired** in UC-58 — the `climb_weight` / `climb_target_height`
+> / `climb_gamma` fields, the `collision_penalty_start` / `_end` / `_hold_fraction` /
+> `_warmup_fraction` / `_enabled` `TrainConfig` fields, the `set_collision_penalty` env method, and the
+> `drone_fly.train.collision_curriculum` module no longer exist. They are kept below as historical
+> context. See [Takeoff-oriented reward redesign (UC-58)](#takeoff-oriented-reward-redesign-uc-58).
 
 - **Lever 1 — dense potential-based climb reward (`RewardConfig.climb_weight` = 2.0,
   `climb_target_height` = 1.0 m, `climb_gamma` = 0.99; default on).** A small per-step reward pays for
@@ -467,6 +491,10 @@ beats sit, and a full hovering episode still beats a takeoff-then-immediate-cras
 curriculum's lowest endpoint (there is no grounded penalty, so no suicide optimum).
 
 ### Takeoff gradient: graded airborne survival reward (UC-42)
+> **Superseded by UC-58.** The graded `airborne_bonus` term (and the `completion_bonus` 100→200 bump
+> made to preserve its bound) were folded into the single UC-58 Altitude reward; `airborne_bonus` no
+> longer exists. `completion_bonus` stays 200. Kept below as historical context.
+
 UC-41 removed the crash-cliff *punishment* and that half worked — a fresh pybullet run no longer
 crashes, freezes, or trips the K0 verdict; the actor holds a calm hover. **But it still never took
 off:** across three recordings the drone stayed pinned at the floor (z ≈ 0.0135 m), throttle sitting
@@ -515,6 +543,11 @@ still equals the training γ, and the penalty-free stuck-cut / anti-suicide orde
 and `ent_coef` are all unchanged.
 
 ### Sub-threshold ground-breaking reward + reward-system audit (UC-43)
+> **Superseded by UC-58.** The `ground_break_*` potential fixed a sub-threshold dead zone that the
+> UC-58 Altitude reward eliminates structurally (it pays from `h=0`, so there is no dead zone to
+> bootstrap over). `ground_break_weight` / `ground_break_height` no longer exist. Kept below as
+> historical context; the "desired outcome" audit table further down is updated for the UC-58 reward.
+
 UC-40/41/42 removed the freeze, the crash-cliff, and the perverse once-airborne gradient — yet a
 fresh full-stack run (~99k steps) still **never breaks ground at all**. Every sampled recording pins
 z at ~0.0135 m (resting height — no hop, no lift-and-drop) and `ep_rew_mean` is glued to exactly
@@ -578,15 +611,18 @@ fresh-build throttle-bias init (extending the UC-40 hover-bias above 0.5); `ent_
 
 **Reward-system audit.** Per the governing directive — *any* nudge toward *any* desired outcome, no
 matter how small, must be rewarded, with no dead zone where genuine incremental progress earns zero
-or goes negative — every desired outcome was checked for a dense, non-farmable crediting gradient:
+or goes negative — every desired outcome has a dense, non-farmable crediting gradient. **Updated for
+the UC-58 reward** (the four accreted altitude terms audited here were replaced by the single
+level-based Altitude reward):
 
-| Desired outcome | Crediting gradient | Verdict |
+| Desired outcome | Crediting gradient (UC-58) | Verdict |
 |---|---|---|
-| Break ground `[0, 0.05 m]` | was dead/negative (airborne gated off, climb too weak) → now the ground-breaking potential | **fixed** (the sole takeoff-blocker) |
-| Climb to target `[0.05, 1.0 m]` | UC-39 climb potential + UC-42 graded airborne bonus | dense, non-farmable ✔ |
+| Break ground `[0, 0.05 m]` | the **Altitude** reward pays from `h=0` (strictly increasing, no dead zone) | ✔ (dead zone eliminated structurally) |
+| Climb to target `[0.05, 1.0 m]` | the **Altitude** reward, linear to +0.2 at `altitude_target` (1.0 m) | dense, non-farmable ✔ |
+| Hold altitude at/above target | the **Altitude** reward saturates flat at +0.2 — a sustained, level-based signal (not a telescoping potential that nets ≈0) | ✔ (sustained, anti-suicide) |
 | Reduce distance to next gate | `progress` term (dense, telescoping) | ✔ |
 | Pass a gate | `gate_bonus` event + the progress approach gradient | ✔ |
-| Complete the course | `completion_bonus` + progress/gate gradient | ✔ |
+| Complete the course | `completion_bonus` + progress/gate gradient (dominant, hierarchy on top) | ✔ |
 | Above target / into ceiling | intentionally saturated (no ceiling-seeking) | correct — not a desired outcome ✔ |
 
 Per-term verdicts (fixing only the clearly-wrong, evidence-backed takeoff-blocker; documenting the
@@ -642,9 +678,9 @@ effect of these two levers can be attributed cleanly.
   spawn stays fully airborne through ~60% of training and reaches the floor only at the very end
   (100%), making floor-takeoff the last, isolated stage (see the
   [UC-51 section](#restaggered-curriculum-schedule--exposed-knobs-uc-51)). **Semantic note:** the
-  airborne `warmup_fraction` is a **hold / start-delay** (the spawn stays airborne through it), the
-  opposite of the collision curriculum's `warmup_fraction` (a ramp width); they must compose as
-  `warmup <= anneal`. Early in training the policy experiences the rewarded airborne region from
+  airborne `warmup_fraction` is a **hold / start-delay** (the spawn stays airborne through it), NOT a
+  ramp width; it must compose with the anneal as `warmup <= anneal`. Early in training the policy
+  experiences the rewarded airborne region from
   step 0 and only has to learn to **maintain** altitude — far easier than discovering takeoff — and
   as the spawn anneals to the floor it must learn takeoff itself, now bootstrapped from a
   hover-competent policy. The schedule (`drone_fly.train.airborne_curriculum.spawn_z_at`) is a pure
@@ -653,7 +689,7 @@ effect of these two levers can be attributed cleanly.
   run continues it correctly. Setting `airborne_curriculum_warmup_fraction = 0.0` reproduces the
   pre-UC-51 single-window anneal exactly. It is pushed into the envs each rollout by an SB3 callback
   via
-  `env_method("set_spawn_z", …)`, exactly like the UC-41 collision curriculum. Set
+  `env_method("set_spawn_z", …)`, via a per-rollout SB3 callback. Set
   `airborne_curriculum_enabled = False` to train at the constant floored spawn (byte-identical to
   UC-43).
 - **Training-only scope (does not leak into the takeoff measurement).** The curriculum callback is
@@ -845,6 +881,11 @@ sits at its annealed endpoint (spawn-z = floor). This is observability/guard-onl
 training behavior, the UC-48 fix, the simple backend, the reward, or the UC-44 curriculum.
 
 ### Restaggered curriculum schedule & exposed knobs (UC-51)
+> **Partly superseded.** Two of the three curricula this section restaggered are gone: attitude
+> authority (retired in UC-55) and the collision-penalty curriculum (retired in UC-58). Only the
+> **airborne-spawn** curriculum (UC-44) and the exposed `ent_coef` / PPO knobs remain; the
+> collision-penalty and attitude-authority knobs no longer exist. Kept below as historical context.
+
 The three training curricula — attitude authority (UC-46), the collision penalty (UC-41), and the
 airborne spawn (UC-44) — previously all annealed on the same `anneal_fraction ≈ 0.5` schedule, so at
 the 50% mark the spawn dropped to the floor, attitude jumped to full, and the collision penalty
@@ -1052,6 +1093,83 @@ the task or the latency semantics.
 > **brand-new** GPU retrain. All UC-57 tests are hermetic (rate plumbing, seconds-invariance,
 > latency-ms→steps conversion, decoupling ratio, `pyb_freq` multiples, ratio-1 byte-identity); the
 > behavioral verdict is deferred to the owner's retrain and is not a CI gate.
+
+### Takeoff-oriented reward redesign (UC-58)
+With the plant finally flight-capable (UC-55 inner-loop rate controller + UC-56 Meteor75 nominal at
+T/W 2.5), a fresh UC-55+UC-56 training run exposed that the reward — accreted across ~15 use cases
+while the drone *could not* fly — now **incentivizes early termination rather than flight**. Recording
+analysis (episodes 0–2450) showed cumulative reward *rising* as episode length *fell* (Pearson
+**−0.87** between total reward and frame count — the two shortest 12-frame episodes scored best),
+commanded throttle *declining* over training (mean 0.53 → 0.30), every airborne-start episode
+descending to the floor (z-end ≈ 0.01 m from a 1.0 m start), and gate success flat at 0 %. The policy
+was optimizing to **end episodes as fast as possible** — hitting the ground stops the per-step
+`time_penalty` bleed — because it could earn no positive reward (no gate reachable, no effective climb
+incentive).
+
+**Root cause (three compounding factors in the pre-UC-58 default reward):**
+1. **`time_penalty` (0.05/step)** — an unconditional per-step existence cost that made existence
+   net-negative below a useful altitude, so diving to the floor to stop the bleed was optimal.
+2. **The UC-50 progress hard-gate was live by default** — it withheld the positive progress reward
+   whenever the drone was below a gate-referenced altitude band, penalizing a low floor-start policy
+   even as it moved toward a gate.
+3. **No sustained positive altitude term** — `airborne_bonus` was dead-zoned below the airborne
+   threshold and net-negative low; the three potential-based terms (climb / ground-break /
+   altitude-hold) telescope to ≈0 net by construction, giving only transient nudges clawed back on
+   descent.
+
+**The redesign (from scratch, one coherent reward).** The four overlapping altitude terms are replaced
+by ONE **sustained, level-based, saturating altitude reward** paid from `h=0`:
+
+```
+altitude_reward(h) = altitude_weight · clamp(h, 0, altitude_target) / altitude_target   # × per_step_scale
+```
+
+with `altitude_weight = 0.2`, `altitude_target = 1.0 m`. The full step reward is now:
+
+```
+reward = progress + gate_bonus/N + completion_bonus + altitude_reward
+         − collision_penalty(genuine crash) − obstacle_penalty
+```
+
+Why it satisfies the acceptance criteria:
+- **Anti-suicide (AC1/AC2).** It is *level-based* (a function of the current height, not a telescoping
+  potential), so it is a genuinely SUSTAINED positive signal for staying up. With `time_penalty` gone
+  there is nothing to be "saved" by ending the episode, so a descent / early termination scores
+  strictly below holding-or-climbing over the same-or-longer horizon — the −0.87 correlation is
+  removed/inverted.
+- **Takeoff gradient from the floor (AC3).** It is paid from `h=0` and is strictly increasing on
+  `[0, altitude_target]`, so leaving the ground earns reward immediately — no dead zone (this is what
+  the retired UC-43 ground-break potential was bolted on to patch; it is now structural).
+- **Non-farmable (AC4).** It saturates flat at the target and is bounded by `altitude_weight` per step,
+  so hovering/oscillating can never exceed genuine climb-to-target.
+- **Hierarchy preserved (AC5).** The per-episode altitude ceiling over the default 800-step budget is
+  `0.2 × 800 = 160 < completion_bonus 200`, so completing the course strictly dominates loitering.
+
+**Retired (each removed, no dead/duplicate reward paths remain):** `time_penalty`; `airborne_bonus` +
+its boolean airborne gate; the UC-39 `climb_weight` / `climb_target_height` / `climb_gamma` potential;
+the UC-43 `ground_break_weight` / `ground_break_height` potential; the whole UC-50
+`enable_altitude_decoupling` / `altitude_hold_weight` / `altitude_band` group (including its progress
+hard-gate); and the UC-39/41 training-time collision-penalty curriculum (`collision_penalty_start` /
+`_end` / `_hold_fraction` / `_warmup_fraction` / `_enabled` `TrainConfig` fields, the
+`set_collision_penalty` env method, and the `drone_fly.train.collision_curriculum` module). The
+fragile `climb_gamma == training γ` coupling is eliminated entirely — no potential-based shaping
+remains.
+
+**Grounded-rest is now penalty-free (the load-bearing subtlety).** `penalize_collision` changed from
+`crash or (early_termination == "grounded")` to just `crash`. A gentle grounded-rest after a failed
+takeoff no longer pays −`collision_penalty`; otherwise a failed takeoff attempt would cost −100 versus
+a penalty-free do-nothing floor — exactly the early-termination trap the (now-retired) crash-cliff
+curriculum papered over. The UC-25 grounded/stuck early-termination *detectors* are **kept** (they
+still BOUND the episode, just penalty-free), and the UC-44/51 airborne-start spawn curriculum is
+**kept** and reward-decoupled (its high spawn endpoint now derives geometrically from
+`altitude_target`).
+
+**Configurable + default-on.** `altitude_weight` / `altitude_target` are exposed and validated in the
+train and evaluate YAML (weight ≥ 0, target > 0), folded into the run's `RewardConfig` by
+`_apply_reward` exactly like the UC-57 control-rate knobs; the redesigned reward ships on for every
+fresh run. **Validation is hermetic (AC10):** the reward is deterministic and unit-testable on
+hand-built transitions; the **behavioral takeoff verdict is deferred to the owner's fresh GPU
+retrain** — old checkpoints do not transfer (the reward changed for every run).
 
 ### Visualization & recording
 Enable recording in a train/evaluate config with `record: true` (tune cadence via `record_every`);

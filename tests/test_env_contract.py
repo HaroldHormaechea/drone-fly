@@ -1841,9 +1841,10 @@ def test_ac7_light_course_completable_without_repair() -> None:
 # far above the rest band.
 
 
-def test_uc25_grounded_episode_is_cut_as_a_crash() -> None:
-    """AC1: a drone that falls and rests ~8 mm above the floor at zero speed is cut as a floor
-    crash well under the step budget (grounded detector), not run to ``_max_steps``."""
+def test_uc25_grounded_episode_is_cut_by_the_grounded_detector() -> None:
+    """AC1 (UC-58): a drone that falls and rests ~8 mm above the floor at zero speed is CUT by the
+    grounded detector well under the step budget, not run to ``_max_steps``. UC-58: the cut is now
+    penalty-free (``collided=False``) — it BOUNDS the episode but is not charged as a crash."""
     # Fall from spawn, then rest inside the floor band (z=0.008 < floor_epsilon=0.05) at zero speed.
     positions = [(0.0, 0.0, 1.0), (0.0, 0.0, 0.3)] + [(0.0, 0.0, 0.008)] * 8
     # UC-36: the grounded detector now has its OWN window; match it to the legacy UC-25 value of 4
@@ -1862,9 +1863,9 @@ def test_uc25_grounded_episode_is_cut_as_a_crash() -> None:
         steps += 1
         if terminated or truncated:
             break
-    assert terminated is True, "a grounded episode must terminate (crash), not truncate"
-    assert truncated is False, "it ends promptly via the crash path, not at the budget"
-    assert info["collided"] is True, "a grounded cut is reported as a crash collision (AC3)"
+    assert terminated is True, "a grounded episode must terminate, not truncate"
+    assert truncated is False, "it ends promptly via the grounded cut, not at the budget"
+    assert info["collided"] is False, "UC-58: a grounded cut is penalty-free, not a crash collision"
     assert info["completed"] is False, "resting on the floor is not a course success"
     assert info["early_termination"] == "grounded"
     # Warm-up: it takes a full window of grounded steps (spawn + fall are not grounded).
@@ -1922,16 +1923,14 @@ def test_uc25_closing_path_is_not_cut() -> None:
     assert all(r is None for r in reasons), "a progressing flight is never cut early"
 
 
-def test_uc25_grounded_cut_applies_the_collision_penalty() -> None:
-    """AC3: a GROUNDED cut earns the EXISTING collision penalty in the reward, exactly like a
-    floor/ceiling crash — the cut step's reward is dominated by ``collision_penalty`` (100).
-
-    UC-38 note: this is the deliberate, documented AC-3 choice — a *grounded* cut (a drone that
-    took off then dropped back and rests on the floor = a failed flight) KEEPS the penalty, while
-    the no-progress ("stuck") cut and a pure timeout are decoupled from it (see
-    ``test_uc38_no_progress_episode_is_cut_without_the_collision_penalty``). This test pins the
-    grounded half of that split; ``penalize_collision = crash or (early_termination=='grounded')``
-    is what preserves it."""
+def test_uc58_grounded_cut_is_penalty_free() -> None:
+    """AC1/AC2 (UC-58 anti-suicide, supersedes the UC-25/UC-38 grounded-pays-penalty split): a
+    GROUNDED cut — a drone that took off then dropped back and rests on the floor (a failed flight)
+    — is now PENALTY-FREE. It reports ``collided=False`` and the cut step's reward carries NO
+    −collision_penalty. This is the crux of the UC-58 anti-suicide fix: a failed takeoff attempt
+    must not pay −100 vs a penalty-free do-nothing floor, or the early-termination trap the retired
+    UC-39/41 crash-cliff curriculum papered over would return. ``penalize_collision = crash`` (no
+    longer ``crash or grounded``) is what enforces it; only a GENUINE crash pays the penalty."""
     positions = [(0.0, 0.0, 1.0)] + [(0.0, 0.0, 0.008)] * 8
     # UC-36: match the grounded window to the legacy value of 3 (grounded fires first anyway).
     cfg = EnvConfig(early_termination=EarlyTerminationConfig(stuck_window=3, grounded_window=3))
@@ -1939,15 +1938,17 @@ def test_uc25_grounded_cut_applies_the_collision_penalty() -> None:
     env.reset()
     reward = 0.0
     terminated = False
+    info: dict = {}
     for _ in range(env._max_steps + 1):
         _obs, reward, terminated, _tr, info = env.step(HOVER)
         if terminated:
             break
-    assert terminated is True and info["collided"] is True
-    # The default collision_penalty is 100; the cut step's reward must reflect that big negative.
-    assert reward <= -cfg.reward.collision_penalty + 1.0, (
-        "the cut step must eat the collision penalty (AC3)"
-    )
+    assert terminated is True, "a grounded cut still terminates (it bounds the episode)"
+    assert info["early_termination"] == "grounded"
+    assert info["collided"] is False, "UC-58: the grounded cut is penalty-free (collided=False)"
+    # No −collision_penalty leaks in; the cut step is at worst mildly positive (altitude reward ≈ 0
+    # at the floor), nowhere near −100.
+    assert reward > -1.0, "the grounded cut must NOT eat the collision penalty (UC-58 anti-suicide)"
 
 
 def test_uc25_docked_exemption_is_two_sided_and_non_vacuous() -> None:
@@ -2379,7 +2380,8 @@ def test_uc37_never_took_off_floor_drone_is_not_grounded_cut_but_still_bounded()
 
 def test_uc37_takeoff_then_floor_is_grounded_cut() -> None:
     """AC3: once a drone HAS taken off (left the floor band), settling back onto the floor arms the
-    grounded detector exactly as under UC-36 — it is cut as a grounded crash."""
+    grounded detector exactly as under UC-36 — it is grounded-cut. UC-58: that cut is penalty-free
+    (``collided=False``) — it bounds the episode but is not charged as a crash."""
     # spawn on the floor (not took off) → lift above the band (arms the latch) → settle back down.
     positions = [(0.0, 0.0, 0.01), (0.0, 0.0, 1.0)] + [(0.0, 0.0, 0.01)] * 8
     env = _env_with(
@@ -2398,7 +2400,7 @@ def test_uc37_takeoff_then_floor_is_grounded_cut() -> None:
     assert info["early_termination"] == "grounded", (
         "a drone that took off then floored is grounded-cut exactly as UC-36 (AC3)"
     )
-    assert info["collided"] is True  # a grounded cut folds into crash accounting
+    assert info["collided"] is False  # UC-58: the grounded cut is penalty-free, not a crash
 
 
 def test_uc37_airborne_start_is_taken_off_at_step_zero() -> None:
@@ -2513,7 +2515,7 @@ def test_uc38_genuine_collision_dominates_a_same_step_stuck_cut() -> None:
     airborne so pre-takeoff suppression does not apply, not a dock) AND the no-progress counter
     reaches its window on the SAME step, the genuine collision dominates — the penalty is still
     charged (``collided=True``, reward eats −collision_penalty) even though the reported reason is
-    the stuck cut. Pins ``penalize_collision = crash or grounded`` so a decoupled stuck cut can
+    the stuck cut. Pins ``penalize_collision = crash`` (UC-58) so a decoupled stuck cut can
     never launder away a real crash."""
     # Static airborne hover ⇒ the stuck detector fires on step (stuck_window + 1) = 4 for window=3
     # (warm-up step + 3 no-progress steps). Script a genuine collision on that exact step.
@@ -2542,7 +2544,7 @@ def test_uc38_airborne_survival_return_beats_floor_sit_and_is_positive() -> None
     the same duration before being cut — and, unlike pre-UC-38 (where both scored ≈ −105 and the
     survival bonus was cancelled by the terminal penalty), the airborne return is now strictly
     POSITIVE. Both cuts are decoupled stuck cuts (neither took off into a grounded drop), so neither
-    pays −collision_penalty; the difference is purely UC-37's +airborne_bonus survival gradient."""
+    pays −collision_penalty; the difference is purely UC-58's sustained altitude_reward gradient."""
     window = 4
 
     def total_return(positions) -> tuple[float, dict]:
@@ -2574,23 +2576,21 @@ def test_uc38_airborne_survival_return_beats_floor_sit_and_is_positive() -> None
     )
 
 
-# --- UC-39 AC4: a genuine crash still terminates + is penalised at the ACTIVE penalty --
-def _scripted_ceiling_crash(cp_override):
+# --- UC-39/UC-58 AC4: a genuine crash still terminates + is penalised at the fixed penalty --
+def _scripted_ceiling_crash():
     """Drive a scripted takeoff-then-crash; return (crash-step reward, terminated, info).
 
     Step 0 spawns airborne (z=2.0) so the takeoff latch is set; the drone climbs to z=2.4 and the
     adapter flags a genuine collision on the last step (a ceiling crash — the env keys on
     ``state.collided``, so floor vs ceiling is immaterial to the crash contract). Both airborne
-    endpoints sit ABOVE the climb target (1.0 m), so the potential-based climb term is the SAME
-    constant (≈ −0.02) in every run — isolating the collision penalty in the reward comparison.
-    ``cp_override`` (the training curriculum value) is applied via ``set_collision_penalty`` before
-    stepping; ``None`` leaves the env default (100) in force.
+    endpoints sit above the altitude target (1.0 m), so the sustained altitude reward is the SAME
+    saturated constant in every step — isolating the collision penalty in the reward comparison.
+    UC-58: the training-time collision-penalty curriculum (and its ``set_collision_penalty`` env
+    override) are retired, so a genuine crash always pays the fixed ``collision_penalty`` (100).
     """
     positions = [(0.0, 0.0, 2.0), (0.0, 0.0, 2.2), (0.0, 0.0, 2.4)]
     env = _env_with(_ScriptedAdapter(positions, collide_at=2))
     env.reset(seed=0)
-    if cp_override is not None:
-        env.set_collision_penalty(cp_override)
     reward = 0.0
     terminated = False
     info: dict = {}
@@ -2602,47 +2602,38 @@ def _scripted_ceiling_crash(cp_override):
 
 
 def test_uc39_genuine_crash_terminates_and_reports_collided() -> None:
-    """AC4: whatever the curriculum value, a genuine floor/ceiling/OOB collision still TERMINATES
-    the episode with ``terminated=True`` and ``info["collided"]=True`` (and is not a completion).
-    Asserted at both the default penalty and a low override — termination is penalty-independent."""
-    for cp in (None, 10.0):
-        reward, terminated, info = _scripted_ceiling_crash(cp)
-        assert terminated is True, f"a genuine crash must terminate (cp={cp})"
-        assert info["collided"] is True, f"a genuine crash reports collided=True (cp={cp})"
-        assert info["completed"] is False
-        assert info["early_termination"] is None, "a real crash is not an early-termination cut"
-        assert reward < 0.0
+    """AC4: a genuine floor/ceiling/OOB collision TERMINATES the episode with ``terminated=True``
+    and ``info["collided"]=True`` (and is not a completion / early-termination cut)."""
+    reward, terminated, info = _scripted_ceiling_crash()
+    assert terminated is True, "a genuine crash must terminate"
+    assert info["collided"] is True, "a genuine crash reports collided=True"
+    assert info["completed"] is False
+    assert info["early_termination"] is None, "a real crash is not an early-termination cut"
+    assert reward < 0.0
 
 
-def test_uc39_crash_penalty_tracks_the_active_curriculum_value() -> None:
-    """AC4: the crash penalty applied in the reward is the ACTIVE curriculum value, not a fixed 100.
-    Everything but the collision penalty is identical across the two runs (same trajectory, same
-    airborne + climb terms), so the crash-step reward difference is EXACTLY the penalty difference —
-    the default eats −100 while a curriculum override of 10 eats only −10."""
-    r_default, _, _ = _scripted_ceiling_crash(None)  # env default collision_penalty = 100
-    r_low, _, _ = _scripted_ceiling_crash(10.0)  # curriculum start value
+def test_uc58_genuine_crash_pays_the_fixed_collision_penalty() -> None:
+    """AC4/AC6 (UC-58: curriculum retired): a genuine crash pays the fixed default
+    ``collision_penalty`` (100) — there is no longer a training-time override that scales it. The
+    crash-step reward is dominated by the −100 penalty (the small saturated altitude reward on the
+    same step cannot offset it), so it sits well below −50."""
+    reward, _terminated, _info = _scripted_ceiling_crash()
     default_cp = EnvConfig().reward.collision_penalty
     assert default_cp == pytest.approx(100.0)
-    # The reward difference isolates the penalty: (−10) − (−100) = +90.
-    assert r_low - r_default == pytest.approx(default_cp - 10.0)
-    assert r_low - r_default == pytest.approx(90.0)
-    # And the magnitudes bracket the cliff: the full penalty dominates, the relieved one does not.
-    assert r_default < -50.0, "the default run eats the full −100 crash cliff"
-    assert r_low > -50.0, "the curriculum-relieved run eats only −10 — the cliff is relieved"
+    assert reward < -50.0, "the crash eats the full −100 penalty (no curriculum relief remains)"
 
 
-def test_uc39_stuck_cut_stays_penalty_free_even_with_curriculum_override() -> None:
-    """AC4 (UC-38 preserved): the no-progress ("stuck") cut remains DECOUPLED from the collision
-    penalty even when the training curriculum has set an override. The override only ever changes a
-    GENUINE crash's magnitude — it must not leak a penalty into a stuck/timeout cut. The cut reports
-    ``collided=False`` and its reward carries no −collision_penalty term."""
+def test_uc58_grounded_and_stuck_cuts_stay_penalty_free() -> None:
+    """AC1/AC2 (UC-58 anti-suicide): the no-progress ("stuck") cut is penalty-free — it terminates
+    the episode but never charges ``collision_penalty``. A genuine crash is the ONLY signal that
+    eats the penalty; a cut that merely bounds the episode reports ``collided=False`` and carries no
+    −collision_penalty term."""
     positions = [(0.0, 0.0, 1.0)] + [(0.5, 0.0, 1.0)] * 12  # airborne hover, never closes on g0
     env = _env_with(
         _ScriptedAdapter(positions),
         EnvConfig(early_termination=EarlyTerminationConfig(stuck_window=4)),
     )
     env.reset()
-    env.set_collision_penalty(10.0)  # curriculum active during this rollout
     reward = 0.0
     terminated = truncated = False
     info: dict = {}
@@ -2651,8 +2642,7 @@ def test_uc39_stuck_cut_stays_penalty_free_even_with_curriculum_override() -> No
         if terminated or truncated:
             break
     assert terminated is True and truncated is False
-    assert info["collided"] is False, (
-        "a stuck cut is not a crash — no penalty even with an override"
-    )
+    assert info["collided"] is False, "a stuck cut is not a crash — it is penalty-free (UC-58)"
     assert info["early_termination"] == "stuck"
-    assert reward > -1.0, "no −collision_penalty (10 or 100) leaks into a decoupled stuck cut"
+    # No −collision_penalty leaks in; the cut step is at worst mildly positive (altitude reward).
+    assert reward > -1.0

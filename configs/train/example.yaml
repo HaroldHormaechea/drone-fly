@@ -83,12 +83,13 @@ resume: auto
 # --- Training curriculum schedule + exploration (UC-51) -----------------------------------------
 # All keys below are OPTIONAL and shown with their NEW UC-51 defaults. Omitting a key — or setting
 # it to the value shown — is byte-identical to the default run (set-to-default == omit). Each is
-# validated (type + range) at config load: fractions must be in [0, 1], ent_coef >= 0, the collision
-# penalties >= 0; out-of-range or unknown values fail loud with a clear error (exit 2).
+# validated (type + range) at config load: fractions must be in [0, 1], ent_coef >= 0; out-of-range
+# or unknown values fail loud with a clear error (exit 2).
 #
-# The DEFAULT schedule is RESTAGGERED so the difficulty steps are ISOLATED and floor-takeoff is the
-# last, longest stage — collision-full (~0.5) < spawn-reaches-floor (1.0). (UC-55 retired the
-# attitude-authority stage that used to lead this ordering.) Each fraction is a fraction of `timesteps`.
+# The DEFAULT schedule leaves floor-takeoff as the last, longest stage: the airborne spawn is held
+# high, then descends to reach the floor only at 1.0. (UC-55 retired the attitude-authority stage
+# and UC-58 retired the collision-penalty curriculum that used to lead/co-stage this ordering.) Each
+# fraction is a fraction of `timesteps`.
 #
 # ent_coef: 0.005        # PPO entropy coefficient (exploration). Strictly positive keeps the action
 #                        # distribution exploring long enough to discover takeoff (UC-38/40/41).
@@ -105,25 +106,31 @@ resume: auto
 # rate_kd: 0.02            # derivative gain (damps the noisy full-range regime)
 # rate_max_body_rate: 4.0  # full-stick body-rate clamp (rad/s); +/-1 command -> +/-this setpoint
 #
-# Collision-penalty curriculum (UC-39/41): hold-then-ramp crash-cliff relief. The penalty is held
-# low through `hold_fraction`, then ramps to full over `warmup_fraction` (the RAMP WIDTH), reaching
-# full at hold + warmup = 0.4 + 0.1 = 0.5 — the isolated mid-training step (after attitude-full,
-# before the airborne floor descent).
-# collision_curriculum_enabled: true
-# collision_penalty_start: 2.0              # held value through the fly-learning phase
-# collision_penalty_end: 100.0             # full-strength value after the ramp
-# collision_curriculum_hold_fraction: 0.4  # hold the start value through this fraction
-# collision_penalty_warmup_fraction: 0.1   # RAMP WIDTH after the hold (hold + warmup <= 1)
+# Collision-penalty curriculum (UC-39/41): RETIRED in UC-58. It was hold-then-ramp crash-cliff
+# relief for an early-termination trap that only existed because of the (also-retired) per-step
+# time_penalty and the grounded cut paying the collision penalty. UC-58 removes the trap at the
+# source (see the takeoff-reward section below), so these keys are gone — a config that still sets
+# them now fails loud (exit 2, unknown key).
 #
 # Airborne-start curriculum (UC-44): the training spawn is held airborne early, then descends to the
 # floor so floor-takeoff is learned LAST. Restaggered to hold airborne through ~0.6 then reach the
 # floor only at 1.0 — the last, longest, isolated stage.
-#   IMPORTANT semantic contrast: here `warmup_fraction` is a HOLD / START-DELAY (the spawn stays
-#   fully airborne through it before descending), the OPPOSITE of the collision `warmup_fraction`
-#   above (which is the ramp width). They must compose coherently: warmup <= anneal.
+#   `warmup_fraction` here is a HOLD / START-DELAY (the spawn stays fully airborne through it before
+#   descending). It must compose coherently with the anneal: warmup <= anneal.
 # airborne_curriculum_enabled: true
 # airborne_curriculum_warmup_fraction: 0.6  # HOLD airborne through this fraction (start-delay)
 # airborne_curriculum_anneal_fraction: 1.0  # spawn reaches the floor by this fraction (end of run)
+#
+# --- Takeoff reward (UC-58) ---------------------------------------------------------------------
+# The redesigned reward pays ONE sustained, level-based, saturating altitude term every step from
+# h=0: altitude_reward(h) = altitude_weight * clamp(h, 0, altitude_target) / altitude_target. This
+# is the takeoff/hold incentive (it replaced the retired time_penalty / airborne_bonus / climb /
+# ground_break / altitude_hold machinery). Both keys are OPTIONAL and shown with their RewardConfig
+# defaults — omitting them (or setting them to these values) runs the default-on reward. Validated at
+# config load: altitude_weight >= 0, altitude_target > 0 (out-of-range fails loud, exit 2).
+# altitude_weight: 0.2   # per-step payout at/above the target. Per-episode ceiling over the default
+#                        # 800-step budget is 0.2*800 = 160 < completion_bonus 200 (hierarchy held).
+# altitude_target: 1.0   # target hover altitude (m) above the floor at which the reward saturates.
 #
 # --- PPO optimization hyperparameters (UC-54) ---------------------------------------------------
 # All four keys below are OPTIONAL and shown with their CURRENT defaults. Omitting a key — or setting

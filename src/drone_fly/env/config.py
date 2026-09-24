@@ -591,167 +591,76 @@ class RandomizationConfig:
 class RewardConfig:
     """Reward shaping weights (AC3). See :func:`drone_fly.env.reward.compute_reward`.
 
-    Chosen so a *valid* completion always dominates any collision shortcut:
-    ``completion_bonus`` is large and positive while ``collision_penalty`` is large and
-    negative, and the per-step ``time_penalty`` makes faster completions score higher.
+    UC-58 — takeoff-oriented redesign (from scratch). The reward is ONE coherent composition:
+
+        ``reward = progress + gate_bonus/N + completion_bonus + altitude_reward
+                   − collision_penalty(genuine crash) − obstacle_penalty``
+
+    A *valid* completion always dominates any collision shortcut (``completion_bonus`` large and
+    positive, ``collision_penalty`` large and negative) AND dominates the accumulated takeoff/hold
+    shaping (the objective hierarchy, AC5). The single ``altitude_reward`` term — a sustained,
+    level-based, saturating altitude signal paid every step from ``h=0`` — supplies the takeoff and
+    altitude-hold incentive that the retired accreted machinery failed to.
+
+    Retired in UC-58 (each removed, no dead/duplicate reward paths remain): ``time_penalty`` (the
+    per-step existence cost that made early termination optimal — the −0.87 suicide trap);
+    ``airborne_bonus`` + its boolean airborne gate; the UC-39 ``climb_weight`` /
+    ``climb_target_height`` / ``climb_gamma`` potential; the UC-43 ``ground_break_weight`` /
+    ``ground_break_height`` potential; and the whole UC-50 ``enable_altitude_decoupling`` /
+    ``altitude_hold_weight`` / ``altitude_band`` group (including its progress hard-gate). The four
+    overlapping altitude terms are replaced by the single ``altitude_reward`` below; the fragile
+    ``climb_gamma == training γ`` coupling is eliminated entirely (no potential shaping remains).
     """
 
-    time_penalty: float = 0.05  # subtracted every step -> faster start→gate→finish wins
     progress_weight: float = 1.0  # reward for closing distance to the current target
     gate_bonus: float = 10.0  # per-gate reward, NORMALISED by num_gates (UC-09 AC4)
-    # One-off reward on a VALID all-gates-then-finish. UC-42 raised this 100 → 200 strictly as
-    # forced bound-preservation: with the airborne bump to 0.2 the per-episode airborne max
-    # (0.2 × 800 = 160) + the climb-term bound (1.98) = 161.98 would exceed the old 100, breaking
-    # the loiter < completion invariant (b). 200 restores it tight (headroom ≈ 1.23, matching the
-    # original ≈ 1.22). NOT a takeoff signal, and kept tight on purpose: reward VecNormalize is ON,
-    # so a larger completion spike would inflate the return-std the normaliser divides by and is
-    # counterproductive — do NOT raise it further.
-    # UC-43 update: the new sub-threshold ``ground_break`` potential adds a per-episode bound of
-    # ``climb_gamma`` · ``ground_break_weight`` = 0.99 × 0.5 = 0.495 (telescoping, capped at
-    # ``ground_break_height``). The combined shaping bound is now 160 (airborne) + 1.98 (climb) +
-    # 0.495 (ground-break) = 162.48 < ``completion_bonus`` 200, so the loiter < completion invariant
-    # (b) still holds with headroom (the historical 161.98 above is UC-42's rationale and is left
-    # intact for provenance).
+    # One-off reward on a VALID all-gates-then-finish — the DOMINANT positive reward, keeping
+    # traversal above the takeoff/hold shaping (objective hierarchy, AC5). Kept at 200 from UC-42:
+    # the per-episode ``altitude_reward`` ceiling over the DEFAULT 3-gate episode (budget 800 steps
+    # = max_steps 400 + steps_per_gate 200 × 2) is altitude_weight × 800 = 0.2 × 800 = 160 < 200,
+    # so a policy that merely loiters at altitude scores strictly below one that completes the
+    # course (AC5). With the UC-58 retirement of the airborne/climb/ground-break/altitude-hold
+    # terms, the altitude reward is now the ONLY shaping term, so the combined shaping bound is
+    # exactly 160 (vs the pre-UC-58 162.48) — the loiter < completion invariant holds with headroom.
+    # Kept tight on purpose: reward VecNormalize is ON, so a larger completion spike would inflate
+    # the return-std the normaliser divides by and is counterproductive — do NOT raise it further.
+    # HONEST large-N caveat: for large randomized courses (budget > 1000 steps) 0.2 × budget can
+    # exceed 200; loiter-domination there rests on the no-progress / stuck detector
+    # (``EarlyTerminationConfig.stuck_window``) cutting a non-progressing hover plus the forgone
+    # per-gate and completion bonuses, not on the per-step arithmetic. The bound is anchored to the
+    # default 800-step budget.
     completion_bonus: float = 200.0
-    collision_penalty: float = 100.0  # subtracted on floor/ceiling contact (episode ends)
+    collision_penalty: float = 100.0  # subtracted on a GENUINE floor/ceiling/OOB crash (ends ep.)
     # SEVERE, NON-terminating obstacle-contact penalty (UC-15 AC2/AC9). Documented, tunable.
     # Applied **edge-triggered** (once per distinct contact, not per overlapping step), so a
     # sustained graze cannot stack an unbounded per-frame penalty. Sized well above a single
     # normalised gate_bonus (severe) yet below the terminal collision_penalty, and it never
     # feeds ``terminated`` — the drone may recover aerially and still complete the course.
     obstacle_penalty: float = 50.0
-    # Per-step SURVIVAL reward paid ONLY while the drone is airborne (above the floor band),
-    # exactly zero on/at the floor (UC-37 AC5). Appended **last** (after ``obstacle_penalty``) so
-    # every positional ``RewardConfig`` call is unshifted.
-    # UC-42 makes the payout ALTITUDE-GRADED (see :func:`drone_fly.env.reward.compute_reward`):
-    # ``airborne_bonus · min(max(h, 0), climb_target_height) / climb_target_height`` — flat at/above
-    # the target and equal to ``airborne_bonus`` at the target. This flips the previously-perverse
-    # net-hold gradient (with a FLAT bonus, holding higher was slightly WORSE net of the time
-    # penalty and the discounted climb-potential leak) into a monotone climb-to-target pull. Sized
-    # against two bounds (AC-6):
-    #   (a) at the target the net per-airborne-step reward ``airborne_bonus − time_penalty`` =
-    #       0.20 − 0.05 = +0.15 is strictly positive, and combined with the climb term the net-hold
-    #       differential over hover-at-floor is monotone increasing in altitude — so climbing and
-    #       holding altitude decisively beats hovering just off the floor; AND
-    #   (b) the max survival reward accruable over the DEFAULT 3-gate episode (budget 800 steps =
-    #       max_steps 400 + steps_per_gate 200 × 2) is 0.20 × 800 = 160; plus the climb-term bound
-    #       (1.98) that is 161.98 < ``completion_bonus`` 200, so a policy that merely loiters scores
-    #       strictly below one that completes the course. (``completion_bonus`` was raised 100 → 200
-    #       in UC-42 precisely to keep this bound after the airborne bump — see its comment.)
-    # HONEST large-N caveat: for large randomized courses (N up to ~10, budget up to ~2200 steps)
-    # the theoretical max survival (0.20 × 2200 = 440) exceeds ``completion_bonus``. Loiter-
-    # domination there does NOT rest on the per-step arithmetic; it rests on the no-progress /
-    # stuck detector (``EarlyTerminationConfig.stuck_window`` = 100 steps) cutting a non-
-    # progressing hover, plus the forgone per-gate and completion bonuses. The bound in (b) is
-    # anchored to the default 800-step budget.
-    airborne_bonus: float = 0.2
-    # UC-39 — Dense potential-based CLIMB reward (default on). Pays positive signal on every
-    # step of upward progress from a floor start toward ``climb_target_height``, so the first
-    # increments of a takeoff earn reward immediately (before/independent of any later crash),
-    # making PPO's per-action advantage for "throttle up" positive even on an attempt that later
-    # crashes. Implemented in :func:`drone_fly.env.reward.compute_reward` as potential-based
-    # shaping (Ng et al. 1999): Φ(h) = ``climb_weight`` · min(max(h, 0), ``climb_target_height``);
-    # per-step term F = ``climb_gamma`` · Φ(curr) − Φ(prev). Because it telescopes:
-    #   * a round trip (climb then descend the same amount) nets ≈0 (non-farmable, no loiter opt);
-    #   * the per-episode max ≈ ``climb_gamma`` · ``climb_weight`` · ``climb_target_height`` = 1.98,
-    #     far below ``completion_bonus`` (100) and at/below a normalised ``gate_bonus`` (AC1/2/5);
-    #   * it CAPS at ``climb_target_height`` so there is no incentive to climb into the ceiling.
-    # Appended **last** (after ``airborne_bonus``) so every positional ``RewardConfig`` call is
-    # unshifted.
-    climb_weight: float = 2.0
-    # Target hover altitude ABOVE the floor (metres) at which the climb potential saturates. Set to
-    # 1.0 m — it aligns with the first gate's height (z ≈ 0.9–1.3) and sits safely below the ceiling
+    # UC-58 — the SUSTAINED, LEVEL-BASED, SATURATING altitude reward (the takeoff/hold signal,
+    # default on). Paid on EVERY step from ``h = 0``:
+    #   ``altitude_reward(h) = altitude_weight · clamp(h, 0, altitude_target) / altitude_target``
+    # (scaled by ``per_step_scale`` for UC-57 rate-invariance). This ONE term replaces the four
+    # retired overlapping altitude terms and is designed against the acceptance criteria:
+    #   * LEVEL-BASED (a function of the current height, not a telescoping potential) ⇒ it is a
+    #     genuinely SUSTAINED positive signal for staying up, so descending / terminating early
+    #     scores strictly below holding-or-climbing over the same-or-longer horizon (AC1/AC2). This
+    #     is the anti-suicide property; with ``time_penalty`` gone there is nothing to be "saved" by
+    #     ending the episode, so the −0.87 reward-vs-length correlation is removed/inverted.
+    #   * PAID FROM h=0 ⇒ a smooth takeoff gradient off the floor with NO dead zone (AC3) — the
+    #     failure the UC-43 ground-break potential was bolted on to fix is now structural, not a
+    #     patch: a climbing-from-floor trajectory scores strictly above a stays-grounded one.
+    #   * STRICTLY INCREASING on [0, altitude_target] then FLAT ⇒ climbing to the target strictly
+    #     beats loitering low, and there is no ceiling-seeking above the target; bounded by
+    #     ``altitude_weight`` per step ⇒ non-farmable by hover/oscillation (AC4).
+    # ``altitude_weight`` = 0.2: the per-step payout at/above the target. Its per-episode integral
+    # over the default 800-step budget is 160 < ``completion_bonus`` 200 (AC5). MUST be ≥ 0.
+    altitude_weight: float = 0.2
+    # ``altitude_target`` = 1.0 m: the target hover altitude ABOVE the floor at which the reward
+    # saturates. Aligns with the first gate's height (z ≈ 0.9–1.3) and sits safely below the ceiling
     # (2.5), so the drone is rewarded for climbing to a useful flying altitude, not into the roof.
-    climb_target_height: float = 1.0
-    # Discount used in the potential-based climb term. IMPORTANT COUPLING (Note 4): for the shaping
-    # to be **policy-invariant** (Ng et al. 1999) this MUST equal the TRAINING discount γ
-    # (:attr:`drone_fly.train.config.TrainConfig.gamma`, currently 0.99). If a future change alters
-    # the training γ, this value MUST be updated in lockstep or the shaping stops being
-    # return-invariant (it would add a real, farmable bias). Kept as an explicit constant here (not
-    # silently sourced) so the coupling is visible; the value is deliberately identical to the train
-    # default γ = 0.99.
-    climb_gamma: float = 0.99
-    # UC-43 — Dense potential-based SUB-THRESHOLD "ground-breaking" reward (default on). Fixes the
-    # takeoff chicken-and-egg: UC-42's graded airborne bonus is gated off below the airborne
-    # threshold (``EarlyTerminationConfig.floor_epsilon`` ≈ 0.05 m; ``racing_env.py`` only raises
-    # the ``airborne`` flag above it), and the UC-39 climb potential — though active below the
-    # threshold — is return-invariant and too weak (net of ``time_penalty``) to pull a resting drone
-    # up. So a fresh run rests at ~0.0135 m forever (``ep_rew_mean`` glued to −5). This term adds a
-    # positive gradient in the sub-threshold band [0, ``ground_break_height``] so PPO is rewarded
-    # for the first few centimetres of lift BEFORE the airborne bonus can engage. Implemented in
-    # :func:`drone_fly.env.reward.compute_reward` as potential-based shaping (Ng et al. 1999):
-    #   Φ_gb(h) = ``ground_break_weight`` · min(max(h, 0), ``ground_break_height``)
-    #             / ``ground_break_height``;
-    #   per-step F_gb = ``climb_gamma`` · Φ_gb(curr) − Φ_gb(prev).
-    # Properties (all unit-testable):
-    #   * ≈0 at rest (Φ_gb(0) = 0) and non-farmable — it telescopes, so a bob nets (γ−1)·ΣΦ ≤ 0;
-    #   * dense sub-threshold slope ``ground_break_weight`` / ``ground_break_height`` = 10/m (5× the
-    #     climb slope), so a genuine break from rest pays strongly;
-    #   * saturates exactly at ``ground_break_height`` → clean, continuous handoff to UC-42's graded
-    #     airborne bonus at the threshold; above threshold F_gb = (γ−1)·``ground_break_weight`` =
-    #     −0.005/step, height-independent (Φ_gb flat) → a benign constant leak, NOT a double-count;
-    #   * per-episode bound ``climb_gamma`` · ``ground_break_weight`` = 0.495 (see the
-    #     ``completion_bonus`` comment for the combined-shaping < completion invariant).
-    # SIZING BOUND: ``ground_break_weight`` < 0.9 is the HARD seam-monotonicity constraint (the
-    # net-hold band slope 0.18 − 0.2·w must stay > 0). 0.5 keeps a +0.08/m margin and a strong
-    # transient (a 0.0135 m hop pays ≈0.13) — do NOT shrink it. Appended **last** (after
-    # ``climb_gamma``) so every positional ``RewardConfig`` call is unshifted.
-    ground_break_weight: float = 0.5
-    # Sub-threshold band height (metres) at which Φ_gb saturates. IMPORTANT COUPLING: this MUST
-    # equal ``EarlyTerminationConfig.floor_epsilon`` (the airborne threshold), so the
-    # ground-breaking potential hands off to UC-42's graded airborne bonus exactly where the
-    # airborne flag trips — no gap, no overlap-driven discontinuity. Kept as an explicit constant
-    # here (not silently sourced from ``EarlyTerminationConfig``) so the coupling is visible;
-    # mirrors the ``climb_gamma`` == γ pattern and keeps ``racing_env.py`` untouched. The UC-43 test
-    # asserts this equality against its source (``EarlyTerminationConfig().floor_epsilon``), not an
-    # independent literal.
-    ground_break_height: float = 0.05
-    # UC-50 — Altitude-holding forward-flight decoupling (default OFF ⇒ BYTE-IDENTICAL to UC-43).
-    # Fixes the post-UC-48 "rush the gate horizontally and sink" failure: the dense 3D progress term
-    # pays for closing on the gate in ANY direction (including while descending), and nothing
-    # rewards HOLDING altitude (the UC-39/42/43 terms reward altitude *change* and net ≈0 for level
-    # flight). When ``enable_altitude_decoupling`` is True,
-    # :func:`drone_fly.env.reward.compute_reward` (a) HARD-GATES the progress term on altitude —
-    # withholding only the POSITIVE progress reward whenever the drone is below a safe band
-    # referenced to the CURRENT TARGET GATE's height, so diving toward the gate earns no progress
-    # (the withhold only ever REDUCES reward: a below-band retreat still pays its penalty, so an
-    # approach/retreat loop cannot be farmed) — and (b) adds a potential-based altitude-HOLD term
-    # Φ_track(h, ref) = ``altitude_hold_weight`` · clamp(h − (ref − ``altitude_band``), 0,
-    # ``altitude_band``) — a NON-NEGATIVE altitude "credit" (anchored like the UC-39 climb potential
-    # so the shaping leak is ≤ 0 and hovering below the reference is never rewarded), per-step
-    # F = ``climb_gamma`` · Φ_track(curr) − Φ_track(prev), so climbing toward the reference pays and
-    # dropping away costs. Because both terms key off the target-gate height, the safe
-    # altitude TRACKS each gate's own z (gates vary in z); the finish leg inherits the last gate's z
-    # for free via ``geometry.current_target``. In the reward function the reference is
-    # LOWER-clamped to ``ground_break_height`` (``ref_eff = max(target_height_above_floor,
-    # ground_break_height)``), keeping the band non-degenerate for a floor-band gate and handing off
-    # cleanly to the UC-43
-    # ground-break bootstrap (whose ``ground_break_height`` is also the progress-gate's lower edge —
-    # so takeoff still bootstraps and no new chicken-and-egg is introduced). The band is ONE-SIDED
-    # (penalises only being BELOW the reference, never overshoot above it), so there is NO upper /
-    # ceiling clamp and no ``ceiling_z`` argument. SIZING INVARIANT (documented, load-bearing —
-    # enforced by gate placement + the enabled ``altitude_band``, NOT a runtime clamp):
-    # ``ref − band ≤ climb_target_height`` so the band's lower edge never sits above the climb
-    # target and hands off to the UC-43 ground-break band; with band 0.6 this holds for any gate up
-    # to ``climb_target_height`` + 0.6 = 1.6 m above floor. Properties (all unit-testable):
-    # telescoping ⇒ a climb-then-descend / bob round trip nets ≤ 0 (non-farmable, no loiter
-    # optimum); per-episode altitude-hold total bounded by ≈ ``altitude_hold_weight`` ·
-    # ``altitude_band``. ENABLED-VALUE BOUND (loiter < completion, AC-4): with the recommended
-    # 2.0 · 0.6 = 1.2 the total dense shaping is 160 (airborne) + 1.98 (climb) + 0.495
-    # (ground-break) + 1.2 (altitude-hold) = 163.68 < ``completion_bonus`` 200, so a loiter can
-    # never out-score a completion. ``climb_gamma`` MUST equal training γ for the shaping to stay
-    # return-invariant (the same coupling as UC-39). Appended **last** (after the UC-43 fields) so
-    # every positional ``RewardConfig`` call is unshifted. **Enabled by DEFAULT** (UC-50 follow-up):
-    # the feature ships on with the recommended values below, so a plain ``drone-fly train`` retrain
-    # picks it up without any config surface (the training YAML does not expose reward weights). To
-    # get the pre-UC-50 reward exactly, construct ``RewardConfig(enable_altitude_decoupling=False,
-    # altitude_hold_weight=0.0)`` explicitly. NOTE: turning this on changes ``compute_reward`` for
-    # callers that do not pass ``target_height_above_floor_*`` (they default to 0.0 ⇒ the reference
-    # lower-clamps to ``ground_break_height``); the env's ``racing_env`` call site always passes the
-    # real target-gate height, so training/eval track each gate's own z.
-    enable_altitude_decoupling: bool = True
-    altitude_hold_weight: float = 2.0
-    altitude_band: float = 0.6
+    # MUST be > 0 (it is the normaliser of the altitude fraction).
+    altitude_target: float = 1.0
 
 
 @dataclass(frozen=True)
