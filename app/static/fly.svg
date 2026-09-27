@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="drone-fly">
+  <!-- Hand-authored fly silhouette: wings, body segments, antennae. Single accent colour, zero deps. -->
+  <g fill="none" stroke="#4da3ff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <!-- wings -->
+    <ellipse cx="9.5" cy="11" rx="6.5" ry="3.6" transform="rotate(-28 9.5 11)"/>
+    <ellipse cx="22.5" cy="11" rx="6.5" ry="3.6" transform="rotate(28 22.5 11)"/>
+    <!-- antennae -->
+    <path d="M14 7 L12 3.5"/>
+    <path d="M18 7 L20 3.5"/>
+  </g>
+  <g fill="#4da3ff">
+    <!-- head + thorax + abdomen -->
+    <circle cx="16" cy="8.5" r="2.6"/>
+    <ellipse cx="16" cy="15" rx="3.1" ry="3.4"/>
+    <ellipse cx="16" cy="22.5" rx="2.6" ry="5.2"/>
+  </g>
+</svg>
