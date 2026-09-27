@@ -197,3 +197,47 @@ def test_list_train_config_names_returns_sorted_stems(tmp_path):
     assert configs_io.list_train_config_names(root) == ["alpha", "zeta"]
     # An absent configs/train dir is not an error.
     assert configs_io.list_train_config_names(str(tmp_path / "empty")) == []
+
+
+# --- item 3: saved slice (prune) enumeration + per-name load -------------------------------
+
+
+def test_list_prune_config_names_returns_sorted_stems(tmp_path):
+    root = str(tmp_path)
+    configs_io.prune_config_to_yaml(root, {"out": "artifacts/z"}, slug="zeta")
+    configs_io.prune_config_to_yaml(root, {"out": "artifacts/a"}, slug="alpha")
+    assert configs_io.list_prune_config_names(root) == ["alpha", "zeta"]
+    # An absent configs/prune dir is not an error (mirrors list_train_config_names).
+    assert configs_io.list_prune_config_names(str(tmp_path / "empty")) == []
+
+
+def test_load_prune_config_returns_only_present_keys(tmp_path):
+    root = str(tmp_path)
+    configs_io.prune_config_to_yaml(root, {"out": "artifacts/x", "prune_k": 7}, slug="s")
+    loaded = configs_io.load_prune_config(root, "s")
+    assert loaded == {"out": "artifacts/x", "prune_k": 7}  # verbatim, only saved keys
+    # A never-saved slice loads as an empty mapping (form shows all-default).
+    assert configs_io.load_prune_config(root, "nonexistent") == {}
+
+
+# --- item 6: curated help/example merged into the field descriptors ------------------------
+
+
+def test_train_descriptors_carry_help_and_example():
+    by_name = {f["name"]: f for f in configs_io.describe_train_fields()}
+    # Curated prose from app.field_help is merged in, keyed by field name (item 6).
+    assert by_name["name"]["help"] and by_name["name"]["example"]
+    assert by_name["timesteps"]["help"] and by_name["timesteps"]["example"]
+    # Every descriptor exposes the two keys (None for fields with no curated prose — safe drift).
+    for f in configs_io.describe_train_fields():
+        assert "help" in f and "example" in f
+    # Constraints still derive from the real dataclass — prose never relaxes validation.
+    assert by_name["timesteps"]["control"] == "number"
+
+
+def test_prune_descriptors_carry_help_and_example():
+    by_name = {f["name"]: f for f in configs_io.describe_prune_fields()}
+    assert by_name["out"]["help"] and by_name["out"]["example"]
+    assert by_name["prune_k"]["help"] and by_name["prune_k"]["example"]
+    for f in configs_io.describe_prune_fields():
+        assert "help" in f and "example" in f

@@ -22,6 +22,7 @@ import sys
 
 import yaml
 from app import configs_io
+from app import runs as runs_mod
 from app.runs import RunRegistry
 from app.server import create_app
 from fastapi.testclient import TestClient
@@ -108,14 +109,28 @@ def test_settings_round_trip(tmp_path):
 
 
 def test_shell_exposes_left_nav_and_hash_routes():
-    """AC2 structural check of the front-end (headless): nav groups + hash routes present."""
+    """AC2 structural check of the front-end (headless): nav labels + hash routes present.
+
+    Item 1/3 moved the nav tree out of ``index.html`` — it is now rendered by ``app.js`` so the
+    Slices/Train lists and their expanded state stay live. So the nav labels + the new per-run leaf
+    routes are asserted against ``app.js``; ``index.html`` now only has to reference the shared
+    assets (the fly favicon/brand mark + ``modal.js``, loaded before ``app.js``).
+    """
     static_dir = os.path.join(__import__("app").__path__[0], "static")
     index = open(os.path.join(static_dir, "index.html"), encoding="utf-8").read()
-    for label in ("Generate slices", "Train", "Settings"):
-        assert label in index
-    for route in ("#/slices/new", "#/train/new", "#/settings"):
-        assert route in index
+    # index.html references the shared assets the nav/app depend on (item 5 icon + item 6 modal).
+    assert "fly.svg" in index
+    assert "modal.js" in index
+
     app_js = open(os.path.join(static_dir, "app.js"), encoding="utf-8").read()
+    # The three nav groups (item 3 renamed "Generate slices" → "Slices") live in app.js now.
+    for label in ("Slices", "Train", "Settings"):
+        assert label in app_js
+    # The base routes (unchanged) + the new per-run leaf routes (item 1) + slice-detail (item 3).
+    for route in ("#/slices/new", "#/train/new", "#/settings", "#/slices/"):
+        assert route in app_js
+    for leaf in ('"/status"', '"/recordings"', '"/config"'):
+        assert leaf in app_js, leaf
     # Hash-based routing (back/forward work) — the actual render is owner-eyeball.
     assert "hashchange" in app_js
     assert "#/train/" in app_js
@@ -149,6 +164,84 @@ def test_create_slice_bad_config_returns_400(tmp_path):
     client, _, _ = _client(tmp_path)
     r = client.post("/api/slices", json={"config": {"prune_k": 8}})  # missing required 'out'
     assert r.status_code == 400
+
+
+# --- item 3: saved-slice enumeration + per-name load/regenerate over HTTP -------------------
+
+
+def test_list_slice_configs_endpoint(tmp_path):
+    client, _, _ = _client(tmp_path)
+    client.post("/api/slice-configs/alpha", json={"config": {"out": "artifacts/a"}})
+    client.post("/api/slice-configs/zeta", json={"config": {"out": "artifacts/z"}})
+    assert client.get("/api/slice-configs").json()["names"] == ["alpha", "zeta"]
+
+
+def test_get_and_save_slice_config_round_trip_and_regenerate(tmp_path):
+    client, _, spawned = _client(tmp_path)
+    # POST /api/slice-configs/{name} saves the prune config AND regenerates the slice (item 3).
+    r = client.post(
+        "/api/slice-configs/myslice", json={"config": {"out": "artifacts/x", "prune_k": 9}}
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == "launched"
+    assert spawned[-1].argv[:3] == ["drone-fly", "prune", "--config"]  # regenerate ran prune
+    assert (tmp_path / "configs" / "prune" / "myslice.yaml").is_file()
+    # GET reflects the saved config verbatim (only present keys).
+    got = client.get("/api/slice-configs/myslice").json()
+    assert got["name"] == "myslice"
+    assert got["config"] == {"out": "artifacts/x", "prune_k": 9}
+
+
+def test_save_slice_config_bad_returns_400(tmp_path):
+    client, _, _ = _client(tmp_path)
+    r = client.post("/api/slice-configs/bad", json={"config": {"prune_k": 5}})  # missing 'out'
+    assert r.status_code == 400
+
+
+# --- item 4: interpreter Setting + no-interpreter → HTTP 409 --------------------------------
+
+
+def test_settings_includes_train_executable(tmp_path):
+    client, _, _ = _client(tmp_path)
+    got = client.get("/api/settings").json()
+    assert "train_executable" in got  # item 4: interpreter override surfaced in Settings
+    assert got["train_executable"] is None  # default unset → auto-detect
+    saved = client.post("/api/settings", json={"train_executable": "/opt/venv"}).json()
+    assert saved["train_executable"] == "/opt/venv"
+    assert client.get("/api/settings").json()["train_executable"] == "/opt/venv"
+
+
+def test_launch_with_no_interpreter_surfaces_as_409(tmp_path, monkeypatch):
+    """No cli= seam + no pybullet-capable env → RunError → HTTP 409 (item 4, hermetic)."""
+    sysbin = tmp_path / "_sysbin"
+    sysbin.mkdir(parents=True, exist_ok=True)
+    (sysbin / ("python.exe" if os.name == "nt" else "python3")).write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        runs_mod.sys,
+        "executable",
+        str(sysbin / ("python.exe" if os.name == "nt" else "python3")),
+        raising=False,
+    )
+
+    spawned: list[_FakePopen] = []
+
+    def fake_spawn(argv, cwd):
+        p = _FakePopen(argv, cwd)
+        spawned.append(p)
+        return p
+
+    # No .venv* on disk, sysbin has no drone-fly script, probe always False → nothing resolves.
+    reg = RunRegistry(
+        str(tmp_path),
+        spawn=fake_spawn,
+        signaler=lambda p, s: p.finish(0),
+        probe=lambda python_exe: False,
+    )
+    client = TestClient(create_app(str(tmp_path), registry=reg))
+    client.post("/api/train-configs/demo", json={"config": {}})
+    r = client.post("/api/runs/demo/launch")
+    assert r.status_code == 409
+    assert spawned == []  # resolution failed before any spawn
 
 
 # --- AC4/AC9: train config schema + save --------------------------------------------------
@@ -286,3 +379,45 @@ def test_docs_describe_launch_and_usage():
     assert "lossless" in readme.lower()
     # The maintainer module doc exists too.
     assert os.path.isfile(os.path.join(__import__("app").__path__[0], "README.md"))
+
+
+# --- item 2: embedded-viewer static-grep guards (no JS harness → owner-eyeball + grep) -------
+#
+# The embedded viewer (brain TL / actions BL / map full-height R, fully-bare chrome incl.
+# #meta-bar) and the standalone viewer rendering identically are OWNER-EYEBALL. These cheap
+# static greps catch the regressions that would silently break the standalone/embed split:
+# the embed behaviour must stay gated behind the `?embed=1` param / `.embed` class.
+
+
+def _viz_file(name: str) -> str:
+    root = os.path.dirname(__import__("app").__path__[0])
+    return open(os.path.join(root, "viz", name), encoding="utf-8").read()
+
+
+def test_viewer_js_gates_embed_class_behind_the_param():
+    js = _viz_file("viewer.js")
+    # The ONE embed-aware edit: read ?embed, and ONLY then tag <body> with the embed class.
+    assert 'get("embed")' in js
+    assert 'classList.add("embed")' in js
+
+
+def test_viewer_css_embed_rules_are_embed_scoped():
+    css = _viz_file("viewer.css")
+    # Standalone viewer matches no `.embed` selector → renders identically. The chrome-hide
+    # (incl. the #meta-bar via `.embed header`) and 2-col layout are all `.embed`-scoped.
+    assert ".embed header" in css
+    assert ".embed #app" in css
+    # Every rule that mentions the embed layout keeps the `.embed` prefix (no bare selector leaked
+    # into the standalone cascade). Scan the UC-61 embed block for un-scoped structural selectors.
+    embed_block = css[css.index("EMBEDDED MODE") :]
+    for line in embed_block.splitlines():
+        stripped = line.strip()
+        # Selector lines end in "{"; skip comments, at-rules, and property/closing lines.
+        if stripped.endswith("{") and not stripped.startswith(("/*", "*", "@")):
+            assert ".embed" in stripped, f"un-scoped embed selector: {stripped!r}"
+
+
+def test_viewer_embed_iframe_requests_embed_param():
+    app_dir = __import__("app").__path__[0]
+    js = open(os.path.join(app_dir, "static", "viewer-embed.js"), encoding="utf-8").read()
+    assert "?embed=1" in js  # the app's iframe opts into embed mode; standalone URL is untouched

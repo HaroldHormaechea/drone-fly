@@ -21,6 +21,7 @@ import os
 import pytest
 import yaml
 from app import configs_io
+from app import runs as runs_mod
 from app.runs import RunError, RunRegistry
 
 
@@ -220,3 +221,163 @@ def test_run_prune_spawns_prune_subcommand(tmp_path):
         "--config",
         "configs/prune/s.yaml",
     ]  # AC3/AC10
+
+
+# --- item 4: per-call interpreter resolution (auto-detect / override / probe cache) --------
+#
+# The `cli=` seam short-circuits detection (that path is exercised by every test above), so these
+# tests build registries WITHOUT `cli=` to drive the real resolver. All hermetic: a fake venv tree
+# on disk + an injected fake pybullet probe (never a real subprocess/import). `sys.executable` is
+# monkeypatched to a controlled fake bin dir so the real test venv's console script can never leak
+# into auto-detection.
+
+_SCRIPT = "drone-fly.exe" if os.name == "nt" else "drone-fly"
+_PYEXE = "python.exe" if os.name == "nt" else "python3"
+
+
+def _bindir(venv_dir):
+    return venv_dir / ("Scripts" if os.name == "nt" else "bin")
+
+
+def _mkfile(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n", encoding="utf-8")
+
+
+def _make_venv(root, name, *, script=True, python=True):
+    """Create a fake venv ``<root>/<name>/<bin>/`` with a drone-fly script and/or a python exe."""
+    b = _bindir(root / name)
+    if script:
+        _mkfile(b / _SCRIPT)
+    if python:
+        _mkfile(b / _PYEXE)
+    return b
+
+
+def _fake_sys_executable(tmp_path, monkeypatch, *, script=False):
+    """Point ``sys.executable`` at a controlled fake bin dir (the app's own interpreter).
+
+    ``script=True`` gives that bin dir its own ``drone-fly`` (the today's-success-path fallback).
+    Returns the fake bin dir.
+    """
+    b = tmp_path / "_sysbin"
+    _mkfile(b / _PYEXE)
+    if script:
+        _mkfile(b / _SCRIPT)
+    monkeypatch.setattr(runs_mod.sys, "executable", str(b / _PYEXE), raising=False)
+    return b
+
+
+def _probe_for(capable_bindirs, calls):
+    """Return a fake pybullet probe: True only for python exes inside ``capable_bindirs``."""
+    capable = {str(b) for b in capable_bindirs}
+
+    def probe(python_exe):
+        calls.append(python_exe)
+        return os.path.dirname(python_exe) in capable
+
+    return probe
+
+
+def _detect_registry(root, *, probe, settings=None):
+    """A registry with NO ``cli=`` (real resolver) + injected spawn/probe/settings_reader."""
+    spawned: list[_FakePopen] = []
+
+    def fake_spawn(argv, cwd):
+        p = _FakePopen(argv, cwd)
+        spawned.append(p)
+        return p
+
+    reg = RunRegistry(
+        str(root),
+        spawn=fake_spawn,
+        signaler=lambda p, s: p.finish(0),
+        settings_reader=(lambda: settings),
+        probe=probe,
+    )
+    return reg, spawned
+
+
+def test_auto_detect_priority_prefers_venv_cuda(tmp_path, monkeypatch):
+    _fake_sys_executable(tmp_path, monkeypatch)
+    b_cuda = _make_venv(tmp_path, ".venv-cuda")
+    _make_venv(tmp_path, ".venv")
+    _make_venv(tmp_path, ".venv-rocm")
+    probe = _probe_for([b_cuda, tmp_path / ".venv" / "bin", tmp_path / ".venv-rocm" / "bin"], [])
+    _save_cfg(tmp_path, "demo")
+    reg, spawned = _detect_registry(tmp_path, probe=probe)
+    reg.launch("demo")
+    assert spawned[-1].argv[0] == str(b_cuda / _SCRIPT)  # .venv-cuda > .venv > other .venv-*
+
+
+def test_auto_detect_skips_incapable_and_picks_next_in_priority(tmp_path, monkeypatch):
+    _fake_sys_executable(tmp_path, monkeypatch)
+    _make_venv(tmp_path, ".venv-cuda")  # present but NOT pybullet-capable
+    b_venv = _make_venv(tmp_path, ".venv")
+    probe = _probe_for([b_venv], [])  # only .venv can import pybullet
+    _save_cfg(tmp_path, "demo")
+    reg, spawned = _detect_registry(tmp_path, probe=probe)
+    reg.launch("demo")
+    assert spawned[-1].argv[0] == str(b_venv / _SCRIPT)
+
+
+def test_settings_override_wins_and_bypasses_probe(tmp_path, monkeypatch):
+    _fake_sys_executable(tmp_path, monkeypatch)
+    _make_venv(tmp_path, ".venv")  # would auto-detect...
+    b_over = _make_venv(tmp_path, ".venv-custom")
+    calls: list[str] = []
+    probe = _probe_for([tmp_path / ".venv" / "bin"], calls)
+    _save_cfg(tmp_path, "demo")
+    reg, spawned = _detect_registry(tmp_path, probe=probe, settings=str(tmp_path / ".venv-custom"))
+    reg.launch("demo")
+    assert spawned[-1].argv[0] == str(b_over / _SCRIPT)  # override venv dir → its drone-fly
+    assert calls == []  # override is validated fresh, never probed
+
+
+def test_settings_override_invalid_raises_run_error_no_fallthrough(tmp_path, monkeypatch):
+    _fake_sys_executable(tmp_path, monkeypatch)
+    b_venv = _make_venv(tmp_path, ".venv")  # a valid auto-detect target exists...
+    probe = _probe_for([b_venv], [])
+    _save_cfg(tmp_path, "demo")
+    reg, _ = _detect_registry(tmp_path, probe=probe, settings=str(tmp_path / "does-not-exist"))
+    with pytest.raises(RunError):  # bad override must NOT silently fall through to auto-detect
+        reg.launch("demo")
+
+
+def test_sys_executable_fallback_when_no_venv_is_capable(tmp_path, monkeypatch):
+    sysbin = _fake_sys_executable(tmp_path, monkeypatch, script=True)
+    _make_venv(tmp_path, ".venv")  # present but NOT pybullet-capable
+    probe = _probe_for([sysbin], [])  # only the app's own interpreter is capable
+    _save_cfg(tmp_path, "demo")
+    reg, spawned = _detect_registry(tmp_path, probe=probe)
+    reg.launch("demo")
+    assert spawned[-1].argv[0] == str(sysbin / _SCRIPT)  # preserves today's success path
+
+
+def test_no_capable_env_errors_for_train_but_prune_still_resolves(tmp_path, monkeypatch):
+    _fake_sys_executable(tmp_path, monkeypatch, script=False)  # app interp has no drone-fly
+    b_venv = _make_venv(tmp_path, ".venv")  # has a script but pybullet probe fails
+    probe = _probe_for([], [])  # nothing is pybullet-capable
+    _save_cfg(tmp_path, "demo")
+    reg, spawned = _detect_registry(tmp_path, probe=probe)
+    with pytest.raises(RunError):  # train requires pybullet → RunError (no spawn)
+        reg.launch("demo")
+    assert spawned == []
+    # prune is relaxed: it accepts any env with a drone-fly script (the .venv here).
+    pid = reg.run_prune("configs/prune/s.yaml")
+    assert pid is not None
+    assert spawned[-1].argv[0] == str(b_venv / _SCRIPT)
+    assert spawned[-1].argv[1] == "prune"
+
+
+def test_probe_verdict_is_cached_per_venv_path(tmp_path, monkeypatch):
+    _fake_sys_executable(tmp_path, monkeypatch)
+    b_venv = _make_venv(tmp_path, ".venv")
+    calls: list[str] = []
+    probe = _probe_for([b_venv], calls)
+    reg, spawned = _detect_registry(tmp_path, probe=probe)
+    # Two separate resolves (prune re-resolves every call) → the slow probe runs only ONCE.
+    reg.run_prune("configs/prune/s.yaml")
+    reg.run_prune("configs/prune/s.yaml")
+    assert len(calls) == 1  # verdict memoised by absolute venv path
+    assert spawned[-1].argv[0] == str(b_venv / _SCRIPT)
