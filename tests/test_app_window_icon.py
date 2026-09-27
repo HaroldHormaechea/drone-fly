@@ -18,17 +18,20 @@ from __future__ import annotations
 import os
 import struct
 import sys
-
-import pytest
+import types
 
 # Importing the module must be side-effect free: no window, no pywebview import.
 # (If this line ever opens a window or imports pywebview, that is a production bug.)
-from app.__main__ import _window_icon_path
+import app.__main__ as appmain
+import pytest
+from app.__main__ import _window_icon_path, main
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-ICO_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app", "static", "fly.ico"
+STATIC_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app", "static"
 )
+ICO_PATH = os.path.join(STATIC_DIR, "fly.ico")
+PNG_PATH = os.path.join(STATIC_DIR, "fly.png")
 
 
 def test_import_did_not_import_pywebview() -> None:
@@ -144,3 +147,74 @@ def test_committed_ico_has_no_png_encoded_frames() -> None:
             "System.Drawing.Icon rejects PNG-in-ICO frames. Regenerate fly.ico with "
             "bitmap_format='bmp' (see scripts/make_app_icons.py)."
         )
+
+
+def test_both_committed_assets_exist() -> None:
+    """Both window icons ship in app/static so the selection logic can find them."""
+    assert os.path.isfile(ICO_PATH), f"missing {ICO_PATH}"
+    assert os.path.isfile(PNG_PATH), f"missing {PNG_PATH}"
+
+
+# --------------------------------------------------------------------------- #
+# 3. main() passes the selected icon to webview.start (fully faked — no window)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def faked_webview(monkeypatch):
+    """Install a fake ``webview`` module and stub out the server/thread/sleep so
+    ``main()`` runs the windowed path head-lessly, recording the ``start`` kwargs.
+
+    Nothing real is started: no uvicorn thread, no sleep, no native window.
+    """
+    calls: dict = {}
+
+    fake = types.ModuleType("webview")
+
+    def _create_window(*args, **kwargs):
+        calls["create_window"] = (args, kwargs)
+
+    def _start(*args, **kwargs):
+        calls["start"] = (args, kwargs)
+
+    fake.create_window = _create_window
+    fake.start = _start
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    # Stub the server factory (imported inside main() as `from app.server import create_app`).
+    monkeypatch.setattr("app.server.create_app", lambda project_root: object())
+
+    # No real background thread and no real sleep.
+    class _NoopThread:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            pass
+
+        def join(self):
+            pass
+
+    monkeypatch.setattr(appmain.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(appmain.time, "sleep", lambda *a, **k: None)
+    return calls
+
+
+def test_main_passes_ico_to_webview_start_on_windows(faked_webview, monkeypatch) -> None:
+    monkeypatch.setattr(os, "name", "nt")  # forces the .ico branch at call time
+    rc = main(["--host", "127.0.0.1", "--port", "12345"])
+    assert rc == 0
+    assert "start" in faked_webview, "webview.start was never called"
+    icon = faked_webview["start"][1].get("icon")
+    assert icon is not None and icon.endswith("fly.ico")
+
+
+def test_main_passes_png_to_webview_start_on_posix(faked_webview, monkeypatch) -> None:
+    # os.name is posix on the CI host and the default platform arg is the CI platform (linux)
+    # → the .png branch is selected.
+    monkeypatch.setattr(os, "name", "posix")
+    rc = main(["--host", "127.0.0.1", "--port", "12345"])
+    assert rc == 0
+    assert "start" in faked_webview, "webview.start was never called"
+    icon = faked_webview["start"][1].get("icon")
+    assert icon is not None and icon.endswith("fly.png")
