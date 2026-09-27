@@ -103,6 +103,8 @@ main.view {
   margin-bottom: 18px;
 }
 .view-head h2 { margin: 0; font-size: 20px; }
+/* item 2: right-aligned header actions slot (the top-right Save convention on every screen). */
+.view-head-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .subtle { color: var(--muted); }
 
 /* ---- cards / panels ---- */
@@ -133,6 +135,36 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* ---- forms ---- */
 .form-grid { display: grid; grid-template-columns: 1fr; gap: 2px; }
+/* item 2: train-config fields grouped into titled section cards in a responsive grid. */
+.form-sections {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 14px;
+  align-items: start;
+  margin-bottom: 4px;
+}
+.form-section {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 2px 12px 8px;
+}
+.form-section-title {
+  margin: 12px 2px 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+}
+/* Narrow section cards: stack the label above the control instead of the 260px 2-col layout. */
+.form-section .field {
+  grid-template-columns: 1fr;
+  align-items: stretch;
+  gap: 4px;
+}
+.form-section .field:hover { background: transparent; }
+.form-section .field:last-child { border-bottom: 0; }
+.form-section .field .control { flex-wrap: wrap; }
 .field {
   display: grid;
   grid-template-columns: 260px 1fr;
@@ -301,6 +333,22 @@ a.link:hover { text-decoration: underline; }
 }
 .mh-constraints dt { color: var(--muted); }
 .mh-constraints dd { margin: 0; }
+
+/* ---- live process-log panel (item 5) ---- */
+.log-head { margin: 16px 0 0; font-size: 12px; }
+.log-panel {
+  margin: 6px 0 0;
+  max-height: 320px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 
 /* ---- about page (items 6+7) ---- */
 .about-card h3 .dot { color: var(--accent); }

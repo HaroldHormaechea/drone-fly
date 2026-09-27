@@ -47,7 +47,7 @@ import sys
 from collections.abc import Callable
 from typing import Any
 
-from app import configs_io
+from app import configs_io, logs
 from drone_fly.config import validate_run_name
 
 # Live states (a process is running); terminal/derived states (no live process).
@@ -99,14 +99,31 @@ def _default_probe(python_exe: str) -> bool:
         return False
 
 
-def _default_spawn(argv: list[str], cwd: str) -> subprocess.Popen:
-    """Spawn ``argv`` in ``cwd`` in its own process group so the whole tree can be signalled."""
+def _default_spawn(argv: list[str], cwd: str, *, log_path: str | None = None) -> subprocess.Popen:
+    """Spawn ``argv`` in ``cwd`` in its own process group so the whole tree can be signalled.
+
+    When ``log_path`` is given (training launches, item 5), the child's stdout+stderr are redirected
+    to that file in append mode. The parent creates the ``logs/`` dir (``launch()`` does not
+    pre-create it), opens the file, hands the fd to the child, and closes **its own** copy right
+    after ``Popen`` — the child keeps its dup'd fd, so there is no leak and no reader/pump thread,
+    and process-group signalling is unaffected. ``log_path=None`` (prune) keeps inherited stdio.
+    """
     kwargs: dict[str, Any] = {"cwd": cwd}
     if os.name == "nt":  # Windows: new process group for CTRL_BREAK_EVENT
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
     else:  # POSIX: new session so os.killpg reaches vec-env workers
         kwargs["start_new_session"] = True
-    return subprocess.Popen(argv, **kwargs)
+    fh = None
+    if log_path is not None:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        fh = open(log_path, "a", encoding="utf-8")  # noqa: SIM115 — child keeps the fd; parent closes below
+        kwargs["stdout"] = fh
+        kwargs["stderr"] = subprocess.STDOUT
+    try:
+        return subprocess.Popen(argv, **kwargs)
+    finally:
+        if fh is not None:
+            fh.close()
 
 
 def _default_signaler(popen: subprocess.Popen, sig: str) -> None:
@@ -151,7 +168,7 @@ class RunRegistry:
         self,
         project_root: str,
         *,
-        spawn: Callable[[list[str], str], Any] | None = None,
+        spawn: Callable[..., Any] | None = None,
         signaler: Callable[[Any, str], None] | None = None,
         cli: str | None = None,
         settings_reader: Callable[[], str | None] | None = None,
@@ -288,6 +305,10 @@ class RunRegistry:
     def _training_dir(self, name: str) -> str:
         return os.path.join(self.project_root, "training", name)
 
+    def _log_path(self, name: str) -> str:
+        """Return ``training/<name>/logs/app.log`` — the redirected stdout+stderr file (item 5)."""
+        return logs.log_path_for(self.project_root, name)
+
     def _checkpoints_dir(self, name: str) -> str:
         return os.path.join(self._training_dir(name), "checkpoints")
 
@@ -374,7 +395,9 @@ class RunRegistry:
         if not os.path.isfile(config_path):
             raise RunError(f"no saved train config for run {name!r} (save it first)")
         cli = self._resolve_executable(require_pybullet=True)
-        popen = self._spawn(self._launch_argv(cli, config_path), self.project_root)
+        popen = self._spawn(
+            self._launch_argv(cli, config_path), self.project_root, log_path=self._log_path(name)
+        )
         self._procs[name] = _Proc(popen, "running")
         self._last_state.pop(name, None)
         return self.describe(name)
@@ -399,7 +422,9 @@ class RunRegistry:
         else:
             launch_config = self._write_transient_resume_config(name, mapping)
         cli = self._resolve_executable(require_pybullet=True)
-        popen = self._spawn(self._launch_argv(cli, launch_config), self.project_root)
+        popen = self._spawn(
+            self._launch_argv(cli, launch_config), self.project_root, log_path=self._log_path(name)
+        )
         self._procs[name] = _Proc(popen, "running", resumed=True)
         self._last_state.pop(name, None)
         return self.describe(name)
@@ -437,7 +462,10 @@ class RunRegistry:
         so the executable is resolved with the relaxed gate (``require_pybullet=False``).
         """
         cli = self._resolve_executable(require_pybullet=False)
-        popen = self._spawn([cli, "prune", "--config", config_path], self.project_root)
+        # Slice builds are fire-and-forget; no log capture (log_path=None keeps inherited stdio).
+        popen = self._spawn(
+            [cli, "prune", "--config", config_path], self.project_root, log_path=None
+        )
         return getattr(popen, "pid", None)
 
     def pause(self, name: str) -> dict[str, Any]:

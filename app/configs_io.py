@@ -138,7 +138,10 @@ def describe_train_fields() -> list[dict[str, Any]]:
         choices_map=_train_choices(),
         defaults_seed={"name": "preview"},
     )
-    return field_help.merge_help(fields, field_help.TRAIN_HELP)
+    fields = field_help.merge_help(fields, field_help.TRAIN_HELP)
+    # item 2: tag each descriptor with its section (order-preserving) so the form can group the
+    # existing field order into titled cards without reordering keys.
+    return field_help.merge_sections(fields, field_help.TRAIN_SECTIONS)
 
 
 def describe_prune_fields() -> list[dict[str, Any]]:

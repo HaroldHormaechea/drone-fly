@@ -22,7 +22,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from app import configs_io, recordings, status
+from app import configs_io, logs, recordings, status
 from app.runs import RunError, RunRegistry
 from drone_fly.config import ConfigError
 
@@ -207,6 +207,13 @@ def create_app(
     @app.get("/api/runs/{name}/status")
     def run_status(name: str, since: int = 0) -> dict[str, Any]:
         return status.progress_snapshot(root, name, since=since)
+
+    # -- live process logs (item 5) -------------------------------------------------------
+    @app.get("/api/runs/{name}/logs")
+    def run_logs(name: str, since: int = 0) -> dict[str, Any]:
+        # Byte-offset tail of training/<name>/logs/app.log; `since` mirrors the status route's
+        # cursor. Returns {"lines": [filtered], "next": <offset>}; the raw log is kept on disk.
+        return logs.tail(logs.log_path_for(root, name), since=since)
 
     @app.get("/api/runs/{name}/status/stream")
     def run_status_stream(name: str) -> StreamingResponse:

@@ -87,8 +87,18 @@
   }
   function fmt(v, digits) {
     if (v === null || v === undefined) return "—";
-    if (typeof v === "number") return digits !== undefined ? v.toFixed(digits) : String(v);
+    if (typeof v === "number") {
+      if (digits !== undefined) return v.toFixed(digits);
+      // item 3: unformatted integers get thousands separators (e.g. 2,000,000); non-integers keep
+      // their full precision. Callers passing an explicit `digits` are unaffected.
+      return Number.isInteger(v) ? v.toLocaleString("en-US") : String(v);
+    }
     return String(v);
+  }
+  // item 3: format a value as a grouped integer (thousands separators, no decimals).
+  function fmtInt(v) {
+    if (v === null || v === undefined) return "—";
+    return typeof v === "number" ? v.toLocaleString("en-US") : String(v);
   }
   function esc(s) {
     return String(s === null || s === undefined ? "" : s)
@@ -232,7 +242,11 @@
     const fields = await getTrainSchema();
     const root = view();
     root.innerHTML = "";
-    root.appendChild(headBar("New training", null, null));
+    // item 2: Save + "Save & launch" live in the top-right header slot (two distinct buttons —
+    // launch stays separate from a plain save).
+    const saveBtn = h("button", { class: "primary" }, "Save");
+    const launchBtn = h("button", null, "Save &amp; launch");
+    root.appendChild(headBar("New training", null, null, [saveBtn, launchBtn]));
     const nameCard = h("div", { class: "card" });
     nameCard.appendChild(h("h3", null, "Run name"));
     const nameInput = h("input", { type: "text", placeholder: "e.g. baseline" });
@@ -247,12 +261,6 @@
     root.appendChild(formCard);
     const form = Forms.buildForm(formHost, fields.filter((f) => f.name !== "name"), {});
     formHost.addEventListener("input", () => setDirty(true));
-
-    const actions = h("div", { class: "btn-row" });
-    const saveBtn = h("button", { class: "primary" }, "Save");
-    const launchBtn = h("button", null, "Save &amp; launch");
-    actions.appendChild(saveBtn); actions.appendChild(launchBtn);
-    root.appendChild(actions);
 
     async function save() {
       const name = nameInput.value.trim();
@@ -272,12 +280,16 @@
   }
 
   // -- item 1: split run detail into Status / Recordings / Config --
-  function runHead(name, sub) {
+  // `actions` (item 2): optional button nodes rendered in the right-aligned header slot (Save).
+  function runHead(name, sub, actions) {
     const bar = h("div", { class: "view-head" });
     const wrap = h("div");
     wrap.appendChild(h("h2", null, esc(name)));
     wrap.appendChild(h("p", { class: "view-sub subtle" }, sub));
     bar.appendChild(wrap);
+    const slot = h("div", { class: "view-head-actions" });
+    (actions || []).forEach((node) => slot.appendChild(node));
+    bar.appendChild(slot);
     return bar;
   }
 
@@ -295,6 +307,12 @@
     monitor.appendChild(progLabel); monitor.appendChild(progWrap);
     const metrics = h("div", { class: "metrics" }); metrics.style.marginTop = "12px";
     monitor.appendChild(metrics);
+    // item 5: live process-log panel below the metric boxes. Filled by a byte-offset tail folded
+    // into the same 2.5s poll; `logCursor` adopts the server's returned `next` verbatim.
+    monitor.appendChild(h("p", { class: "subtle log-head" }, "Process logs"));
+    const logPanel = h("pre", { class: "log-panel" });
+    monitor.appendChild(logPanel);
+    let logCursor = 0;
     root.appendChild(monitor);
 
     function renderControls(run) {
@@ -327,7 +345,9 @@
     }
     function renderMetricsCsv(row) {
       metrics.innerHTML = "";
-      Object.keys(row).slice(0, 8).forEach((k) => metrics.appendChild(metricCard(k, fmt(row[k], 3))));
+      // item 3: integer-valued cells (e.g. 100000) render as grouped ints; genuine decimals keep 3dp.
+      Object.keys(row).slice(0, 8).forEach((k) =>
+        metrics.appendChild(metricCard(k, Number.isInteger(row[k]) ? fmtInt(row[k]) : fmt(row[k], 3))));
     }
     async function tick() {
       let run;
@@ -339,15 +359,30 @@
         if (latest && snap.source === "jsonl") {
           const pct = latest.target_timesteps ? Math.min(100, 100 * latest.timesteps / latest.target_timesteps) : 0;
           progWrap.firstChild.style.width = pct + "%";
+          // item 4: no "source:" indicator — just the progress line.
           progLabel.textContent = "step " + fmt(latest.timesteps) + " / " + fmt(latest.target_timesteps) +
-            " · update " + fmt(latest.n_updates) + " · " + fmt(latest.fps, 0) + " fps · source: jsonl";
+            " · update " + fmt(latest.n_updates) + " · " + fmt(latest.fps, 0) + " fps";
           renderMetrics(latest);
         } else if (latest && snap.source === "csv") {
-          progLabel.textContent = "source: progress.csv (fallback)";
+          // item 4: neutral label (the CSV fallback has no step counter); no "source:" wording.
+          progLabel.textContent = "live metrics";
           renderMetricsCsv(latest);
         } else {
           progLabel.textContent = "no progress yet";
         }
+      } catch (e) {}
+      await tickLogs();
+    }
+    async function tickLogs() {
+      try {
+        const lr = await getJSON("/api/runs/" + encodeURIComponent(name) + "/logs?since=" + logCursor);
+        if (lr.lines && lr.lines.length) {
+          // Auto-scroll only when the user is already pinned to the bottom (don't yank them up).
+          const atBottom = logPanel.scrollTop + logPanel.clientHeight >= logPanel.scrollHeight - 4;
+          lr.lines.forEach((line) => logPanel.appendChild(document.createTextNode(line + "\n")));
+          if (atBottom) logPanel.scrollTop = logPanel.scrollHeight;
+        }
+        logCursor = lr.next;  // adopt the server's cursor verbatim (don't assume prev + length).
       } catch (e) {}
     }
     await tick();
@@ -392,7 +427,8 @@
     const fields = await getTrainSchema();
     const root = view();
     root.innerHTML = "";
-    root.appendChild(runHead(name, "Config"));
+    const saveBtn = h("button", { class: "primary" }, "Save");
+    root.appendChild(runHead(name, "Config", [saveBtn]));  // item 2: Save top-right.
     const cfgCard = h("div", { class: "card" });
     cfgCard.appendChild(h("h3", null, "Configuration"));
     const cfgHost = h("div");
@@ -400,10 +436,6 @@
     const saved = (await getJSON("/api/train-configs/" + encodeURIComponent(name))).config || {};
     const form = Forms.buildForm(cfgHost, fields.filter((f) => f.name !== "name"), saved);
     cfgHost.addEventListener("input", () => setDirty(true));
-    const cfgActions = h("div", { class: "btn-row" });
-    const saveBtn = h("button", { class: "primary" }, "Save");
-    cfgActions.appendChild(saveBtn);
-    cfgCard.appendChild(cfgActions);
     root.appendChild(cfgCard);
     saveBtn.addEventListener("click", async () => {
       try { await postJSON("/api/train-configs/" + encodeURIComponent(name), { config: form.collect() }); setDirty(false); toast("Saved."); }
@@ -415,17 +447,14 @@
     const fields = await getSliceSchema();
     const root = view();
     root.innerHTML = "";
-    root.appendChild(headBar("New slice", null, null));
+    const genBtn = h("button", { class: "primary" }, "Generate slice");
+    root.appendChild(headBar("New slice", null, null, [genBtn]));  // item 2: primary action top-right.
     const card = h("div", { class: "card" });
     card.appendChild(h("h3", null, "Slice (prune) configuration"));
     const host = h("div"); card.appendChild(host);
     root.appendChild(card);
     const form = Forms.buildForm(host, fields, {});
     host.addEventListener("input", () => setDirty(true));
-    const actions = h("div", { class: "btn-row" });
-    const genBtn = h("button", { class: "primary" }, "Generate slice");
-    actions.appendChild(genBtn);
-    root.appendChild(actions);
     genBtn.addEventListener("click", async () => {
       try {
         const config = form.collect();
@@ -441,7 +470,8 @@
     const fields = await getSliceSchema();
     const root = view();
     root.innerHTML = "";
-    root.appendChild(headBar("Slice · " + name, null, null));
+    const genBtn = h("button", { class: "primary" }, "Regenerate slice");
+    root.appendChild(headBar("Slice · " + name, null, null, [genBtn]));  // item 2: primary action top-right.
     const card = h("div", { class: "card" });
     card.appendChild(h("h3", null, "Slice (prune) configuration"));
     const host = h("div"); card.appendChild(host);
@@ -449,10 +479,6 @@
     const saved = (await getJSON("/api/slice-configs/" + encodeURIComponent(name))).config || {};
     const form = Forms.buildForm(host, fields, saved);
     host.addEventListener("input", () => setDirty(true));
-    const actions = h("div", { class: "btn-row" });
-    const genBtn = h("button", { class: "primary" }, "Regenerate slice");
-    actions.appendChild(genBtn);
-    root.appendChild(actions);
     genBtn.addEventListener("click", async () => {
       try {
         const config = form.collect();
@@ -468,7 +494,8 @@
     const s = await getJSON("/api/settings");
     const root = view();
     root.innerHTML = "";
-    root.appendChild(headBar("Settings", null, null));
+    const saveBtn = h("button", { class: "primary" }, "Save");
+    root.appendChild(headBar("Settings", null, null, [saveBtn]));  // item 2: Save top-right.
     const card = h("div", { class: "card" });
     const rows = [
       ["project_root", "Project root", s.project_root || "", "text"],
@@ -493,10 +520,6 @@
       inputs[k] = inp;
     });
     root.appendChild(card);
-    const actions = h("div", { class: "btn-row" });
-    const saveBtn = h("button", { class: "primary" }, "Save");
-    actions.appendChild(saveBtn);
-    root.appendChild(actions);
     saveBtn.addEventListener("click", async () => {
       try {
         await postJSON("/api/settings", {
@@ -555,13 +578,16 @@
     return box;
   }
 
-  function headBar(title, actionLabel, actionHash) {
+  // item 2: a view header with a right-aligned actions slot. `actionLabel`/`actionHash` render a
+  // link button (e.g. "New training"); `actions` is an optional array of button nodes (e.g. the
+  // primary Save) — the top-right Save convention across every screen.
+  function headBar(title, actionLabel, actionHash, actions) {
     const bar = h("div", { class: "view-head" });
     bar.appendChild(h("h2", null, esc(title)));
-    if (actionLabel && actionHash) {
-      const a = h("a", { class: "btn primary", href: actionHash }, actionLabel);
-      bar.appendChild(a);
-    }
+    const slot = h("div", { class: "view-head-actions" });
+    if (actionLabel && actionHash) slot.appendChild(h("a", { class: "btn primary", href: actionHash }, actionLabel));
+    (actions || []).forEach((node) => slot.appendChild(node));
+    bar.appendChild(slot);
     return bar;
   }
 

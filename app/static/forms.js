@@ -59,8 +59,31 @@
   function buildForm(container, fields, values) {
     container.innerHTML = "";
     values = values || {};
-    const grid = el("div", { class: "form-grid" });
     const rows = [];
+
+    // item 2: fields carrying a `section` are wrapped into titled cards laid out in a responsive
+    // grid (`.form-sections`); fields with no section render flat in a `.form-grid` (the prune
+    // form, unchanged). Sections are created lazily in first-seen order — since the backend emits
+    // fields in descriptor order and each section is a contiguous run, this preserves field order.
+    let sectionsWrap = null, flatGrid = null;
+    const sectionGrids = {};
+    function flat() {
+      if (!flatGrid) flatGrid = el("div", { class: "form-grid" });
+      return flatGrid;
+    }
+    function sectionGrid(title) {
+      if (!sectionsWrap) sectionsWrap = el("div", { class: "form-sections" });
+      if (!sectionGrids[title]) {
+        const g = el("div", { class: "form-grid" });
+        const card = el("div", { class: "form-section" }, [
+          el("h4", { class: "form-section-title", text: title }),
+          g,
+        ]);
+        sectionsWrap.appendChild(card);
+        sectionGrids[title] = g;
+      }
+      return sectionGrids[title];
+    }
 
     fields.forEach((f) => {
       const present = Object.prototype.hasOwnProperty.call(values, f.name);
@@ -119,7 +142,7 @@
       control.appendChild(input);
       row.appendChild(keyLabel);
       row.appendChild(control);
-      grid.appendChild(row);
+      (f.section ? sectionGrid(f.section) : flat()).appendChild(row);
 
       function markDirty() { row.classList.add("dirty"); }
       input.addEventListener("input", markDirty);
@@ -128,7 +151,8 @@
       rows.push({ f, input, enableBox });
     });
 
-    container.appendChild(grid);
+    if (sectionsWrap) container.appendChild(sectionsWrap);
+    if (flatGrid) container.appendChild(flatGrid);
 
     function collect() {
       const out = {};

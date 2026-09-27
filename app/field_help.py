@@ -204,6 +204,84 @@ SETTINGS_HELP: dict[str, dict[str, str]] = {
 }
 
 
+#: Display order of the train-config sections (item 2). The front-end lays sections out in this
+#: order in a responsive grid; a field whose name is absent from :data:`TRAIN_SECTIONS` renders in
+#: no section (the front-end falls back to a flat layout, as the prune form does).
+SECTION_ORDER: list[str] = [
+    "Core",
+    "Pruning",
+    "Recording",
+    "Task randomization",
+    "Capacity guard",
+    "Curriculum",
+    "Rate controller",
+    "PPO",
+    "Dynamics envelope",
+    "Control rate",
+    "Reward",
+]
+
+#: Train-config field → section title (item 2). Each section is a **contiguous** run over the
+#: ``TrainRunConfig`` dataclass field order, so grouping never reorders fields — it only wraps the
+#: existing order into titled cards. Keep this in sync with the dataclass if new fields are added.
+TRAIN_SECTIONS: dict[str, str] = {
+    # Core
+    "name": "Core",
+    "connectome": "Core",
+    "adapter": "Core",
+    "device": "Core",
+    "timesteps": "Core",
+    "n_envs": "Core",
+    "resume": "Core",
+    # Pruning
+    "prune": "Pruning",
+    "prune_k": "Pruning",
+    # Recording
+    "record": "Recording",
+    "record_every": "Recording",
+    "record_dir": "Recording",
+    # Task randomization
+    "randomize": "Task randomization",
+    "randomize_dynamics": "Task randomization",
+    "schema": "Task randomization",
+    "randomize_obstacles": "Task randomization",
+    "randomize_recharge_pads": "Task randomization",
+    "randomize_repair_pads": "Task randomization",
+    # Capacity guard
+    "strict_capacity": "Capacity guard",
+    "capacity_floor": "Capacity guard",
+    # Curriculum
+    "ent_coef": "Curriculum",
+    "airborne_curriculum_enabled": "Curriculum",
+    "airborne_curriculum_warmup_fraction": "Curriculum",
+    "airborne_curriculum_anneal_fraction": "Curriculum",
+    # Rate controller
+    "rate_kp": "Rate controller",
+    "rate_ki": "Rate controller",
+    "rate_kd": "Rate controller",
+    "rate_max_body_rate": "Rate controller",
+    # PPO
+    "n_epochs": "PPO",
+    "batch_size": "PPO",
+    "n_steps": "PPO",
+    "learning_rate": "PPO",
+    # Dynamics envelope
+    "pybullet_mass_ratio_min": "Dynamics envelope",
+    "pybullet_mass_ratio_max": "Dynamics envelope",
+    "pybullet_tw_min": "Dynamics envelope",
+    "pybullet_tw_max": "Dynamics envelope",
+    "pybullet_arm_length_min": "Dynamics envelope",
+    "pybullet_arm_length_max": "Dynamics envelope",
+    # Control rate
+    "control_hz": "Control rate",
+    "physics_ratio": "Control rate",
+    "command_latency_ms": "Control rate",
+    # Reward
+    "altitude_weight": "Reward",
+    "altitude_target": "Reward",
+}
+
+
 def merge_help(fields: list[dict[str, Any]], help_map: dict[str, dict[str, str]]) -> list[dict]:
     """Return ``fields`` with ``help`` + ``example`` merged in from ``help_map`` (by field name).
 
@@ -220,4 +298,27 @@ def merge_help(fields: list[dict[str, Any]], help_map: dict[str, dict[str, str]]
     return out
 
 
-__all__ = ["TRAIN_HELP", "PRUNE_HELP", "SETTINGS_HELP", "merge_help"]
+def merge_sections(fields: list[dict[str, Any]], section_map: dict[str, str]) -> list[dict]:
+    """Return ``fields`` with a ``section`` key merged in from ``section_map`` (by field name).
+
+    Non-destructive and order-preserving: fields absent from ``section_map`` get ``section: None``
+    (the front-end renders them flat), and the field order is never changed — grouping only wraps
+    the existing descriptor order into titled cards (item 2).
+    """
+    out: list[dict[str, Any]] = []
+    for f in fields:
+        merged = dict(f)
+        merged["section"] = section_map.get(f.get("name", ""))
+        out.append(merged)
+    return out
+
+
+__all__ = [
+    "TRAIN_HELP",
+    "PRUNE_HELP",
+    "SETTINGS_HELP",
+    "TRAIN_SECTIONS",
+    "SECTION_ORDER",
+    "merge_help",
+    "merge_sections",
+]
