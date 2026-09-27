@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>drone-fly · desktop</title>
+  <link rel="stylesheet" href="/app/app.css" />
+</head>
+<body>
+  <nav class="sidebar">
+    <h1>drone<span class="dot">·</span>fly</h1>
+
+    <div class="nav-group">
+      <div class="nav-head">Generate slices</div>
+      <a class="nav-item" data-route="#/slices/new" href="#/slices/new">New slice</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-head">Train</div>
+      <a class="nav-item" data-route="#/train/new" href="#/train/new">New training</a>
+      <div id="nav-runs"><!-- run items injected here --></div>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-head">Settings</div>
+      <a class="nav-item" data-route="#/settings" href="#/settings">Settings</a>
+    </div>
+  </nav>
+
+  <main class="view" id="view">
+    <p class="subtle">Loading…</p>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <!-- Vanilla, dependency-free. Order matters: helpers before the app bootstrap. -->
+  <script src="/app/forms.js"></script>
+  <script src="/app/viewer-embed.js"></script>
+  <script src="/app/app.js"></script>
+</body>
+</html>

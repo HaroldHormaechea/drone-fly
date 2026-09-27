@@ -310,6 +310,8 @@ def train(
     strict_capacity: bool = False,
     capacity_floor: int | None = None,
     tui: bool | None = None,
+    status_path: str | None = None,
+    checkpoint_on_signal: bool = False,
 ):
     """Run (or resume) PPO training; return the trained model.
 
@@ -368,6 +370,18 @@ def train(
         HealthCallback` gets ``on_verdict`` wired to the dashboard, a
         :class:`~drone_fly.train.tui.callback.TuiCallback` is appended after it, and
         ``model.learn`` runs inside the dashboard's live session.
+    status_path:
+        UC-61 (AC6) structured-progress file. When set, a
+        :class:`~drone_fly.train.status_emitter.StatusEmitterCallback` appends one JSON status
+        line per rollout to this path (timesteps, metrics, health verdict, dynamics summary),
+        independent of the TUI, so the desktop app can tail live progress. ``None`` (default) adds
+        no callback → byte-identical to before (``smoke_train`` / existing tests unchanged).
+    checkpoint_on_signal:
+        UC-61 (AC7) lossless pause. When ``True`` a
+        :class:`~drone_fly.train.checkpoint_signal.CheckpointOnSignalCallback` traps the first
+        SIGINT/SIGTERM to flush an atomic, resumable checkpoint at the next safe step and then stop
+        cleanly (a second signal force-quits). ``False`` (default) leaves signal handling and the
+        callback list untouched → byte-identical to before.
     """
     from stable_baselines3.common.callbacks import CheckpointCallback
 
@@ -551,6 +565,17 @@ def train(
 
     callbacks: list = [checkpoint_cb]
 
+    # UC-61 (AC7): lossless-pause checkpoint-on-signal. Opt-in (default off ⇒ byte-identical).
+    # The handler is I/O-free (sets a flag); the flush runs at the next safe ``_on_step`` and writes
+    # an atomic checkpoint under the SAME naming ``resume: auto`` scans for. Registered on both the
+    # fresh and resume paths (the callback list feeds ``model.learn`` either way).
+    if checkpoint_on_signal:
+        from drone_fly.train.checkpoint_signal import CheckpointOnSignalCallback
+
+        callbacks.append(
+            CheckpointOnSignalCallback(cfg.models_dir, name_prefix=CHECKPOINT_PREFIX)
+        )
+
     # UC-58: the UC-39/41 training-time collision-penalty curriculum (crash-cliff relief) is
     # retired. It papered over an early-termination trap caused by the (now-removed) per-step
     # ``time_penalty`` plus the grounded cut paying ``collision_penalty``; UC-58 fixes the trap at
@@ -647,12 +672,27 @@ def train(
     # UC-22: reuse the EXISTING UC-23 HealthCallback — inject ``on_verdict`` so its verdict
     # flows to the dashboard status bar (no second assessment). Append the TuiCallback AFTER it
     # so each rollout's verdict is fresh before the redraw. Both are no-ops when the TUI is off.
-    callbacks.append(
-        HealthCallback(
-            thresholds=thresholds,
-            on_verdict=dashboard.set_verdict if dashboard is not None else None,
-        )
+    health_cb = HealthCallback(
+        thresholds=thresholds,
+        on_verdict=dashboard.set_verdict if dashboard is not None else None,
     )
+    callbacks.append(health_cb)
+
+    # UC-61 (AC6): structured JSONL progress emitter. Appended AFTER the HealthCallback so its
+    # ``latest_verdict`` is fresh when the emitter serialises the rollout. Independent of the TUI
+    # (the app launches runs with ``--no-tui``). Only constructed when ``status_path`` is set, so
+    # the default path is byte-identical.
+    if status_path is not None:
+        from drone_fly.train.status_emitter import StatusEmitterCallback
+
+        callbacks.append(
+            StatusEmitterCallback(
+                status_path,
+                health_cb=health_cb,
+                tw_preserving=(env_config or EnvConfig()).pybullet_tw_preserving,
+            )
+        )
+
     if dashboard is not None:
         from drone_fly.train.tui.callback import TuiCallback
 

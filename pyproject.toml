@@ -44,6 +44,23 @@ dev = [
     "ruff",
     "mypy",
     "pip-audit",
+    # UC-61: the desktop app's FastAPI/Uvicorn backend. Placed in `dev` (NOT the default deps) so
+    # CI — which installs `--extra dev` only — can import `app.server` and drive it hermetically via
+    # starlette's TestClient (bundled with FastAPI), with no display and no GPU. `pywebview` is
+    # deliberately OMITTED here: it needs a native display, so the window-open path is owner-eyeball
+    # only and lives in the separate `app` extra below.
+    "fastapi",
+    "uvicorn",
+    "httpx",
+]
+
+# UC-61: the desktop app runtime extra. `pywebview` opens the native window around the local
+# FastAPI server; it needs a display, so it is NOT in `dev`/CI. Install with `uv sync --extra app`
+# (or `pip install -e ".[app]"`) on a machine with a desktop to run `python -m app`.
+app = [
+    "fastapi",
+    "uvicorn",
+    "pywebview",
 ]
 
 # Optional simulator backend (UC-03). PyBullet is the native rigid-body engine the
@@ -62,13 +79,19 @@ sim = [
 
 [project.scripts]
 drone-fly = "drone_fly.cli:main"
+# UC-61: launch the desktop app (starts the local FastAPI server + opens the pywebview window).
+# Requires the `app` extra (pywebview). Running from a source checkout, `python -m app` is equivalent.
+drone-fly-app = "app.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/drone_fly"]
+# UC-61: `app` (the desktop-app package at the repo root) is included so the `drone-fly-app`
+# console script resolves in an installed wheel. The app is normally run from a source checkout
+# (`python -m app`); PyInstaller packaging is out of scope for this use case (Phase 3).
+packages = ["src/drone_fly", "app"]
 
 [tool.ruff]
 line-length = 100
@@ -81,7 +104,9 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+# UC-61: `.` (the repo root) is on the import path so the app tests can `import app` — the desktop
+# app package lives at the repo root (outside `src/`), per AC10 / the CLAUDE.md write authorizations.
+pythonpath = ["src", "."]
 addopts = "-q"
 
 [tool.mypy]

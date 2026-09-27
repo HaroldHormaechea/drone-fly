@@ -479,7 +479,9 @@ def _run_train(config_path: str, *, no_tui: bool = False) -> int:
     ``no_tui`` (UC-22) forwards to ``train(tui=not no_tui)``; the loop still auto-disables the
     dashboard on a non-TTY run, so ``--no-tui`` is a hard off switch, not a hard on switch.
     """
-    from drone_fly.config import TrainRunConfig, load_yaml, run_layout
+    import os
+
+    from drone_fly.config import TRAINING_ROOT, TrainRunConfig, load_yaml, run_layout
     from drone_fly.train.config import TrainConfig
     from drone_fly.train.loop import train
 
@@ -560,6 +562,11 @@ def _run_train(config_path: str, *, no_tui: bool = False) -> int:
         strict_capacity=cfg.strict_capacity,
         capacity_floor=cfg.capacity_floor,
         tui=not no_tui,
+        # UC-61: every CLI train run emits structured JSONL progress under training/<name>/ so the
+        # desktop app can tail it (AC6), and traps the first SIGINT/SIGTERM to flush a resumable
+        # checkpoint before exiting — a lossless pause (AC7). A second Ctrl-C still force-quits.
+        status_path=os.path.join(TRAINING_ROOT, cfg.name, "status.jsonl"),
+        checkpoint_on_signal=True,
     )
     return 0
 
