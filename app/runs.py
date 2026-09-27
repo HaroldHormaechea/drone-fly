@@ -15,8 +15,27 @@ the project root as CWD (all the CLIs are CWD-relative). :class:`RunRegistry` ow
   relaunches the same YAML with ``resume: auto`` (via a transient launch config when the saved YAML
   has no ``resume`` key — never mutating the user's file, AC9).
 
-Both the process spawner and the group-signaler are injected (defaults do the real OS calls) so the
-whole state machine is unit-testable with fakes — no real training, no signals, no display (AC11).
+The process spawner, the group-signaler, and the **pybullet probe** are all injected (defaults do
+the real OS calls) so the whole state machine — including interpreter resolution — is unit-testable
+with fakes: no real training, no signals, no display, no pybullet import (AC11).
+
+**Interpreter resolution (UC-61 follow-up item 4).** The app itself runs in its own venv, which may
+NOT have ``pybullet`` (a training-only dependency). So the ``drone-fly`` executable used to launch a
+run is re-resolved on **every** :meth:`launch` / :meth:`resume` / :meth:`run_prune` call (never
+cached, so a Settings change takes effect on the next launch with no restart), in this order:
+
+1. An explicit ``cli=`` constructor arg (the test seam) — used verbatim, no detection.
+2. A Settings ``train_executable`` override (re-read fresh each call) — normalised to a
+   ``drone-fly`` console script; a value that does not resolve to a real script is a hard
+   :class:`RunError` (no silent fall-through).
+3. Auto-detect, probe-gated: candidate venvs under the project root in priority order
+   ``.venv-cuda`` > ``.venv`` > other ``.venv-*`` (sorted) > the app's own interpreter
+   (``sys.executable``), choosing the first whose ``import pybullet`` probe passes.
+4. Nothing capable → :class:`RunError` with an actionable message.
+
+Only the slow per-venv pybullet-probe *verdict* is memoised (keyed by absolute venv path); the
+chosen executable never is. :meth:`run_prune` does not need pybullet, so it uses relaxed resolution
+(prefers a pybullet-capable env but accepts any env that has a ``drone-fly`` script).
 """
 
 from __future__ import annotations
@@ -35,19 +54,49 @@ from drone_fly.config import validate_run_name
 _LIVE_STATES = {"running", "pausing", "stopping"}
 
 
-def _resolve_cli() -> str:
-    """Return the ``drone-fly`` console-script path (next to the running interpreter), or its name.
+def _bin_dir(venv_dir: str) -> str:
+    """Return the console-scripts dir for a venv: ``Scripts`` on Windows, ``bin`` on POSIX."""
+    return os.path.join(venv_dir, "Scripts" if os.name == "nt" else "bin")
 
-    The app runs inside the project venv, so the ``drone-fly`` entry point sits in the same
-    ``bin``/``Scripts`` dir as ``sys.executable``. Fall back to the bare name (PATH lookup) if the
-    resolved candidate is absent.
+
+def _drone_fly_script(bindir: str) -> str | None:
+    """Return the ``drone-fly`` console-script path inside ``bindir``, or ``None`` if absent.
+
+    On Windows the ``.exe`` shim is preferred; on POSIX the bare name is used.
     """
-    bindir = os.path.dirname(sys.executable)
-    for candidate in ("drone-fly", "drone-fly.exe"):
-        path = os.path.join(bindir, candidate)
+    suffixes = (".exe", "") if os.name == "nt" else ("",)
+    for suffix in suffixes:
+        path = os.path.join(bindir, "drone-fly" + suffix)
         if os.path.isfile(path):
             return path
-    return "drone-fly"
+    return None
+
+
+def _python_in(bindir: str) -> str | None:
+    """Return the interpreter inside a venv ``bindir`` (for the pybullet probe), or ``None``."""
+    names = ("python.exe", "python") if os.name == "nt" else ("python3", "python")
+    for n in names:
+        path = os.path.join(bindir, n)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _default_probe(python_exe: str) -> bool:
+    """Return ``True`` iff ``python_exe`` can ``import pybullet`` (the training hard-dep, AC5).
+
+    Runs a short, isolated subprocess. Any failure (missing module, bad interpreter, timeout) is a
+    ``False`` verdict — never an exception — so a broken candidate is simply skipped, not fatal.
+    """
+    try:
+        completed = subprocess.run(
+            [python_exe, "-c", "import pybullet"],
+            capture_output=True,
+            timeout=60,
+        )
+        return completed.returncode == 0
+    except Exception:
+        return False
 
 
 def _default_spawn(argv: list[str], cwd: str) -> subprocess.Popen:
@@ -105,14 +154,134 @@ class RunRegistry:
         spawn: Callable[[list[str], str], Any] | None = None,
         signaler: Callable[[Any, str], None] | None = None,
         cli: str | None = None,
+        settings_reader: Callable[[], str | None] | None = None,
+        probe: Callable[[str], bool] | None = None,
     ) -> None:
         self.project_root = os.path.abspath(project_root)
         self._spawn = spawn or _default_spawn
         self._signaler = signaler or _default_signaler
-        self._cli = cli or _resolve_cli()
+        #: Explicit executable (test seam). When set, short-circuits detection (backward-compat).
+        self._cli = cli
+        #: Reads the Settings ``train_executable`` override fresh on each resolve (None → unset).
+        self._settings_reader = settings_reader
+        #: Injected pybullet probe (``python_exe -> bool``); defaults to the real subprocess import.
+        self._probe = probe or _default_probe
+        #: Memoised pybullet-probe verdicts, keyed by absolute venv/bin path (never the executable).
+        self._probe_cache: dict[str, bool] = {}
         self._procs: dict[str, _Proc] = {}
         #: Last known terminal state per name, so a reaped process keeps its label until relaunch.
         self._last_state: dict[str, str] = {}
+
+    # -- interpreter resolution (item 4) ---------------------------------------------------
+
+    def _resolve_executable(self, *, require_pybullet: bool) -> str:
+        """Resolve the ``drone-fly`` executable to launch, fresh, on every call (item 4).
+
+        ``require_pybullet`` gates auto-detection: ``True`` for train/resume (a run dies without
+        pybullet), ``False`` for prune (relaxed — prefer a capable env, else any env with a script).
+        """
+        # 1. Explicit cli= seam → verbatim, no detection (keeps existing tests green).
+        if self._cli is not None:
+            return self._cli
+        # 2. Settings override → normalise; a bad path is fatal (no silent fall-through).
+        override = self._settings_reader() if self._settings_reader is not None else None
+        if override:
+            return self._resolve_override(override)
+        # 3. Auto-detect, probe-gated.
+        return self._auto_detect(require_pybullet=require_pybullet)
+
+    def _resolve_override(self, override: str) -> str:
+        """Normalise a Settings ``train_executable`` value to a ``drone-fly`` script path.
+
+        Accepts a console-script path (``…/bin/drone-fly``), a venv interpreter (``…/bin/python``),
+        a venv directory (``…/.venv-cuda``), or a bin directory. Raises :class:`RunError` naming the
+        bad value when it cannot be resolved to a real ``drone-fly`` script.
+        """
+        candidate = os.path.abspath(os.path.expanduser(override))
+        base = os.path.basename(candidate)
+        # Already a drone-fly console script?
+        if base in ("drone-fly", "drone-fly.exe") and os.path.isfile(candidate):
+            return candidate
+        bindirs: list[str] = []
+        if os.path.isdir(candidate):
+            bindirs.append(_bin_dir(candidate))  # treat as a venv root
+            bindirs.append(candidate)  # …or it already IS the bin dir
+        elif os.path.isfile(candidate):
+            bindirs.append(os.path.dirname(candidate))  # a python interpreter → its bin dir
+        for bindir in bindirs:
+            script = _drone_fly_script(bindir)
+            if script:
+                return script
+        raise RunError(
+            f"Settings train_executable {override!r} does not resolve to a drone-fly executable "
+            "(expected a venv dir, its python interpreter, or a drone-fly console script)."
+        )
+
+    def _venv_candidates(self) -> list[str]:
+        """Return candidate venv dirs under the project root, priority-ordered.
+
+        Priority: ``.venv-cuda`` > ``.venv`` > any other ``.venv-*`` (sorted). Only existing
+        directories are returned.
+        """
+        try:
+            entries = sorted(os.listdir(self.project_root))
+        except OSError:
+            entries = []
+        venvs = [
+            e
+            for e in entries
+            if e.startswith(".venv") and os.path.isdir(os.path.join(self.project_root, e))
+        ]
+        ordered: list[str] = []
+        for pref in (".venv-cuda", ".venv"):
+            if pref in venvs:
+                ordered.append(pref)
+        ordered.extend(v for v in venvs if v not in (".venv-cuda", ".venv"))
+        return [os.path.join(self.project_root, v) for v in ordered]
+
+    def _probe_verdict(self, key: str, bindir: str) -> bool:
+        """Return the memoised ``import pybullet`` verdict for the env at ``key`` (abs path)."""
+        key = os.path.abspath(key)
+        if key in self._probe_cache:
+            return self._probe_cache[key]
+        python_exe = _python_in(bindir)
+        verdict = bool(python_exe) and self._probe(python_exe)
+        self._probe_cache[key] = verdict
+        return verdict
+
+    def _auto_detect(self, *, require_pybullet: bool) -> str:
+        """Auto-detect a ``drone-fly`` executable, probe-gated (item 4 step 3).
+
+        Walks candidate venvs (priority-ordered) plus the app's own interpreter last, returning the
+        first pybullet-capable one. For ``require_pybullet=False`` (prune) a capable env is still
+        preferred, but any env with a ``drone-fly`` script is accepted as a fallback.
+        """
+        # Candidate (bindir, probe-key) pairs: project venvs first, app interpreter last.
+        pairs: list[tuple[str, str]] = [(_bin_dir(v), v) for v in self._venv_candidates()]
+        sys_bindir = os.path.dirname(sys.executable)
+        pairs.append((sys_bindir, sys_bindir))
+
+        first_script: str | None = None
+        for bindir, key in pairs:
+            script = _drone_fly_script(bindir)
+            if script is None:
+                continue
+            if first_script is None:
+                first_script = script
+            if self._probe_verdict(key, bindir):
+                return script  # pybullet-capable → best choice for both train and prune.
+
+        if not require_pybullet and first_script is not None:
+            return first_script  # prune: fall back to any env that has a drone-fly script.
+        if require_pybullet:
+            raise RunError(
+                "No Python environment with pybullet found — set the training interpreter in "
+                "Settings, or create one with `uv sync --extra sim`."
+            )
+        raise RunError(
+            "No drone-fly executable found — set the training interpreter in Settings, or "
+            "install the project (`uv sync`)."
+        )
 
     # -- filesystem facts ------------------------------------------------------------------
 
@@ -194,8 +363,8 @@ class RunRegistry:
         if self._resolve_state(name) in _LIVE_STATES:
             raise RunError(f"run {name!r} is already running")
 
-    def _launch_argv(self, config_path: str) -> list[str]:
-        return [self._cli, "train", "--config", config_path, "--no-tui"]
+    def _launch_argv(self, cli: str, config_path: str) -> list[str]:
+        return [cli, "train", "--config", config_path, "--no-tui"]
 
     def launch(self, name: str) -> dict[str, Any]:
         """Start a fresh run from its saved config (AC5). Errors if already running / no config."""
@@ -204,7 +373,8 @@ class RunRegistry:
         config_path = configs_io.train_config_path(self.project_root, name)
         if not os.path.isfile(config_path):
             raise RunError(f"no saved train config for run {name!r} (save it first)")
-        popen = self._spawn(self._launch_argv(config_path), self.project_root)
+        cli = self._resolve_executable(require_pybullet=True)
+        popen = self._spawn(self._launch_argv(cli, config_path), self.project_root)
         self._procs[name] = _Proc(popen, "running")
         self._last_state.pop(name, None)
         return self.describe(name)
@@ -228,7 +398,8 @@ class RunRegistry:
             launch_config = config_path
         else:
             launch_config = self._write_transient_resume_config(name, mapping)
-        popen = self._spawn(self._launch_argv(launch_config), self.project_root)
+        cli = self._resolve_executable(require_pybullet=True)
+        popen = self._spawn(self._launch_argv(cli, launch_config), self.project_root)
         self._procs[name] = _Proc(popen, "running", resumed=True)
         self._last_state.pop(name, None)
         return self.describe(name)
@@ -262,9 +433,11 @@ class RunRegistry:
         """Spawn a one-shot ``drone-fly prune --config <path>`` slice build (AC3); return its pid.
 
         Not tracked as a managed run (slice generation is fire-and-forget). Uses the same injected
-        spawner as training runs so it is unit-testable with a fake.
+        spawner as training runs so it is unit-testable with a fake. Pruning does not need pybullet,
+        so the executable is resolved with the relaxed gate (``require_pybullet=False``).
         """
-        popen = self._spawn([self._cli, "prune", "--config", config_path], self.project_root)
+        cli = self._resolve_executable(require_pybullet=False)
+        popen = self._spawn([cli, "prune", "--config", config_path], self.project_root)
         return getattr(popen, "pid", None)
 
     def pause(self, name: str) -> dict[str, Any]:

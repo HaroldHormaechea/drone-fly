@@ -36,6 +36,9 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
     "default_connectome": None,
     "host": "127.0.0.1",
     "port": 0,  # 0 → ephemeral port chosen at bind time
+    # UC-61 item 4: the interpreter used to launch training. Empty/None → auto-detect a
+    # pybullet-capable venv; set it to a venv dir / its python / a drone-fly script to override.
+    "train_executable": None,
 }
 
 
@@ -80,7 +83,13 @@ def create_app(
     :class:`RunRegistry` is created for ``project_root``.
     """
     root = os.path.abspath(project_root or _DEFAULT_ROOT)
-    reg = registry or RunRegistry(root)
+
+    def _read_train_executable() -> str | None:
+        # Re-read fresh each launch so a Settings change takes effect without a restart (item 4).
+        val = _load_settings(root).get("train_executable")
+        return val or None
+
+    reg = registry or RunRegistry(root, settings_reader=_read_train_executable)
     viz_dir = os.path.join(root, "viz")
 
     app = FastAPI(title="drone-fly desktop", version="0.1.0")
