@@ -35,6 +35,9 @@ artifacts/**
 training/**
 !training/**/.gitkeep
 
+# Desktop app (UC-61) per-machine local state (settings.json etc.)
+.dev-app/
+
 # Model / RL byproducts
 *.pt
 *.pth

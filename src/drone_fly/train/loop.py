@@ -572,9 +572,7 @@ def train(
     if checkpoint_on_signal:
         from drone_fly.train.checkpoint_signal import CheckpointOnSignalCallback
 
-        callbacks.append(
-            CheckpointOnSignalCallback(cfg.models_dir, name_prefix=CHECKPOINT_PREFIX)
-        )
+        callbacks.append(CheckpointOnSignalCallback(cfg.models_dir, name_prefix=CHECKPOINT_PREFIX))
 
     # UC-58: the UC-39/41 training-time collision-penalty curriculum (crash-cliff relief) is
     # retired. It papered over an early-termination trap caused by the (now-removed) per-step

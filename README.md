@@ -75,6 +75,60 @@ boundaries, the dashboard renders full-screen, Python logging is routed into the
 alternate-screen buffer (e.g. legacy `conhost.exe`) the TUI **fails fast** with an actionable
 error telling you to use Windows Terminal or pass `--no-tui`. macOS/Linux behavior is unchanged.
 
+**Structured progress + lossless Ctrl-C (UC-61).** Every `drone-fly train` run now also writes a
+machine-readable progress stream to `training/<name>/status.jsonl` — one JSON line per rollout
+(timesteps + target, rollout/train metrics, the health verdict, and the drone-dynamics summary),
+which the [desktop app](#desktop-app-uc-61) tails for live progress. This is an additional artifact
+alongside the existing CSV/TensorBoard curves; it does not change training. Relatedly, `train` now
+traps the **first** `Ctrl-C` (SIGINT) or `SIGTERM`: instead of aborting immediately it flushes a
+resumable checkpoint at the next safe step and then exits cleanly, so `resume: auto` continues from
+where you interrupted — a **lossless pause**. Press `Ctrl-C` a **second** time to force-quit
+immediately (the old behavior). The checkpoint is written atomically, so an interrupted run never
+corrupts a checkpoint.
+
+## Desktop app (UC-61)
+
+A lightweight local desktop app manages the whole loop — define slices, configure and launch
+multiple named trainings, monitor a run live (progress / pause / resume / stop), and play its
+recordings in the existing brain + inputs + course viewer — so you never have to touch the TUI or
+hand-edit YAML. It is a thin [FastAPI](https://fastapi.tiangolo.com/) + Uvicorn backend that shells
+out to the existing `drone-fly` CLIs, wrapped in a native [pywebview](https://pywebview.flowrl.com/)
+window, with a dependency-free vanilla HTML/CSS/JS front-end. The recording viewer
+(`viz/viewer.js`) is reused unchanged; recording gzip is decompressed server-side.
+
+**Install + launch:**
+
+```bash
+uv sync --extra app          # adds fastapi + uvicorn + pywebview (needs a desktop/display)
+uv run drone-fly-app         # opens the native window at a local loopback URL
+# or, from a source checkout:
+uv run python -m app
+```
+
+On a headless machine (or to debug without a webview), run the server alone and open the printed
+URL in a browser: `uv run python -m app --no-window`.
+
+**What it does:**
+
+- **Generate slices** — a form serialises a `PruneRunConfig` and runs `drone-fly prune --config`
+  (no manual file editing).
+- **Train** — a form exposes **every** `TrainRunConfig` key as a control (tri-state for the
+  placement toggles); it respects omit-vs-default (a key is written only when you change it), saves
+  to `configs/train/<name>.yaml` on an explicit **Save** (no auto-save, no version history), and
+  launches `drone-fly train --config … --no-tui` as a subprocess. Multiple named runs are tracked
+  concurrently.
+- **Monitor** — live progress bar + metrics + health from `status.jsonl` (CSV fallback), with
+  **Pause** (flushes a checkpoint via the lossless-pause signal, above), **Resume** (relaunches with
+  `resume: auto`), and **Stop**.
+- **Recordings** — open any `training/<name>/recordings/episode_<n>.json[.gz]` in the embedded
+  viewer (gunzipped server-side).
+- **Settings** — local tool config (project root, default connectome, host/port).
+
+The app binds to `127.0.0.1` only and is a single-user local developer tool. Backend logic is
+covered by hermetic tests that run in CI without a GPU or display; the native-window rendering is
+verified by eyeball (as with the viewer in UC-59/60). PyInstaller packaging and remote-GPU control
+are out of scope for this version.
+
 ## Other useful commands
 
 - **Sanity check** (offline, seconds): `uv run drone-fly smoke-train --connectome tests/fixtures`.
