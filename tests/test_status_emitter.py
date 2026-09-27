@@ -26,7 +26,6 @@ import pytest
 
 from drone_fly.train.status_emitter import StatusEmitterCallback, _finite
 
-
 # --- fakes --------------------------------------------------------------------------------
 
 

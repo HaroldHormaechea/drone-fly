@@ -47,7 +47,7 @@ class _FakeVecNormalize:
 
 
 class _FakeModel:
-    """A model whose ``save`` writes a marker file (already-atomic in the real ProgressReportingPPO)."""
+    """A model whose ``save`` writes a marker file (already-atomic in real ProgressReportingPPO)."""
 
     def __init__(self, *, num_timesteps=1234, vecnorm=None):
         self.num_timesteps = num_timesteps
@@ -217,7 +217,7 @@ def test_second_signal_restores_and_reraises(tmp_path, monkeypatch):
 
 
 def test_registration_off_main_thread_degrades_gracefully(tmp_path):
-    """signal.signal only works on the main thread; a worker context disables the feature, not train."""
+    """signal.signal is main-thread-only; a worker context disables the feature, not training."""
     cb = _make_cb(tmp_path, vecnorm=_FakeVecNormalize())
     errors: list[BaseException] = []
 
