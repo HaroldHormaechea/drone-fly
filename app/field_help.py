@@ -87,10 +87,53 @@ TRAIN_HELP: dict[str, dict[str, str]] = {
         "adapter's default.",
         "example": "full",
     },
+    "randomize_obstacles": {
+        "help": "Whether pillar obstacles are placed on the course. Three-state: leave unset for "
+        "the schema-aware default, true to force-place them, false to suppress — overriding the "
+        "default that 'randomize' would pick.",
+        "example": "true",
+    },
+    "randomize_recharge_pads": {
+        "help": "Whether recharge pads are placed on the course. Three-state: unset = schema-aware "
+        "default, true = force-place, false = suppress (overrides the 'randomize' default).",
+        "example": "true",
+    },
+    "randomize_repair_pads": {
+        "help": "Whether repair pads are placed on the course. Three-state: unset = schema-aware "
+        "default, true = force-place, false = suppress (overrides the 'randomize' default).",
+        "example": "false",
+    },
+    "strict_capacity": {
+        "help": "Pre-training capacity guardrail. When true, a network with too few trainable "
+        "actor parameters aborts the run; the default (false) warns and continues (prompts on a "
+        "terminal).",
+        "example": "false",
+    },
+    "capacity_floor": {
+        "help": "Minimum trainable actor-parameter count the capacity guardrail requires. Omit to "
+        "use the calibrated default (3000).",
+        "example": "3000",
+    },
     "ent_coef": {
         "help": "PPO entropy coefficient — higher keeps exploration alive longer. Omit to keep the "
         "TrainConfig default.",
         "example": "0.005",
+    },
+    "airborne_curriculum_enabled": {
+        "help": "Enable the reverse airborne-start curriculum (UC-44/51): early training spawns "
+        "the drone aloft, then anneals the spawn height down to the floor, so it learns to hold "
+        "altitude before it must take off. Omit to keep the default (on).",
+        "example": "true",
+    },
+    "airborne_curriculum_warmup_fraction": {
+        "help": "Fraction of total timesteps to hold the full airborne spawn height before "
+        "annealing begins (UC-51). Must be <= anneal_fraction. Omit to keep the default (0.6).",
+        "example": "0.6",
+    },
+    "airborne_curriculum_anneal_fraction": {
+        "help": "Fraction of total timesteps by which the spawn height has annealed all the way "
+        "down to the floor (UC-51). Must be >= warmup_fraction. Omit to keep the default (1.0).",
+        "example": "1.0",
     },
     "rate_kp": {
         "help": "Inner-loop rate-controller proportional gain (UC-55). Omit to keep the default "
@@ -126,6 +169,38 @@ TRAIN_HELP: dict[str, dict[str, str]] = {
     "learning_rate": {
         "help": "PPO optimiser learning rate. Omit to keep the default 3e-4.",
         "example": "0.0003",
+    },
+    "pybullet_mass_ratio_min": {
+        "help": "Lower bound of the domain-randomised drone mass, as a multiple of the Meteor75 "
+        "nominal (~0.032 kg). Only applies when randomize_dynamics is on (pybullet adapter); must "
+        "be > 0 and <= the max. Omit to keep the default envelope (1.0).",
+        "example": "1.0",
+    },
+    "pybullet_mass_ratio_max": {
+        "help": "Upper bound of the domain-randomised mass multiple (× Meteor75 nominal). The "
+        'default envelope spans 1×→20× (whoop → 5" racer). Omit to keep the default (20.0).',
+        "example": "20.0",
+    },
+    "pybullet_tw_min": {
+        "help": "Lower bound of the domain-randomised peak thrust-to-weight ratio (T/W-preserving "
+        "scaling, UC-56). Must be >= 1 (a peak T/W below 1 cannot hover) and <= the max. Omit to "
+        "keep the default (2.5).",
+        "example": "2.5",
+    },
+    "pybullet_tw_max": {
+        "help": "Upper bound of the domain-randomised peak thrust-to-weight ratio. Default span "
+        "2.5→10.0. Omit to keep the default (10.0).",
+        "example": "10.0",
+    },
+    "pybullet_arm_length_min": {
+        "help": "Lower bound of the domain-randomised quad-X arm length in metres (motor arm "
+        "coordinate). Must be > 0 and <= the max. Omit to keep the default (0.0265 m, ~whoop).",
+        "example": "0.0265",
+    },
+    "pybullet_arm_length_max": {
+        "help": "Upper bound of the domain-randomised quad-X arm length in metres. Default span "
+        '0.0265→0.078 m (~whoop → 5" racer). Omit to keep the default (0.078).',
+        "example": "0.078",
     },
     "control_hz": {
         "help": "Outer control-loop frequency in Hz (UC-57). 50 decouples the policy step from the "
