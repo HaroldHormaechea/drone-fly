@@ -11,6 +11,7 @@
  *   #/train/<name>/recordings        recordings picker + embedded viewer
  *   #/train/<name>/config            per-run config editor
  *   #/settings                       local tool settings (incl. the training interpreter override)
+ *   #/about                          static about page (app name/purpose, version, author)
  * Back/forward work because navigation is pure hashchange. Config edits live in local state and
  * persist ONLY via an explicit Save button (AC9); an unsaved-changes guard warns on navigation.
  */
@@ -146,6 +147,15 @@
     return a;
   }
 
+  // item 1: a top-level nav link (no chevron, no child indent) aligned with the group heads,
+  // used for standalone destinations that have no children (Settings, About).
+  function topLink(href, iconName, label) {
+    const a = h("a", { class: "nav-leaf nav-top", "data-route": href, href: href },
+      icon(iconName) + '<span class="nav-label">' + esc(label) + "</span>");
+    if (location.hash === href) { a.classList.add("active"); a.setAttribute("aria-current", "page"); }
+    return a;
+  }
+
   async function refreshNav() {
     let runs = [], slices = [];
     try {
@@ -185,9 +195,10 @@
     });
     tree.appendChild(disclosure("group:train", "train", "Train", trainKids));
 
-    // -- Settings (single leaf, no disclosure) --
+    // -- Settings + About (top-level leaves, no disclosure, aligned with group heads) --
     const setGroup = h("div", { class: "nav-node" });
-    setGroup.appendChild(leaf("#/settings", "settings", "Settings"));
+    setGroup.appendChild(topLink("#/settings", "settings", "Settings"));
+    setGroup.appendChild(topLink("#/about", "info", "About"));
     tree.appendChild(setGroup);
   }
 
@@ -500,6 +511,25 @@
     });
   }
 
+  // items 6+7: a static, offline About page (app name/purpose + version + author).
+  async function renderAbout() {
+    const root = view();
+    root.innerHTML = "";
+    root.appendChild(headBar("About", null, null));
+    const card = h("div", { class: "card about-card" });
+    card.innerHTML =
+      '<h3>drone<span class="dot">·</span>fly desktop</h3>' +
+      '<p>A lightweight, local, single-user desktop app for the drone-fly project: define ' +
+      "connectome slices, configure and launch trainings, monitor live progress and logs, and " +
+      "replay recorded episodes — a single window replacing the training TUI and the standalone " +
+      "HTML recording viewer.</p>" +
+      '<dl class="about-meta">' +
+      "<dt>Version</dt><dd>0.1.0</dd>" +
+      "<dt>Built by</dt><dd>Harold Hormaechea</dd>" +
+      "</dl>";
+    root.appendChild(card);
+  }
+
   // ---- shared UI bits ------------------------------------------------------------------
   // item 6: an inline-SVG info button that opens the accessible modal with help/example/constraints.
   function infoButton(title, helpText, example, constraintsHTML) {
@@ -561,6 +591,7 @@
       else if (parts[0] === "slices" && parts[1] && parts[1] !== "new") await renderSliceDetail(decodeURIComponent(parts[1]));
       else if (parts[0] === "slices") await renderSliceNew();
       else if (parts[0] === "settings") await renderSettings();
+      else if (parts[0] === "about") await renderAbout();
       else await renderTrainList();
     } catch (e) {
       view().innerHTML = '<p class="subtle">Error: ' + esc(e && e.message ? e.message : e) + "</p>";

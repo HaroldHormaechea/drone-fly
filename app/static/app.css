@@ -74,6 +74,8 @@ nav.sidebar {
 .nav-leaf:hover { background: var(--panel-2); color: var(--fg); }
 .nav-leaf:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .nav-leaf.active { background: var(--panel-2); color: var(--fg); border-left-color: var(--accent); }
+/* item 1: top-level leaves (Settings, About) align with the group heads, not child leaves. */
+.nav-leaf.nav-top { padding-left: 14px; color: var(--fg); }
 .run-children .nav-leaf { padding-left: 40px; }
 .nav-empty { padding: 5px 14px 5px 26px; color: var(--muted); font-size: 12px; font-style: italic; }
 
@@ -299,6 +301,21 @@ a.link:hover { text-decoration: underline; }
 }
 .mh-constraints dt { color: var(--muted); }
 .mh-constraints dd { margin: 0; }
+
+/* ---- about page (items 6+7) ---- */
+.about-card h3 .dot { color: var(--accent); }
+.about-card p { max-width: 60ch; color: var(--fg); }
+.about-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 14px;
+  margin: 14px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+.about-meta dt { color: var(--muted); }
+.about-meta dd { margin: 0; }
 
 /* ---- embedded viewer ---- */
 .viewer-frame { width: 100%; height: calc(100vh - 220px); min-height: 420px; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; }
