@@ -53,8 +53,9 @@ def _make_registry(root):
     spawned: list[_FakePopen] = []
     signalled: list[tuple[int, str]] = []
 
-    def fake_spawn(argv, cwd):
+    def fake_spawn(argv, cwd, *, log_path=None):
         p = _FakePopen(argv, cwd)
+        p.log_path = log_path  # capture the item-5 seam arg for assertions (__init__ unchanged)
         spawned.append(p)
         return p
 
@@ -223,6 +224,100 @@ def test_run_prune_spawns_prune_subcommand(tmp_path):
     ]  # AC3/AC10
 
 
+# --- item 5: log capture seam (launch/resume redirect to logs/app.log; prune does not) ------
+#
+# The registry passes `log_path` to the injected spawner; the fake records it (above). The real
+# redirect behaviour (mkdir the logs/ dir, append-open, hand the fd to the child, parent closes its
+# copy) is pinned separately on `_default_spawn` with a monkeypatched Popen — no real subprocess.
+
+
+def test_launch_passes_app_log_path(tmp_path):
+    _save_cfg(tmp_path, "demo")
+    reg, spawned, _ = _make_registry(tmp_path)
+    reg.launch("demo")
+    expected = os.path.join(str(tmp_path), "training", "demo", "logs", "app.log")
+    assert spawned[-1].log_path == expected  # stdout/stderr redirected to the run's app.log
+
+
+def test_resume_passes_app_log_path(tmp_path):
+    _save_cfg(tmp_path, "demo")
+    _write_checkpoint(tmp_path, "demo")
+    reg, spawned, _ = _make_registry(tmp_path)
+    reg.resume("demo")
+    expected = os.path.join(str(tmp_path), "training", "demo", "logs", "app.log")
+    assert spawned[-1].log_path == expected  # resume tails the SAME app.log as launch
+
+
+def test_run_prune_passes_no_log_path(tmp_path):
+    reg, spawned, _ = _make_registry(tmp_path)
+    reg.run_prune("configs/prune/s.yaml")
+    assert spawned[-1].log_path is None  # slice builds are fire-and-forget → inherited stdio
+
+
+class _RecordingPopen:
+    """Records the Popen kwargs (esp. the stdout file handle) without spawning anything."""
+
+    def __init__(self, argv, **kwargs):
+        self.argv = argv
+        self.kwargs = kwargs
+        self.pid = 9999
+        fh = kwargs.get("stdout")
+        if fh is not None:
+            fh.write("child stdout line\n")  # emulate the child writing through the handed fd
+
+    def poll(self):
+        return None
+
+
+def test_default_spawn_creates_logs_dir_and_redirects_stdio(tmp_path, monkeypatch):
+    """First-launch guard: logs/ absent → created; stdout=fh, stderr=STDOUT; parent closes fd."""
+    recorded: dict = {}
+
+    def _popen(argv, **kwargs):
+        p = _RecordingPopen(argv, **kwargs)
+        recorded["p"] = p
+        return p
+
+    monkeypatch.setattr(runs_mod.subprocess, "Popen", _popen)
+    log_path = tmp_path / "training" / "demo" / "logs" / "app.log"
+    assert not log_path.parent.exists()  # logs/ does NOT pre-exist (launch() never pre-creates it)
+
+    runs_mod._default_spawn(["drone-fly", "train"], str(tmp_path), log_path=str(log_path))
+
+    assert log_path.parent.is_dir()  # first-launch-crash guard created logs/
+    assert log_path.is_file()
+    kwargs = recorded["p"].kwargs
+    assert kwargs["stderr"] is runs_mod.subprocess.STDOUT
+    fh = kwargs["stdout"]
+    assert fh.mode == "a"  # append (never truncate a run's earlier log)
+    assert fh.closed  # parent closed its own copy right after Popen (child keeps the dup'd fd)
+
+
+def test_default_spawn_appends_not_truncates(tmp_path, monkeypatch):
+    monkeypatch.setattr(runs_mod.subprocess, "Popen", _RecordingPopen)
+    log_path = tmp_path / "logs" / "app.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("previous run output\n", encoding="utf-8")
+
+    runs_mod._default_spawn(["drone-fly", "train"], str(tmp_path), log_path=str(log_path))
+
+    # The earlier content survives and the child's output is appended after it.
+    assert log_path.read_text(encoding="utf-8") == "previous run output\nchild stdout line\n"
+
+
+def test_default_spawn_without_log_path_inherits_stdio(tmp_path, monkeypatch):
+    recorded: dict = {}
+
+    def _popen(argv, **kwargs):
+        recorded["kwargs"] = kwargs
+        return _RecordingPopen(argv, **kwargs)
+
+    monkeypatch.setattr(runs_mod.subprocess, "Popen", _popen)
+    runs_mod._default_spawn(["drone-fly", "prune"], str(tmp_path), log_path=None)
+    assert "stdout" not in recorded["kwargs"]  # prune keeps inherited stdio (no redirect)
+    assert "stderr" not in recorded["kwargs"]
+
+
 # --- item 4: per-call interpreter resolution (auto-detect / override / probe cache) --------
 #
 # The `cli=` seam short-circuits detection (that path is exercised by every test above), so these
@@ -283,8 +378,9 @@ def _detect_registry(root, *, probe, settings=None):
     """A registry with NO ``cli=`` (real resolver) + injected spawn/probe/settings_reader."""
     spawned: list[_FakePopen] = []
 
-    def fake_spawn(argv, cwd):
+    def fake_spawn(argv, cwd, *, log_path=None):
         p = _FakePopen(argv, cwd)
+        p.log_path = log_path
         spawned.append(p)
         return p
 

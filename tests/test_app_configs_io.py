@@ -21,7 +21,7 @@ import dataclasses
 
 import pytest
 import yaml
-from app import configs_io
+from app import configs_io, field_help
 
 from drone_fly.config import ConfigError, PruneRunConfig, TrainRunConfig
 
@@ -218,6 +218,42 @@ def test_load_prune_config_returns_only_present_keys(tmp_path):
     assert loaded == {"out": "artifacts/x", "prune_k": 7}  # verbatim, only saved keys
     # A never-saved slice loads as an empty mapping (form shows all-default).
     assert configs_io.load_prune_config(root, "nonexistent") == {}
+
+
+# --- item 2: train-config sections (contiguous ascending runs over the descriptor order) ----
+#
+# Grouping the form into titled cards must NEVER reorder fields — each section is one contiguous
+# block over describe_train_fields() order, and the sections' first-seen order equals the declared
+# SECTION_ORDER. This is the structural guard behind the omit-vs-default byte-identity: collect()
+# still iterates the unchanged descriptor order, so save output is unaffected by visual grouping.
+
+
+def test_every_train_descriptor_carries_a_known_section():
+    fields = configs_io.describe_train_fields()
+    for f in fields:
+        assert "section" in f, f  # merge_sections tags every descriptor
+        assert f["section"] in field_help.SECTION_ORDER, f["name"]  # known section only
+
+
+def test_train_sections_are_contiguous_ascending_runs():
+    sections = [f["section"] for f in configs_io.describe_train_fields()]
+    seen_order: list[str] = []
+    for s in sections:
+        if not seen_order or seen_order[-1] != s:
+            # A section boundary: this section must not have appeared earlier (contiguity), else
+            # its fields are interleaved with another section's → grouping would reorder them.
+            assert s not in seen_order, f"section {s!r} is not a contiguous run"
+            seen_order.append(s)
+    # First-seen (== field) order matches the declared display order exactly.
+    assert seen_order == field_help.SECTION_ORDER
+
+
+def test_section_grouping_does_not_change_field_order():
+    # merge_sections is order-preserving: the descriptor field order is identical to the dataclass
+    # order regardless of grouping (the item-2 regression guard for omit-vs-default byte-identity).
+    described = [f["name"] for f in configs_io.describe_train_fields()]
+    dc = [f.name for f in dataclasses.fields(TrainRunConfig)]
+    assert described == dc
 
 
 # --- item 6: curated help/example merged into the field descriptors ------------------------

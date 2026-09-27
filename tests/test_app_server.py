@@ -51,8 +51,9 @@ class _FakePopen:
 def _client(root):
     spawned: list[_FakePopen] = []
 
-    def fake_spawn(argv, cwd):
+    def fake_spawn(argv, cwd, *, log_path=None):
         p = _FakePopen(argv, cwd)
+        p.log_path = log_path
         spawned.append(p)
         return p
 
@@ -225,8 +226,9 @@ def test_launch_with_no_interpreter_surfaces_as_409(tmp_path, monkeypatch):
 
     spawned: list[_FakePopen] = []
 
-    def fake_spawn(argv, cwd):
+    def fake_spawn(argv, cwd, *, log_path=None):
         p = _FakePopen(argv, cwd)
+        p.log_path = log_path
         spawned.append(p)
         return p
 
@@ -321,6 +323,49 @@ def test_launch_pause_resume_stop_over_http(tmp_path):
 
     # stop (AC5)
     assert client.post("/api/runs/demo/stop").json()["state"] == "stopped"
+
+
+# --- item 5: live process-log tail endpoint (GET /api/runs/{name}/logs?since=) --------------
+
+
+def _write_log(tmp_path, name, text):
+    p = tmp_path / "training" / name / "logs" / "app.log"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def test_run_logs_endpoint_tails_from_since_cursor(tmp_path):
+    client, _, _ = _client(tmp_path)
+    log = _write_log(tmp_path, "demo", "first line\nsecond line\n")
+    size = log.stat().st_size
+
+    body = client.get("/api/runs/demo/logs").json()
+    assert body["lines"] == ["first line", "second line"]
+    assert body["next"] == size  # byte offset to poll from next time
+
+    # Nothing new since the cursor → empty, cursor unchanged.
+    assert client.get(f"/api/runs/demo/logs?since={size}").json()["lines"] == []
+
+    # Append and re-poll from the cursor → only the new line comes back.
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write("third line\n")
+    r = client.get(f"/api/runs/demo/logs?since={size}").json()
+    assert r["lines"] == ["third line"]
+    assert r["next"] == log.stat().st_size
+
+
+def test_run_logs_endpoint_applies_deny_filter(tmp_path):
+    client, _, _ = _client(tmp_path)
+    _write_log(tmp_path, "demo", "pybullet build time: May  1 2024\nSaving checkpoint to disk\n")
+    body = client.get("/api/runs/demo/logs").json()
+    # Boot noise dropped; the real checkpoint line kept (endpoint routes through app.logs.tail).
+    assert body["lines"] == ["Saving checkpoint to disk"]
+
+
+def test_run_logs_endpoint_absent_file_is_empty(tmp_path):
+    client, _, _ = _client(tmp_path)
+    assert client.get("/api/runs/demo/logs").json() == {"lines": [], "next": 0}
 
 
 def test_get_runs_and_status_endpoints(tmp_path):
