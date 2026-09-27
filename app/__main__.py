@@ -20,6 +20,20 @@ import threading
 import time
 
 
+def _window_icon_path(static_dir: str, platform: str = sys.platform) -> str | None:
+    """Pick the native-window icon for ``platform`` from ``static_dir``, or ``None`` if absent.
+
+    Windows (``win32`` / ``os.name == "nt"``) needs a real ``.ico`` — pywebview's WinForms backend
+    feeds it to ``System.Drawing.Icon``, which rejects PNG-encoded frames. Linux/macOS take the PNG
+    (Cocoa ignores ``icon=`` entirely, harmlessly). Returns an absolute path to the chosen file, or
+    ``None`` when it is missing so the caller can fall back to the default icon. Pure and
+    importable — no window is opened and pywebview is never imported.
+    """
+    name = "fly.ico" if (platform == "win32" or os.name == "nt") else "fly.png"
+    path = os.path.join(static_dir, name)
+    return path if os.path.isfile(path) else None
+
+
 def _pick_free_port(host: str) -> int:
     """Bind an ephemeral port on ``host`` and return it (closed at once; small TOCTOU window)."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -85,9 +99,11 @@ def main(argv: list[str] | None = None) -> int:
     # UC-61 item 5: set the native window/taskbar icon best-effort. `icon=` is honoured on the
     # GTK/Qt backends and ignored elsewhere; a pywebview too old to accept the kwarg falls back to
     # the default icon. Never fatal — this path is owner-eyeball only and never runs in CI.
-    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "fly.png")
+    # Windows needs a real .ico (fly.ico); other platforms take fly.png. See _window_icon_path.
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+    icon_path = _window_icon_path(static_dir)
     try:
-        if os.path.isfile(icon_path):
+        if icon_path is not None:
             webview.start(icon=icon_path)
         else:
             webview.start()

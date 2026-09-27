@@ -52,10 +52,14 @@ def main() -> int:
     os.makedirs(_STATIC, exist_ok=True)
     png = _draw_fly(256)
     png.save(os.path.join(_STATIC, "fly.png"))
-    # ICO with the usual window/taskbar sizes.
+    # ICO with window/taskbar sizes. Force BMP (DIB) frames via bitmap_format="bmp": Pillow's
+    # default PNG-in-ICO encoding trips System.Drawing.Icon on Windows (pywebview's WinForms
+    # backend), so keep every entry BMP. Drop 128/256 — large BMP frames are historically
+    # problematic for System.Drawing.Icon and Windows upscales the 64px entry for big views.
     png.save(
         os.path.join(_STATIC, "fly.ico"),
-        sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
+        sizes=[(16, 16), (32, 32), (48, 48), (64, 64)],
+        bitmap_format="bmp",
     )
     print(f"wrote {os.path.join(_STATIC, 'fly.png')} and fly.ico")
     return 0
