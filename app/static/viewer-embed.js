@@ -1,11 +1,15 @@
 /* viewer-embed.js — embed the reused viz/viewer.html and drive it via window.loadDocument (AC8).
  *
- * The recording viewer (viz/viewer.{html,js,css}, UC-59/60) is reused UNCHANGED. It is served at
- * /viewer/ and embedded in an iframe. Because viewer.js is a classic script, its top-level
+ * The recording viewer (viz/viewer.{html,js,css}, UC-59/60) is reused. It is served at /viewer/ and
+ * embedded in an iframe. Because viewer.js is a classic script, its top-level
  * `function loadDocument(doc, name)` is exposed as a property on the iframe's window — so once the
  * iframe has loaded we fetch the recording (gunzipped SERVER-SIDE by the backend, returned as
  * parsed JSON) and call `iframe.contentWindow.loadDocument(parsed, name)`. No DecompressionStream,
- * no file:// picker, no edit to viewer.js.
+ * no file:// picker.
+ *
+ * item 2: the iframe URL carries `?embed=1`, which viewer.js reads at startup to add an `embed`
+ * class to <body>. That class drives `.embed`-scoped CSS in viewer.css (chrome hidden, a compact
+ * 2-column layout). Opening viewer.html WITHOUT `?embed=1` (the standalone page) is unaffected.
  */
 (function (global) {
   "use strict";
@@ -14,7 +18,7 @@
     container.innerHTML = "";
     const iframe = document.createElement("iframe");
     iframe.className = "viewer-frame";
-    iframe.src = "/viewer/viewer.html";
+    iframe.src = "/viewer/viewer.html?embed=1";
     container.appendChild(iframe);
 
     const label = name + " · episode " + episode;

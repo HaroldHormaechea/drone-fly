@@ -108,21 +108,33 @@ uv run python -m app
 On a headless machine (or to debug without a webview), run the server alone and open the printed
 URL in a browser: `uv run python -m app --no-window`.
 
+The left nav is a keyboard-operable **disclosure tree** — a **Slices** menu, a **Train** menu whose
+runs each expand to **Status / Recordings / Config** sub-views, and **Settings** — with inline-SVG
+icons. Every config and settings field has an **ⓘ info button** that opens an accessible popover
+explaining the field, an example value, and its constraints.
+
 **What it does:**
 
-- **Generate slices** — a form serialises a `PruneRunConfig` and runs `drone-fly prune --config`
-  (no manual file editing).
+- **Slices** — a form serialises a `PruneRunConfig` and runs `drone-fly prune --config` (no manual
+  file editing). Saved slices are listed under the Slices menu; reopening one lets you edit and
+  **Regenerate** it.
 - **Train** — a form exposes **every** `TrainRunConfig` key as a control (tri-state for the
   placement toggles); it respects omit-vs-default (a key is written only when you change it), saves
   to `configs/train/<name>.yaml` on an explicit **Save** (no auto-save, no version history), and
   launches `drone-fly train --config … --no-tui` as a subprocess. Multiple named runs are tracked
   concurrently.
-- **Monitor** — live progress bar + metrics + health from `status.jsonl` (CSV fallback), with
-  **Pause** (flushes a checkpoint via the lossless-pause signal, above), **Resume** (relaunches with
-  `resume: auto`), and **Stop**.
-- **Recordings** — open any `training/<name>/recordings/episode_<n>.json[.gz]` in the embedded
-  viewer (gunzipped server-side).
-- **Settings** — local tool config (project root, default connectome, host/port).
+- **Monitor** (a run's **Status** sub-view) — live progress bar + metrics + health from
+  `status.jsonl` (CSV fallback), with **Pause** (flushes a checkpoint via the lossless-pause signal,
+  above), **Resume** (relaunches with `resume: auto`), and **Stop**.
+- **Recordings** (a run's **Recordings** sub-view) — pick any
+  `training/<name>/recordings/episode_<n>.json[.gz]` from a dropdown to play it in the embedded
+  viewer (gunzipped server-side). Embedded, the viewer runs bare (chrome hidden) in a compact
+  brain + flight-actions + 3D-map layout; the standalone `viz/viewer.html` is unchanged.
+- **Settings** — local tool config: project root, default connectome, host/port, and the
+  **training interpreter**. Set the training interpreter to a venv that has `pybullet` (a venv dir,
+  its `python`, or a `drone-fly` script) when the app's own venv lacks it; leave it blank to
+  auto-detect a `pybullet`-capable venv (`.venv-cuda` > `.venv` > other `.venv-*`). Training won't
+  start without a `pybullet`-capable interpreter, and the app tells you how to set one.
 
 The app binds to `127.0.0.1` only and is a single-user local developer tool. Backend logic is
 covered by hermetic tests that run in CI without a GPU or display; the native-window rendering is

@@ -4,36 +4,29 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>drone-fly · desktop</title>
+  <link rel="icon" type="image/svg+xml" href="/app/fly.svg" />
   <link rel="stylesheet" href="/app/app.css" />
 </head>
 <body>
-  <nav class="sidebar">
-    <h1>drone<span class="dot">·</span>fly</h1>
-
-    <div class="nav-group">
-      <div class="nav-head">Generate slices</div>
-      <a class="nav-item" data-route="#/slices/new" href="#/slices/new">New slice</a>
+  <nav class="sidebar" aria-label="Primary">
+    <div class="brand">
+      <img class="brand-mark" src="/app/fly.svg" width="26" height="26" alt="" />
+      <h1>drone<span class="dot">·</span>fly</h1>
     </div>
 
-    <div class="nav-group">
-      <div class="nav-head">Train</div>
-      <a class="nav-item" data-route="#/train/new" href="#/train/new">New training</a>
-      <div id="nav-runs"><!-- run items injected here --></div>
-    </div>
-
-    <div class="nav-group">
-      <div class="nav-head">Settings</div>
-      <a class="nav-item" data-route="#/settings" href="#/settings">Settings</a>
-    </div>
+    <!-- The nav tree (Slices / Train / Settings disclosures + leaf links) is rendered by app.js
+         so run/slice lists and their expanded state stay live. -->
+    <div id="nav-tree" class="nav-tree"></div>
   </nav>
 
-  <main class="view" id="view">
+  <main class="view" id="view" aria-live="polite">
     <p class="subtle">Loading…</p>
   </main>
 
-  <div class="toast" id="toast"></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <!-- Vanilla, dependency-free. Order matters: helpers before the app bootstrap. -->
+  <!-- Vanilla, dependency-free. Order matters: helpers + modal before the app bootstrap. -->
+  <script src="/app/modal.js"></script>
   <script src="/app/forms.js"></script>
   <script src="/app/viewer-embed.js"></script>
   <script src="/app/app.js"></script>

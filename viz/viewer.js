@@ -119,6 +119,19 @@ const v3 = {
 let flight = null;
 
 const el = (id) => document.getElementById(id);
+
+// UC-61 item 2: when embedded inside the desktop app (iframe src carries `?embed=1`), tag <body>
+// with the `embed` class so viewer.css can hide the standalone chrome (header, file loader, meta
+// bar) and switch to the app's compact 2-column layout. This is the ONLY embed-aware line in
+// viewer.js; opening viewer.html directly (no `?embed=1`) leaves the standalone page untouched.
+try {
+  if (new URLSearchParams(window.location.search).get("embed") === "1") {
+    document.body.classList.add("embed");
+  }
+} catch (e) {
+  /* URLSearchParams unavailable → standalone behaviour, never fatal */
+}
+
 const state = {
   data: null,
   frame: 0,

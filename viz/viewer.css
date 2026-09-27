@@ -122,3 +122,55 @@ footer { color: var(--muted); font-size: 12px; border-top: 1px solid #22263d; ma
 /* Fixed strip height → stable, backing-store-independent CSS box (no resize feedback loop). */
 .soma-box-canvas { width: 100%; height: 46px; }
 .soma-empty { color: var(--muted); font-size: 12px; font-style: italic; padding: 6px 2px; }
+
+/* =====================================================================================
+ * UC-61 item 2 — EMBEDDED MODE (desktop app iframe, `?embed=1` → <body class="embed">).
+ * EVERYTHING below is `.embed`-scoped: it adds rules for the embedded page ONLY. The standalone
+ * viewer (viewer.html opened without `?embed=1`) matches NO `.embed` selector, so it renders
+ * byte-behaviour-identical to before. resize() is NOT touched — the flight canvas gets a definite
+ * CSS height via the height:100% chain below, which resize() reads through clientWidth/Height.
+ * ===================================================================================== */
+
+/* Fully bare: hide the standalone chrome (title h1, instructions .sub, the file loader + its
+ * #load-status caption, and the #meta-bar provenance/dynamics strip) plus the footer disclaimer. */
+.embed header,
+.embed footer { display: none !important; }
+
+/* The app supplies the outer chrome; let the viewer fill the iframe edge to edge. */
+.embed main {
+  max-width: none;
+  margin: 0;
+  padding: 10px;
+}
+
+/* 2-column layout: controls full-width on top, brain‖actions stacked in col 1, the 3D flight map
+ * filling col 2 full height, outcome full-width below. A definite middle-row height gives the
+ * height:100% fill-chain something concrete to resolve against. */
+.embed #app {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: auto minmax(340px, 1fr) auto;
+  gap: 12px;
+  height: 100vh;
+}
+.embed #app > .controls { grid-column: 1 / -1; grid-row: 1; margin: 0; }
+.embed #app > .top-zones { grid-column: 1; grid-row: 2; min-height: 0; overflow: auto; }
+.embed #app > .bottom-zone { grid-column: 2; grid-row: 2; margin-top: 0; min-height: 0; height: 100%; }
+.embed #app > #outcome { grid-column: 1 / -1; grid-row: 3; margin-top: 0; }
+
+/* Col 1: force the brain‖actions grid into a single vertical column (brain on top, actions below). */
+.embed .top-zones { grid-template-columns: 1fr; align-items: start; }
+
+/* Col 2: unbroken height:100% chain (grid item → .bottom-zone → .panel → #flight-canvas) so the
+ * flight map fills the taller column. The panel becomes a flex column; the canvas flexes to fill
+ * the space left by the head + legend. min-height:0 lets the flex child actually shrink/grow. */
+.embed .bottom-zone .panel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.embed .bottom-zone #flight-canvas {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+}

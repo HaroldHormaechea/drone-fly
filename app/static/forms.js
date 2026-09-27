@@ -40,6 +40,22 @@
     return node;
   }
 
+  function esc(s) {
+    return String(s === null || s === undefined ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  // item 6: the machine-checkable constraints block shown in a field's info modal.
+  function constraintsHTML(f) {
+    const rows = [["type", f.base_type], ["required", f.required ? "yes" : "no"]];
+    if (f.nullable && !f.required) rows.push(["optional", "may be left unset"]);
+    if (f.default !== null && f.default !== undefined) rows.push(["default", JSON.stringify(f.default)]);
+    if (f.choices && f.choices.length) rows.push(["choices", f.choices.join(", ")]);
+    let html = '<dl class="mh-constraints">';
+    rows.forEach(([k, v]) => { html += "<dt>" + esc(k) + "</dt><dd>" + esc(v) + "</dd>"; });
+    return html + "</dl>";
+  }
+
   function buildForm(container, fields, values) {
     container.innerHTML = "";
     values = values || {};
@@ -57,6 +73,10 @@
         (f.nullable ? " · optional" : "") +
         (f.default !== null && f.default !== undefined ? " · default " + JSON.stringify(f.default) : "");
       keyLabel.appendChild(meta);
+      // item 6: per-field "ⓘ" button → accessible modal (purpose + example + constraints).
+      if (window.AppUI && window.AppUI.infoButton) {
+        keyLabel.appendChild(window.AppUI.infoButton(f.name, f.help, f.example, constraintsHTML(f)));
+      }
 
       const control = el("div", { class: "control" });
       let input, enableBox = null;

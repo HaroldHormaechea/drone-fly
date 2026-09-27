@@ -13,6 +13,7 @@ printed URL), which is handy for debugging without a webview.
 from __future__ import annotations
 
 import argparse
+import os
 import socket
 import sys
 import threading
@@ -81,7 +82,17 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     webview.create_window("drone-fly", url, width=1280, height=860)
-    webview.start()
+    # UC-61 item 5: set the native window/taskbar icon best-effort. `icon=` is honoured on the
+    # GTK/Qt backends and ignored elsewhere; a pywebview too old to accept the kwarg falls back to
+    # the default icon. Never fatal — this path is owner-eyeball only and never runs in CI.
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "fly.png")
+    try:
+        if os.path.isfile(icon_path):
+            webview.start(icon=icon_path)
+        else:
+            webview.start()
+    except TypeError:
+        webview.start()  # older pywebview without the `icon` kwarg
     return 0
 
 

@@ -153,6 +153,31 @@ def create_app(
         pid = reg.run_prune(path)
         return {"config": os.path.relpath(path, root), "pid": pid, "status": "launched"}
 
+    # -- saved slice configs (item 3: Slices menu enumeration + per-name load/regenerate) --
+    @app.get("/api/slice-configs")
+    def list_slice_configs() -> dict[str, Any]:
+        return {"names": configs_io.list_prune_config_names(root)}
+
+    @app.get("/api/slice-configs/{name}")
+    def get_slice_config(name: str) -> dict[str, Any]:
+        return {"name": name, "config": configs_io.load_prune_config(root, name)}
+
+    @app.post("/api/slice-configs/{name}")
+    def save_slice_config(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        # Save the prune config under configs/prune/<name>.yaml, then regenerate the slice.
+        mapping = payload.get("config", payload)
+        try:
+            path = configs_io.prune_config_to_yaml(root, mapping, slug=name)
+        except ConfigError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        pid = reg.run_prune(path)
+        return {
+            "name": name,
+            "config": os.path.relpath(path, root),
+            "pid": pid,
+            "status": "launched",
+        }
+
     # -- runs (AC5/AC7) -------------------------------------------------------------------
     @app.get("/api/runs")
     def list_runs() -> dict[str, Any]:

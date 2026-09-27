@@ -91,6 +91,9 @@ build-backend = "hatchling.build"
 # UC-61: `app` (the desktop-app package at the repo root) is included so the `drone-fly-app`
 # console script resolves in an installed wheel. The app is normally run from a source checkout
 # (`python -m app`); PyInstaller packaging is out of scope for this use case (Phase 3).
+# UC-61 item 5: verified that hatchling ships the non-.py static assets under app/static/ (the
+# .svg/.png/.ico window icons alongside the .js/.css/.html shell) by default — a `uv build --wheel`
+# lists them, so no artifacts/force-include rule is needed.
 packages = ["src/drone_fly", "app"]
 
 [tool.ruff]

@@ -29,6 +29,7 @@ from typing import Any
 
 import yaml
 
+from app import field_help
 from drone_fly.config import (
     ConfigError,
     PruneRunConfig,
@@ -126,23 +127,32 @@ def _prune_choices() -> dict[str, list[Any]]:
 
 
 def describe_train_fields() -> list[dict[str, Any]]:
-    """Ordered descriptors for every ``TrainRunConfig`` key (AC4: one control per key)."""
-    return _describe(
+    """Ordered descriptors for every ``TrainRunConfig`` key (AC4: one control per key).
+
+    Curated ``help``/``example`` prose (:mod:`app.field_help`) is merged in for the info modal
+    (item 6); the machine-checkable constraints still derive from the real dataclass.
+    """
+    fields = _describe(
         TrainRunConfig,
         required={"name"},
         choices_map=_train_choices(),
         defaults_seed={"name": "preview"},
     )
+    return field_help.merge_help(fields, field_help.TRAIN_HELP)
 
 
 def describe_prune_fields() -> list[dict[str, Any]]:
-    """Ordered descriptors for every ``PruneRunConfig`` key (AC3: the four slice fields)."""
-    return _describe(
+    """Ordered descriptors for every ``PruneRunConfig`` key (AC3: the four slice fields).
+
+    Curated ``help``/``example`` prose is merged in for the info modal (item 6).
+    """
+    fields = _describe(
         PruneRunConfig,
         required={"out"},
         choices_map=_prune_choices(),
         defaults_seed={"out": "artifacts/pruned"},
     )
+    return field_help.merge_help(fields, field_help.PRUNE_HELP)
 
 
 # --- Paths ---------------------------------------------------------------------------------
@@ -154,9 +164,14 @@ def train_config_path(project_root: str, name: str) -> str:
     return os.path.join(project_root, "configs", "train", f"{name}.yaml")
 
 
-def list_train_config_names(project_root: str) -> list[str]:
-    """List saved train-config names (``configs/train/*.yaml`` stems), sorted."""
-    directory = os.path.join(project_root, "configs", "train")
+def prune_config_path(project_root: str, name: str) -> str:
+    """Return ``<project_root>/configs/prune/<name>.yaml`` for a validated slice ``name``."""
+    name = validate_run_name(name)
+    return os.path.join(project_root, "configs", "prune", f"{name}.yaml")
+
+
+def _list_config_names(directory: str) -> list[str]:
+    """List ``*.yaml``/``*.yml`` stems under ``directory``, sorted (``[]`` if absent)."""
     if not os.path.isdir(directory):
         return []
     names = [
@@ -165,6 +180,16 @@ def list_train_config_names(project_root: str) -> list[str]:
         if fn.endswith(".yaml") or fn.endswith(".yml")
     ]
     return sorted(names)
+
+
+def list_train_config_names(project_root: str) -> list[str]:
+    """List saved train-config names (``configs/train/*.yaml`` stems), sorted."""
+    return _list_config_names(os.path.join(project_root, "configs", "train"))
+
+
+def list_prune_config_names(project_root: str) -> list[str]:
+    """List saved slice (prune) config names (``configs/prune/*.yaml`` stems), sorted (item 3)."""
+    return _list_config_names(os.path.join(project_root, "configs", "prune"))
 
 
 # --- Load / save ---------------------------------------------------------------------------
@@ -177,6 +202,20 @@ def load_train_config(project_root: str, name: str) -> dict[str, Any]:
     which keys the user set vs left at their default (AC9 omit-vs-default visibility).
     """
     path = train_config_path(project_root, name)
+    if not os.path.isfile(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        data = yaml.safe_load(fh)
+    return data if isinstance(data, dict) else {}
+
+
+def load_prune_config(project_root: str, name: str) -> dict[str, Any]:
+    """Return the raw mapping in ``configs/prune/<name>.yaml`` (``{}`` if absent) — item 3.
+
+    Returned verbatim (only keys present on disk), mirroring :func:`load_train_config` so the slice
+    editor shows exactly which keys the user set.
+    """
+    path = prune_config_path(project_root, name)
     if not os.path.isfile(path):
         return {}
     with open(path, encoding="utf-8") as fh:
@@ -234,8 +273,11 @@ __all__ = [
     "describe_train_fields",
     "describe_prune_fields",
     "train_config_path",
+    "prune_config_path",
     "list_train_config_names",
+    "list_prune_config_names",
     "load_train_config",
+    "load_prune_config",
     "save_train_config",
     "validate_train_mapping",
     "prune_config_to_yaml",
