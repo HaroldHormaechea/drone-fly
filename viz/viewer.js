@@ -73,7 +73,14 @@ const FLIGHT_MAX_PITCH = Math.PI / 2 - 0.01; // clamp shy of straight-down (gimb
 //   top   = straight down −z  (+x up-screen, −y → screen-right)
 //   front = down the +x course/forward axis (altitude vertical)
 //   side  = along +y (altitude profile; +x to the right)
+// UC-61 item 6: `angled` is the new default flight view — a three-quarter perspective with the
+// right side nearest, rotated ~15° toward the +x forward axis and lifted ~15° in elevation, so the
+// course reads with depth instead of the flat top-down. Well clear of the FLIGHT_MAX_PITCH gimbal
+// clamp. Documented fallbacks if the +x path crowds the camera at eyeball time (challenger note 3):
+// flip the azimuth to yaw:-7*Math.PI/12, or drop to a pure right-side elevation
+// (yaw:-Math.PI/2, pitch:+Math.PI/12).
 const VIEW_PRESETS = {
+  angled: { yaw: (-5 * Math.PI) / 12, pitch: Math.PI / 12 },
   front: { yaw: Math.PI, pitch: 0 },
   side: { yaw: -Math.PI / 2, pitch: 0 },
   top: { yaw: Math.PI, pitch: FLIGHT_MAX_PITCH },
@@ -986,10 +993,14 @@ function bbox3(pts) {
 
 function createFlight3D(canvas) {
   const ctx = canvas.getContext("2d");
-  // Orbit camera in spherical coords about the scene centre; scene up = world +z.
-  const cam = { yaw: VIEW_PRESETS.top.yaw, pitch: VIEW_PRESETS.top.pitch, dist: 10 };
+  // Orbit camera in spherical coords about the scene centre; scene up = world +z. UC-61 item 6:
+  // the default orientation is the `angled` three-quarter view, not top-down.
+  const cam = { yaw: VIEW_PRESETS.angled.yaw, pitch: VIEW_PRESETS.angled.pitch, dist: 10 };
   let scene = null;
   let dpr = 1, cssW = canvas.clientWidth || 440, cssH = canvas.clientHeight || 320;
+  // UC-61 item 6: once the user manually zooms (wheel), stop auto-refitting on resize so we don't
+  // fight their choice; a scene/preset load resets this so each recording lands on the default fit.
+  let userZoomed = false;
   const drag = { active: false, x: 0, y: 0 };
 
   function resize() {
@@ -998,7 +1009,80 @@ function createFlight3D(canvas) {
     cssH = canvas.clientHeight || cssH;
     canvas.width = Math.round(cssW * dpr);
     canvas.height = Math.round(cssH * dpr);
+    // item 6 note A: re-fit on resize (unless the user has zoomed) so a stale-layout initial fit in
+    // the embedded iframe self-heals once layout settles, and the framing tracks aspect changes.
+    if (scene && !userZoomed) fitToScene();
     render();
+  }
+
+  // UC-61 item 6: frame the whole scene bbox to ~75% of the viewport, aspect- AND orientation-aware
+  // (replaces the old bounding-sphere heuristic that ignored both). Builds the same camera basis
+  // project() uses for the current yaw/pitch, measures the bbox's half-extent along the screen right
+  // (r) and up (u) axes over all 8 corners, then sets cam.dist so the larger of the two fills 75%.
+  function fitToScene() {
+    if (!scene) return;
+    const t = Math.tan(FLIGHT_FOV / 2);
+    // dir = eye offset from centre; forward f points from the eye back toward the centre (= -dir).
+    const dir = [
+      Math.cos(cam.pitch) * Math.cos(cam.yaw),
+      Math.cos(cam.pitch) * Math.sin(cam.yaw),
+      Math.sin(cam.pitch),
+    ];
+    const f = v3.norm(v3.scale(dir, -1));
+    let r = v3.cross(f, [0, 0, 1]);
+    if (v3.len(r) < 1e-6) r = v3.cross(f, [1, 0, 0]); // gimbal fallback (straight up/down)
+    r = v3.norm(r);
+    const u = v3.cross(r, f);
+    const bb = scene.bb;
+    let halfW = 0, halfH = 0;
+    for (let xi = 0; xi < 2; xi++) {
+      for (let yi = 0; yi < 2; yi++) {
+        for (let zi = 0; zi < 2; zi++) {
+          const corner = [xi ? bb.max[0] : bb.min[0], yi ? bb.max[1] : bb.min[1], zi ? bb.max[2] : bb.min[2]];
+          const rel = v3.sub(corner, scene.center);
+          halfW = Math.max(halfW, Math.abs(v3.dot(rel, r)));
+          halfH = Math.max(halfH, Math.abs(v3.dot(rel, u)));
+        }
+      }
+    }
+    const FILL = 0.75;
+    const aspect = (cssW || 1) / (cssH || 1);
+    let dist;
+    if (isFinite(halfW) && isFinite(halfH) && (halfW > 1e-6 || halfH > 1e-6)) {
+      const distV = halfH / (FILL * t);
+      const distH = halfW / (FILL * t * aspect);
+      dist = Math.max(distV, distH);
+    } else {
+      dist = (scene.radius / t) * 1.6; // degenerate bbox → old sphere heuristic
+    }
+    if (!isFinite(dist) || dist <= 0) dist = 10;
+    // Perspective refinement: the closed form measures the bbox half-extent at the CENTRE depth, but
+    // nearer corners project larger — for a long course seen from the angled view at a wide aspect
+    // that under-shoots and would clip. Iterate on the ACTUAL projected footprint (reuses project(),
+    // which reads cam.dist) so the worst corner lands at ~75% of the half-viewport without clipping.
+    const corners = [];
+    for (let xi = 0; xi < 2; xi++) {
+      for (let yi = 0; yi < 2; yi++) {
+        for (let zi = 0; zi < 2; zi++) {
+          corners.push([xi ? bb.max[0] : bb.min[0], yi ? bb.max[1] : bb.min[1], zi ? bb.max[2] : bb.min[2]]);
+        }
+      }
+    }
+    for (let iter = 0; iter < 8; iter++) {
+      cam.dist = clamp(dist, 0.05, 1e6);
+      let worst = 0, anyBehind = false;
+      for (let i = 0; i < corners.length; i++) {
+        const s = project(corners[i]);
+        if (!s) { anyBehind = true; continue; }
+        worst = Math.max(worst, Math.abs(s.x - cssW / 2) / (cssW / 2), Math.abs(s.y - cssH / 2) / (cssH / 2));
+      }
+      if (anyBehind) { dist *= 1.5; continue; } // camera inside the bbox → pull back and retry
+      if (worst <= 1e-6) break;
+      const err = worst / FILL; // want the worst corner at FILL of the half-viewport
+      if (Math.abs(err - 1) < 0.02) break;
+      dist *= err;
+    }
+    cam.dist = clamp(dist, 0.05, 1e6);
   }
 
   // Build the view basis and project a world point to CSS-pixel screen space + depth.
@@ -1300,6 +1384,7 @@ function createFlight3D(canvas) {
     ev.preventDefault();
     const factor = Math.exp(ev.deltaY * 0.001);
     cam.dist = clamp(cam.dist * factor, 0.05, 1e6);
+    userZoomed = true; // item 6: honour the manual zoom — stop auto-refitting on resize.
     render();
   }
 
@@ -1317,14 +1402,21 @@ function createFlight3D(canvas) {
   return {
     setScene(doc) {
       scene = buildFlightScene(doc);
-      // Fit distance so the whole scene is comfortably in frame.
-      cam.dist = (scene.radius / Math.tan(FLIGHT_FOV / 2)) * 1.6;
+      // item 6: aspect+orientation-aware fit to ~75% (replaces the bounding-sphere heuristic). A
+      // fresh scene resets the manual-zoom flag so it lands on the default framing.
+      userZoomed = false;
+      fitToScene();
       render();
     },
     applyPreset(name) {
-      const p = VIEW_PRESETS[name] || VIEW_PRESETS.top;
+      // item 6 (default = angled 3-quarter view) + note B: reset orientation AND re-fit to 75%,
+      // clearing userZoomed, so every scene/recording load (viewer.js calls this on load) lands on
+      // the default view rather than a preserved custom orbit from the previous episode.
+      const p = VIEW_PRESETS[name] || VIEW_PRESETS.angled;
       cam.yaw = p.yaw;
       cam.pitch = p.pitch;
+      userZoomed = false;
+      fitToScene();
       render();
     },
     render,
