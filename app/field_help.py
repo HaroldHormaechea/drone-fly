@@ -357,6 +357,302 @@ TRAIN_SECTIONS: dict[str, str] = {
 }
 
 
+#: Live-status metric groups, in display order (UC-61 status-view polish items 5/6). The grouped
+#: status renderer lays these headings out in this order; every group referenced by a
+#: :data:`STATUS_FIELDS` descriptor MUST appear here.
+STATUS_GROUP_ORDER: list[str] = ["Progress", "Rollout", "Train", "Health", "Dynamics"]
+
+#: Curated plain-language help for each live-status field, keyed by descriptor ``key`` (items 5/6).
+#: Kept SB3/PPO-accurate but non-expert; merged into :data:`STATUS_FIELDS` for the per-box info
+#: popups. Every descriptor key MUST have a non-empty ``help`` entry here.
+STATUS_HELP: dict[str, dict[str, str]] = {
+    # -- Progress --
+    "timesteps": {
+        "help": "Environment steps collected so far this run (across all parallel envs). This is "
+        "the number that drives the progress bar toward the target."
+    },
+    "target_timesteps": {
+        "help": "Total environment steps this run is scheduled to train for. The progress bar and "
+        "ETA are measured against it; blank if the run did not set a target."
+    },
+    "eta": {
+        "help": "Estimated time remaining, derived on the fly from the current throughput "
+        "(steps/second) and the steps left to the target. Shows '—' until a rate is known and "
+        "'done' once the target is reached."
+    },
+    "elapsed_seconds": {
+        "help": "Wall-clock time since this training process started, shown as a duration."
+    },
+    "fps": {
+        "help": "Current training throughput in environment steps per second (SB3's time/fps). "
+        "Higher means faster data collection and optimisation."
+    },
+    "n_updates": {
+        "help": "Number of PPO optimisation phases (rollout then update) completed so far. One "
+        "status line is emitted per update."
+    },
+    # -- Rollout --
+    "ep_rew_mean": {
+        "help": "Mean total reward per episode over the recent rollout buffer. The headline "
+        "learning signal — it should trend up as the policy improves."
+    },
+    "ep_len_mean": {
+        "help": "Mean episode length (in steps) over the recent rollout buffer. Read together with "
+        "reward: longer episodes can mean either more flying or more stalling."
+    },
+    "success_rate": {
+        "help": "Fraction of recent episodes flagged successful by the environment (0–1). Blank "
+        "until the env has reported any success outcomes."
+    },
+    # -- Train --
+    "loss": {
+        "help": "PPO's combined training loss for the last update (policy, value and entropy "
+        "terms). Its absolute value matters less than a stable, non-diverging trend."
+    },
+    "value_loss": {
+        "help": "Error of the value-function (critic) predicting returns. Should settle rather "
+        "than blow up; persistent growth signals an unstable value estimate."
+    },
+    "approx_kl": {
+        "help": "Approximate KL divergence between the policy before and after the last update — "
+        "how far the policy moved. Large spikes mean overly aggressive updates."
+    },
+    "entropy_loss": {
+        "help": "Policy entropy term (reported negative). More entropy means more exploration; it "
+        "typically shrinks toward zero as the policy becomes confident."
+    },
+    "explained_variance": {
+        "help": "How well the value function explains observed returns (1 is perfect, 0 is no "
+        "better than the mean, negative is worse). Rising toward 1 is healthy."
+    },
+    "std": {
+        "help": "Standard deviation of the (Gaussian) action distribution — the policy's current "
+        "exploration noise. It generally decreases as training converges."
+    },
+    # -- Health --
+    "status": {
+        "help": "The run's automated health verdict (normal / warning / critical) from the "
+        "training health monitor. Any diagnostic message is shown in this popup."
+    },
+    # -- Dynamics --
+    "applied_mass": {
+        "help": "Drone mass (kg) actually applied to the simulated body this run, after any domain "
+        "randomisation. The UC-47 free-fall bug was an over-heavy applied mass."
+    },
+    "weight": {
+        "help": "Gravitational weight (newtons) of the applied mass — mass × g. Shown alongside "
+        "thrust to make the thrust-to-weight ratio legible."
+    },
+    "thrust_to_weight": {
+        "help": "Peak thrust-to-weight ratio: max motor thrust divided by weight. Must exceed 1 to "
+        "hover; the T/W-preserving scaling (UC-48) keeps this flyable as mass is randomised."
+    },
+    "hover_throttle": {
+        "help": "Fraction of full throttle (0–1) needed just to hover at the applied mass. A "
+        "sensible value sits well below 1, leaving headroom to climb."
+    },
+    "max_body_rate": {
+        "help": "Maximum commandable body angular rate (rad/s) for the inner rate controller — the "
+        "full-stick rotation speed the policy can request."
+    },
+    "spawn_z": {
+        "help": "Height (m) the drone is spawned at for the current episode. The airborne-start "
+        "curriculum (UC-44/51) anneals this down toward the floor over training."
+    },
+    "arm_length": {
+        "help": "Motor-arm length (m) of the simulated quad-X frame, after any randomisation "
+        "(~whoop scale up to a 5-inch racer). Blank when the backend does not report it."
+    },
+    "backend": {
+        "help": "Physics/dynamics backend producing these numbers (e.g. the pybullet adapter vs. "
+        "the simple analytic model)."
+    },
+}
+
+#: Live-status field descriptors consumed by the grouped status renderer (items 5/6). Each is
+#: EITHER path-backed (``path``: how to read the leaf from the ``status.jsonl`` record) OR computed
+#: (``computed: True``, e.g. ETA — derived front-end from other fields). ``format.type`` is a closed
+#: vocabulary the renderer knows: ``float`` (+``digits``) | ``int`` | ``seconds`` | ``duration`` |
+#: ``badge`` | ``text``. Keep in sync with the emitted record
+#: (:mod:`drone_fly.train.status_emitter`); the status-help completeness test derives its
+#: expectation from a real emitted record, so a new leaf without a descriptor here will fail CI.
+STATUS_FIELDS: list[dict[str, Any]] = [
+    # -- Progress --
+    {
+        "key": "timesteps",
+        "label": "Steps",
+        "group": "Progress",
+        "path": ["timesteps"],
+        "format": {"type": "int"},
+    },
+    {
+        "key": "target_timesteps",
+        "label": "Target steps",
+        "group": "Progress",
+        "path": ["target_timesteps"],
+        "format": {"type": "int"},
+    },
+    {
+        "key": "eta",
+        "label": "ETA",
+        "group": "Progress",
+        "computed": True,
+        "format": {"type": "duration"},
+    },
+    {
+        "key": "elapsed_seconds",
+        "label": "Elapsed",
+        "group": "Progress",
+        "path": ["elapsed_seconds"],
+        "format": {"type": "seconds"},
+    },
+    {
+        "key": "fps",
+        "label": "FPS",
+        "group": "Progress",
+        "path": ["fps"],
+        "format": {"type": "float", "digits": 0},
+    },
+    {
+        "key": "n_updates",
+        "label": "Updates",
+        "group": "Progress",
+        "path": ["n_updates"],
+        "format": {"type": "int"},
+    },
+    # -- Rollout --
+    {
+        "key": "ep_rew_mean",
+        "label": "Ep reward (mean)",
+        "group": "Rollout",
+        "path": ["rollout", "ep_rew_mean"],
+        "format": {"type": "float", "digits": 3},
+    },
+    {
+        "key": "ep_len_mean",
+        "label": "Ep length (mean)",
+        "group": "Rollout",
+        "path": ["rollout", "ep_len_mean"],
+        "format": {"type": "float", "digits": 1},
+    },
+    {
+        "key": "success_rate",
+        "label": "Success rate",
+        "group": "Rollout",
+        "path": ["rollout", "success_rate"],
+        "format": {"type": "float", "digits": 3},
+    },
+    # -- Train --
+    {
+        "key": "loss",
+        "label": "Loss",
+        "group": "Train",
+        "path": ["train", "loss"],
+        "format": {"type": "float", "digits": 4},
+    },
+    {
+        "key": "value_loss",
+        "label": "Value loss",
+        "group": "Train",
+        "path": ["train", "value_loss"],
+        "format": {"type": "float", "digits": 4},
+    },
+    {
+        "key": "approx_kl",
+        "label": "Approx KL",
+        "group": "Train",
+        "path": ["train", "approx_kl"],
+        "format": {"type": "float", "digits": 4},
+    },
+    {
+        "key": "entropy_loss",
+        "label": "Entropy loss",
+        "group": "Train",
+        "path": ["train", "entropy_loss"],
+        "format": {"type": "float", "digits": 4},
+    },
+    {
+        "key": "explained_variance",
+        "label": "Explained variance",
+        "group": "Train",
+        "path": ["train", "explained_variance"],
+        "format": {"type": "float", "digits": 3},
+    },
+    {
+        "key": "std",
+        "label": "Action std",
+        "group": "Train",
+        "path": ["train", "std"],
+        "format": {"type": "float", "digits": 3},
+    },
+    # -- Health (status is a badge; health.message is surfaced in this box's info popup) --
+    {
+        "key": "status",
+        "label": "Health",
+        "group": "Health",
+        "path": ["health", "status"],
+        "format": {"type": "badge"},
+    },
+    # -- Dynamics --
+    {
+        "key": "applied_mass",
+        "label": "Applied mass",
+        "group": "Dynamics",
+        "path": ["dynamics", "applied_mass"],
+        "format": {"type": "float", "digits": 3},
+    },
+    {
+        "key": "weight",
+        "label": "Weight",
+        "group": "Dynamics",
+        "path": ["dynamics", "weight"],
+        "format": {"type": "float", "digits": 3},
+    },
+    {
+        "key": "thrust_to_weight",
+        "label": "T/W",
+        "group": "Dynamics",
+        "path": ["dynamics", "thrust_to_weight"],
+        "format": {"type": "float", "digits": 2},
+    },
+    {
+        "key": "hover_throttle",
+        "label": "Hover throttle",
+        "group": "Dynamics",
+        "path": ["dynamics", "hover_throttle"],
+        "format": {"type": "float", "digits": 3},
+    },
+    {
+        "key": "max_body_rate",
+        "label": "Max body rate",
+        "group": "Dynamics",
+        "path": ["dynamics", "max_body_rate"],
+        "format": {"type": "float", "digits": 2},
+    },
+    {
+        "key": "spawn_z",
+        "label": "Spawn height",
+        "group": "Dynamics",
+        "path": ["dynamics", "spawn_z"],
+        "format": {"type": "float", "digits": 2},
+    },
+    {
+        "key": "arm_length",
+        "label": "Arm length",
+        "group": "Dynamics",
+        "path": ["dynamics", "arm_length"],
+        "format": {"type": "float", "digits": 3},
+    },
+    {
+        "key": "backend",
+        "label": "Backend",
+        "group": "Dynamics",
+        "path": ["dynamics", "backend"],
+        "format": {"type": "text"},
+    },
+]
+
+
 def merge_help(fields: list[dict[str, Any]], help_map: dict[str, dict[str, str]]) -> list[dict]:
     """Return ``fields`` with ``help`` + ``example`` merged in from ``help_map`` (by field name).
 
@@ -388,12 +684,35 @@ def merge_sections(fields: list[dict[str, Any]], section_map: dict[str, str]) ->
     return out
 
 
+def merge_status_help(
+    fields: list[dict[str, Any]], help_map: dict[str, dict[str, str]]
+) -> list[dict]:
+    """Return ``fields`` with ``help`` + ``example`` merged in from ``help_map`` (by ``key``).
+
+    Mirrors :func:`merge_help` but keys on the status descriptor's ``key`` (not ``name``). Each
+    descriptor is expected to have a curated entry — a missing one yields ``help: None``, which the
+    completeness test rejects, so drift is caught in CI rather than shipping a help-less box.
+    """
+    out: list[dict[str, Any]] = []
+    for f in fields:
+        entry = help_map.get(f.get("key", ""))
+        merged = dict(f)
+        merged["help"] = entry.get("help") if entry else None
+        merged["example"] = entry.get("example") if entry else None
+        out.append(merged)
+    return out
+
+
 __all__ = [
     "TRAIN_HELP",
     "PRUNE_HELP",
     "SETTINGS_HELP",
     "TRAIN_SECTIONS",
     "SECTION_ORDER",
+    "STATUS_HELP",
+    "STATUS_FIELDS",
+    "STATUS_GROUP_ORDER",
     "merge_help",
     "merge_sections",
+    "merge_status_help",
 ]

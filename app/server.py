@@ -123,6 +123,13 @@ def create_app(
     def slice_schema() -> dict[str, Any]:
         return {"fields": configs_io.describe_prune_fields()}
 
+    # -- live-status field descriptors (status-view polish items 5/6) ----------------------
+    @app.get("/api/status-fields")
+    def status_fields() -> dict[str, Any]:
+        # Backend-owned descriptor list (label / group / path|computed / format / help) that the
+        # grouped status renderer consumes so JS and Python never drift on shape or formatting.
+        return {"fields": configs_io.describe_status_fields()}
+
     # -- train configs (AC4/AC9) ----------------------------------------------------------
     @app.get("/api/train-configs")
     def list_train_configs() -> dict[str, Any]:

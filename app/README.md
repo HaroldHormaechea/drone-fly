@@ -15,8 +15,8 @@ the module layout for maintainers.
 | `server.py` | `create_app()` → FastAPI app: JSON API routers + static mounts (`/app`, `/viewer`). Head-less testable via starlette `TestClient`. |
 | `__main__.py` | `python -m app`: run Uvicorn on a loopback ephemeral port in a thread, open a pywebview native window. The only display-dependent path (owner-eyeball; never CI). |
 | `runs.py` | `RunRegistry`: enumerate `training/*` + `configs/train/*`, derive run state, and drive the launch / pause / resume / stop subprocess lifecycle. Spawner, signaler **and the pybullet probe** are injectable for tests. Resolves the training interpreter fresh per call (see below). |
-| `configs_io.py` | Introspect the real `TrainRunConfig`/`PruneRunConfig` dataclasses for the form schema; load/save YAML honouring omit-vs-default; validate through the real `from_mapping`. Enumerate + load saved slice (prune) configs. Merges curated help/example from `field_help.py` into descriptors. |
-| `field_help.py` | Curated per-field `help` + `example` prose (train / prune / settings), keyed by field name. Also owns the train-config **section map** (`TRAIN_SECTIONS` + `SECTION_ORDER`). Merged into the form descriptors — the core config dataclasses stay untouched. |
+| `configs_io.py` | Introspect the real `TrainRunConfig`/`PruneRunConfig` dataclasses for the form schema; load/save YAML honouring omit-vs-default; validate through the real `from_mapping`. Enumerate + load saved slice (prune) configs. Merges curated help/example from `field_help.py` into descriptors. Also builds the **live-status descriptor list** (`describe_status_fields()`). |
+| `field_help.py` | Curated per-field `help` + `example` prose (train / prune / settings), keyed by field name. Also owns the train-config **section map** (`TRAIN_SECTIONS` + `SECTION_ORDER`) and the **live-status descriptor list** (`STATUS_FIELDS` + `STATUS_HELP` + `STATUS_GROUP_ORDER`) that drives the grouped Status view. Merged into the form/status descriptors — the core config dataclasses stay untouched. |
 | `status.py` | Tail `training/<name>/status.jsonl` (partial-write safe), with a `progress.csv` fallback. |
 | `logs.py` | Bounded, filtered byte-offset tail of `training/<name>/logs/app.log` (the redirected run stdout+stderr). Caps each poll to 64 KB, advances only over complete lines, and applies a read-time deny-filter — the raw log stays on disk. |
 | `recordings.py` | Enumerate `episode_<n>.json[.gz]`, read + gunzip **server-side**, return parsed JSON. |
@@ -57,6 +57,34 @@ Each screen's **primary commit button** (Settings Save, per-run Config Save, New
 slice Generate/Regenerate) lives in a **right-aligned header slot** (`.view-head-actions`). Launch
 stays distinct — the New-training screen keeps **Save** and **Save & launch** as two separate
 buttons; launching is never folded into a plain save.
+
+### Live status metrics (Status view)
+
+Below the progress bar the Status view shows the live training metrics as **grouped metric boxes**,
+laid out under topic headings (**Progress**, **Rollout**, **Train**, **Health**, **Dynamics**). The
+grouping, labels, value formatting, and per-box help are entirely **backend-driven**: `app.js`
+fetches a descriptor list once from `GET /api/status-fields`
+(`configs_io.describe_status_fields()` → `field_help.STATUS_FIELDS` + `STATUS_HELP` +
+`STATUS_GROUP_ORDER`) and renders it, so the JS never hard-codes which fields exist or how to format
+them — Python and JS cannot drift on the record shape. Each box reads its value by descriptor `path`
+(or is `computed`, like ETA) and formats it via a closed `format.type` vocabulary (`float` +
+`digits` / `int` / `seconds` / `duration` / `badge` / `text`). A completeness test derives its
+expectation from a real emitted `status.jsonl` record, so a new emitter leaf without a descriptor
+fails CI.
+
+Empty/null contract: an unresolved path or a null/NaN leaf renders `—` (the box stays, so the grid
+is shape-stable across polls); the optional **Health** and **Dynamics** groups are hidden entirely
+when their block is null (a just-launched run shows Progress/Rollout/Train with `—` leaves and no
+empty Health/Dynamics headings). Each box carries an **ⓘ info button** opening the same accessible
+modal used by config fields; the Health box surfaces `health.message` in its popup. **ETA** is
+derived front-end from throughput (`fps`, or steps ÷ elapsed) and the steps remaining to the target,
+showing `—` until a rate is known and `done` at the target. The **CSV fallback** (`progress.csv`,
+when no `status.jsonl` exists) still renders as a flat, ungrouped, help-less grid.
+
+The status view runs in **fill mode** (`#view.view-fill`): the card and its log panel flex to the
+bottom of the window so the log gets the leftover height. Status data, metric boxes, log lines, and
+modal copy are **text-selectable** (a CSS `user-select` layer backing the native pywebview
+`text_select=True`); the nav and buttons stay unselectable to keep a native feel.
 
 ### Live process logs (Status view)
 

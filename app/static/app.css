@@ -96,6 +96,29 @@ main.view {
   overflow-y: auto;
   padding: 24px 28px;
 }
+/* Status-view polish item 4: the status view fills the window height so the log panel can grow to
+   the bottom. `route()` toggles `.view-fill` on for the status view only and off everywhere else,
+   so no other view is affected. The definite-height ancestor chain the flex-fill relies on is
+   html/body 100% → body flex → main.view 100vh. */
+#view.view-fill {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+/* The single status card becomes a flex column that claims the remaining height. */
+#view.view-fill .card {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+/* And its log panel fills what's left below the metrics grid (min-height floor stops a tall
+   metrics grid from crushing it to zero); the fixed 320px cap is dropped in fill mode. */
+#view.view-fill .log-panel {
+  flex: 1;
+  min-height: 120px;
+  max-height: none;
+}
 .view-head {
   display: flex;
   align-items: center;
@@ -194,6 +217,21 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .progress { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; height: 16px; overflow: hidden; }
 .progress > span { display: block; height: 100%; background: var(--accent); width: 0%; transition: width 0.3s; }
 .metrics { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+/* Status-view polish item 5: the grouped status renderer stacks a titled heading + a `.metrics`
+   grid per group inside this container. The CSV fallback wraps its flat cards in a single
+   `.metrics` grid here too, so it stays visually identical (ungrouped). */
+.metrics-groups { display: flex; flex-direction: column; }
+.metric-group-title {
+  margin: 14px 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+}
+.metrics-groups > .metric-group-title:first-child { margin-top: 0; }
+/* item 6: per-metric info button sits inline with the label. */
+.metric .k { display: flex; align-items: center; gap: 2px; }
+.metric .k .info-btn { width: 16px; height: 16px; margin-left: 2px; }
 .metric { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
 .metric .k { font-size: 11px; color: var(--muted); }
 .metric .v { font-size: 16px; font-weight: 600; }
@@ -368,3 +406,11 @@ a.link:hover { text-decoration: underline; }
 /* ---- embedded viewer ---- */
 .viewer-frame { width: 100%; height: calc(100vh - 220px); min-height: 420px; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; }
 .hidden { display: none !important; }
+
+/* ---- text selection (status-view polish item 1) ----
+   Make the status data, metric boxes, log lines and modal copy selectable so the user can
+   copy values out. This backs up the native pywebview text_select=True (app/__main__.py) and
+   works regardless of the webview backend's default. Interactive chrome (nav, buttons, the
+   header action slot) stays unselectable so it keeps feeling like native UI. */
+.card, .metrics, .metrics-groups, .metric, .log-panel, .modal-body { user-select: text; }
+nav.sidebar, .btn-row, button, .btn, .view-head-actions { user-select: none; }

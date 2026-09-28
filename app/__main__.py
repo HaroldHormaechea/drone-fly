@@ -95,7 +95,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    webview.create_window("drone-fly", url, width=1280, height=860)
+    # UC-61 status-view polish item 1: enable native text selection in the webview so the user can
+    # select/copy live status data and log lines. pywebview defaults text_select=False, which
+    # disables selection window-wide; a CSS user-select layer (app.css) backs this up per-region.
+    # Owner-eyeball only — this windowed path never runs in CI.
+    webview.create_window("drone-fly", url, width=1280, height=860, text_select=True)
     # UC-61 item 5: set the native window/taskbar icon best-effort. `icon=` is honoured on the
     # GTK/Qt backends and ignored elsewhere; a pywebview too old to accept the kwarg falls back to
     # the default icon. Never fatal — this path is owner-eyeball only and never runs in CI.
