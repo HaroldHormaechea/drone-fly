@@ -279,6 +279,23 @@ SETTINGS_HELP: dict[str, dict[str, str]] = {
 }
 
 
+#: Per-field combobox option metadata (item 4). Attaches suggestion sources to *open-set* fields —
+#: fields whose valid space is not a closed enum (those already render as a strict ``<select>`` via
+#: the dataclass ``choices``), but where a curated set of suggestions still helps. Keys:
+#:   * ``options``          — a static suggestion list (rendered into a ``<datalist>``).
+#:   * ``options_endpoint`` — a URL the front-end fetches dynamic suggestions from at render time.
+#:   * ``open``             — ``True`` means free text is preserved (datalist-backed text input), so
+#:     ``collect()`` stays byte-identical; the suggestions never constrain what the user can type.
+#: Only fields listed here gain these keys (non-destructive merge); every other descriptor is
+#: unchanged. ``resume`` suggests the two sentinels ``_resolve_config_resume`` understands
+#: (``auto`` = newest-else-fresh, ``latest`` = newest-or-error) while still allowing an explicit
+#: checkpoint ``.zip`` path or directory; ``connectome`` suggests discovered pruned slices.
+FIELD_OPTIONS: dict[str, dict[str, Any]] = {
+    "resume": {"options": ["auto", "latest"], "open": True},
+    "connectome": {"options_endpoint": "/api/connectomes", "open": True},
+}
+
+
 #: Display order of the train-config sections (item 2). The front-end lays sections out in this
 #: order in a responsive grid; a field whose name is absent from :data:`TRAIN_SECTIONS` renders in
 #: no section (the front-end falls back to a flat layout, as the prune form does).
@@ -684,6 +701,31 @@ def merge_sections(fields: list[dict[str, Any]], section_map: dict[str, str]) ->
     return out
 
 
+def merge_options(
+    fields: list[dict[str, Any]], options_map: dict[str, dict[str, Any]]
+) -> list[dict]:
+    """Return ``fields`` with combobox ``options`` metadata merged from ``options_map`` (by name).
+
+    Non-destructive: only fields named in ``options_map`` gain the ``options`` /
+    ``options_endpoint`` / ``open`` keys (item 4); other descriptors are returned unchanged, so an
+    enum field keeps rendering as a strict ``<select>`` from its dataclass ``choices``. Never alters
+    ``base_type`` / ``choices`` / ``default``, so ``collect()`` stays byte-identical.
+    """
+    out: list[dict[str, Any]] = []
+    for f in fields:
+        merged = dict(f)
+        entry = options_map.get(f.get("name", ""))
+        if entry:
+            if "options" in entry:
+                merged["options"] = list(entry["options"])
+            if "options_endpoint" in entry:
+                merged["options_endpoint"] = entry["options_endpoint"]
+            if "open" in entry:
+                merged["open"] = entry["open"]
+        out.append(merged)
+    return out
+
+
 def merge_status_help(
     fields: list[dict[str, Any]], help_map: dict[str, dict[str, str]]
 ) -> list[dict]:
@@ -709,10 +751,12 @@ __all__ = [
     "SETTINGS_HELP",
     "TRAIN_SECTIONS",
     "SECTION_ORDER",
+    "FIELD_OPTIONS",
     "STATUS_HELP",
     "STATUS_FIELDS",
     "STATUS_GROUP_ORDER",
     "merge_help",
     "merge_sections",
+    "merge_options",
     "merge_status_help",
 ]

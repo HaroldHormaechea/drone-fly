@@ -18,6 +18,7 @@ Hermetic (no torch/SB3 — only ``drone_fly.config`` + PyYAML). Pins:
 from __future__ import annotations
 
 import dataclasses
+import os
 
 import pytest
 import yaml
@@ -277,3 +278,103 @@ def test_prune_descriptors_carry_help_and_example():
     assert by_name["prune_k"]["help"] and by_name["prune_k"]["example"]
     for f in configs_io.describe_prune_fields():
         assert "help" in f and "example" in f
+
+
+# --- item 4: open-set combobox metadata on descriptors ------------------------------------
+
+
+def test_train_descriptors_carry_open_combobox_options_for_resume_and_connectome():
+    by_name = {f["name"]: f for f in configs_io.describe_train_fields()}
+    # resume → static suggestion list + open (free text preserved).
+    assert by_name["resume"]["options"] == ["auto", "latest"]
+    assert by_name["resume"]["open"] is True
+    assert "options_endpoint" not in by_name["resume"]
+    # connectome → dynamic endpoint + open.
+    assert by_name["connectome"]["options_endpoint"] == "/api/connectomes"
+    assert by_name["connectome"]["open"] is True
+    assert "options" not in by_name["connectome"]
+
+
+def test_existing_enum_choices_still_present_and_untouched_by_options_merge():
+    # Closed enums keep rendering as strict <select> from their dataclass choices — the item-4
+    # merge is non-destructive and must not add open/options keys to them.
+    by_name = {f["name"]: f for f in configs_io.describe_train_fields()}
+    for enum in ("adapter", "device", "schema"):
+        assert by_name[enum]["control"] == "select"
+        assert by_name[enum].get("choices")  # choices intact
+        assert "options" not in by_name[enum]
+        assert "options_endpoint" not in by_name[enum]
+        assert "open" not in by_name[enum]
+
+
+def test_prune_connectome_descriptor_is_an_open_datalist():
+    by_name = {f["name"]: f for f in configs_io.describe_prune_fields()}
+    assert by_name["connectome"]["options_endpoint"] == "/api/connectomes"
+    assert by_name["connectome"]["open"] is True
+    # prune_rule stays a strict select (closed enum) — no combobox keys leaked onto it.
+    assert by_name["prune_rule"]["control"] == "select"
+    assert "open" not in by_name["prune_rule"]
+
+
+def test_merge_options_is_non_destructive_and_by_name():
+    # Only named fields gain keys; base_type/choices/default/control are never altered.
+    original = [
+        {"name": "resume", "base_type": "str", "default": None, "control": "text"},
+        {"name": "adapter", "base_type": "str", "choices": ["auto", "cpu"], "control": "select"},
+        {"name": "timesteps", "base_type": "int", "default": None, "control": "number"},
+    ]
+    merged = field_help.merge_options(original, field_help.FIELD_OPTIONS)
+    by_name = {f["name"]: f for f in merged}
+    # resume is in FIELD_OPTIONS → gains options/open, keeps its other keys.
+    assert by_name["resume"]["options"] == ["auto", "latest"]
+    assert by_name["resume"]["open"] is True
+    assert by_name["resume"]["base_type"] == "str" and by_name["resume"]["control"] == "text"
+    # adapter/timesteps are NOT in FIELD_OPTIONS → returned unchanged.
+    assert by_name["adapter"] == original[1]
+    assert by_name["timesteps"] == original[2]
+    # The input list is not mutated in place (fresh dicts returned).
+    assert "options" not in original[0]
+
+
+# --- item 4: list_connectomes enumeration / dedup / sort ----------------------------------
+
+
+def test_list_connectomes_enumerates_prune_out_dirs_and_pruned_subdirs(tmp_path):
+    root = str(tmp_path)
+    prune_dir = tmp_path / "configs" / "prune"
+    prune_dir.mkdir(parents=True)
+    # A saved prune config whose `out` dir exists on disk → suggested.
+    (prune_dir / "s1.yaml").write_text(
+        yaml.safe_dump({"out": "artifacts/pruned/from_config", "connectome": "x", "prune_k": 8})
+    )
+    (tmp_path / "artifacts" / "pruned" / "from_config").mkdir(parents=True)
+    # A prune config whose `out` dir does NOT exist → not suggested (nothing to point at).
+    (prune_dir / "s2.yaml").write_text(
+        yaml.safe_dump({"out": "artifacts/pruned/missing", "connectome": "x", "prune_k": 8})
+    )
+    # A bare pruned subdir with no config → suggested from the artifacts scan.
+    (tmp_path / "artifacts" / "pruned" / "bare").mkdir(parents=True)
+
+    got = [c.replace(os.sep, "/") for c in configs_io.list_connectomes(root)]
+    assert "artifacts/pruned/from_config" in got
+    assert "artifacts/pruned/bare" in got
+    assert "artifacts/pruned/missing" not in got  # out dir absent → not offered
+    assert got == sorted(got)  # sorted
+    assert len(got) == len(set(got))  # deduped (config out == pruned subdir counts once)
+
+
+def test_list_connectomes_dedups_config_out_against_pruned_scan(tmp_path):
+    # When a prune config's `out` IS one of the artifacts/pruned/* subdirs, it appears once.
+    root = str(tmp_path)
+    prune_dir = tmp_path / "configs" / "prune"
+    prune_dir.mkdir(parents=True)
+    (prune_dir / "s.yaml").write_text(
+        yaml.safe_dump({"out": "artifacts/pruned/shared", "connectome": "x", "prune_k": 8})
+    )
+    (tmp_path / "artifacts" / "pruned" / "shared").mkdir(parents=True)
+    got = [c.replace(os.sep, "/") for c in configs_io.list_connectomes(root)]
+    assert got.count("artifacts/pruned/shared") == 1
+
+
+def test_list_connectomes_empty_when_no_slices(tmp_path):
+    assert configs_io.list_connectomes(str(tmp_path)) == []

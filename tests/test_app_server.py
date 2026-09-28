@@ -507,3 +507,81 @@ def test_viewer_embed_iframe_requests_embed_param():
     app_dir = __import__("app").__path__[0]
     js = open(os.path.join(app_dir, "static", "viewer-embed.js"), encoding="utf-8").read()
     assert "?embed=1" in js  # the app's iframe opts into embed mode; standalone URL is untouched
+
+
+# --- item 3: DELETE /api/runs/{name} ------------------------------------------------------
+
+
+def test_delete_run_happy_removes_outputs_keeps_config(tmp_path):
+    # Default delete over HTTP: 200, outputs removed, committed config kept (deleted_config False).
+    client, _, _ = _client(tmp_path)
+    client.post("/api/train-configs/demo", json={"config": {}})
+    ck = tmp_path / "training" / "demo" / "checkpoints"
+    ck.mkdir(parents=True, exist_ok=True)
+    (ck / "ppo_racer_100_steps.zip").write_bytes(b"zip")
+
+    r = client.request("DELETE", "/api/runs/demo")
+    assert r.status_code == 200
+    assert r.json() == {"name": "demo", "deleted_outputs": True, "deleted_config": False}
+    assert not (tmp_path / "training" / "demo").exists()
+    # Config kept → the run still lists (config-only "ready" row).
+    assert os.path.isfile(configs_io.train_config_path(str(tmp_path), "demo"))
+
+
+def test_delete_run_with_delete_config_query_removes_yaml(tmp_path):
+    # ?delete_config=true also removes the committed YAML.
+    client, _, _ = _client(tmp_path)
+    client.post("/api/train-configs/demo", json={"config": {}})
+    (tmp_path / "training" / "demo").mkdir(parents=True, exist_ok=True)
+
+    r = client.request("DELETE", "/api/runs/demo?delete_config=true")
+    assert r.status_code == 200
+    assert r.json() == {"name": "demo", "deleted_outputs": True, "deleted_config": True}
+    assert not os.path.isfile(configs_io.train_config_path(str(tmp_path), "demo"))
+
+
+def test_delete_running_run_is_409(tmp_path):
+    # A live run refuses deletion → RunError → HTTP 409 (mirrors the lifecycle guard).
+    client, _, _ = _client(tmp_path)
+    client.post("/api/train-configs/demo", json={"config": {}})
+    assert client.post("/api/runs/demo/launch").status_code == 200
+    r = client.request("DELETE", "/api/runs/demo")
+    assert r.status_code == 409
+    # The saved config survives the refused delete.
+    assert os.path.isfile(configs_io.train_config_path(str(tmp_path), "demo"))
+
+
+def test_delete_absent_run_is_404(tmp_path):
+    # Nothing to delete (no outputs, no config) → FileNotFoundError → HTTP 404.
+    client, _, _ = _client(tmp_path)
+    r = client.request("DELETE", "/api/runs/ghost")
+    assert r.status_code == 404
+
+
+# --- item 4: GET /api/connectomes (combobox datalist suggestions) -------------------------
+
+
+def test_connectomes_endpoint_enumerates_pruned_slices(tmp_path):
+    # Seed two suggestion sources: a saved prune config whose `out` dir exists, and a subdir of
+    # artifacts/pruned/. The endpoint returns them deduped + sorted (root-relative).
+    client, _, _ = _client(tmp_path)
+    prune_dir = tmp_path / "configs" / "prune"
+    prune_dir.mkdir(parents=True)
+    (prune_dir / "myslice.yaml").write_text(
+        yaml.safe_dump({"out": "artifacts/pruned/myslice", "connectome": "x", "prune_k": 8})
+    )
+    (tmp_path / "artifacts" / "pruned" / "myslice").mkdir(parents=True)  # the config's out dir
+    (tmp_path / "artifacts" / "pruned" / "other").mkdir(parents=True)  # a bare pruned subdir
+
+    body = client.get("/api/connectomes").json()
+    connectomes = body["connectomes"]
+    assert connectomes == sorted(connectomes)  # sorted
+    assert len(connectomes) == len(set(connectomes))  # deduped
+    norm = {c.replace(os.sep, "/") for c in connectomes}
+    assert "artifacts/pruned/myslice" in norm
+    assert "artifacts/pruned/other" in norm
+
+
+def test_connectomes_endpoint_empty_when_nothing_pruned(tmp_path):
+    client, _, _ = _client(tmp_path)
+    assert client.get("/api/connectomes").json() == {"connectomes": []}

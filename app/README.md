@@ -33,7 +33,8 @@ The left nav is a keyboard-operable **disclosure tree** (rendered by `app.js`, n
   views: **Status** (`#/train/<name>/status`, live progress + lifecycle controls + process logs),
   **Recordings** (`#/train/<name>/recordings`, an episode picker feeding the embedded viewer), and
   **Config** (`#/train/<name>/config`, the per-run config editor). `#/train/<name>` redirects to
-  `.../status`. Expanded runs stay open across the 5-second nav refresh.
+  `.../status`. Expanded runs stay open across the 5-second nav refresh. The run list also carries a
+  per-row **Delete** button — see *Deleting a run* below.
 - **Settings** — `#/settings`. A **top-level** nav link (aligned with the Slices/Train group heads,
   not indented like a run child).
 - **About** — `#/about`. A second top-level link below Settings; a static, offline page with the
@@ -57,6 +58,39 @@ Each screen's **primary commit button** (Settings Save, per-run Config Save, New
 slice Generate/Regenerate) lives in a **right-aligned header slot** (`.view-head-actions`). Launch
 stays distinct — the New-training screen keeps **Save** and **Save & launch** as two separate
 buttons; launching is never folded into a plain save.
+
+**Enum & path comboboxes.** Fields with a *closed* set of valid values (adapter, device, schema,
+prune rule) render as a strict `<select>` from the config dataclass's own `choices`. Fields whose
+valid space is *open* (`resume`, `connectome`) render as a text input backed by a `<datalist>` of
+suggestions — `resume` offers `auto` / `latest`, `connectome` offers the discovered pruned slices
+from `GET /api/connectomes` (prune-config `out` dirs that exist + immediate `artifacts/pruned/`
+subdirs). Suggestions are **advisory only**: free text is always accepted (a checkpoint `.zip`, a
+fixture path, or leaving it blank), and the emitted YAML is byte-identical to before — the datalist
+only autocompletes. Suggestion metadata (`options` / `options_endpoint` / `open`) is backend-owned
+(`field_help.FIELD_OPTIONS`, merged into the descriptors); a failed dynamic fetch degrades silently
+to a plain input.
+
+### Deleting a run
+
+Each row in the run list has a destructive **Delete** button opening a confirm dialog (`modal.js`
+footer actions). By default it deletes only the **generated outputs** — checkpoints, recordings and
+logs under the gitignored `training/<name>/` — via `DELETE /api/runs/{name}`. The committed run
+definition (`configs/train/<name>.yaml`) is **kept**, so the run stays listed as a config-only
+`ready` entry you can relaunch (the confirm copy and the success toast both say so). Tick the
+dialog's checkbox to also remove the saved config (`?delete_config=true`), permanently dropping the
+definition. Guards (in `runs.RunRegistry.delete`): `validate_run_name`, a **409** refusal for a run
+in a live state (stop it first), and a realpath + `os.path.commonpath` containment check so a
+symlinked `training/<name>` can't escape the training root. Deleting a run with nothing to remove is
+a **404**.
+
+### Loading feedback (skeletons + progress)
+
+Navigation shows an instant nav highlight and, for any view that takes longer than ~120 ms to load,
+a greyed **skeleton** placeholder (a fast view never flashes one — the threshold timer is cleared).
+On the Status view the **Elapsed** field advances once a second between the 2.5 s status polls (a
+drift-free client clock reconciled to each server reading; ETA stays on the poll cadence), and the
+progress bar switches to an **indeterminate striped marquee** while a run is launching or reports no
+measurable progress yet (no target set), instead of showing a dead 0-width bar.
 
 ### Live status metrics (Status view)
 
@@ -109,6 +143,15 @@ embed-aware line in `viewer.js` (it adds `class="embed"` to `<body>`); all layou
 byte-behaviour-identical. In embed mode the viewer is **fully bare**: the title, instructions, file
 loader and provenance meta-bar are hidden, and the panels reflow to a compact 2-column layout
 (brain + flight-actions stacked on the left, the 3D flight map filling the right).
+
+The **3D flight** panel now defaults to an **angled three-quarter view** (`VIEW_PRESETS.angled`,
+labelled *3D* in the flight view picker) instead of top-down, and **auto-fits the whole course to
+~75% of the panel** — an aspect- and orientation-aware fit (`fitToScene()`, with a perspective
+refinement pass so a long course never clips) that replaces the old bounding-sphere heuristic. It
+re-fits on resize (so the embedded iframe's initial layout race self-heals and aspect changes
+re-frame) and on every scene/recording load (each episode lands on the default view), unless the
+user has manually zoomed. front / side / top-down remain available in the picker. This is a
+viewer-only change; `viewer-embed.js` is unchanged.
 
 ### Training interpreter resolution (Settings → *Training interpreter*)
 

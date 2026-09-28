@@ -19,7 +19,8 @@ assertions on ``viz/*`` and ``README.md`` — never by executing it (AC10). Veri
 * **UC-06 AC1-6,9,11,12,13** — ``viewer.js`` carries the 3D orbit projector (floor / markers
   / trajectory / drone / presets / ``destroy``) and the play-at-end restart; the old flat 2D
   ``path-canvas`` / ``drawPath`` are gone; ``viewer.html`` offers a 0.25× speed option and a
-  human-labelled ``view-select`` (front/side/top, top the default). "A right turn looks right"
+  human-labelled ``view-select`` (angled '3D' default + front/side/top; UC-61 item 6 made the
+  angled three-quarter preset the default). "A right turn looks right"
   (AC5) is a documented MANUAL browser check.
 * **UC-12 AC1,2,4,5,7,8** — the anatomical panel is now an MRI-style heatmap over a static,
   registered brain outline: the per-neuron dot cloud AND the UC-06 neuron beat are removed;
@@ -535,8 +536,11 @@ def test_viewer_html_has_quarter_speed_option() -> None:
     assert "0.25" in values, f"speed-select missing 0.25× option (values: {values})"
 
 
-def test_viewer_html_view_select_is_human_labelled_top_default() -> None:
-    """AC13: the flight view selector offers front/side/top with **top** the default.
+def test_viewer_html_view_select_is_human_labelled_angled_default() -> None:
+    """UC-61 item 6: the flight view selector offers an **angled** '3D' default plus front/side/top.
+
+    The default flight view is now the three-quarter ``angled`` preset (labelled "3D"); the
+    original orthographic presets (front / side / top-down) are kept as explicit options.
 
     CRITICAL: assert on the ``view-select`` element and its option VALUES — NOT a bare
     "top-down" text grep. Both the brain-map panel hint ``<span class="hint">(top-down)</span>``
@@ -546,13 +550,16 @@ def test_viewer_html_view_select_is_human_labelled_top_default() -> None:
     body = _extract_select(html, "view-select")
     opts = _options(body)
     values = [v for v, _ in opts]
-    assert values == ["front", "side", "top"], f"view-select option values wrong: {values}"
-    # Exactly one default, and it is 'top' (top-down on load).
+    assert values == ["angled", "front", "side", "top"], (
+        f"view-select option values wrong: {values}"
+    )
+    # Exactly one default, and it is the angled three-quarter '3D' view on load (item 6).
     selected = [v for v, sel in opts if sel]
-    assert selected == ["top"], f"default view must be 'top' (top-down); got {selected}"
+    assert selected == ["angled"], f"default flight view must be 'angled' (3D); got {selected}"
     # Human-readable label text (never raw axis names x/y/z) — visible option text is words.
     label_text = re.sub(r"<[^>]+>", " ", body)
     assert "top-down" in label_text  # scoped to the view-select body, not the panel hint
+    assert "3D" in label_text  # the angled default carries the human-readable '3D' label
     for axis in (">x<", ">y<", ">z<"):
         assert axis not in body, f"view-select must not expose raw axis label {axis!r}"
 

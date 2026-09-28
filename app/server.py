@@ -123,6 +123,12 @@ def create_app(
     def slice_schema() -> dict[str, Any]:
         return {"fields": configs_io.describe_prune_fields()}
 
+    # -- connectome suggestions (item 4: the connectome combobox datalist) -----------------
+    @app.get("/api/connectomes")
+    def list_connectomes() -> dict[str, Any]:
+        # Suggestion-only enumeration of pruned-slice paths for the connectome field's datalist.
+        return {"connectomes": configs_io.list_connectomes(root)}
+
     # -- live-status field descriptors (status-view polish items 5/6) ----------------------
     @app.get("/api/status-fields")
     def status_fields() -> dict[str, Any]:
@@ -209,6 +215,18 @@ def create_app(
     @app.post("/api/runs/{name}/stop")
     def stop_run(name: str) -> dict[str, Any]:
         return _guard(lambda: reg.stop(name))
+
+    @app.delete("/api/runs/{name}")
+    def delete_run(name: str, delete_config: bool = False) -> dict[str, Any]:
+        # Item 3: delete a run's generated outputs (and, when delete_config=true, its saved YAML).
+        # A live run → RunError → 409 (mirrors the lifecycle guard); nothing to delete →
+        # FileNotFoundError → 404 (mirrors the recordings route).
+        try:
+            return reg.delete(name, delete_config=delete_config)
+        except RunError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     # -- live status (AC6) ----------------------------------------------------------------
     @app.get("/api/runs/{name}/status")

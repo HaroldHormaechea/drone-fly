@@ -41,6 +41,7 @@ chosen executable never is. :meth:`run_prune` does not need pybullet, so it uses
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -475,6 +476,59 @@ class RunRegistry:
     def stop(self, name: str) -> dict[str, Any]:
         """Stop a running run cleanly (terminate its process group, AC5)."""
         return self._signal_live(validate_run_name(name), "stop", "stopping")
+
+    def delete(self, name: str, *, delete_config: bool = False) -> dict[str, Any]:
+        """Delete a run's generated outputs (``training/<name>/``); optionally its saved config.
+
+        Destructive; three guards make it safe (item 3):
+
+        1. ``validate_run_name`` rejects separators / ``.`` / ``..`` / spaces (path-traversal).
+        2. A run in a live state (running / pausing / stopping) is refused with :class:`RunError`
+           (HTTP 409) — the caller must stop it first, so a live process's tree is never removed.
+        3. Realpath + ``os.path.commonpath`` containment: the resolved ``training/<name>`` dir must
+           sit strictly *inside* the resolved ``training/`` root, so a symlink at
+           ``training/<name>`` pointing outside the tree cannot be followed out (symlink escape).
+
+        Default (``delete_config=False``) removes ONLY the gitignored per-run outputs and KEEPS the
+        committed ``configs/train/<name>.yaml`` — so the run's definition survives: it still appears
+        in the list as a config-only ``ready`` row (enumeration unions the saved configs). Pass
+        ``delete_config=True`` to also remove the committed YAML (permanent loss of the definition).
+
+        Raises :class:`FileNotFoundError` (HTTP 404) when neither the output dir nor the config
+        exists — there is nothing to delete. Returns what was actually removed.
+        """
+        name = validate_run_name(name)
+        # Guard 2: never delete a live run's tree out from under it.
+        if self._resolve_state(name) in _LIVE_STATES:
+            raise RunError(f"run {name!r} is running — stop it before deleting")
+        training_dir = self._training_dir(name)
+        # Guard 3: realpath + commonpath containment (symlink-escape defence). The resolved dir must
+        # be a strict descendant of the resolved training root.
+        training_root = os.path.join(self.project_root, "training")
+        real_dir = os.path.realpath(training_dir)
+        real_root = os.path.realpath(training_root)
+        if real_dir == real_root or os.path.commonpath([real_root, real_dir]) != real_root:
+            raise RunError(
+                f"refusing to delete {name!r}: {training_dir!r} is not contained in the training "
+                "root (symlink escape?)"
+            )
+        config_path = configs_io.train_config_path(self.project_root, name)
+        dir_exists = os.path.isdir(training_dir)
+        config_exists = os.path.isfile(config_path)
+        if not dir_exists and not config_exists:
+            raise FileNotFoundError(f"run {name!r} has no outputs or saved config to delete")
+        deleted_outputs = False
+        if dir_exists:
+            shutil.rmtree(training_dir)
+            deleted_outputs = True
+        deleted_config = False
+        if delete_config and config_exists:
+            os.remove(config_path)
+            deleted_config = True
+        # Drop any cached live-process handle / terminal-state label for this run.
+        self._procs.pop(name, None)
+        self._last_state.pop(name, None)
+        return {"name": name, "deleted_outputs": deleted_outputs, "deleted_config": deleted_config}
 
 
 __all__ = ["RunRegistry", "RunError"]

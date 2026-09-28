@@ -153,8 +153,12 @@ button, .btn {
 button:hover { border-color: var(--accent); }
 button.primary { background: var(--accent); color: #05151f; border-color: var(--accent); font-weight: 600; }
 button.danger { border-color: var(--bad); color: var(--bad); }
+button.danger:hover { border-color: var(--bad); background: rgba(224,96,77,0.12); }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
 .btn-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+/* item 3: a compact button for inline table-row actions. */
+.btn-sm { padding: 3px 10px; font-size: 12px; }
+.row-actions { display: flex; gap: 14px; align-items: center; }
 
 /* ---- forms ---- */
 .form-grid { display: grid; grid-template-columns: 1fr; gap: 2px; }
@@ -216,6 +220,20 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 /* ---- status / metrics ---- */
 .progress { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; height: 16px; overflow: hidden; }
 .progress > span { display: block; height: 100%; background: var(--accent); width: 0%; transition: width 0.3s; }
+/* item 2: the "launching / no measurable progress" state — a striped marquee filling the whole bar
+   (pure CSS, offline). Overrides the determinate width; removing `.indeterminate` restores it. */
+.progress.indeterminate > span {
+  width: 100% !important;
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(77, 163, 255, 0.85) 0, rgba(77, 163, 255, 0.85) 12px,
+    rgba(77, 163, 255, 0.4) 12px, rgba(77, 163, 255, 0.4) 24px
+  );
+  background-size: 34px 100%;
+  animation: prog-marquee 0.9s linear infinite;
+}
+@keyframes prog-marquee { from { background-position: 0 0; } to { background-position: 34px 0; } }
+@media (prefers-reduced-motion: reduce) { .progress.indeterminate > span { animation: none; } }
 .metrics { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
 /* Status-view polish item 5: the grouped status renderer stacks a titled heading + a `.metrics`
    grid per group inside this container. The CSV fallback wraps its flat cards in a single
@@ -356,7 +374,17 @@ a.link:hover { text-decoration: underline; }
 .modal-close:hover { border-color: var(--accent); color: var(--accent); }
 .modal-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .modal-body { padding: 16px; }
+/* item 3: confirm-dialog footer action row (e.g. Cancel / Delete). */
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--line);
+}
 .modal-body .mh-help { margin: 0 0 12px; }
+/* item 3: the "also delete the saved config" opt-in inside the confirm dialog. */
+.modal-body .enable { display: flex; align-items: center; gap: 8px; color: var(--fg); font-size: 13px; }
 .modal-body .mh-example { margin: 0 0 12px; color: var(--muted); }
 .modal-body .mh-example .mh-k { text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; margin-right: 6px; }
 .modal-body code { background: var(--bg); border: 1px solid var(--line); padding: 1px 6px; border-radius: 4px; }
@@ -406,6 +434,22 @@ a.link:hover { text-decoration: underline; }
 /* ---- embedded viewer ---- */
 .viewer-frame { width: 100%; height: calc(100vh - 220px); min-height: 420px; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; }
 .hidden { display: none !important; }
+
+/* ---- skeleton loaders (item 5) ----
+   A threshold placeholder painted only when a view takes > 120 ms to render (route() clears the
+   timer for fast views), replaced wholesale by the real view. Pure CSS shimmer, offline. */
+.skeleton { display: flex; flex-direction: column; }
+.skel-head { margin-bottom: 18px; }
+.skel-line, .skel-block {
+  background: linear-gradient(90deg, var(--panel) 25%, var(--panel-2) 37%, var(--panel) 63%);
+  background-size: 400% 100%;
+  animation: skel-shimmer 1.3s ease-in-out infinite;
+  border-radius: 6px;
+}
+.skel-line { height: 14px; margin: 6px 0; }
+.skel-block { margin-bottom: 14px; border: 1px solid var(--line); }
+@keyframes skel-shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+@media (prefers-reduced-motion: reduce) { .skel-line, .skel-block { animation: none; } }
 
 /* ---- text selection (status-view polish item 1) ----
    Make the status data, metric boxes, log lines and modal copy selectable so the user can
