@@ -141,7 +141,10 @@ def describe_train_fields() -> list[dict[str, Any]]:
     fields = field_help.merge_help(fields, field_help.TRAIN_HELP)
     # item 2: tag each descriptor with its section (order-preserving) so the form can group the
     # existing field order into titled cards without reordering keys.
-    return field_help.merge_sections(fields, field_help.TRAIN_SECTIONS)
+    fields = field_help.merge_sections(fields, field_help.TRAIN_SECTIONS)
+    # item 4: attach open-set combobox suggestions (resume / connectome) — datalist-backed inputs
+    # that preserve free text, so serialization stays byte-identical.
+    return field_help.merge_options(fields, field_help.FIELD_OPTIONS)
 
 
 def describe_status_fields() -> list[dict[str, Any]]:
@@ -167,7 +170,9 @@ def describe_prune_fields() -> list[dict[str, Any]]:
         choices_map=_prune_choices(),
         defaults_seed={"out": "artifacts/pruned"},
     )
-    return field_help.merge_help(fields, field_help.PRUNE_HELP)
+    fields = field_help.merge_help(fields, field_help.PRUNE_HELP)
+    # item 4: the connectome source is an open path too — datalist suggestions, free text kept.
+    return field_help.merge_options(fields, field_help.FIELD_OPTIONS)
 
 
 # --- Paths ---------------------------------------------------------------------------------
@@ -205,6 +210,48 @@ def list_train_config_names(project_root: str) -> list[str]:
 def list_prune_config_names(project_root: str) -> list[str]:
     """List saved slice (prune) config names (``configs/prune/*.yaml`` stems), sorted (item 3)."""
     return _list_config_names(os.path.join(project_root, "configs", "prune"))
+
+
+def _norm_rel(project_root: str, path: str) -> str:
+    """Normalise ``path`` to a project-root-relative path when it resolves under the root.
+
+    Absolute or ``../``-relative paths that fall outside the root are returned unchanged, so a
+    hand-authored out-of-tree ``out`` is still surfaced as a usable suggestion.
+    """
+    absolute = path if os.path.isabs(path) else os.path.join(project_root, path)
+    absolute = os.path.normpath(absolute)
+    try:
+        rel = os.path.relpath(absolute, project_root)
+    except ValueError:  # different drive on Windows
+        return path
+    return rel
+
+
+def list_connectomes(project_root: str) -> list[str]:
+    """Return suggestion-only pruned-slice paths for the connectome combobox (item 4).
+
+    Two sources, deduped + sorted (all normalised to project-root-relative paths):
+
+    * the ``out`` directory of every saved ``configs/prune/*.yaml`` that exists on disk, and
+    * every immediate subdirectory of ``artifacts/pruned/``.
+
+    This is advisory only — the connectome field is an open datalist, so any path (a fixture, an
+    out-of-tree slice, or omitting it for the default MaleCNS connectome) remains valid; these are
+    just the discoverable slices offered as suggestions.
+    """
+    found: set[str] = set()
+    for name in list_prune_config_names(project_root):
+        out = load_prune_config(project_root, name).get("out")
+        if isinstance(out, str) and out:
+            absolute = out if os.path.isabs(out) else os.path.join(project_root, out)
+            if os.path.isdir(absolute):
+                found.add(_norm_rel(project_root, out))
+    pruned_root = os.path.join(project_root, "artifacts", "pruned")
+    if os.path.isdir(pruned_root):
+        for fn in os.listdir(pruned_root):
+            if os.path.isdir(os.path.join(pruned_root, fn)):
+                found.add(_norm_rel(project_root, os.path.join(pruned_root, fn)))
+    return sorted(found)
 
 
 # --- Load / save ---------------------------------------------------------------------------
@@ -292,6 +339,7 @@ __all__ = [
     "prune_config_path",
     "list_train_config_names",
     "list_prune_config_names",
+    "list_connectomes",
     "load_train_config",
     "load_prune_config",
     "save_train_config",
