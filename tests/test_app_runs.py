@@ -24,6 +24,8 @@ from app import configs_io
 from app import runs as runs_mod
 from app.runs import RunError, RunRegistry
 
+from drone_fly.config import ConfigError
+
 
 class _FakePopen:
     """A fake subprocess: ``poll()`` returns None until ``finish()`` sets a return code."""
@@ -477,3 +479,104 @@ def test_probe_verdict_is_cached_per_venv_path(tmp_path, monkeypatch):
     reg.run_prune("configs/prune/s.yaml")
     assert len(calls) == 1  # verdict memoised by absolute venv path
     assert spawned[-1].argv[0] == str(b_venv / _SCRIPT)
+
+
+# --- item 3: RunRegistry.delete() -- destructive delete with three guards ------------------
+
+
+def test_delete_removes_the_whole_training_tree(tmp_path):
+    # Outputs + a saved config both present; default delete removes only the outputs tree.
+    _save_cfg(tmp_path, "demo")
+    _write_checkpoint(tmp_path, "demo")
+    (tmp_path / "training" / "demo" / "logs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "training" / "demo" / "logs" / "app.log").write_text("hi")
+    reg, _, _ = _make_registry(tmp_path)
+
+    result = reg.delete("demo")
+
+    assert not (tmp_path / "training" / "demo").exists()  # whole subtree gone
+    assert result == {"name": "demo", "deleted_outputs": True, "deleted_config": False}
+    # The committed YAML survives by default → run still enumerable as a config-only row.
+    assert os.path.isfile(configs_io.train_config_path(str(tmp_path), "demo"))
+
+
+def test_delete_refuses_a_live_run(tmp_path):
+    # A running run's tree must never be removed out from under the live process → RunError (409).
+    _save_cfg(tmp_path, "demo")
+    reg, _, _ = _make_registry(tmp_path)
+    reg.launch("demo")  # fake popen stays poll()==None → state "running" (a live state)
+    with pytest.raises(RunError):
+        reg.delete("demo")
+    # The saved config is untouched by the refused delete.
+    assert os.path.isfile(configs_io.train_config_path(str(tmp_path), "demo"))
+
+
+def test_delete_rejects_invalid_traversal_name(tmp_path):
+    # Guard 1: validate_run_name blocks path separators / '.' / '..' before any FS touch.
+    reg, _, _ = _make_registry(tmp_path)
+    for bad in ("../escape", "..", ".", "a/b", "sp ace"):
+        with pytest.raises(ConfigError):
+            reg.delete(bad)
+
+
+def test_delete_refuses_symlinked_training_dir_escaping_the_root(tmp_path):
+    # Guard 3: a training/<name> symlink pointing OUTSIDE the training root is refused (RunError),
+    # so a symlink escape can never rmtree an out-of-tree directory.
+    training_root = tmp_path / "training"
+    training_root.mkdir()
+    outside = tmp_path / "outside"
+    (outside / "precious").mkdir(parents=True)
+    os.symlink(outside, training_root / "escape")
+    reg, _, _ = _make_registry(tmp_path)
+
+    with pytest.raises(RunError):
+        reg.delete("escape")
+
+    # The symlink target (and its contents) is left completely intact.
+    assert (outside / "precious").is_dir()
+
+
+def test_delete_config_flag_controls_yaml_removal(tmp_path):
+    # delete_config=False keeps the committed YAML; delete_config=True removes it too.
+    _save_cfg(tmp_path, "keep")
+    _write_checkpoint(tmp_path, "keep")
+    reg, _, _ = _make_registry(tmp_path)
+    res_keep = reg.delete("keep", delete_config=False)
+    assert res_keep["deleted_config"] is False
+    assert os.path.isfile(configs_io.train_config_path(str(tmp_path), "keep"))
+
+    _save_cfg(tmp_path, "wipe")
+    _write_checkpoint(tmp_path, "wipe")
+    res_wipe = reg.delete("wipe", delete_config=True)
+    assert res_wipe == {"name": "wipe", "deleted_outputs": True, "deleted_config": True}
+    assert not os.path.isfile(configs_io.train_config_path(str(tmp_path), "wipe"))
+
+
+def test_delete_config_only_run_is_a_no_op_but_not_an_error(tmp_path):
+    # A run with a saved config but no outputs: default delete removes nothing (outputs absent) yet
+    # is not a 404 — there is still something (the config) that COULD be removed with the flag.
+    _save_cfg(tmp_path, "cfgonly")
+    reg, _, _ = _make_registry(tmp_path)
+    res = reg.delete("cfgonly")
+    assert res == {"name": "cfgonly", "deleted_outputs": False, "deleted_config": False}
+    assert os.path.isfile(configs_io.train_config_path(str(tmp_path), "cfgonly"))
+
+
+def test_delete_absent_run_raises_file_not_found(tmp_path):
+    # Neither an outputs dir nor a saved config → FileNotFoundError (server maps to HTTP 404).
+    reg, _, _ = _make_registry(tmp_path)
+    with pytest.raises(FileNotFoundError):
+        reg.delete("ghost")
+
+
+def test_delete_drops_cached_terminal_state_label(tmp_path):
+    # After a run exits (terminal cached state) then is deleted, the registry forgets it entirely:
+    # a re-enumerated fresh config of the same name reconciles to "ready", not a stale label.
+    _save_cfg(tmp_path, "demo")
+    reg, spawned, _ = _make_registry(tmp_path)
+    reg.launch("demo")
+    spawned[0].finish(0)  # exits with no final model → cached terminal "stopped"
+    assert reg.describe("demo")["state"] == "stopped"
+    reg.delete("demo")  # config kept, outputs (none) gone, cached label popped
+    # The label cache no longer forces "stopped"; the surviving config reconciles to "ready".
+    assert reg.describe("demo")["state"] == "ready"
