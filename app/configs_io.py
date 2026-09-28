@@ -144,6 +144,18 @@ def describe_train_fields() -> list[dict[str, Any]]:
     return field_help.merge_sections(fields, field_help.TRAIN_SECTIONS)
 
 
+def describe_status_fields() -> list[dict[str, Any]]:
+    """Descriptors for the live-status metric boxes (UC-61 status-view polish items 5/6).
+
+    Returns the backend-owned :data:`app.field_help.STATUS_FIELDS` list with curated ``help`` prose
+    merged in (keyed by ``key``). This is the single source of truth for *which* status leaves the
+    grouped renderer shows, *how* to read each (``path`` / ``computed``), *how* to format it
+    (``format.type``) and *which group* it belongs to — so the JS renderer needs no per-field
+    knowledge and can never drift from the emitted record's shape.
+    """
+    return field_help.merge_status_help(field_help.STATUS_FIELDS, field_help.STATUS_HELP)
+
+
 def describe_prune_fields() -> list[dict[str, Any]]:
     """Ordered descriptors for every ``PruneRunConfig`` key (AC3: the four slice fields).
 
@@ -275,6 +287,7 @@ def prune_config_to_yaml(project_root: str, mapping: dict[str, Any], *, slug: st
 __all__ = [
     "describe_train_fields",
     "describe_prune_fields",
+    "describe_status_fields",
     "train_config_path",
     "prune_config_path",
     "list_train_config_names",
