@@ -100,6 +100,18 @@
     if (v === null || v === undefined) return "—";
     return typeof v === "number" ? v.toLocaleString("en-US") : String(v);
   }
+  // status-view polish item 2: format a duration (seconds) as "1h 23m" / "2m 05s" / "45s".
+  // Non-finite / negative → "—" so ETA and Elapsed degrade cleanly.
+  function fmtDuration(seconds) {
+    if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return "—";
+    const total = Math.floor(seconds);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    if (h > 0) return h + "h " + m + "m";
+    if (m > 0) return m + "m " + String(s).padStart(2, "0") + "s";
+    return s + "s";
+  }
   function esc(s) {
     return String(s === null || s === undefined ? "" : s)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -122,9 +134,12 @@
   }
 
   // ---- schema cache --------------------------------------------------------------------
-  let trainSchema = null, sliceSchema = null;
+  let trainSchema = null, sliceSchema = null, statusFields = null;
   async function getTrainSchema() { if (!trainSchema) trainSchema = (await getJSON("/api/train-configs/schema")).fields; return trainSchema; }
   async function getSliceSchema() { if (!sliceSchema) sliceSchema = (await getJSON("/api/slice-schema")).fields; return sliceSchema; }
+  // status-view polish items 5/6: the backend-owned live-status descriptor list (label / group /
+  // path|computed / format / help), fetched once and cached like the config schemas.
+  async function getStatusFields() { if (!statusFields) statusFields = (await getJSON("/api/status-fields")).fields; return statusFields; }
 
   // ---- navigation tree (items 1/3/7) ---------------------------------------------------
   function toggleNode(key, btn, childrenEl) {
@@ -293,9 +308,53 @@
     return bar;
   }
 
+  // status-view polish item 5/6: read a leaf out of the status record by descriptor path.
+  // Returns undefined when the path is unresolved (any ancestor null / absent / non-object), which
+  // the formatter renders as "—" — so a box is shape-stable across polls even before data arrives.
+  function readPath(obj, path) {
+    let cur = obj;
+    for (let i = 0; i < path.length; i++) {
+      if (cur === null || cur === undefined || typeof cur !== "object") return undefined;
+      cur = cur[path[i]];
+    }
+    return cur;
+  }
+  // Format a status leaf per its descriptor's closed `format.type` vocabulary. null / undefined /
+  // NaN always collapse to "—" (the "not observed" sentinel), regardless of type.
+  function formatStatusValue(value, format) {
+    if (value === null || value === undefined) return "—";
+    if (typeof value === "number" && !Number.isFinite(value)) return "—";
+    const type = format && format.type;
+    if (type === "int") return fmtInt(value);
+    if (type === "float") return fmt(value, format.digits);
+    if (type === "seconds" || type === "duration") return fmtDuration(value);
+    // "text" (and any unknown type) → plain string.
+    return String(value);
+  }
+  // item 2: derive ETA from the live record (no backend field). rate = fps when positive, else the
+  // average steps/sec so far; clamps to "—" (unknown target / no rate) and "done" (target reached).
+  function computeEta(latest) {
+    const target = latest.target_timesteps;
+    if (target === null || target === undefined) return "—";
+    const ts = typeof latest.timesteps === "number" ? latest.timesteps : 0;
+    const fps = latest.fps;
+    const elapsed = latest.elapsed_seconds;
+    let rate = 0;
+    if (typeof fps === "number" && Number.isFinite(fps) && fps > 0) rate = fps;
+    else if (typeof elapsed === "number" && elapsed > 0) rate = ts / elapsed;
+    if (rate <= 0) return "—";
+    const remaining = target - ts;
+    if (remaining <= 0) return "done";
+    return fmtDuration(remaining / rate);
+  }
+
   async function renderRunStatus(name) {
+    const fields = await getStatusFields();
     const root = view();
     root.innerHTML = "";
+    // item 4: fill the window height in the status view so the log panel grows to the bottom.
+    // `route()` clears `.view-fill` on every dispatch, so only this view uses fill mode.
+    root.classList.add("view-fill");
     root.appendChild(runHead(name, "Status"));
 
     const monitor = h("div", { class: "card" });
@@ -305,10 +364,11 @@
     const progWrap = h("div", { class: "progress" }); progWrap.appendChild(h("span"));
     const progLabel = h("p", { class: "subtle" }, "—");
     monitor.appendChild(progLabel); monitor.appendChild(progWrap);
-    const metrics = h("div", { class: "metrics" }); metrics.style.marginTop = "12px";
+    // items 5/6: grouped metric boxes are stacked (heading + grid per group) inside this container.
+    const metrics = h("div", { class: "metrics-groups" }); metrics.style.marginTop = "12px";
     monitor.appendChild(metrics);
-    // item 5: live process-log panel below the metric boxes. Filled by a byte-offset tail folded
-    // into the same 2.5s poll; `logCursor` adopts the server's returned `next` verbatim.
+    // item 5 (prior): live process-log panel below the metric boxes. Filled by a byte-offset tail
+    // folded into the same 2.5s poll; `logCursor` adopts the server's returned `next` verbatim.
     monitor.appendChild(h("p", { class: "subtle log-head" }, "Process logs"));
     const logPanel = h("pre", { class: "log-panel" });
     monitor.appendChild(logPanel);
@@ -331,23 +391,71 @@
       catch (e) { toast(e.message, true); }
     }
     function metricCard(k, v) { const m = h("div", { class: "metric" }); m.innerHTML = '<div class="k">' + esc(k) + '</div><div class="v">' + esc(v) + "</div>"; return m; }
-    function renderMetrics(l) {
+    // items 5/6: build one grouped, backend-described metric box (label + info button + value).
+    function statusBox(d, latest) {
+      const box = h("div", { class: "metric" });
+      const k = h("div", { class: "k" });
+      k.appendChild(document.createTextNode(d.label));
+      if (d.help) {
+        // item 3: health.message rides along in the Health box's info popup when present.
+        let extra = null;
+        if (d.format && d.format.type === "badge") {
+          const msg = latest.health && latest.health.message;
+          if (msg) extra = '<p class="mh-help">' + esc(msg) + "</p>";
+        }
+        k.appendChild(infoButton(d.label, d.help, d.example, extra));
+      }
+      box.appendChild(k);
+      const v = h("div", { class: "v" });
+      if (d.computed && d.key === "eta") {
+        v.textContent = computeEta(latest);
+      } else if (d.format && d.format.type === "badge") {
+        const raw = readPath(latest, d.path);
+        if (raw === null || raw === undefined) v.textContent = "—";
+        else v.innerHTML = '<span class="badge ' + esc(raw) + '">' + esc(raw) + "</span>";
+      } else {
+        v.textContent = formatStatusValue(readPath(latest, d.path), d.format);
+      }
+      box.appendChild(v);
+      return box;
+    }
+    // Whole-group suppression (item 5): hide a heading+grid only when every descriptor in it is a
+    // path-backed nested leaf (path length >= 2) whose top-level block is null/absent — i.e. the
+    // optional Health / Dynamics blocks on a just-launched run. Progress/Rollout/Train always show
+    // (they carry length-1 paths or the computed ETA, or their block is always present).
+    function groupSuppressed(descriptors, latest) {
+      return descriptors.every((d) =>
+        !d.computed && Array.isArray(d.path) && d.path.length >= 2 &&
+        (latest[d.path[0]] === null || latest[d.path[0]] === undefined));
+    }
+    function renderMetricsGrouped(latest) {
       metrics.innerHTML = "";
-      const ro = l.rollout || {}, tr = l.train || {}, he = l.health || {}, dy = l.dynamics || {};
-      metrics.appendChild(metricCard("ep_rew_mean", fmt(ro.ep_rew_mean, 3)));
-      metrics.appendChild(metricCard("ep_len_mean", fmt(ro.ep_len_mean, 1)));
-      metrics.appendChild(metricCard("success", fmt(ro.success_rate, 3)));
-      metrics.appendChild(metricCard("value_loss", fmt(tr.value_loss, 4)));
-      metrics.appendChild(metricCard("approx_kl", fmt(tr.approx_kl, 4)));
-      metrics.appendChild(metricCard("expl_var", fmt(tr.explained_variance, 3)));
-      if (he.status) { const m = h("div", { class: "metric" }); m.innerHTML = '<div class="k">health</div><div class="v"><span class="badge ' + he.status + '">' + esc(he.status) + "</span></div>"; metrics.appendChild(m); }
-      if (dy.thrust_to_weight !== undefined && dy.thrust_to_weight !== null) metrics.appendChild(metricCard("T/W", fmt(dy.thrust_to_weight, 2)));
+      // Group by descriptor order → groups appear in the backend's STATUS_GROUP_ORDER (the
+      // descriptors are authored contiguously per group).
+      const order = [];
+      const byGroup = new Map();
+      fields.forEach((d) => {
+        if (!byGroup.has(d.group)) { byGroup.set(d.group, []); order.push(d.group); }
+        byGroup.get(d.group).push(d);
+      });
+      order.forEach((group) => {
+        const descriptors = byGroup.get(group);
+        if (groupSuppressed(descriptors, latest)) return;
+        metrics.appendChild(h("p", { class: "metric-group-title" }, esc(group)));
+        const grid = h("div", { class: "metrics" });
+        descriptors.forEach((d) => grid.appendChild(statusBox(d, latest)));
+        metrics.appendChild(grid);
+      });
     }
     function renderMetricsCsv(row) {
       metrics.innerHTML = "";
+      // CSV fallback stays flat/ungrouped/help-less (different key namespace); wrapped in a single
+      // `.metrics` grid so it looks identical to the pre-grouping layout.
+      const grid = h("div", { class: "metrics" });
       // item 3: integer-valued cells (e.g. 100000) render as grouped ints; genuine decimals keep 3dp.
       Object.keys(row).slice(0, 8).forEach((k) =>
-        metrics.appendChild(metricCard(k, Number.isInteger(row[k]) ? fmtInt(row[k]) : fmt(row[k], 3))));
+        grid.appendChild(metricCard(k, Number.isInteger(row[k]) ? fmtInt(row[k]) : fmt(row[k], 3))));
+      metrics.appendChild(grid);
     }
     async function tick() {
       let run;
@@ -359,12 +467,12 @@
         if (latest && snap.source === "jsonl") {
           const pct = latest.target_timesteps ? Math.min(100, 100 * latest.timesteps / latest.target_timesteps) : 0;
           progWrap.firstChild.style.width = pct + "%";
-          // item 4: no "source:" indicator — just the progress line.
+          // item 4 (prior): no "source:" indicator — just the progress line.
           progLabel.textContent = "step " + fmt(latest.timesteps) + " / " + fmt(latest.target_timesteps) +
             " · update " + fmt(latest.n_updates) + " · " + fmt(latest.fps, 0) + " fps";
-          renderMetrics(latest);
+          renderMetricsGrouped(latest);
         } else if (latest && snap.source === "csv") {
-          // item 4: neutral label (the CSV fallback has no step counter); no "source:" wording.
+          // item 4 (prior): neutral label (the CSV fallback has no step counter); no "source:" wording.
           progLabel.textContent = "live metrics";
           renderMetricsCsv(latest);
         } else {
@@ -602,6 +710,9 @@
     currentHash = hash;
     setDirty(false);
     clearPoll();
+    // item 4: fill mode is status-view only; clear it before dispatch so every other view lays out
+    // normally (renderRunStatus re-adds it).
+    view().classList.remove("view-fill");
     try {
       const parts = hash.replace(/^#\//, "").split("/");
       if (parts[0] === "train" && parts[1] === "new") await renderTrainNew();
