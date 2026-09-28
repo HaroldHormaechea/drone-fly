@@ -147,6 +147,30 @@
   // path|computed / format / help), fetched once and cached like the config schemas.
   async function getStatusFields() { if (!statusFields) statusFields = (await getJSON("/api/status-fields")).fields; return statusFields; }
 
+  // item 4: prefetch dynamic combobox suggestions for any field carrying an `options_endpoint`, so
+  // the (synchronous) form builder can attach them as a datalist. Unique endpoints are fetched once;
+  // the response's first array value is used. A failed fetch degrades silently to no suggestions
+  // (the field stays a plain text input). Returns a fieldName -> [strings] map.
+  async function fetchFieldOptions(fields) {
+    const byField = {};
+    const endpoints = {};  // endpoint URL -> [field names using it]
+    fields.forEach((f) => {
+      if (f.options_endpoint) (endpoints[f.options_endpoint] = endpoints[f.options_endpoint] || []).push(f.name);
+    });
+    await Promise.all(Object.keys(endpoints).map(async (ep) => {
+      try {
+        const data = await getJSON(ep);
+        let arr = null;
+        if (Array.isArray(data)) arr = data;
+        else if (data && typeof data === "object") {
+          for (const k in data) { if (Array.isArray(data[k])) { arr = data[k]; break; } }
+        }
+        if (arr) endpoints[ep].forEach((fn) => { byField[fn] = arr; });
+      } catch (e) { /* degrade to a plain input */ }
+    }));
+    return byField;
+  }
+
   // ---- navigation tree (items 1/3/7) ---------------------------------------------------
   function toggleNode(key, btn, childrenEl) {
     const open = !navExpanded.has(key);
@@ -344,7 +368,8 @@
     const formHost = h("div");
     formCard.appendChild(formHost);
     root.appendChild(formCard);
-    const form = Forms.buildForm(formHost, fields.filter((f) => f.name !== "name"), {});
+    const optionsByField = await fetchFieldOptions(fields);  // item 4: connectome/resume suggestions.
+    const form = Forms.buildForm(formHost, fields.filter((f) => f.name !== "name"), {}, optionsByField);
     formHost.addEventListener("input", () => setDirty(true));
 
     async function save() {
@@ -652,7 +677,8 @@
     const cfgHost = h("div");
     cfgCard.appendChild(cfgHost);
     const saved = (await getJSON("/api/train-configs/" + encodeURIComponent(name))).config || {};
-    const form = Forms.buildForm(cfgHost, fields.filter((f) => f.name !== "name"), saved);
+    const optionsByField = await fetchFieldOptions(fields);  // item 4: connectome/resume suggestions.
+    const form = Forms.buildForm(cfgHost, fields.filter((f) => f.name !== "name"), saved, optionsByField);
     cfgHost.addEventListener("input", () => setDirty(true));
     root.appendChild(cfgCard);
     saveBtn.addEventListener("click", async () => {
@@ -671,7 +697,8 @@
     card.appendChild(h("h3", null, "Slice (prune) configuration"));
     const host = h("div"); card.appendChild(host);
     root.appendChild(card);
-    const form = Forms.buildForm(host, fields, {});
+    const optionsByField = await fetchFieldOptions(fields);  // item 4: connectome suggestions.
+    const form = Forms.buildForm(host, fields, {}, optionsByField);
     host.addEventListener("input", () => setDirty(true));
     genBtn.addEventListener("click", async () => {
       try {
@@ -695,7 +722,8 @@
     const host = h("div"); card.appendChild(host);
     root.appendChild(card);
     const saved = (await getJSON("/api/slice-configs/" + encodeURIComponent(name))).config || {};
-    const form = Forms.buildForm(host, fields, saved);
+    const optionsByField = await fetchFieldOptions(fields);  // item 4: connectome suggestions.
+    const form = Forms.buildForm(host, fields, saved, optionsByField);
     host.addEventListener("input", () => setDirty(true));
     genBtn.addEventListener("click", async () => {
       try {

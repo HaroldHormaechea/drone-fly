@@ -16,6 +16,9 @@
 (function (global) {
   "use strict";
 
+  // item 4: monotonic id source for the per-open-field <datalist> elements (unique within a build).
+  let datalistSeq = 0;
+
   function coerce(baseType, raw) {
     if (baseType === "int") {
       const n = parseInt(raw, 10);
@@ -51,14 +54,20 @@
     if (f.nullable && !f.required) rows.push(["optional", "may be left unset"]);
     if (f.default !== null && f.default !== undefined) rows.push(["default", JSON.stringify(f.default)]);
     if (f.choices && f.choices.length) rows.push(["choices", f.choices.join(", ")]);
+    // item 4: open-set fields advertise their static suggestions + that free text is allowed.
+    if (f.options && f.options.length) rows.push(["suggestions", f.options.join(", ")]);
+    if (f.open) rows.push(["free text", "yes — any value allowed"]);
     let html = '<dl class="mh-constraints">';
     rows.forEach(([k, v]) => { html += "<dt>" + esc(k) + "</dt><dd>" + esc(v) + "</dd>"; });
     return html + "</dl>";
   }
 
-  function buildForm(container, fields, values) {
+  function buildForm(container, fields, values, optionsByField) {
     container.innerHTML = "";
     values = values || {};
+    // item 4: dynamic suggestion lists prefetched by the caller (fieldName -> [strings]); static
+    // suggestions ride on the descriptor's own `options`. Absent → open fields just get no datalist.
+    optionsByField = optionsByField || {};
     const rows = [];
 
     // item 2: fields carrying a `section` are wrapped into titled cards laid out in a responsive
@@ -102,7 +111,7 @@
       }
 
       const control = el("div", { class: "control" });
-      let input, enableBox = null;
+      let input, enableBox = null, extraNode = null;
 
       // "set" toggle for nullable non-bool fields (class b) so absence is meaningful.
       const needsEnable = f.nullable && f.control !== "tristate" && !f.required;
@@ -129,6 +138,21 @@
         if (f.base_type === "float") input.step = "any";
         if (present) input.value = values[f.name];
         else if (f.default !== null && f.default !== undefined) input.value = f.default;
+        // item 4: open-set field (e.g. resume / connectome) → a <datalist> of suggestions backing a
+        // plain text input. Free text is preserved, so collect() stays byte-identical; the
+        // suggestions merely autocomplete. Static `f.options` + any dynamic prefetched values.
+        if (f.open) {
+          const suggestions = [];
+          (f.options || []).forEach((o) => { if (suggestions.indexOf(String(o)) === -1) suggestions.push(String(o)); });
+          (optionsByField[f.name] || []).forEach((o) => { if (suggestions.indexOf(String(o)) === -1) suggestions.push(String(o)); });
+          if (suggestions.length) {
+            const listId = "dl-" + f.name + "-" + (++datalistSeq);
+            const dl = el("datalist", { id: listId });
+            suggestions.forEach((o) => dl.appendChild(el("option", { value: o })));
+            input.setAttribute("list", listId);
+            extraNode = dl;
+          }
+        }
       }
 
       if (needsEnable) {
@@ -140,6 +164,7 @@
         enableBox.addEventListener("change", () => { input.disabled = !enableBox.checked; markDirty(); });
       }
       control.appendChild(input);
+      if (extraNode) control.appendChild(extraNode);  // item 4: the sibling <datalist>.
       row.appendChild(keyLabel);
       row.appendChild(control);
       (f.section ? sectionGrid(f.section) : flat()).appendChild(row);
