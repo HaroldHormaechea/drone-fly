@@ -34,6 +34,8 @@
   function closeModal() {
     if (!current) return;
     var invoker = current.invoker;
+    var resolve = current.resolve;
+    var resolved = current.resolved;
     document.removeEventListener("keydown", current.onKeydown, true);
     if (current.overlay && current.overlay.parentNode) {
       current.overlay.parentNode.removeChild(current.overlay);
@@ -41,6 +43,8 @@
     current = null;
     // Restore focus to the control that opened the dialog (accessibility requirement).
     if (invoker && typeof invoker.focus === "function") invoker.focus();
+    // A confirm dialog dismissed without picking an action (ESC / backdrop / close) resolves null.
+    if (resolve && !resolved) resolve(null);
   }
 
   function openModal(opts) {
@@ -79,6 +83,35 @@
 
     dialog.appendChild(head);
     dialog.appendChild(body);
+
+    // Optional footer action buttons (UC-61 item 3: a confirm dialog). Each action is
+    // {label, value, class?}. Clicking one resolves `choice` with its `value`; dismissing the dialog
+    // any other way resolves null. Focus trap / ESC / backdrop all keep working (buttons are just
+    // more focusable nodes inside the same dialog). `firstFocus` is the button focused on open.
+    var resolveChoice = null;
+    var choice = null;
+    var firstFocus = closeBtn;
+    if (opts.actions && opts.actions.length) {
+      choice = new Promise(function (res) { resolveChoice = res; });
+      var foot = document.createElement("div");
+      foot.className = "modal-foot";
+      opts.actions.forEach(function (a, i) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = a.class || "";
+        b.textContent = a.label;
+        b.addEventListener("click", function () {
+          if (current) current.resolved = true;  // mark handled so closeModal won't resolve null.
+          var r = resolveChoice;
+          closeModal();
+          if (r) r(a.value);
+        });
+        foot.appendChild(b);
+        if (i === 0) firstFocus = b;  // focus the first action (place the safe/cancel action first).
+      });
+      dialog.appendChild(foot);
+    }
+
     overlay.appendChild(dialog);
 
     overlay.addEventListener("mousedown", function (ev) {
@@ -110,11 +143,19 @@
     }
 
     document.body.appendChild(overlay);
-    current = { overlay: overlay, invoker: opts.invoker || document.activeElement, onKeydown: onKeydown };
+    current = {
+      overlay: overlay,
+      invoker: opts.invoker || document.activeElement,
+      onKeydown: onKeydown,
+      resolve: resolveChoice,  // null for a plain info dialog (no actions).
+      resolved: false,
+    };
     document.addEventListener("keydown", onKeydown, true);
-    // Move focus into the dialog (close button is always present and focusable).
-    closeBtn.focus();
-    return { close: closeModal };
+    // Move focus into the dialog (the first action, or the always-present close button).
+    firstFocus.focus();
+    // `body` + `choice` let a confirm caller read live form state (e.g. a checkbox) and await the
+    // picked action; `close` is kept for the info-dialog callers that ignore the rest.
+    return { close: closeModal, choice: choice, body: body };
   }
 
   global.openModal = openModal;

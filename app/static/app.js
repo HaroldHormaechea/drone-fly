@@ -245,18 +245,82 @@
     table.innerHTML = "<thead><tr><th>Name</th><th>State</th><th>Checkpoints</th><th>Final</th><th></th></tr></thead>";
     const tbody = h("tbody");
     runs.forEach((r) => {
+      const enc = encodeURIComponent(r.name);
       const tr = h("tr");
       tr.innerHTML =
-        '<td><a class="link" href="#/train/' + encodeURIComponent(r.name) + '/status">' + esc(r.name) + "</a></td>" +
+        '<td><a class="link" href="#/train/' + enc + '/status">' + esc(r.name) + "</a></td>" +
         '<td><span class="state-tag ' + r.state + '">' + esc(r.state) + "</span></td>" +
         "<td>" + (r.has_checkpoints ? "yes" : "—") + "</td>" +
-        "<td>" + (r.has_final ? "yes" : "—") + "</td>" +
-        '<td><a class="link" href="#/train/' + encodeURIComponent(r.name) + '/status">open →</a></td>';
+        "<td>" + (r.has_final ? "yes" : "—") + "</td>";
+      // item 3: per-row actions — the existing "open →" link plus a destructive Delete button.
+      const actTd = h("td");
+      const actions = h("div", { class: "row-actions" });
+      actions.appendChild(h("a", { class: "link", href: "#/train/" + enc + "/status" }, "open →"));
+      const delBtn = h("button", { class: "danger btn-sm", "aria-label": "Delete run " + r.name }, "Delete");
+      delBtn.addEventListener("click", () => onDeleteRun(r));
+      actions.appendChild(delBtn);
+      actTd.appendChild(actions);
+      tr.appendChild(actTd);
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
     card.appendChild(table);
     root.appendChild(card);
+  }
+
+  // item 3: confirm + perform a destructive run delete. Default deletes only the generated outputs
+  // (training/<name>/); the modal's opt-in checkbox also removes the committed configs/train YAML.
+  // Challenger note 1: with the default (config kept) the run stays listed as a config-only row, so
+  // the copy states this explicitly.
+  async function confirmDeleteRun(name) {
+    const bodyHTML =
+      '<p class="mh-help">Permanently delete the generated outputs for <strong>' + esc(name) +
+      "</strong> — checkpoints, recordings and logs under <code>training/" + esc(name) +
+      "/</code>. This can’t be undone.</p>" +
+      '<p class="mh-help">The saved run definition (<code>configs/train/' + esc(name) +
+      ".yaml</code>) is <strong>kept</strong> by default, so the run stays in the list as a " +
+      "config-only entry you can relaunch. Tick the box to also remove the saved config.</p>" +
+      '<label class="enable"><input type="checkbox" id="del-config-cb"> ' +
+      "Also delete the saved config (removes the run definition entirely)</label>";
+    const m = openModal({
+      title: "Delete " + name,
+      bodyHTML,
+      actions: [
+        { label: "Cancel", value: "cancel" },
+        { label: "Delete", value: "delete", class: "danger" },
+      ],
+      invoker: document.activeElement,
+    });
+    // Capture the checkbox node BEFORE awaiting — it stays readable even after the modal detaches.
+    const cb = m.body.querySelector("#del-config-cb");
+    const choice = await m.choice;
+    return { confirmed: choice === "delete", deleteConfig: !!(cb && cb.checked) };
+  }
+
+  async function onDeleteRun(r) {
+    let decision;
+    try { decision = await confirmDeleteRun(r.name); } catch (e) { return; }
+    if (!decision.confirmed) return;
+    const enc = encodeURIComponent(r.name);
+    try {
+      const resp = await api(
+        "/api/runs/" + enc + (decision.deleteConfig ? "?delete_config=true" : ""),
+        { method: "DELETE" }
+      );
+      if (resp && resp.deleted_config) toast("Deleted " + r.name + " (outputs + saved config).");
+      else if (resp && resp.deleted_outputs)
+        toast("Deleted " + r.name + " outputs. Run definition kept — tick the box to also remove it.");
+      else toast("Nothing to delete for " + r.name + ".");
+      const viewingThis = location.hash.indexOf("#/train/" + enc + "/") === 0;
+      if (viewingThis) {
+        // Bounce back to the list; the hashchange → route() renders it (and refreshes the nav).
+        location.hash = "#/train";
+      } else {
+        // Already on the list → refresh nav + re-render in place.
+        await refreshNav();
+        await renderTrainList();
+      }
+    } catch (e) { toast(e.message, true); }
   }
 
   async function renderTrainNew() {
