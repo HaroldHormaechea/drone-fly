@@ -263,6 +263,47 @@ def test_slice_schema_endpoint_lists_four_fields(tmp_path):
     assert [f["name"] for f in fields] == ["connectome", "out", "prune_k", "prune_rule"]
 
 
+# --- UC-61 status-view polish (items 5/6): the grouped status-field descriptors ------------
+
+
+def test_status_fields_endpoint_returns_well_formed_descriptors(tmp_path):
+    from app.field_help import STATUS_GROUP_ORDER
+
+    client, _, _ = _client(tmp_path)
+    r = client.get("/api/status-fields")
+    assert r.status_code == 200
+    fields = r.json()["fields"]
+    assert isinstance(fields, list) and fields  # non-empty descriptor list
+
+    for f in fields:
+        # Every box the grouped renderer draws must carry a label, a curated help string, and a
+        # group the renderer knows how to lay out — a help-less or mis-grouped box is a bug.
+        assert isinstance(f.get("label"), str) and f["label"].strip(), f
+        assert isinstance(f.get("help"), str) and f["help"].strip(), f
+        assert f.get("group") in STATUS_GROUP_ORDER, f
+
+    # The set of groups actually used is a subset of the declared display order (no stray group).
+    used_groups = {f["group"] for f in fields}
+    assert used_groups <= set(STATUS_GROUP_ORDER)
+
+
+def test_status_fields_endpoint_covers_expected_metric_keys(tmp_path):
+    client, _, _ = _client(tmp_path)
+    fields = client.get("/api/status-fields").json()["fields"]
+    by_key = {f["key"]: f for f in fields}
+
+    # A representative leaf from each group must be present (Progress computed ETA, Rollout, Train,
+    # Health badge, Dynamics) so the renderer has something to show in every section.
+    for key in ("eta", "ep_rew_mean", "approx_kl", "explained_variance", "thrust_to_weight"):
+        assert key in by_key, key
+    # Health status is path-backed at ["health", "status"] and rendered as a badge.
+    assert by_key["status"]["group"] == "Health"
+    assert by_key["status"]["format"]["type"] == "badge"
+    assert by_key["status"]["path"] == ["health", "status"]
+    # ETA is the one computed (front-end derived) descriptor — it has no path.
+    assert by_key["eta"].get("computed") is True and "path" not in by_key["eta"]
+
+
 def test_save_train_config_in_place_then_load(tmp_path):
     client, _, _ = _client(tmp_path)
     r = client.post("/api/train-configs/demo", json={"config": {"timesteps": 5000}})
