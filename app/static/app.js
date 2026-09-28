@@ -20,6 +20,9 @@
 
   const view = () => document.getElementById("view");
   let pollTimer = null;
+  // item 1: a 1 Hz ticker that advances the Elapsed box between the 2.5 s status polls. Lives at
+  // module scope so clearPoll() tears it down alongside pollTimer (no leak across route() changes).
+  let elapsedTimer = null;
   let dirty = false;
   // item 1: persisted disclosure state so a 5s nav rebuild never collapses what the user opened.
   // Keys: "group:slices", "group:train", "run:<name>".
@@ -126,7 +129,10 @@
     if (html !== undefined) n.innerHTML = html;
     return n;
   }
-  function clearPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+  function clearPoll() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }  // item 1: no timer leak.
+  }
   function setDirty(v) { dirty = v; }
   function guardNav() {
     if (dirty) return confirm("You have unsaved changes. Leave without saving?");
@@ -373,6 +379,10 @@
     const logPanel = h("pre", { class: "log-panel" });
     monitor.appendChild(logPanel);
     let logCursor = 0;
+    // item 1: drift-free elapsed clock. `elapsedBase` is the last server-reported elapsed_seconds,
+    // stamped against `elapsedBaseAt` (a performance.now() reading) so the 1 Hz ticker can add the
+    // wall-time since the last poll. `runActive` gates the ticker (freeze the clock once stopped).
+    let elapsedBase = null, elapsedBaseAt = null, runActive = false;
     root.appendChild(monitor);
 
     function renderControls(run) {
@@ -407,6 +417,8 @@
       }
       box.appendChild(k);
       const v = h("div", { class: "v" });
+      // item 1: tag the Elapsed value node so the 1 Hz ticker can advance it between polls.
+      if (d.key === "elapsed_seconds") v.classList.add("js-elapsed");
       if (d.computed && d.key === "eta") {
         v.textContent = computeEta(latest);
       } else if (d.format && d.format.type === "badge") {
@@ -457,26 +469,51 @@
         grid.appendChild(metricCard(k, Number.isInteger(row[k]) ? fmtInt(row[k]) : fmt(row[k], 3))));
       metrics.appendChild(grid);
     }
+    // item 2: switch the progress bar between determinate (known target → real width) and an
+    // indeterminate marquee (running but no measurable progress yet, e.g. just launched or no
+    // target_timesteps). Keeps the existing determinate label/width path byte-for-byte.
+    function setProgress(mode, label) {
+      if (mode === "indeterminate") progWrap.classList.add("indeterminate");
+      else progWrap.classList.remove("indeterminate");
+      if (label !== undefined) progLabel.textContent = label;
+    }
     async function tick() {
       let run;
       try { run = await getJSON("/api/runs/" + encodeURIComponent(name)); } catch (e) { return; }
       renderControls(run);
+      runActive = !!run.running;  // item 1: gate the 1 Hz elapsed ticker.
+      const live = !!run.running;
       try {
         const snap = await getJSON("/api/runs/" + encodeURIComponent(name) + "/status");
         const latest = snap.latest;
+        // item 1: reconcile the elapsed clock's base against every fresh server reading.
+        if (latest && typeof latest.elapsed_seconds === "number" && Number.isFinite(latest.elapsed_seconds)) {
+          elapsedBase = latest.elapsed_seconds;
+          elapsedBaseAt = performance.now();
+        }
         if (latest && snap.source === "jsonl") {
-          const pct = latest.target_timesteps ? Math.min(100, 100 * latest.timesteps / latest.target_timesteps) : 0;
-          progWrap.firstChild.style.width = pct + "%";
-          // item 4 (prior): no "source:" indicator — just the progress line.
-          progLabel.textContent = "step " + fmt(latest.timesteps) + " / " + fmt(latest.target_timesteps) +
-            " · update " + fmt(latest.n_updates) + " · " + fmt(latest.fps, 0) + " fps";
+          const determinate = !!(latest.target_timesteps && latest.timesteps != null);
+          if (determinate) {
+            const pct = Math.min(100, 100 * latest.timesteps / latest.target_timesteps);
+            progWrap.firstChild.style.width = pct + "%";
+            // item 4 (prior): no "source:" indicator — just the progress line.
+            setProgress("determinate", "step " + fmt(latest.timesteps) + " / " + fmt(latest.target_timesteps) +
+              " · update " + fmt(latest.n_updates) + " · " + fmt(latest.fps, 0) + " fps");
+          } else if (live) {
+            // item 2: running but no target/steps to measure against → marquee instead of a dead bar.
+            setProgress("indeterminate", "starting…");
+          } else {
+            setProgress("determinate", "no progress yet");
+          }
           renderMetricsGrouped(latest);
         } else if (latest && snap.source === "csv") {
           // item 4 (prior): neutral label (the CSV fallback has no step counter); no "source:" wording.
-          progLabel.textContent = "live metrics";
+          // item 2: the CSV fallback has no step target, so a live run shows the marquee.
+          setProgress(live ? "indeterminate" : "determinate", "live metrics");
           renderMetricsCsv(latest);
         } else {
-          progLabel.textContent = "no progress yet";
+          // item 2: no data yet — marquee while launching, static once idle/stopped.
+          setProgress(live ? "indeterminate" : "determinate", live ? "starting…" : "no progress yet");
         }
       } catch (e) {}
       await tickLogs();
@@ -496,6 +533,15 @@
     await tick();
     clearPoll();
     pollTimer = setInterval(tick, 2500);
+    // item 1: advance the Elapsed box once a second (ETA stays on the 2.5 s poll cadence). Guards:
+    // only while the run is active, only when a base reading exists, and only if the box is present
+    // (suppressed on a just-launched run or in the CSV fallback → the ticker no-ops).
+    elapsedTimer = setInterval(() => {
+      if (!runActive || elapsedBase === null || elapsedBaseAt === null) return;
+      const node = document.querySelector(".js-elapsed");
+      if (!node) return;
+      node.textContent = fmtDuration(elapsedBase + (performance.now() - elapsedBaseAt) / 1000);
+    }, 1000);
   }
 
   async function renderRunRecordings(name) {
@@ -700,6 +746,48 @@
   }
 
   // ---- router --------------------------------------------------------------------------
+  // item 5: instantly mark the nav link for `hash` active (before refreshNav rebuilds the tree), so
+  // a click on a slow view gives immediate feedback. refreshNav() later reconciles authoritatively.
+  function setActiveNav(hash) {
+    const tree = document.getElementById("nav-tree");
+    if (!tree) return;
+    tree.querySelectorAll("[data-route]").forEach((a) => {
+      const on = a.getAttribute("data-route") === hash;
+      a.classList.toggle("active", on);
+      if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+    });
+  }
+  // item 5: map a parsed hash to a rough skeleton layout kind.
+  function skeletonKind(parts) {
+    if (parts[0] === "train" && parts[1] && parts[1] !== "new") {
+      if (parts[2] === "recordings") return "recordings";
+      if (parts[2] === "config") return "form";
+      return "status";
+    }
+    if (parts[0] === "train" && parts[1] === "new") return "form";
+    if (parts[0] === "train") return "list";
+    if (parts[0] === "slices") return "form";
+    if (parts[0] === "settings") return "settings";
+    if (parts[0] === "about") return "about";
+    return "list";
+  }
+  // item 5: paint greyed shimmer placeholders roughly matching the target view's layout. Whatever
+  // the renderer paints next (root.innerHTML = "") replaces this; a fast view never shows it (the
+  // 120 ms threshold timer is cleared first).
+  function paintSkeleton(kind) {
+    const block = (height) => '<div class="skel-block" style="height:' + height + '"></div>';
+    const line = (width) => '<div class="skel-line" style="width:' + width + '"></div>';
+    let body;
+    if (kind === "list") body = block("40px") + block("40px") + block("40px");
+    else if (kind === "status") body = block("18px") + block("150px") + block("240px");
+    else if (kind === "recordings") body = block("42px") + block("360px");
+    else if (kind === "settings") body = block("40px") + block("40px") + block("40px") + block("40px");
+    else if (kind === "about") body = block("60px") + line("70%") + line("55%");
+    else body = block("120px") + block("240px");  // "form"
+    view().innerHTML =
+      '<div class="skeleton"><div class="skel-head">' + line("160px") + "</div>" + body + "</div>";
+  }
+
   let currentHash = null;
   async function route() {
     const hash = location.hash || "#/train";
@@ -713,8 +801,11 @@
     // item 4: fill mode is status-view only; clear it before dispatch so every other view lays out
     // normally (renderRunStatus re-adds it).
     view().classList.remove("view-fill");
+    const parts = hash.replace(/^#\//, "").split("/");
+    // item 5: instant nav highlight + a threshold skeleton (only shows if the view takes > 120 ms).
+    setActiveNav(hash);
+    const skelT = setTimeout(() => paintSkeleton(skeletonKind(parts)), 120);
     try {
-      const parts = hash.replace(/^#\//, "").split("/");
       if (parts[0] === "train" && parts[1] === "new") await renderTrainNew();
       else if (parts[0] === "train" && parts[1]) {
         const name = decodeURIComponent(parts[1]);
@@ -732,6 +823,8 @@
       else await renderTrainList();
     } catch (e) {
       view().innerHTML = '<p class="subtle">Error: ' + esc(e && e.message ? e.message : e) + "</p>";
+    } finally {
+      clearTimeout(skelT);  // item 5: fast view → no skeleton flash; redirect return → also cleared.
     }
     await refreshNav();
   }
