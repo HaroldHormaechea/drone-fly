@@ -547,15 +547,23 @@ class PyBulletAdapter(DroneAdapter):
     def _read_state(self, collided: bool) -> DroneState:  # pragma: no cover - sim path
         raw = self._env._getDroneStateVector(0)
         position = np.asarray(raw[0:3], dtype=np.float64)
+        quat = raw[3:7]  # (x, y, z, w) body->world orientation
         attitude = np.asarray(raw[7:10], dtype=np.float64)  # roll, pitch, yaw
         velocity = np.asarray(raw[10:13], dtype=np.float64)
         angular_velocity = np.asarray(raw[13:16], dtype=np.float64)
+        # EXPERIMENTAL: gravity direction in the body frame from the quaternion (exact, convention-
+        # safe — no Euler ambiguity). R = body->world, so R.T @ world_down = gravity in body frame.
+        import pybullet as _p
+
+        _R = np.asarray(_p.getMatrixFromQuaternion(quat), dtype=np.float64).reshape(3, 3)
+        gravity_body = _R.T @ np.array([0.0, 0.0, -1.0], dtype=np.float64)
         return DroneState(
             position=position,
             velocity=velocity,
             attitude=attitude,
             angular_velocity=angular_velocity,
             collided=collided,
+            gravity_body=gravity_body,
         )
 
     def reset(self, seed: int | None = None) -> DroneState:  # pragma: no cover - sim path

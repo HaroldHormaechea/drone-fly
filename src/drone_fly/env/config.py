@@ -661,6 +661,36 @@ class RewardConfig:
     # (2.5), so the drone is rewarded for climbing to a useful flying altitude, not into the roof.
     # MUST be > 0 (it is the normaliser of the altitude fraction).
     altitude_target: float = 1.0
+    # --- Anti-ballistic hover-stability bonus (experimental reward-tuning loop, uncommitted) ---
+    # A PURELY POSITIVE, level-based bonus that rewards being at altitude WITH LOW VERTICAL SPEED,
+    # i.e. sustained *level* hover rather than a ballistic hop (climb-burst then fall). It mirrors
+    # the altitude reward's anti-suicide philosophy (no per-step cost that could make ending the
+    # episode optimal): it is gated by the same ``h_frac`` (only pays when airborne) and multiplied
+    # by a stability factor ``max(0, 1 - |v_z|/hover_stability_v_ref)`` that is 1.0 at a dead hover
+    # (v_z=0) and 0.0 once the vertical speed reaches ``v_ref``. A ballistic trajectory has large
+    # |v_z| on both the way up and the way down, so it earns ~no bonus; a drone that climbs and then
+    # HOLDS level earns it every step. Shipped default weight is 0.0 (byte-identical); this working
+    # tree sets 0.6 to activate the experiment. Revert via `git checkout src/drone_fly/env/config.py`.
+    # Shipped default 0.0 ⇒ byte-identical no-op; set via config (train YAML) to activate.
+    hover_stability_weight: float = 0.0
+    hover_stability_v_ref: float = 1.0  # m/s; |v_z| at which the stability factor reaches 0
+    # --- Upright / attitude-stability reward (experimental, acro-mode leveling signal) ---
+    # The acro (rate-mode) controller never auto-levels, so the policy must LEARN to keep the drone
+    # upright to stay airborne — but nothing in the reward told it to. This term supplies that
+    # missing signal: a purely positive, airborne-gated bonus proportional to how vertical the body
+    # thrust axis is, ``cos(roll)·cos(pitch)`` (= 1.0 level, → 0 on its side, < 0 inverted →
+    # clamped to 0). Paid only when airborne (h > ``upright_min_height``) so the drone cannot farm
+    # it sitting upright on the ground. It keeps FULL acro agency — the policy still commands body
+    # rates and can still flip; it just now has a reward gradient teaching that staying level is how
+    # you keep lift. Shipped default 0.0 ⇒ no-op; set via config to explore values.
+    upright_weight: float = 0.0
+    upright_min_height: float = 0.1  # m above floor before the upright bonus is paid (anti-farm)
+    # --- Spin-stability reward (experimental, acro anti-tumble signal) ---
+    # Purely positive, airborne-gated (shares ``upright_min_height``): 1.0 at zero body angular
+    # velocity, → 0 at |omega| == ``spin_stability_omega_ref``. Rewards NOT tumbling (the acro
+    # failure mode is flipping at ~pi rad/s). Shipped default 0.0 ⇒ no-op; set via config to explore.
+    spin_stability_weight: float = 0.0
+    spin_stability_omega_ref: float = 3.0  # rad/s; |omega| at which the spin bonus reaches 0
 
 
 @dataclass(frozen=True)

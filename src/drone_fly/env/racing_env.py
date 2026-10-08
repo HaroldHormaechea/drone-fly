@@ -263,7 +263,18 @@ class RaceEnv(gym.Env):
     def _observation(self, state) -> np.ndarray:
         target = current_target(self._course, self._gates_passed)
         rel = target - state.position
-        parts = [rel, state.attitude, state.velocity, state.angular_velocity]
+        # EXPERIMENTAL (env var DRONE_FLY_OBS_GRAVITY=1): swap the 3-dim Euler ``attitude`` block for
+        # the body-frame gravity direction — a gimbal-lock-free attitude signal that makes acro
+        # self-leveling far more learnable. Same width (3), so OBS_DIM and the schema's
+        # proprioceptive binding are unchanged; only the semantics of those 3 dims change. Falls back
+        # to Euler if the adapter didn't provide gravity_body. Default (unset) = shipped behaviour.
+        import os as _os
+
+        if _os.environ.get("DRONE_FLY_OBS_GRAVITY") == "1" and state.gravity_body is not None:
+            attitude_block = np.asarray(state.gravity_body, dtype=np.float64)
+        else:
+            attitude_block = state.attitude
+        parts = [rel, attitude_block, state.velocity, state.angular_velocity]
         if self._obstacle_vision_enabled:
             # Append the nearest-k egocentric obstacle encoding after the base 12 dims and
             # BEFORE nan_to_num, so sanitation wraps the full concatenated observation (UC-15).
@@ -691,6 +702,18 @@ class RaceEnv(gym.Env):
             # episode integral is invariant to the control-Hz change (= 1.0 at the 20 Hz baseline ⇒
             # byte-identical; 0.4 at 50 Hz).
             per_step_scale=self.config.episode.dt / BASELINE_DT,
+            # EXPERIMENTAL: vertical speed (m/s) AFTER the step, for the anti-ballistic
+            # hover-stability bonus (rewards holding altitude with low |v_z|; no-op when
+            # hover_stability_weight == 0.0). Reuses existing sensing — no new observation.
+            vertical_speed=float(state.velocity[2]),
+            # EXPERIMENTAL: body roll/pitch (rad) AFTER the step, for the upright/attitude bonus
+            # (rewards a vertical thrust axis so the acro policy learns to stay level; no-op when
+            # upright_weight == 0.0). Reuses existing sensing — no new observation.
+            roll=float(state.attitude[0]),
+            pitch=float(state.attitude[1]),
+            # EXPERIMENTAL: body angular-speed magnitude (rad/s) for the spin-stability bonus
+            # (rewards not tumbling; no-op when spin_stability_weight == 0.0).
+            angular_speed=float(np.linalg.norm(state.angular_velocity)),
         )
 
         # UC-16/UC-25/UC-38: a dock does NOT terminate. An episode ends on a valid completion, a
@@ -733,6 +756,11 @@ class RaceEnv(gym.Env):
             # freeze/drop/reprojection). The UC-45 diagnosis proved this path byte-faithful across
             # the full vec/subproc training stack — do not filter, clamp, or transform it here.
             "position": state.position.copy(),
+            # EXPERIMENTAL diagnostics: body attitude [roll,pitch,yaw] (rad) and linear velocity
+            # (m/s) after the step. Additive keys (existing tests assert membership, so safe);
+            # consumed by the acro-stabilization probes to measure uprightness / ballistic shape.
+            "attitude": state.attitude.copy(),
+            "velocity": state.velocity.copy(),
             # UC-25/UC-38: reason this episode was cut early — ``"grounded"`` (rested on the floor
             # after takeoff), ``"stuck"`` (no course progress for a full window), or ``None`` (not
             # cut early — includes a pure ``max_steps`` timeout, which reports ``truncated=True``).

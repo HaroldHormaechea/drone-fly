@@ -60,7 +60,13 @@ Design guarantees (all unit-testable)
 
 from __future__ import annotations
 
+import os
+
 from drone_fly.env.config import RewardConfig
+
+# EXPERIMENTAL: altitude-gate the progress reward (see compute_reward). Read once at import; set the
+# env var at process launch. Default off ⇒ shipped behaviour.
+_PROGRESS_ALT_GATE = os.environ.get("DRONE_FLY_PROGRESS_ALT_GATE") == "1"
 
 
 def compute_reward(
@@ -75,6 +81,10 @@ def compute_reward(
     obstacle_contact: bool = False,
     height_above_floor_curr: float = 0.0,
     per_step_scale: float = 1.0,
+    vertical_speed: float = 0.0,
+    roll: float = 0.0,
+    pitch: float = 0.0,
+    angular_speed: float = 0.0,
 ) -> float:
     """Return the scalar step reward (UC-58 redesign).
 
@@ -136,7 +146,17 @@ def compute_reward(
         bonuses/penalties are per-event. Default ``1.0`` ⇒ byte-identical at the 20 Hz baseline.
     """
     # Dense progress toward the current target waypoint (telescopes across gate transitions).
-    reward = cfg.progress_weight * (dist_to_target_prev - dist_to_target_curr)
+    progress = cfg.progress_weight * (dist_to_target_prev - dist_to_target_curr)
+    # EXPERIMENTAL (env var DRONE_FLY_PROGRESS_ALT_GATE=1): gate the progress reward by the altitude
+    # fraction, so forward progress only pays when the drone is AT flying altitude. This breaks the
+    # "skim forward along the floor" local optimum (which farms horizontal progress without ever
+    # climbing to the gate band): at h≈0 progress earns ~nothing, forcing the policy to climb first
+    # (via the altitude reward) and then advance AT gate altitude — the forward-AND-up coupling gate
+    # passage needs. No-op unless the env var is set. Uses the same h_frac as the altitude reward.
+    if _PROGRESS_ALT_GATE:
+        _hf = min(max(height_above_floor_curr, 0.0), cfg.altitude_target) / cfg.altitude_target
+        progress *= _hf
+    reward = progress
     # Per-gate reward, normalised so an N-gate course awards ``gate_bonus`` in total (UC-09 AC4).
     if event == "gate":
         reward += cfg.gate_bonus / max(1, num_gates)
@@ -158,4 +178,32 @@ def compute_reward(
     # at the 20 Hz baseline).
     h_frac = min(max(height_above_floor_curr, 0.0), cfg.altitude_target) / cfg.altitude_target
     reward += per_step_scale * cfg.altitude_weight * h_frac
+    # EXPERIMENTAL anti-ballistic hover-stability bonus (default weight 0.0 ⇒ no-op). Purely
+    # positive and level-based (gated by the same ``h_frac`` so it only pays when airborne), it
+    # rewards holding altitude with LOW vertical speed. The stability factor is 1.0 at a dead hover
+    # (v_z=0) and ramps to 0.0 at |v_z| == ``hover_stability_v_ref``, so a ballistic hop (large
+    # |v_z| up then down) earns ~nothing while a sustained level hover earns the full bonus every
+    # step. Scaled by ``per_step_scale`` for the same rate-invariance as the altitude term.
+    if cfg.hover_stability_weight > 0.0:
+        stability = max(0.0, 1.0 - abs(vertical_speed) / cfg.hover_stability_v_ref)
+        reward += per_step_scale * cfg.hover_stability_weight * h_frac * stability
+    # EXPERIMENTAL upright/attitude-stability bonus (default weight 0.0 ⇒ no-op). The acro rate
+    # controller never auto-levels, so the policy must LEARN to stay upright to keep lift; this is
+    # the missing reward signal. ``cos(roll)·cos(pitch)`` is the vertical fraction of the body
+    # thrust axis — 1.0 when level, → 0 on its side, clamped at 0 when inverted. Paid only when
+    # airborne (h > ``upright_min_height``) so it cannot be farmed sitting upright on the ground.
+    # Purely positive (no suicide trap); full acro agency retained — the policy can still flip, it
+    # just now gains reward for flying level.
+    if cfg.upright_weight > 0.0 and height_above_floor_curr > cfg.upright_min_height:
+        import math
+
+        upright = max(0.0, math.cos(roll) * math.cos(pitch))
+        reward += per_step_scale * cfg.upright_weight * upright
+    # EXPERIMENTAL spin-stability bonus (default weight 0.0 ⇒ no-op). Rewards NOT tumbling: a purely
+    # positive, airborne-gated bonus that is 1.0 at zero body angular velocity and ramps to 0.0 at
+    # |omega| == ``spin_stability_omega_ref``. Directly targets the failure mode (the drone flips at
+    # ~pi rad/s); a stable hover has omega≈0 and earns it every step, a tumble earns ~nothing.
+    if cfg.spin_stability_weight > 0.0 and height_above_floor_curr > cfg.upright_min_height:
+        spin_stab = max(0.0, 1.0 - abs(angular_speed) / cfg.spin_stability_omega_ref)
+        reward += per_step_scale * cfg.spin_stability_weight * spin_stab
     return float(reward)

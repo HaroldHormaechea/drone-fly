@@ -81,6 +81,11 @@ class DroneState:
     collided: bool
     battery: float = 1.0
     integrity: float = 1.0
+    # EXPERIMENTAL: unit gravity direction in the BODY frame ([0,0,1] when level, tilting as the
+    # drone rolls/pitches) — a gimbal-lock-free attitude signal for acro stabilization. Optional
+    # (None on adapters that don't compute it); consumed by the gravity-vector observation
+    # (env var DRONE_FLY_OBS_GRAVITY=1), which swaps it in for the Euler ``attitude`` block.
+    gravity_body: np.ndarray | None = None
 
 
 def sanitize_action(action: np.ndarray) -> np.ndarray:

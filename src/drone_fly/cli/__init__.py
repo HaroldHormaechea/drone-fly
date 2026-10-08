@@ -203,6 +203,11 @@ def _apply_reward(env_config, cfg):
         base_reward,
         altitude_weight=cfg.altitude_weight,
         altitude_target=cfg.altitude_target,
+        # EXPERIMENTAL acro-stabilization knobs (RewardConfig defaults 0.0 ⇒ off when omitted).
+        hover_stability_weight=cfg.hover_stability_weight,
+        upright_weight=cfg.upright_weight,
+        spin_stability_weight=cfg.spin_stability_weight,
+        progress_weight=cfg.progress_weight,
     )
     if env_config is None:
         return EnvConfig(reward=reward)

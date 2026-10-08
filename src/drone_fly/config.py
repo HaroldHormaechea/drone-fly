@@ -288,6 +288,12 @@ def _validate_reward(command: str, resolved: dict[str, Any]) -> None:
         raise ConfigError(
             f"{command} config: 'altitude_target' must be > 0, got {altitude_target!r}."
         )
+    # EXPERIMENTAL acro-stabilization knobs (train-only; guarded so eval, which never resolves them,
+    # is unaffected). Both are weights and must be >= 0.
+    for key in ("hover_stability_weight", "upright_weight", "spin_stability_weight", "progress_weight"):
+        value = resolved.get(key)
+        if value is not None and value < 0.0:
+            raise ConfigError(f"{command} config: {key!r} must be >= 0, got {value!r}.")
 
 
 # --- Per-command config dataclasses -------------------------------------------------------
@@ -382,6 +388,12 @@ class TrainRunConfig:
     # Validated in ``from_mapping`` (altitude_weight >= 0, altitude_target > 0).
     altitude_weight: float
     altitude_target: float
+    # EXPERIMENTAL reward knobs (acro stabilization): hover-stability (low |v_z|) + upright
+    # (cos roll·cos pitch). Carry RewardConfig defaults (0.0 ⇒ off) so omitting them is a no-op.
+    hover_stability_weight: float
+    upright_weight: float
+    spin_stability_weight: float
+    progress_weight: float
 
     @classmethod
     def from_mapping(cls, mapping: Any) -> TrainRunConfig:
@@ -465,6 +477,19 @@ class TrainRunConfig:
             # ``_validate_reward`` below.
             _Spec("altitude_weight", (float,), default=_reward_defaults.altitude_weight),
             _Spec("altitude_target", (float,), default=_reward_defaults.altitude_target),
+            # EXPERIMENTAL acro-stabilization reward knobs: carry RewardConfig defaults (0.0 ⇒ off).
+            _Spec(
+                "hover_stability_weight",
+                (float,),
+                default=_reward_defaults.hover_stability_weight,
+            ),
+            _Spec("upright_weight", (float,), default=_reward_defaults.upright_weight),
+            _Spec(
+                "spin_stability_weight",
+                (float,),
+                default=_reward_defaults.spin_stability_weight,
+            ),
+            _Spec("progress_weight", (float,), default=_reward_defaults.progress_weight),
         ]
         resolved = _validate("train", mapping, specs)
         resolved["name"] = validate_run_name(resolved["name"])
