@@ -81,11 +81,12 @@ class K1Reservoir(nn.Module):
 
 
 def train(N=512, budget=25e6, lr=3e-4, roll=32, epochs=4, mb=8, ent_coef=0.01,
-          save_path="/workspace/drone-fly/gpu_prototype/gates_k1_reservoir.pt"):
+          save_path="/workspace/drone-fly/gpu_prototype/gates_k1_reservoir.pt",
+          env_cls=BatchedGateCourse):
     ac = K1Reservoir().to(dev)
     # Only the readout trains (body is frozen) -> optimizer sees the small head params.
     opt = torch.optim.Adam([p for p in ac.parameters() if p.requires_grad], lr=lr)
-    env = BatchedGateCourse(N)
+    env = env_cls(N)
     GAMMA, LAM, CLIP = 0.99, 0.95, 0.2
     print(f"K1 reservoir: feat_dim={ac.feat_dim} trainable={sum(p.numel() for p in ac.parameters() if p.requires_grad)/1e3:.1f}k "
           f"frozen={sum(p.numel() for p in ac.parameters() if not p.requires_grad)/1e6:.2f}M  N={N} ppo_batch={N*roll}", flush=True)
