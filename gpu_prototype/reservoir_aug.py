@@ -74,9 +74,37 @@ class K1ReservoirAug(nn.Module):
         return mean, std, val
 
 
+def warm_start(ac, path, src_extra_dim):
+    """Initialize an augmented reservoir from a readout trained with FEWER extra senses.
+
+    The readout input is [tap(R) || extra]; a source policy with `src_extra_dim` senses has its first
+    R+src_extra_dim input columns copied in, and the NEW sense columns (e.g. obstacle vision) start at
+    ZERO influence, so the policy begins with the source's exact flight behavior and only has to LEARN
+    the new senses. Value head (input = extra) is warm-started the same way. Same-shape heads copy directly.
+    """
+    src = torch.load(path, map_location="cpu")
+    tgt = ac.state_dict()
+    R = ac.feat_dim
+    for k, v in src.items():
+        if k not in tgt:
+            continue
+        tv = tgt[k]
+        if v.shape == tv.shape:
+            tv.copy_(v)
+        elif k == "pi.0.weight":                       # (HID, R+extra): copy [tap||src-extra], zero new
+            tv.zero_(); tv[:, : R + src_extra_dim].copy_(v)
+        elif k == "vf.0.weight":                       # (HID, extra): copy src-extra cols, zero new
+            tv.zero_(); tv[:, :src_extra_dim].copy_(v)
+    ac.load_state_dict(tgt)
+    print(f"warm-started from {path} (src_extra_dim={src_extra_dim}, new senses zero-init)", flush=True)
+
+
 def train_aug(env_cls, extra_dim, N=512, budget=20e6, lr=3e-4, roll=32, epochs=4, mb=8,
-              ent_coef=0.01, logstd_final=-2.0, anneal_start=0.4, save_path=None):
+              ent_coef=0.01, logstd_final=-2.0, anneal_start=0.4, save_path=None,
+              warm_from=None, warm_src_extra_dim=12, logstd_init=INIT_LOGSTD):
     ac = K1ReservoirAug(extra_dim).to(dev)
+    if warm_from is not None:
+        warm_start(ac, warm_from, warm_src_extra_dim)
     trainable = [p for n, p in ac.named_parameters()
                  if p.requires_grad and not (logstd_final is not None and n == "log_std")]
     opt = torch.optim.Adam(trainable, lr=lr)
@@ -91,7 +119,7 @@ def train_aug(env_cls, extra_dim, N=512, budget=20e6, lr=3e-4, roll=32, epochs=4
             frac = total_steps / budget
             a = max(0.0, (frac - anneal_start) / max(1e-6, 1.0 - anneal_start))
             with torch.no_grad():
-                ac.log_std.fill_(INIT_LOGSTD + (logstd_final - INIT_LOGSTD) * min(1.0, a))
+                ac.log_std.fill_(logstd_init + (logstd_final - logstd_init) * min(1.0, a))
         tap_b = torch.zeros(roll, N, ac.feat_dim, device=dev)
         ext_b = torch.zeros(roll, N, extra_dim, device=dev)
         obs_b = torch.zeros(roll, N, 12, device=dev)

@@ -17,14 +17,29 @@ from hover_gpu import (  # noqa: F401
 from gates_lap import GATES, START, CX, CY, Z, PASS_R, APERTURE  # reuse the oval geometry
 
 NG = GATES.shape[0]
-NOBS = 3                 # pillars per episode
+NOBS = 2                 # pillars per episode (2 keeps a full lap learnable; 3 was too punishing)
 NVIS = 2                 # nearest pillars the readout sees
 EXTRA_DIM = 12 + NVIS * 3   # readout senses = raw flight obs (12) + obstacle vision (NVIS*3)
-OBS_R = 0.3              # pillar radius
-MARGIN = 0.12            # drone half-extent added to contact test
+OBS_R = 0.25             # pillar radius
+MARGIN = 0.1             # drone half-extent added to contact test
+# Dense avoidance: penalty grows EXPONENTIALLY as the drone nears the obstacle BORDER (not just a
+# sparse crash). Contact does NOT end the episode -- it NUDGES the drone off course (a recoverable
+# bump, as in real flight), so the policy learns to keep clearance and to recover from a knock.
+# Avoidance is taught by the PHYSICAL NUDGE (a bump knocks the drone off course -> lost progress/time),
+# NOT by a region penalty. A proximity/terminal penalty makes flying riskier than hovering, so PPO
+# collapses to a stationary hover (observed repeatedly). With contact merely a recoverable nudge +
+# a small contact cost, flying stays optimal and the policy learns to steer clear to fly smoothly.
+PROX_W = 0.0             # region proximity penalty OFF (it induced the hover collapse)
+PROX_SCALE = 0.22
+BOUNCE = 0.6             # outward velocity impulse (m/s) imparted on contact (gentle, recoverable)
+CONTACT_PEN = 0.5        # small per-contact cost (not terminal) -> a bump is mildly bad, not fatal
+_FIXED_SEG = torch.tensor([1, 4], device=dev)   # opposite sides of the oval (consistent -> learnable)
 MAX_STEPS = 800
+# NO tilt penalty: in acro/CTBR flight the drone MUST tilt to translate (thrust vector is the only
+# horizontal force), so penalizing tilt collapses it to a stationary hover (can't reach any gate).
+# Flight stays upright via the reward's r_up term + exploration annealing, as on the other courses.
 TILT_PEN_W = 0.0
-TILT_PEN_DEG = 25.0
+TILT_PEN_DEG = 30.0
 
 _SEG_MID = 0.5 * (GATES + torch.roll(GATES, -1, 0))   # (NG,3) midpoint of each gate->next segment
 
@@ -52,13 +67,15 @@ class BatchedObstacleCourse:
             self.tgt = torch.zeros(self.n, dtype=torch.long, device=dev)
             self.obs_c = torch.zeros(self.n, NOBS, 3, device=dev)
         idx = mask.nonzero(as_tuple=True)[0]
-        # Place NOBS pillars on random distinct gate segments, offset laterally so they sit near (but
-        # not exactly on) the path center -> the drone must deviate, gates (aperture 1.0) stay passable.
-        seg = torch.stack([torch.randperm(NG, device=dev)[:NOBS] for _ in range(k)])   # (k,NOBS)
-        base = _SEG_MID[seg]                                                            # (k,NOBS,3)
-        lat = (torch.rand(k, NOBS, 2, device=dev) - 0.5) * 0.6                          # xy jitter +-0.3
-        base = base.clone()
-        base[:, :, :2] = base[:, :, :2] + lat
+        # Pillars at FIXED segment midpoints, OFFSET toward the loop centre so a clear lane remains on
+        # the OUTSIDE: avoidance is then a gentle outward shift, not a stop-or-crash dilemma on the
+        # direct path (a centre-of-path pillar makes the drone stop short to dodge the penalty wall).
+        base = _SEG_MID[_FIXED_SEG].unsqueeze(0).expand(k, NOBS, 3).clone()             # (k,NOBS,3)
+        center = torch.tensor([CX, CY], device=dev)
+        to_center = center - base[:, :, :2]
+        to_center = to_center / (to_center.norm(dim=-1, keepdim=True) + 1e-6)
+        base[:, :, :2] = base[:, :, :2] + to_center * 0.5                               # shift 0.5 inward
+        base[:, :, :2] = base[:, :, :2] + (torch.rand(k, NOBS, 2, device=dev) - 0.5) * 0.25   # jitter
         self.obs_c[idx] = base
         self.pos[idx] = START + 0.1 * torch.randn(k, 3, device=dev)
         self.vel[idx] = 0.0
@@ -127,11 +144,30 @@ class BatchedObstacleCourse:
 
         completed = (self.tgt >= self.ngates) & ((self.pos - START).norm(dim=-1) < PASS_R)
         reward = reward + 300.0 * completed.float()
-        # obstacle contact: within (radius + margin) of any pillar axis in xy (pillars are full-height)
-        odist = (self.obs_c[:, :, :2] - self.pos[:, :2].unsqueeze(1)).norm(dim=-1)   # (n,NOBS)
-        hit_obs = (odist < (OBS_R + MARGIN)).any(dim=1)
+
+        # --- obstacles: dense exponential proximity penalty + non-terminal nudge on contact ---
+        dvec = self.pos[:, :2].unsqueeze(1) - self.obs_c[:, :, :2]      # (n,NOBS,2) pillar->drone in xy
+        odist = dvec.norm(dim=-1)                                       # (n,NOBS)
+        border = (odist - OBS_R).clamp(min=0.0)                        # distance to the pillar BORDER
+        # exponential: ~PROX_W at the border, decaying with distance; summed over pillars (far ones ~0)
+        reward = reward - (PROX_W * torch.exp(-border / PROX_SCALE)).sum(dim=1)
+        # contact = inside (radius + margin) of the NEAREST pillar -> bump off course, DON'T terminate
+        nd, ni = odist.min(dim=1)                                      # (n,) nearest pillar dist/index
+        ar = torch.arange(self.n, device=dev)
+        away = dvec[ar, ni] / (nd.unsqueeze(-1) + 1e-6)                # (n,2) unit outward from pillar
+        degen = nd < 1e-3                                              # drone ~at center: direction undefined
+        away = torch.where(degen.unsqueeze(-1), torch.tensor([1.0, 0.0], device=dev), away)
+        contact = nd < (OBS_R + MARGIN)
+        if contact.any():
+            cm = contact.float().unsqueeze(-1)
+            # push the drone out to the border (no penetration) and add an outward velocity impulse
+            border_xy = self.obs_c[ar, ni, :2] + away * (OBS_R + MARGIN)
+            self.pos[:, :2] = torch.where(contact.unsqueeze(-1), border_xy, self.pos[:, :2])
+            self.vel[:, :2] = self.vel[:, :2] + cm * away * BOUNCE
+            reward = reward - CONTACT_PEN * contact.float()
+
         xy_off = (self.pos[:, :2] - torch.tensor([CX, CY], device=dev)).norm(dim=-1)
-        crashed = (self.pos[:, 2] < 0.1) | (self.pos[:, 2] > 3.0) | (xy_off > 8.0) | hit_obs
+        crashed = (self.pos[:, 2] < 0.1) | (self.pos[:, 2] > 3.0) | (xy_off > 8.0)   # obstacle hit is NOT terminal
         reward = reward - 5.0 * crashed.float()
         timeout = self.t >= MAX_STEPS
         done = completed | crashed | timeout
