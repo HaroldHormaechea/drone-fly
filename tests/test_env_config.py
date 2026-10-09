@@ -183,13 +183,12 @@ def test_env_config_floor_start_is_last_field() -> None:
 def test_reward_config_field_order() -> None:
     """UC-58 (redesign): the four accreted altitude terms (``airborne_bonus`` / ``climb_*`` /
     ``ground_break_*`` / the ``altitude_hold_*`` decoupling trio) and the per-step ``time_penalty``
-    are RETIRED and replaced by the two takeoff-reward fields ``altitude_weight`` /
-    ``altitude_target``, appended **last** in that order. The full tail is pinned exactly:
-    ``gate_bonus`` → ``completion_bonus`` → ``collision_penalty`` → ``obstacle_penalty`` →
-    ``altitude_weight`` → ``altitude_target`` (last)."""
+    are RETIRED and replaced by the takeoff-reward fields ``altitude_weight`` / ``altitude_target``.
+    The acro-stabilization campaign then appended the EXPERIMENTAL per-step stabilization knobs
+    (``hover_stability_*`` / ``upright_*`` / ``spin_stability_*``, all default 0.0 ⇒ off) as the new
+    tail. The order is pinned exactly: the UC-58 takeoff pair sits after the event bonuses/penalties,
+    then the stabilization knobs follow in (weight, ref) pairs."""
     fields = [f.name for f in dataclasses.fields(RewardConfig)]
-    assert fields[-1] == "altitude_target"
-    assert fields[-2:] == ["altitude_weight", "altitude_target"]
     assert fields == [
         "progress_weight",
         "gate_bonus",
@@ -198,6 +197,12 @@ def test_reward_config_field_order() -> None:
         "obstacle_penalty",
         "altitude_weight",
         "altitude_target",
+        "hover_stability_weight",
+        "hover_stability_v_ref",
+        "upright_weight",
+        "upright_min_height",
+        "spin_stability_weight",
+        "spin_stability_omega_ref",
     ]
     # The retired fields are GONE — no dead/duplicate reward knobs remain (AC6).
     for retired in (

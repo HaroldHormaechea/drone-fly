@@ -113,10 +113,18 @@ def build_policy_kwargs(connectome: ConnectomeData, cfg: TrainConfig, obs_schema
     features_extractor_kwargs: dict = {"data": connectome}
     if obs_schema is not None:
         features_extractor_kwargs["obs_schema"] = obs_schema
+    # RESEARCH (acro deterministic-collapse, default off): a LINEAR policy mean (pi=[]) cannot
+    # represent the nonlinear thrust∝1/cos(tilt) coupling needed to hold altitude WHILE pitching
+    # forward, so the deterministic mean decouples the two (flies forward OR holds alt, never both)
+    # even though sampling noise can combine them. DRONE_FLY_PI_ARCH="64" (or "64,64") inserts a
+    # small nonlinear head AFTER the connectome features so the mean can encode the coupling. The
+    # connectome stays load-bearing (it is still the features extractor). Unset ⇒ pi=[] (byte-ident).
+    _pi_env = os.environ.get("DRONE_FLY_PI_ARCH", "").strip()
+    pi_arch = [int(x) for x in _pi_env.split(",") if x] if _pi_env else []
     return {
         "features_extractor_class": ConnectomeFeaturesExtractor,
         "features_extractor_kwargs": features_extractor_kwargs,
-        "net_arch": {"pi": [], "vf": list(cfg.vf_arch)},
+        "net_arch": {"pi": pi_arch, "vf": list(cfg.vf_arch)},
     }
 
 
@@ -603,6 +611,17 @@ def train(
                 high_z=ecfg.course.floor_z + ecfg.reward.altitude_target,
             )
         )
+
+    # RESEARCH (acro deterministic-collapse, default off): hard-anneal + freeze the Gaussian
+    # ``log_std`` via env var DRONE_FLY_LOGSTD_ANNEAL="<target>:<fraction>". Forces the policy to
+    # move corrective control authority from sampling noise into the deterministic mean. Unset ⇒
+    # not constructed ⇒ byte-identical. See drone_fly.train.logstd_anneal.
+    from drone_fly.train.logstd_anneal import ENV_VAR as _LOGSTD_ENV, LogStdAnnealCallback, parse_spec
+
+    _logstd_spec = parse_spec(os.environ.get(_LOGSTD_ENV))
+    if _logstd_spec is not None:
+        _ls_target, _ls_frac = _logstd_spec
+        callbacks.append(LogStdAnnealCallback(_ls_target, _ls_frac, total_steps=steps))
 
     # UC-55: the UC-46 attitude-authority curriculum is retired. The inner-loop rate controller in
     # the pybullet adapter now stabilizes the plant against command noise, making the crude

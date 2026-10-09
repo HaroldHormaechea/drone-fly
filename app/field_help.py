@@ -371,6 +371,10 @@ TRAIN_SECTIONS: dict[str, str] = {
     # Reward
     "altitude_weight": "Reward",
     "altitude_target": "Reward",
+    "hover_stability_weight": "Reward",
+    "upright_weight": "Reward",
+    "spin_stability_weight": "Reward",
+    "progress_weight": "Reward",
 }
 
 

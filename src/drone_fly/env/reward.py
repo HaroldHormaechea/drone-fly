@@ -67,6 +67,15 @@ from drone_fly.env.config import RewardConfig
 # EXPERIMENTAL: altitude-gate the progress reward (see compute_reward). Read once at import; set the
 # env var at process launch. Default off ⇒ shipped behaviour.
 _PROGRESS_ALT_GATE = os.environ.get("DRONE_FLY_PROGRESS_ALT_GATE") == "1"
+# EXPERIMENTAL: exponent applied to the altitude-gate fraction (DRONE_FLY_PROGRESS_ALT_GATE). The
+# default linear gate (pow 1.0) still pays ~20% forward-progress at h=0.2·target, so the deterministic
+# mean can fly LOW (under the gates) and still earn progress. A higher power collapses that payout at
+# low altitude (0.2**3≈0.008) so forward reward is only earned near gate altitude, FORCING the climb.
+# Default 1.0 ⇒ byte-identical to the linear gate.
+try:
+    _PROGRESS_ALT_GATE_POW = float(os.environ.get("DRONE_FLY_PROGRESS_ALT_GATE_POW", "1.0"))
+except ValueError:
+    _PROGRESS_ALT_GATE_POW = 1.0
 
 
 def compute_reward(
@@ -155,6 +164,8 @@ def compute_reward(
     # passage needs. No-op unless the env var is set. Uses the same h_frac as the altitude reward.
     if _PROGRESS_ALT_GATE:
         _hf = min(max(height_above_floor_curr, 0.0), cfg.altitude_target) / cfg.altitude_target
+        if _PROGRESS_ALT_GATE_POW != 1.0:
+            _hf = _hf ** _PROGRESS_ALT_GATE_POW
         progress *= _hf
     reward = progress
     # Per-gate reward, normalised so an N-gate course awards ``gate_bonus`` in total (UC-09 AC4).

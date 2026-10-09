@@ -254,7 +254,7 @@ def test_train_schema_endpoint_lists_every_key(tmp_path):
     fields = client.get("/api/train-configs/schema").json()["fields"]
     names = [f["name"] for f in fields]
     assert "name" in names and "prune" in names and "prune_k" in names
-    assert len(names) == 43  # every TrainRunConfig key
+    assert len(names) == 47  # every TrainRunConfig key (incl. the 4 acro-stabilization reward knobs)
 
 
 def test_slice_schema_endpoint_lists_four_fields(tmp_path):

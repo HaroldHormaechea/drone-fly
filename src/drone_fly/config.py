@@ -626,6 +626,13 @@ class EvaluateRunConfig:
     # target > 0).
     altitude_weight: float
     altitude_target: float
+    # EXPERIMENTAL reward knobs (acro stabilization), mirror of the train keys so an eval / record
+    # run reproduces the trained reward. RewardConfig defaults (0.0 ⇒ off) so omitting them is a
+    # no-op and ``_apply_reward`` (shared with train) no longer fails on a missing attribute.
+    hover_stability_weight: float
+    upright_weight: float
+    spin_stability_weight: float
+    progress_weight: float
 
     @classmethod
     def from_mapping(cls, mapping: Any) -> EvaluateRunConfig:
@@ -671,6 +678,20 @@ class EvaluateRunConfig:
             # UC-58: takeoff-reward knobs (mirror of the train keys, same RewardConfig defaults).
             _Spec("altitude_weight", (float,), default=_reward_defaults.altitude_weight),
             _Spec("altitude_target", (float,), default=_reward_defaults.altitude_target),
+            # EXPERIMENTAL acro-stabilization reward knobs (mirror of the train keys). RewardConfig
+            # defaults (0.0 ⇒ off) so omitting them reproduces the shipped reward.
+            _Spec(
+                "hover_stability_weight",
+                (float,),
+                default=_reward_defaults.hover_stability_weight,
+            ),
+            _Spec("upright_weight", (float,), default=_reward_defaults.upright_weight),
+            _Spec(
+                "spin_stability_weight",
+                (float,),
+                default=_reward_defaults.spin_stability_weight,
+            ),
+            _Spec("progress_weight", (float,), default=_reward_defaults.progress_weight),
         ]
         resolved = _validate("evaluate", mapping, specs)
         if resolved["name"] is not None:
