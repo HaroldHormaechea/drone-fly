@@ -80,12 +80,18 @@ class K1Reservoir(nn.Module):
         return self.pi(feats), self.log_std.exp(), self.vf(obs).squeeze(-1)
 
 
+INIT_LOGSTD = -0.5
+
+
 def train(N=512, budget=25e6, lr=3e-4, roll=32, epochs=4, mb=8, ent_coef=0.01,
           save_path="/workspace/drone-fly/gpu_prototype/gates_k1_reservoir.pt",
-          env_cls=BatchedGateCourse):
+          env_cls=BatchedGateCourse, logstd_final=None, anneal_start=0.4):
     ac = K1Reservoir().to(dev)
-    # Only the readout trains (body is frozen) -> optimizer sees the small head params.
-    opt = torch.optim.Adam([p for p in ac.parameters() if p.requires_grad], lr=lr)
+    # Only the readout trains (body is frozen) -> optimizer sees the small head params. When annealing
+    # exploration (logstd_final set), log_std is scheduled by hand each iter, not optimized.
+    trainable = [p for n, p in ac.named_parameters()
+                 if p.requires_grad and not (logstd_final is not None and n == "log_std")]
+    opt = torch.optim.Adam(trainable, lr=lr)
     env = env_cls(N)
     GAMMA, LAM, CLIP = 0.99, 0.95, 0.2
     print(f"K1 reservoir: feat_dim={ac.feat_dim} trainable={sum(p.numel() for p in ac.parameters() if p.requires_grad)/1e3:.1f}k "
@@ -94,6 +100,15 @@ def train(N=512, budget=25e6, lr=3e-4, roll=32, epochs=4, mb=8, ent_coef=0.01,
     total_steps = 0
     t0 = time.time()
     for it in range(1, 2_000_001):
+        # Exploration annealing (closes the stochastic->deterministic gap on hard turning courses):
+        # hold full exploration until anneal_start of the budget, then drive log_std linearly to
+        # logstd_final so the readout MUST put corrective control into the mean, not the sampling noise.
+        if logstd_final is not None:
+            frac = total_steps / budget
+            a = max(0.0, (frac - anneal_start) / max(1e-6, 1.0 - anneal_start))
+            cur = INIT_LOGSTD + (logstd_final - INIT_LOGSTD) * min(1.0, a)
+            with torch.no_grad():
+                ac.log_std.fill_(cur)
         feat_b = torch.zeros(roll, N, ac.feat_dim, device=dev)
         obs_b = torch.zeros(roll, N, 12, device=dev)
         act_b = torch.zeros(roll, N, 4, device=dev)

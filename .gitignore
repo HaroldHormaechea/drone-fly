@@ -55,3 +55,9 @@ events.out.tfevents.*
 !training/acro-gate-flight/**
 !training/k1-gate-flight/
 !training/k1-gate-flight/**
+!training/oval-lap-flight/
+!training/oval-lap-flight/**
+!training/figure8-chicane-flight/
+!training/figure8-chicane-flight/**
+!training/obstacle-lap-flight/
+!training/obstacle-lap-flight/**

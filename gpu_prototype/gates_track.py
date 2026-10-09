@@ -128,6 +128,10 @@ class BatchedTrackCourse:
         g_body = quat_rotate_inv(self.quat, torch.tensor([0.0, 0.0, -1.0], device=dev).expand(self.n, 3))
         return torch.cat([rel, g_body, self.vel, self.omega], dim=-1)
 
+    def extra(self):
+        # Readout senses for the augmented reservoir: the raw 12-dim flight obs (no extra senses here).
+        return self.obs()
+
     def metric(self):
         return f"compl {self._comp_rate*100:4.1f}%"
 
