@@ -21,6 +21,8 @@ biophysical brain simulation — the wiring comes from the fly; the connection s
 > ground-up explainer (no RL/control/neuroscience background assumed) of how the real 25.6k-neuron K1
 > connectome flies the gate course, including the *frozen-reservoir* approach that runs the whole
 > brain fixed and trains only a tiny readout — ~11× faster and more biologically faithful.
+> For the index of trained flying models (straight / oval / figure-8+chicane, all reproducible), see
+> [docs/FLIGHT_MODELS.md](docs/FLIGHT_MODELS.md).
 
 ## Goals
 
