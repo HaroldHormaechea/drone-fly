@@ -17,6 +17,11 @@ observations are projected into named sensory populations, propagated through th
 real synapses, and read out from motor neurons into throttle / roll / pitch / yaw. It is **not** a
 biophysical brain simulation — the wiring comes from the fly; the connection strengths are learned.
 
+> **New to the project? Start with [docs/CONNECTOME_RESERVOIR.md](docs/CONNECTOME_RESERVOIR.md)** — a
+> ground-up explainer (no RL/control/neuroscience background assumed) of how the real 25.6k-neuron K1
+> connectome flies the gate course, including the *frozen-reservoir* approach that runs the whole
+> brain fixed and trains only a tiny readout — ~11× faster and more biologically faithful.
+
 ## Goals
 
 1. Prove end-to-end that a connectome-seeded agent can learn to fly a waypoint course.
