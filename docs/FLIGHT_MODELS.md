@@ -11,8 +11,12 @@ See [CONNECTOME_RESERVOIR.md](CONNECTOME_RESERVOIR.md) for how the frozen-reserv
 | **k1-gate-flight** | 3 straight gates | **100%** | 7° | 10 |
 | **oval-lap-flight** | closed oval lap (same-direction turns) | **99–100%** | 25° | 10 |
 | **figure8-chicane-flight** | randomized figure-8 *or* chicane per episode (both turn directions) | **96%** (figure-8 100% / chicane 92%) | 12° | 12 |
+| **pad-lap-flight** | oval lap + battery + charging pad (recharge mid-lap) | **99%** | 46° (aggressive — see note) | 10 |
 
-All are **upright, controlled flight** (not ballistic tumbles) — tilt is tracked precisely for this reason.
+The navigation courses (straight/oval/track) are **upright, controlled flight** (~7–25° tilt). The
+**pad** model solves the battery/charging task at 99% but flies **aggressively** (~46° tilt, never
+inverts): the battery pressure rewards speed, so it rushes and banks hard. Tilt is tracked precisely
+because an early version of this project was briefly fooled by ballistic tumbling scoring "completion".
 
 ### What's committed per scenario
 - `recordings/episode_*.json` — app-readable recordings (all 25,627 neuron activations per frame +
@@ -44,9 +48,8 @@ which (with exploration annealing) closes a deterministic-control gap on the har
 ## Work in progress (not yet solved — see CONNECTOME_RESERVOIR notes / campaign memory)
 
 - **obstacle-lap-flight** — pillars to weave around (obstacle-vision fed to the readout; contact is a
-  non-terminal recoverable nudge). Training collapses to either a stationary hover (any proximity /
-  terminal penalty makes flying riskier than hovering) or unstable high-tilt flight (nudge-only).
-  Proposed fix: a **curriculum** (pillars start off the flight path, slide onto it over training).
-- **pad-lap-flight** — battery drains with thrust; a charging pad recharges on fly-over. Infrastructure
-  built (`gates_pads.py`); the battery pressure prevents the hover trap (hovering also drains), but
-  full-lap completion with recharge detours is not yet trained.
+  non-terminal recoverable nudge). Cold/naive training collapses to either a stationary hover (any
+  proximity / terminal penalty makes flying riskier than hovering) or unstable high-tilt flight
+  (nudge-only). Now training with a **curriculum** (`curriculum_frac`): pillars start at the loop
+  centre (off-path, ignored) and slide onto the path over the first half of training, warm-started from
+  the oval — so avoidance is learned incrementally. In progress.

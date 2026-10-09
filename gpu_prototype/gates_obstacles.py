@@ -49,6 +49,7 @@ class BatchedObstacleCourse:
         self.n = n
         self.ngates = NG
         self._comp_rate = 0.0
+        self.difficulty = 1.0   # 0 = pillars at loop centre (off-path), 1 = on-path; trainer ramps it
         self.reset_all()
 
     def reset_all(self):
@@ -67,15 +68,18 @@ class BatchedObstacleCourse:
             self.tgt = torch.zeros(self.n, dtype=torch.long, device=dev)
             self.obs_c = torch.zeros(self.n, NOBS, 3, device=dev)
         idx = mask.nonzero(as_tuple=True)[0]
-        # Pillars at FIXED segment midpoints, OFFSET toward the loop centre so a clear lane remains on
-        # the OUTSIDE: avoidance is then a gentle outward shift, not a stop-or-crash dilemma on the
-        # direct path (a centre-of-path pillar makes the drone stop short to dodge the penalty wall).
-        base = _SEG_MID[_FIXED_SEG].unsqueeze(0).expand(k, NOBS, 3).clone()             # (k,NOBS,3)
+        # CURRICULUM: interpolate each pillar between the loop CENTRE (difficulty 0 -> far from the flight
+        # path, so the warm-started flier ignores it) and its on-path clear-lane position (difficulty 1).
+        # The trainer ramps self.difficulty 0->1 over early training, so the policy meets the obstacle
+        # gradually and learns to deviate incrementally instead of hitting a sudden wall.
+        seg_mid = _SEG_MID[_FIXED_SEG][:, :2]                                           # (NOBS,2) on path
         center = torch.tensor([CX, CY], device=dev)
-        to_center = center - base[:, :, :2]
-        to_center = to_center / (to_center.norm(dim=-1, keepdim=True) + 1e-6)
-        base[:, :, :2] = base[:, :, :2] + to_center * 0.5                               # shift 0.5 inward
-        base[:, :, :2] = base[:, :, :2] + (torch.rand(k, NOBS, 2, device=dev) - 0.5) * 0.25   # jitter
+        to_center = center - seg_mid
+        clear_lane = seg_mid + to_center / (to_center.norm(dim=-1, keepdim=True) + 1e-6) * 0.5  # near path
+        d = float(getattr(self, "difficulty", 1.0))
+        pillar_xy = center + d * (clear_lane - center)                                  # (NOBS,2) interp
+        base = _SEG_MID[_FIXED_SEG].unsqueeze(0).expand(k, NOBS, 3).clone()             # (k,NOBS,3), z kept
+        base[:, :, :2] = pillar_xy.unsqueeze(0) + (torch.rand(k, NOBS, 2, device=dev) - 0.5) * 0.25
         self.obs_c[idx] = base
         self.pos[idx] = START + 0.1 * torch.randn(k, 3, device=dev)
         self.vel[idx] = 0.0

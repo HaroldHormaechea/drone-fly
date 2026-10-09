@@ -101,7 +101,7 @@ def warm_start(ac, path, src_extra_dim):
 
 def train_aug(env_cls, extra_dim, N=512, budget=20e6, lr=3e-4, roll=32, epochs=4, mb=8,
               ent_coef=0.01, logstd_final=-2.0, anneal_start=0.4, save_path=None,
-              warm_from=None, warm_src_extra_dim=12, logstd_init=INIT_LOGSTD):
+              warm_from=None, warm_src_extra_dim=12, logstd_init=INIT_LOGSTD, curriculum_frac=None):
     ac = K1ReservoirAug(extra_dim).to(dev)
     if warm_from is not None:
         warm_start(ac, warm_from, warm_src_extra_dim)
@@ -120,6 +120,10 @@ def train_aug(env_cls, extra_dim, N=512, budget=20e6, lr=3e-4, roll=32, epochs=4
             a = max(0.0, (frac - anneal_start) / max(1e-6, 1.0 - anneal_start))
             with torch.no_grad():
                 ac.log_std.fill_(logstd_init + (logstd_final - logstd_init) * min(1.0, a))
+        # Curriculum: ramp env.difficulty 0->1 over the first curriculum_frac of the budget (hazards
+        # start easy/off-path and move in). Affects envs as they respawn, so difficulty rises smoothly.
+        if curriculum_frac is not None and hasattr(env, "difficulty"):
+            env.difficulty = min(1.0, (total_steps / budget) / curriculum_frac)
         tap_b = torch.zeros(roll, N, ac.feat_dim, device=dev)
         ext_b = torch.zeros(roll, N, extra_dim, device=dev)
         obs_b = torch.zeros(roll, N, 12, device=dev)

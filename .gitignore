@@ -61,3 +61,5 @@ events.out.tfevents.*
 !training/figure8-chicane-flight/**
 !training/obstacle-lap-flight/
 !training/obstacle-lap-flight/**
+!training/pad-lap-flight/
+!training/pad-lap-flight/**

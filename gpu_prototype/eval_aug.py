@@ -8,6 +8,8 @@ elif which == "track":
     from gates_track import BatchedTrackCourse as C; E = 12
 elif which == "obstacles":
     from gates_obstacles import BatchedObstacleCourse as C, EXTRA_DIM as E
+elif which == "pads":
+    from gates_pads import BatchedPadCourse as C, EXTRA_DIM as E
 else:
     raise SystemExit(f"unknown course {which!r}")
 from reservoir_aug import K1ReservoirAug

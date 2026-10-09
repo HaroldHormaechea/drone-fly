@@ -21,9 +21,9 @@ EXTRA_DIM = 12 + 4            # obs + [battery, pad_dx, pad_dy, over_pad]
 MAX_STEPS = 900
 # One charging pad, offset from the ellipse center so reaching it is a small deliberate detour.
 PAD = torch.tensor([CX + 1.2, CY - 1.4, 0.0], device=dev)
-PAD_R = 0.8                  # horizontal radius to count as "over the pad"
-PAD_Z = 1.6                  # must be below this height over the pad to charge (dip toward it)
-DRAIN = 0.55                 # battery/sec at full thrust (a full lap drains > 1 -> a recharge is needed)
+PAD_R = 1.0                  # horizontal radius to count as "over the pad" (generous -> easy to use)
+PAD_Z = 1.8                  # charge when below this height over the pad (course z=1.2 < this, so no dip)
+DRAIN = 0.35                 # battery/sec at full thrust: dies ~mid-lap -> exactly ONE recharge completes it
 RECHARGE = 1.6               # battery/sec while charging
 EMPTY_THRUST = 0.25          # thrust multiplier when the battery is flat (can't hold altitude)
 TILT_PEN_W = 0.0
@@ -125,8 +125,9 @@ class BatchedPadCourse:
         r_prog = 6.0 * (prev_dist - curr_dist)
         r_up = torch.clamp(cos_tilt, 0, 1) * 0.3
         r_spin = torch.exp(-0.5 * self.omega.norm(dim=-1)) * 0.2
-        # recharge shaping: reward gaining charge, weighted up when the battery is low (guides the detour)
-        r_charge = 8.0 * batt_gain * (1.0 - prev_batt)
+        # recharge shaping: reward gaining charge, weighted up when the battery is low (guides the detour).
+        # Softened (3.0, was 8.0) so topping up never out-earns flying the course -> no loitering at the pad.
+        r_charge = 3.0 * batt_gain * (1.0 - prev_batt)
         reward = r_prog + r_up + r_spin + r_charge + 20.0 * passed.float()
         if TILT_PEN_W > 0.0:
             reward = reward - TILT_PEN_W * torch.clamp(tilt - math.radians(TILT_PEN_DEG), min=0.0)

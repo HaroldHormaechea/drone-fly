@@ -22,21 +22,28 @@ N_EP = int(sys.argv[4]) if len(sys.argv) > 4 else 10
 OUT = f"/workspace/drone-fly/training/{OUT_NAME}/recordings"
 K1_PATH = "/workspace/drone-fly/artifacts/pruned/k1"
 
+OBS_R = 0.25
+PAD_SPECS = ()
 if which == "lap":
     from gates_lap import BatchedLapCourse as Course, APERTURE, MAX_STEPS; E = 12
 elif which == "track":
     from gates_track import BatchedTrackCourse as Course, APERTURE, MAX_STEPS; E = 12
 elif which == "obstacles":
     from gates_obstacles import BatchedObstacleCourse as Course, APERTURE, MAX_STEPS, OBS_R, EXTRA_DIM as E
+elif which == "pads":
+    from gates_pads import BatchedPadCourse as Course, APERTURE, MAX_STEPS, PAD, PAD_R, EXTRA_DIM as E
+    from drone_fly.env.config import PadSpec
+    PAD_SPECS = (PadSpec(center=(float(PAD[0]), float(PAD[1]), float(PAD[2])), radius=float(PAD_R),
+                         rechargeable=True),)
 else:
     raise SystemExit(f"unknown course {which!r}")
 
 
 def course_of(env):
-    """CourseConfig for the viewer from this episode's actual gates/start/obstacles."""
+    """CourseConfig for the viewer from this episode's actual gates/start/obstacles/pads."""
     if hasattr(env, "gates"):                     # randomized track: per-env gates
         gates = env.gates[0].cpu().tolist(); start = env.start[0].cpu().tolist()
-    else:                                         # lap/obstacles: static oval gates
+    else:                                         # lap/obstacles/pads: static oval gates
         import gates_lap
         gates = gates_lap.GATES.cpu().tolist(); start = gates_lap.START.cpu().tolist()
     specs = tuple(GateSpec(center=(float(c[0]), float(c[1]), float(c[2])), aperture=float(APERTURE))
@@ -48,7 +55,7 @@ def course_of(env):
                           for o in env.obs_c[0].cpu().tolist())
     return CourseConfig(start_position=(float(start[0]), float(start[1]), float(start[2])),
                         gates=specs, finish_x=float(start[0]), floor_z=0.0, ceiling_z=3.5,
-                        obstacles=obstacles)
+                        obstacles=obstacles, pads=PAD_SPECS)
 
 
 ac = K1ReservoirAug(E).to(dev)
