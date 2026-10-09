@@ -12,6 +12,7 @@ See [CONNECTOME_RESERVOIR.md](CONNECTOME_RESERVOIR.md) for how the frozen-reserv
 | **oval-lap-flight** | closed oval lap (same-direction turns) | **99–100%** | 25° | 10 |
 | **figure8-chicane-flight** | randomized figure-8 *or* chicane per episode (both turn directions) | **96%** (figure-8 100% / chicane 92%) | 12° | 12 |
 | **pad-lap-flight** | oval lap + battery + charging pad (recharge mid-lap) | **99%** | 46° (aggressive — see note) | 10 |
+| **obstacle-lap-flight** | oval lap + pillar obstacles (weave around) | **99%** (100% never enter a pillar, 0.27 m clearance) | 44° (weaving) | 10 |
 
 The navigation courses (straight/oval/track) are **upright, controlled flight** (~7–25° tilt). The
 **pad** model solves the battery/charging task at 99% but flies **aggressively** (~46° tilt, never
@@ -45,11 +46,16 @@ The straight course uses the pure reservoir (`gates_k1_reservoir.py`); the turni
 augmented reservoir (`reservoir_aug.py`) — the K1 body also feeds the raw flight obs to the readout,
 which (with exploration annealing) closes a deterministic-control gap on the hard return-leg turns.
 
-## Work in progress (not yet solved — see CONNECTOME_RESERVOIR notes / campaign memory)
+## Work in progress
 
-- **obstacle-lap-flight** — pillars to weave around (obstacle-vision fed to the readout; contact is a
-  non-terminal recoverable nudge). Cold/naive training collapses to either a stationary hover (any
-  proximity / terminal penalty makes flying riskier than hovering) or unstable high-tilt flight
-  (nudge-only). Now training with a **curriculum** (`curriculum_frac`): pillars start at the loop
-  centre (off-path, ignored) and slide onto the path over the first half of training, warm-started from
-  the oval — so avoidance is learned incrementally. In progress.
+- **pad-lap-flight (landing version)** — the committed `pad-lap-flight` above recharges on a *fly-over*
+  (a flaw). A redesigned `gates_pads.py` requires an actual **controlled landing + full stop** on the
+  pad, with a **timed gradual recharge**, **battery-relative urgency** (>65% ignore pad / ~40% divert /
+  <25% override the course), and **battery sag** (non-linear thrust — a low battery can't fly
+  aggressively). Retraining to replace the fly-over model.
+
+Obstacle avoidance (above) was previously the hard case — naive training collapsed to a stationary
+hover (any proximity/terminal penalty makes flying riskier than hovering) or, with nudge-only, to
+unstable high-tilt flight; a direct tilt penalty is a non-starter (penalizing tilt removes the only way
+to translate in acro). The **curriculum** (pillars start off-path and slide on, warm-started from the
+oval) resolved it.
