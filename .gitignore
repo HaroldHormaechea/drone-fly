@@ -53,3 +53,5 @@ events.out.tfevents.*
 # Committed example recordings for the desktop app (reads training/<name>/recordings/)
 !training/acro-gate-flight/
 !training/acro-gate-flight/**
+!training/k1-gate-flight/
+!training/k1-gate-flight/**

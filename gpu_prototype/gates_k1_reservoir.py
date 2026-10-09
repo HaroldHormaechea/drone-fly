@@ -52,14 +52,24 @@ class K1Reservoir(nn.Module):
             self.pi[-1].bias[0] = 2 * HOVER_THR - 1                          # bias throttle toward hover
 
     @torch.no_grad()
-    def features(self, obs):
-        """Full-brain forward (FROZEN): obs -> sensory injection -> real-weight propagation -> tap."""
+    def propagated_full(self, obs):
+        """Full-brain forward (FROZEN): obs -> sensory injection -> real-weight propagation -> (B, N).
+
+        Returns the activation of ALL 25.6k neurons (what the recorder's per-neuron sink wants),
+        before the reservoir tap narrows it to R features.
+        """
         x = obs.to(torch.float32)
         projected = self.body.input_projection(x)                           # (B, |sensory|)
         state = torch.zeros(x.shape[0], self.N, dtype=torch.float32, device=x.device)
         state = state.index_add(1, self.body.sensory_index, projected)
-        propagated = self.body.layer(state)                                 # (B, N) real K1 dynamics
+        return self.body.layer(state)                                       # (B, N) real K1 dynamics
+
+    def tap(self, propagated):
         return propagated.index_select(1, self.tap_index)                   # (B, R)
+
+    @torch.no_grad()
+    def features(self, obs):
+        return self.tap(self.propagated_full(obs))                          # (B, R)
 
     def act_from_feats(self, feats):
         return self.pi(feats), self.log_std.exp()
