@@ -166,7 +166,14 @@ class RaceEnv(gym.Env):
         # genuinely grounded/stuck episodes (see :class:`EarlyTerminationConfig`); obs/RNG are
         # untouched, so normal/crashing episodes stay byte-identical.
         et = self.config.early_termination
-        self._et_enabled = bool(et.enabled)
+        # EXPERIMENTAL (env var DRONE_FLY_DISABLE_ET=1): force-disable the grounded/stuck early-
+        # termination detectors. Needed for a STATIONARY task (e.g. a stability-first hover phase with
+        # no forward objective), where the no-progress "stuck" detector would otherwise cut a perfectly
+        # good hover. Episodes are then bounded only by ``max_steps`` (and the invert cut, if set).
+        # Unset ⇒ uses the config's ``enabled`` (byte-identical).
+        import os as _os_et
+
+        self._et_enabled = bool(et.enabled) and _os_et.environ.get("DRONE_FLY_DISABLE_ET") != "1"
         self._et_floor_epsilon = float(et.floor_epsilon)
         self._et_stuck_window = int(et.stuck_window)  # no-progress detector window
         self._et_grounded_window = int(et.grounded_window)  # grounded window (UC-36; shorter)
@@ -184,6 +191,26 @@ class RaceEnv(gym.Env):
         # episode, is True at step 0 so behaviour stays byte-identical to UC-25/36 (AC4). Set
         # properly from the spawn state in reset(); declared here for the reset()-skipped path.
         self._took_off = False
+
+        # EXPERIMENTAL (acro stability, env var DRONE_FLY_INVERT_LIMIT="<deg>:<seconds>"): forbid
+        # SUSTAINED inverted flight. Accumulates the airborne time the thrust axis is tilted past
+        # ``<deg>`` from vertical; once the CUMULATIVE inverted time this episode exceeds ``<seconds>``
+        # the episode is cut as a penalised failure. Cumulative (not instantaneous) so brief
+        # intentional inversions (e.g. a Split-S) are allowed but a continuous tumble is not. Unset ⇒
+        # disabled ⇒ byte-identical. ``cos_thresh`` precomputes cos(deg) so the per-step test is
+        # ``cos(roll)·cos(pitch) < cos_thresh``.
+        import os as _os
+
+        _inv_spec = _os.environ.get("DRONE_FLY_INVERT_LIMIT", "").strip()
+        self._invert_enabled = bool(_inv_spec)
+        if self._invert_enabled:
+            _inv_deg, _inv_sec = _inv_spec.split(":")
+            self._invert_cos_thresh = float(np.cos(np.radians(float(_inv_deg))))
+            self._invert_budget_s = float(_inv_sec)
+        else:
+            self._invert_cos_thresh = -1.0
+            self._invert_budget_s = 0.0
+        self._inverted_steps = 0
 
         # UC-44: training-time airborne-start reverse curriculum. When not None, this absolute z
         # replaces ``course.floor_z`` as the spawn height on the ``floor_start`` reset path, so the
@@ -422,6 +449,7 @@ class RaceEnv(gym.Env):
         self._grounded_counter = 0
         self._stuck_counter = 0
         self._best_dist = float("inf")
+        self._inverted_steps = 0
         self._prev_battery = float(state.battery)
         self._prev_integrity = float(state.integrity)
         # Effective step budget scales with the active course's gate count (UC-09): a longer
@@ -661,6 +689,17 @@ class RaceEnv(gym.Env):
             elif self._stuck_counter >= self._et_stuck_window:
                 early_termination = "stuck"
 
+        # EXPERIMENTAL (acro stability): cumulative inverted-time budget cut (independent of the
+        # grounded/stuck early-termination detectors above). Only counts while AIRBORNE and only when
+        # the episode hasn't already ended this step. ``cos(roll)·cos(pitch) < cos_thresh`` ⇒ the
+        # thrust axis is past the tilt threshold; once the accumulated inverted time exceeds the
+        # budget the episode is cut as "inverted" (penalised below). No-op when disabled.
+        if self._invert_enabled and airborne and early_termination is None and not completed:
+            if float(np.cos(state.attitude[0]) * np.cos(state.attitude[1])) < self._invert_cos_thresh:
+                self._inverted_steps += 1
+                if self._inverted_steps * self.config.episode.dt > self._invert_budget_s:
+                    early_termination = "inverted"
+
         # UC-58: ``penalize_collision`` is now crash-only. ``crash`` keeps its narrow meaning — a
         # GENUINE floor/ceiling/OOB collision (raw ``state.collided`` and not a controlled dock,
         # pre-takeoff-suppressed above) — and is the ONLY signal that eats ``collision_penalty``.
@@ -675,7 +714,9 @@ class RaceEnv(gym.Env):
         # punish it. The no-progress ("stuck") cut and a pure ``max_steps`` timeout remain penalty-
         # free too. The termination reason is reported independently via
         # ``info["early_termination"]``.
-        penalize_collision = crash
+        # A sustained-inversion cut is a genuine failure and pays the collision penalty (so tumbling
+        # is costly, not a neutral timeout). The grounded/stuck cuts stay penalty-free as before.
+        penalize_collision = crash or (early_termination == "inverted")
 
         # UC-58: the UC-39/41 crash-cliff collision-penalty override is retired (the whole training-
         # time collision curriculum is gone). The reward always uses the env's default RewardConfig;

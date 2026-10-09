@@ -24,9 +24,13 @@ UC-02 hardening (replaces UC-01's one-hop shim)
   a single matmul. The bounded nonlinearity keeps activity finite over many steps.
 * **Batched state.** ``forward`` accepts either a ``(N,)`` vector (returns ``(N,)``, the
   UC-01 contract) or a batched ``(B, N)`` tensor (returns ``(B, N)``) for SB3 rollouts.
-* **Two propagation modes.** ``propagation_mode="scatter"`` (default) uses an
-  autograd-stable ``index_add`` gather/scatter; ``"sparse"`` uses ``torch.sparse.mm``.
-  The scatter path is the AC6 fallback if sparse autograd proves unstable.
+* **Two propagation modes, both edge-sparse.** ``propagation_mode="sparse"`` (default)
+  builds a precomputed-coalesced COO matrix and uses ``torch.sparse.mm``; its peak memory
+  scales with the ``(B, N)`` state, so the full K1 slice (25.6k neurons, 3.86M edges)
+  fits and trains on a 6 GB GPU. ``"scatter"`` uses an autograd-stable ``index_add``
+  gather/scatter and is the AC6 fallback; it is mathematically identical but materialises
+  a dense ``(B, E)`` message tensor, so on large graphs it exhausts GPU memory (B=256 on
+  K1 needs ~3.7 GB/step) — fine for the small fixtures, kept for equivalence checking.
 
 Only the per-edge weight vector is an :class:`~torch.nn.Parameter`; the edge topology
 and the sign mask are registered buffers (non-trainable). Parameter count therefore
@@ -60,8 +64,11 @@ from drone_fly.connectome.loader import ConnectomeData
 #: sparse weights non-trivially. Configurable per instance.
 DEFAULT_N_STEPS = 2
 
-#: Supported sparse-propagation strategies. ``"scatter"`` (autograd-stable index_add) is
-#: the default and the AC6 fallback; ``"sparse"`` uses ``torch.sparse.mm``.
+#: Supported sparse-propagation strategies. Both are edge-sparse (memory scales with
+#: edges, never ``N**2``). ``"sparse"`` (``torch.sparse.mm`` over a precomputed-coalesced
+#: COO) is the default — it avoids the dense ``(B, E)`` message tensor, so the K1 slice
+#: fits on a 6 GB GPU. ``"scatter"`` (autograd-stable ``index_add``) is the AC6 fallback
+#: and the small-graph equivalence reference.
 PROPAGATION_MODES = ("scatter", "sparse")
 
 
@@ -88,7 +95,7 @@ class SparseConnectomeLayer(nn.Module):
         Number of recurrent unroll steps (must be ``>= 1``; default
         :data:`DEFAULT_N_STEPS`).
     propagation_mode:
-        ``"scatter"`` (default) or ``"sparse"`` — see :data:`PROPAGATION_MODES`.
+        ``"sparse"`` (default) or ``"scatter"`` — see :data:`PROPAGATION_MODES`.
     """
 
     def __init__(
@@ -97,7 +104,7 @@ class SparseConnectomeLayer(nn.Module):
         *,
         sign: np.ndarray | None = None,
         n_steps: int = DEFAULT_N_STEPS,
-        propagation_mode: str = "scatter",
+        propagation_mode: str = "sparse",
     ) -> None:
         super().__init__()
         if n_steps < 1:
@@ -118,6 +125,27 @@ class SparseConnectomeLayer(nn.Module):
         # raw_weight init = connectome magnitudes EXACTLY (coo.data). The effective weight
         # applies sign and abs() (below); at init the magnitude is preserved bit-for-bit.
         self.edge_weight = nn.Parameter(torch.as_tensor(coo.data, dtype=torch.float32))
+
+        # --- Precomputed coalesced edge ordering (memory-efficient ``sparse`` path) -----
+        # ``torch.sparse.mm`` needs a *coalesced* COO tensor (indices lexsorted by
+        # (row, col), no duplicates) for a correct autograd backward. The connectome has
+        # no duplicate edges (one synapse magnitude per directed pair), so coalescing is
+        # purely a sort. We compute that sort ONCE here and store the permutation, then at
+        # every forward we build the sparse tensor from the already-sorted indices and
+        # flag it coalesced — skipping the per-call O(E log E) re-sort that the naive
+        # ``.coalesce()`` performs on each propagation step (3.86M edges × n_steps × calls).
+        # ``edge_order`` maps coalesced-position -> original edge position, so gathering the
+        # per-edge weight vector with it (an autograd-safe ``index_select`` of E scalars)
+        # aligns the trainable magnitudes with the sorted indices while keeping the gradient
+        # path to ``edge_weight`` intact. For an already-lexsorted graph (K1, CSR order) this
+        # is the identity permutation and the gather is a no-op copy.
+        lin = edge_index[0].astype(np.int64) * self.n_neurons + edge_index[1].astype(np.int64)
+        order = np.argsort(lin, kind="stable").astype(np.int64)
+        sorted_edge_index = edge_index[:, order]
+        self.register_buffer(
+            "_coalesced_edge_index", torch.as_tensor(sorted_edge_index, dtype=torch.long)
+        )
+        self.register_buffer("_edge_order", torch.as_tensor(order, dtype=torch.long))
 
         # Fixed per-edge E/I sign buffer = sign of the presynaptic (column) neuron.
         # `has_sign_mask` records whether biology was available; the sign buffer is
@@ -156,23 +184,40 @@ class SparseConnectomeLayer(nn.Module):
     def _propagate(self, state: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         """One hop: ``(W_eff @ state^T)^T`` for a batched ``(B, N)`` state.
 
+        Both modes compute the identical sparse matrix-vector product ``W_eff @ state`` —
+        memory scales with the number of **edges** (``E``), never ``N**2``.
+
         ``scatter`` gathers the presynaptic activations and scatter-adds the weighted
-        messages onto the postsynaptic rows (autograd-stable). ``sparse`` builds a
-        coalesced sparse COO matrix and uses ``torch.sparse.mm``.
+        messages onto the postsynaptic rows via ``index_add``. It is autograd-stable but
+        materialises a dense ``(B, E)`` message tensor, so its peak memory grows with
+        ``batch × edges`` — fine for small graphs, but it blows past a 6 GB GPU on the K1
+        slice (B=256 × 3.86M edges ≈ 3.7 GB per step).
+
+        ``sparse`` (the default) builds a sparse COO matrix from the **precomputed
+        coalesced** edge ordering and uses ``torch.sparse.mm``, which streams the product
+        without ever forming the ``(B, E)`` intermediate. Its peak memory is dominated by
+        the two ``(B, N)`` states, so the full K1 connectome fits — and trains — on 6 GB.
         """
-        edge_index = cast(torch.Tensor, self.edge_index)
-        row, col = edge_index[0], edge_index[1]
         if self.propagation_mode == "scatter":
+            edge_index = cast(torch.Tensor, self.edge_index)
+            row, col = edge_index[0], edge_index[1]
             messages = state.index_select(1, col) * weight.unsqueeze(0)  # (B, E)
             out = torch.zeros_like(state)
             return out.index_add(1, row, messages)
-        # sparse mode: (N, N) @ (N, B) -> (N, B) -> (B, N)
+        # sparse mode: (N, N) @ (N, B) -> (N, B) -> (B, N).
+        # The indices are already in coalesced order (lexsorted by (row, col), no dupes),
+        # precomputed once in __init__, so we reorder the per-edge weights to match and
+        # flag the tensor coalesced — a correct autograd-ready COO with no per-call re-sort.
+        coalesced_index = cast(torch.Tensor, self._coalesced_edge_index)
+        order = cast(torch.Tensor, self._edge_order)
+        coalesced_weight = weight.index_select(0, order)
         w = torch.sparse_coo_tensor(
-            edge_index,
-            weight,
+            coalesced_index,
+            coalesced_weight,
             size=(self.n_neurons, self.n_neurons),
             check_invariants=False,
-        ).coalesce()
+            is_coalesced=True,
+        )
         return torch.sparse.mm(w, state.t()).t()
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
@@ -225,7 +270,7 @@ class ConnectomePolicy(nn.Module):
         *,
         force_shim: bool = False,
         n_steps: int = DEFAULT_N_STEPS,
-        propagation_mode: str = "scatter",
+        propagation_mode: str = "sparse",
     ) -> None:
         super().__init__()
         self.n_neurons = data.neuron_count

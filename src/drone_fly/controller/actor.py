@@ -94,7 +94,7 @@ class ConnectomeActorNetwork(nn.Module):
         data: ConnectomeData,
         *,
         n_steps: int = DEFAULT_N_STEPS,
-        propagation_mode: str = "scatter",
+        propagation_mode: str = "sparse",
         motor_size: int = MOTOR_POP_SIZE,
         sensory_size: int = SENSORY_POP_SIZE,
         sensory_index=None,

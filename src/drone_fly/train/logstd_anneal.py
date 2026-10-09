@@ -69,10 +69,18 @@ class LogStdAnnealCallback(BaseCallback):
         self._start_val = 0.0
 
     def _on_training_start(self) -> None:
+        import os
+
         import torch
 
         log_std = self.model.policy.log_std
-        self._start_val = float(log_std.data.mean().item())
+        # DRONE_FLY_LOGSTD_START (optional): override the anneal START value, e.g. "0.0" => std 1.0.
+        # Use on a WARM resume to RE-INJECT exploration into a checkpoint whose std had already
+        # collapsed (its learned MEAN behaviour is preserved; only the action noise is raised) so the
+        # policy can re-explore refinements (e.g. flying its known trajectory upright) before annealing
+        # back down. Unset => start from the loaded value (byte-identical to before).
+        _start_override = os.environ.get("DRONE_FLY_LOGSTD_START", "").strip()
+        self._start_val = float(_start_override) if _start_override else float(log_std.data.mean().item())
         self._start_ts = int(self.num_timesteps)
         # Freeze: the optimizer must not be able to raise std back up while we drive it down.
         log_std.requires_grad_(False)

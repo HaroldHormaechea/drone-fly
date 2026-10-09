@@ -49,3 +49,7 @@ events.out.tfevents.*
 .DS_Store
 .idea/
 .vscode/
+
+# Committed example recordings for the desktop app (reads training/<name>/recordings/)
+!training/acro-gate-flight/
+!training/acro-gate-flight/**
