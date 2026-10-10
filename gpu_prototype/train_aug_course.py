@@ -32,9 +32,10 @@ elif course == "proc":
         # obstacle-free tier: warm-start from the figure-8/chicane flier (obs-only extra, 12 dims)
         warm_from = "/workspace/drone-fly/training/figure8-chicane-flight/model_readout.pt"; warm_src = 12
     else:
-        # with-obstacles tier: warm-start from the PROC no-obstacle flier (same 30-dim extra -> full
-        # readout copy) so it already flies random courses and only has to LEARN obstacle avoidance.
-        warm_from = "/workspace/drone-fly/training/proc-course-flight/model_readout.pt"; warm_src = E
+        # with-obstacles tier: warm-start from the PROC no-obstacle flier (its extra is 30-dim =
+        # obs+curr+next+obsvis; the current env's first 30 extra dims match, so copy those and zero-init
+        # the 40 new raycast dims) so it already flies random courses and only has to LEARN avoidance.
+        warm_from = "/workspace/drone-fly/training/proc-course-flight/model_readout.pt"; warm_src = 30
 else:
     raise SystemExit(f"unknown course {course!r}")
 

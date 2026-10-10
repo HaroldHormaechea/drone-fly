@@ -60,9 +60,16 @@ which (with exploration annealing) closes a deterministic-control gap on the har
     ~6–10% completion** (it crashes into randomly-placed on-path obstacles rather than reliably avoiding).
   So: non-terminal → cheats, terminal → can't. Clean high-completion evasion worked on `obstacle-lap-flight`
   only because that course was *fixed* with a *clear lane* + slide-in curriculum; generalizing avoidance
-  across *random* on-path obstacles is the open hard problem. Likely needs richer obstacle perception
-  (more than nearest-2) and/or courses that guarantee a clear arc around each blocker. Infra ready
-  (`gates_proc_env.py`, `course_gen.py`, `verify_proc.py`; env vars `PROC_TRACTABLE`/`PROC_NO_OBS`/`PROC_OBS_TERMINAL`).
+  across *random* on-path obstacles is the open hard problem.
+  - **Raycast perception tried** (`PROC_RAYCAST=1`: a forward 90° cone of 40 free-space rays fed to the
+    readout — `gates_proc_env._raycast()`). It lifted the *stochastic* policy ~10–13 pts at matched obstacle
+    size, but under annealing the **deterministic mean still collapsed to ~5%** (same as without raycasts).
+    So perception was **not** the bottleneck — the small frozen-reservoir *readout* can't turn free-space
+    sensing into a placement-invariant avoidance policy that survives annealing.
+  - **Next levers (future):** feed the raycasts into the **connectome itself** (a second sensory input
+    projection — use the brain's capacity, not just the ~168k readout); and/or gentler annealing (deploy a
+    mildly-stochastic policy, which flew clean at ~50%); and/or partial plasticity. Infra ready
+    (`gates_proc_env.py`, `course_gen.py`, `verify_proc.py`; env vars `PROC_TRACTABLE`/`PROC_NO_OBS`/`PROC_OBS_TERMINAL`/`PROC_RAYCAST`).
 - **pad-lap-flight (landing version)** — the committed `pad-lap-flight` above recharges on a *fly-over*
   (a flaw). A redesigned `gates_pads.py` requires an actual **controlled landing + full stop** on the
   pad, with a **timed gradual recharge**, **battery-relative urgency** (>65% ignore pad / ~40% divert /

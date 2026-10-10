@@ -34,8 +34,26 @@ ARENA = 16.0           # xy crash bound (courses are centred on origin, radius <
 CEIL = 3.5
 PASS_SLACK = 0.6       # precision curriculum: extra pass radius at difficulty 0 (generous), -> 0 at diff 1
                        # (true aperture). Lets the policy learn course structure before fine gate precision.
-# extra() layout: obs(12) + curr_orient(2)+curr_ap(1) + next[bearing(3)+orient(2)+dist(1)+vis(1)] + obsvis(NVIS*4)
-EXTRA_DIM = 12 + 3 + 7 + NVIS * 4
+N_RAYS = 40            # forward-cone raycasts (free-space depth fan) -> generalizable obstacle perception
+CONE_HALF_DEG = 45.0   # 90-degree total cone (±45° around the heading)
+RAY_RANGE = 4.0        # max sensing distance (m); rays return distance-to-surface normalized to [0,1]
+# canonical ray directions in a cone around +z (Fibonacci spiral for even spread), rotated to the
+# heading per-env at sensing time.
+import math as _m
+_ga = _m.pi * (3 - _m.sqrt(5))
+_cz_min = _m.cos(_m.radians(CONE_HALF_DEG))
+_cone = []
+for _i in range(N_RAYS):
+    _cz = 1.0 - (_i / max(1, N_RAYS - 1)) * (1 - _cz_min)
+    _st = _m.sqrt(max(0.0, 1 - _cz * _cz)); _phi = _i * _ga
+    _cone.append((_st * _m.cos(_phi), _st * _m.sin(_phi), _cz))
+CONE = torch.tensor(_cone, device=dev)   # (N_RAYS, 3), axis = +z
+
+# extra() layout: obs(12) + curr_orient(2)+curr_ap(1) + next[bearing(3)+orient(2)+dist(1)+vis(1)]
+#                 + obsvis(NVIS*4) [+ raycast(N_RAYS) when PROC_RAYCAST=1]. Raycast is OPT-IN so the
+# committed 30-dim no-obstacle model stays reproducible (default extra_dim 30).
+RAYCAST = bool(os.environ.get("PROC_RAYCAST", ""))
+EXTRA_DIM = 12 + 3 + 7 + NVIS * 4 + (N_RAYS if RAYCAST else 0)
 
 
 def build_pool(P=POOL, base=0, no_obs=False, **ckw):
@@ -196,10 +214,58 @@ class BatchedProcCourse:
         distn = torch.where(occ, torch.zeros_like(dist), (dist / 10.0).clamp(max=1.0))   # normalized
         return torch.cat([bearing, orient, distn, vis], dim=-1)
 
+    def _raycast(self):
+        """Forward 90-deg cone of N_RAYS rays; each returns normalized free-space distance in [0,1]
+        (1 = clear to RAY_RANGE, lower = obstacle surface nearer). Generalizable egocentric perception:
+        'where is the path blocked / open', independent of absolute obstacle positions."""
+        n, R = self.n, N_RAYS
+        # heading = velocity direction; fall back to the direction to the current target at low speed
+        v = self.vel; sp = v.norm(dim=-1, keepdim=True)
+        tdir = self._target_pos() - self.pos
+        fwd = torch.where(sp > 0.3, v / (sp + 1e-6), tdir / (tdir.norm(dim=-1, keepdim=True) + 1e-6))
+        wup = torch.tensor([0.0, 0.0, 1.0], device=dev).expand(n, 3)
+        right = torch.cross(fwd, wup, dim=-1)
+        rn = right.norm(dim=-1, keepdim=True)
+        right = torch.where(rn < 1e-3, torch.tensor([1.0, 0.0, 0.0], device=dev).expand(n, 3), right / (rn + 1e-6))
+        up = torch.cross(right, fwd, dim=-1)
+        # ray directions in world: (n,R,3) = cx*right + cy*up + cz*fwd (canonical cone is around +z)
+        cx = CONE[:, 0].view(1, R, 1); cy = CONE[:, 1].view(1, R, 1); cz = CONE[:, 2].view(1, R, 1)
+        rays = cx * right.unsqueeze(1) + cy * up.unsqueeze(1) + cz * fwd.unsqueeze(1)   # (n,R,3)
+
+        oc = self.P["oc"][self.cid]; od = self._odim(); om = self.P["omask"][self.cid]; ot = self.P["otype"][self.cid]
+        o_e = self.pos.view(n, 1, 1, 3); r_e = rays.view(n, R, 1, 3)
+        oc_e = oc.view(n, 1, MO, 3); od_e = od.view(n, 1, MO, 3)
+        om_e = om.view(n, 1, MO); ot_e = ot.view(n, 1, MO)
+        INF = torch.full((n, R, MO), 1e4, device=dev)
+        # --- cylinder (vertical): quadratic in xy + z-slab ---
+        dxy = r_e[..., :2]; fxy = (o_e - oc_e)[..., :2]                 # (n,R,1,2),(n,1,MO,2)
+        a = (dxy * dxy).sum(-1)                                         # (n,R,1)
+        b = 2 * (dxy * fxy).sum(-1)                                     # (n,R,MO)
+        cc = (fxy * fxy).sum(-1) - od_e[..., 0] ** 2                    # (n,1,MO)
+        disc = b * b - 4 * a * cc
+        tcyl = (-b - torch.sqrt(disc.clamp(min=0))) / (2 * a + 1e-9)
+        zhit = o_e[..., 2] + tcyl * r_e[..., 2]                         # (n,R,MO)
+        cok = (disc > 0) & (tcyl > 1e-3) & (zhit > oc_e[..., 2] - od_e[..., 2]) & (zhit < oc_e[..., 2] + od_e[..., 2])
+        tcyl = torch.where(cok, tcyl, INF)
+        # --- box (AABB): slab method ---
+        dsafe = torch.where(r_e.abs() < 1e-6, torch.full_like(r_e, 1e-6), r_e)
+        t1 = (oc_e - od_e - o_e) / dsafe; t2 = (oc_e + od_e - o_e) / dsafe
+        tmn = torch.minimum(t1, t2).max(-1).values; tmx = torch.maximum(t1, t2).min(-1).values   # (n,R,MO)
+        bhit = torch.where(tmn > 1e-3, tmn, tmx)
+        bok = (tmx >= tmn.clamp(min=0)) & (tmx > 1e-3)
+        tbox = torch.where(bok, bhit, INF)
+        t = torch.where(ot_e == 0, tcyl, tbox)                         # select by type
+        t = torch.where(om_e & (t > 0) & (t < RAY_RANGE), t, INF)      # real obstacles, in range
+        dist = t.min(dim=2).values.clamp(max=RAY_RANGE)                # (n,R) nearest hit per ray
+        return dist / RAY_RANGE                                        # 1 = clear
+
     def extra(self):
         _, cy, cap = self._gate(self.tgt)
         curr = torch.cat([torch.cos(cy).unsqueeze(-1), torch.sin(cy).unsqueeze(-1), cap.unsqueeze(-1)], -1)
-        return torch.cat([self.obs(), curr, self._next_lookahead(), self._obstacle_vision()], dim=-1)
+        feats = [self.obs(), curr, self._next_lookahead(), self._obstacle_vision()]
+        if RAYCAST:
+            feats.append(self._raycast())
+        return torch.cat(feats, dim=-1)
 
     def metric(self):
         return f"compl {self._comp_rate*100:4.1f}% lap {float(self.lap.float().mean()):.1f}"
