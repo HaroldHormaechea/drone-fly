@@ -28,6 +28,20 @@ dev = [
     "mypy",
     "pip-audit",
 ]
+# Live-harness backends (drone_fly.harness): screen capture, OpenCV gate detection, the
+# monocular depth model and the ViGEm virtual gamepad. All lazily imported; the core package
+# and CI do not need them. Install with `uv sync --extra harness`.
+harness = [
+    "opencv-python",
+    "mss",
+    "dxcam; sys_platform == 'win32'",
+    "vgamepad; sys_platform == 'win32'",
+    "transformers",
+    "pillow",
+]
+
+[project.scripts]
+drone-fly = "drone_fly.cli.main:main"
 
 [build-system]
 requires = ["hatchling"]

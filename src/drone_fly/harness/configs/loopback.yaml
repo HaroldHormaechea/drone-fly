@@ -1,0 +1,45 @@
+# Packaged default for the `sim-loopback` harness: the contract reference plant (plant_step)
+# driven through the harness interfaces with ground-truth estimators. A user --config file is
+# overlaid on this one; keys not listed here are rejected.
+harness: sim-loopback
+
+contract:
+  gpu_prototype_dir: null   # null -> $DRONE_FLY_GPU_PROTOTYPE -> <repo>/gpu_prototype
+  k1_path: null             # null -> $DRONE_FLY_K1_PATH -> <repo>/artifacts/pruned/k1
+  device: auto              # auto | cpu | cuda
+
+runner:
+  rate_hz: 50               # must equal 1/DT of the reference plant (50 Hz)
+  clock: sim                # virtual time: the loopback runs as fast as the CPU allows
+  stale_after_s: 0.25
+  max_estimate_age_s: 0.3
+  wait_for_state_s: 1.0
+  max_duration_s: 28.0      # 1400 ticks = the env's MAX_STEPS episode cap
+  max_ticks: null
+
+parts:
+  state_source: plant
+  frame_source: null
+  gate_estimator: course
+  free_space_estimator: raycast
+  action_sink: plant
+  abort_signal: null
+
+# Options for programmatically registered parts, keyed by part kind (free-form).
+part_options: {}
+
+scaling:
+  world_scale: 1.0          # course geometry in yaml/inline is divided by this (training_m = m / s)
+
+course:
+  source: course_gen        # course_gen | yaml | inline
+  seed: 0                   # course_gen seed
+  tractable: true           # course_gen PROC_TRACTABLE tier (what the obstacle model trained on)
+  path: null                # source: yaml -> a {gates, obstacles, start, laps} file
+  inline: {}                # source: inline -> {gates, obstacles, start, laps}
+
+recording:
+  enabled: true
+  output_root: null         # null -> <repo>/artifacts/harness
+  frame_every_n: 0
+  queue_size: 4096

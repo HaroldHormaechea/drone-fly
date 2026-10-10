@@ -71,3 +71,4 @@ Statuses:
 | 59 | [use-cases/59-viewer-layout-redesign.md](use-cases/59-viewer-layout-redesign.md) | Viewer layout redesign (full-width map, brain ‖ actions, animated tagged soma-less boxes) | done | 2026-09-24 |
 | 60 | [use-cases/60-viewer-brain-shorten-boundary-boxes.md](use-cases/60-viewer-brain-shorten-boundary-boxes.md) | Shorten brain image, relocate out-of-boundary neurons to boxes, equal-height top panels, drop legend | done | 2026-09-24 |
 | 61 | [use-cases/61-desktop-app-training-viewer.md](use-cases/61-desktop-app-training-viewer.md) | Desktop app for slices/trainings/recordings (replace TUI + HTML viewer) | done | 2026-09-27 |
+| 62 | [use-cases/62-liftoff-vision-harness.md](use-cases/62-liftoff-vision-harness.md) | Pluggable live-harness framework + vision-driven Liftoff harness | in-progress | 2026-10-11 |
