@@ -73,3 +73,6 @@ events.out.tfevents.*
 # First real random-obstacle avoider (clearance shaping + terminal + warm aggressive start)
 !training/10-proc-obstacle-avoid/
 !training/10-proc-obstacle-avoid/**
+# Obstacle-count curriculum (1->N) -- 67% honest, nearly 2x the avoider above
+!training/11-count-curriculum/
+!training/11-count-curriculum/**

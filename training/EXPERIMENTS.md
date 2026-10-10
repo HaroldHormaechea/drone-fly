@@ -8,18 +8,20 @@ One unified, sequentially-numbered timeline for the whole campaign so the order 
 - Working checkpoint:      `gpu_prototype/expNN_<slug>.pt` (scratch; promoted into the model dir on a win)
 - `Honest?` = did completed runs avoid barging (terminal-contact held)? A higher % that cheats does NOT count — audit with `verify_proc.py`.
 
-**Current best (committed):** `10-proc-obstacle-avoid` — 33–36% honest deterministic, 0% barging. Warm-start ckpt `gpu_prototype/proc_shapeA_term.pt`.
+**Current best (committed):** `11-count-curriculum` — **67% honest deterministic** (seeded 1024), 0% barging. Supersedes `10-proc-obstacle-avoid` (33–36%). Warm-start ckpt for further runs: `gpu_prototype/exp11_count.pt`.
 
 **Canonical seeded audit (AUDIT_SEED=1234, 1024 identical courses) — the fair head-to-head:**
 
 | model | completion | honest? |
 |---|---|---|
 | baseline (proc_shapeA_term) | 39% | yes (0% barge, 2.32 m/s) |
-| exp11 count-curriculum | **67%** | yes (0% barge, 2.51 m/s) |
 | exp12 gap-steering | 58% | yes (0% barge, 2.6 m/s) |
-| exp13 count+gap | _training_ | — |
+| exp13 count+gap | 64% | yes (0% barge, 2.69 m/s) |
+| **exp11 count-curriculum** | **67%** | yes (0% barge, 2.51 m/s) — **WINNER, promote** |
 
-Obstacle-off ceiling for this model family = 90%; tax = 51 pts; exp11 recovered 28 (55%). For 75% need +8 more.
+Obstacle-off ceiling = 90%; tax = 51 pts; exp11 recovered 28 (55%). **Count+gap did NOT stack** (64 < 67): both
+target multi-obstacle threading, so gap adds nothing on top of count. 75% needs a DIFFERENT axis — Phase 1c
+(bigger readout + longer/gentler anneal), a floor-crash shaping term (~8% of failures), or the two-stage GRU.
 
 ## Committed models (01–10, creation order)
 
@@ -45,4 +47,4 @@ Obstacle-off ceiling for this model family = 90%; tax = 51 pts; exp11 recovered 
 | — | (baseline) | 2026-10-09 | clearance shaping + terminal + warm aggressive start | train_shaping.py | proc_shapeA_term.pt | 33–36% | yes (0% barge) | committed as 10-proc-obstacle-avoid |
 | 11 | count-curriculum | 2026-10-10 | obstacle-count curriculum 1→N (count_curr_frac=0.5), resume baseline | exp11_count-curriculum.py | exp11_count.pt | **70%** (512 eps) vs 36% baseline | **yes** (0% barge, 2.53 m/s, 21°, 0.30 m clr) | **new best — promote to 11-count-curriculum** |
 | 12 | gap-steering | 2026-10-10 | gap-steering reward PROC_GAP (fly along clearest gate-ward cone dir), resume baseline | exp12_gap-steering.py | exp12_gap.pt | **55%** (512 eps) vs 36% baseline | **yes** (0% barge, 2.63 m/s, 22°) | solid, but below count (11); remaining failures still 87% multi-obstacle |
-| 13 | count+gap | 2026-10-10 | combination: count_curr_frac=0.5 + PROC_GAP, resume baseline | exp13_count-gap.py | exp13_count-gap.pt | _running_ | — | — |
+| 13 | count+gap | 2026-10-10 | combination: count_curr_frac=0.5 + PROC_GAP, resume baseline | exp13_count-gap.py | exp13_count-gap.pt | 64% (seeded 1024) | yes (0% barge, 2.69 m/s, 26°) | overlaps count — below exp11's 67%; gains don't stack |
