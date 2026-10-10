@@ -94,7 +94,8 @@ assert not unexpected, f"unexpected keys: {unexpected}"
 ac.eval()
 data = load_connectome(K1_PATH)
 rec = ActivationRecorder(data, out_dir=OUT, backend="gpu-batched-ctbr",
-                         checkpoint=f"gpu_prototype/{OUT_NAME} (augmented K1 reservoir)", dt=DT * STRIDE, course=None)
+                         checkpoint=f"gpu_prototype/{OUT_NAME} (augmented K1 reservoir)", dt=DT * STRIDE,
+                         course=None, gzip_output=True)   # ~12x smaller; viewer.js gunzips in-browser
 
 results = []
 for ep in range(N_EP):

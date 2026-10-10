@@ -54,7 +54,8 @@ ac.load_state_dict(torch.load(CKPT, map_location=dev)); ac.eval()
 data = load_connectome(K1_PATH)
 rec = ActivationRecorder(data, out_dir=OUT, backend="gpu-batched-ctbr",
                          checkpoint=f"gpu_prototype/{OUT_NAME} (brain-integrated K1, rays->connectome)",
-                         dt=DT * STRIDE, course=None)   # dt scaled so strided playback keeps real timing
+                         dt=DT * STRIDE, course=None,    # dt scaled so strided playback keeps real timing
+                         gzip_output=True)               # ~12x smaller; viewer.js gunzips in-browser (DecompressionStream)
 
 results = []
 for ep in range(N_EP):
