@@ -71,3 +71,4 @@ Statuses:
 | 59 | [use-cases/59-viewer-layout-redesign.md](use-cases/59-viewer-layout-redesign.md) | Viewer layout redesign (full-width map, brain ‖ actions, animated tagged soma-less boxes) | done | 2026-09-24 |
 | 60 | [use-cases/60-viewer-brain-shorten-boundary-boxes.md](use-cases/60-viewer-brain-shorten-boundary-boxes.md) | Shorten brain image, relocate out-of-boundary neurons to boxes, equal-height top panels, drop legend | done | 2026-09-24 |
 | 61 | [use-cases/61-desktop-app-training-viewer.md](use-cases/61-desktop-app-training-viewer.md) | Desktop app for slices/trainings/recordings (replace TUI + HTML viewer) | done | 2026-09-27 |
+| 63 | [use-cases/63-tie-desktop-app-to-reservoir-runs.md](use-cases/63-tie-desktop-app-to-reservoir-runs.md) | Repoint the desktop app at the reservoir pipeline (launch / monitor / audit / view gpu_prototype runs) | pending | 2026-10-10 |
