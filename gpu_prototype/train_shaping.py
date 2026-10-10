@@ -14,7 +14,7 @@ from reservoir_aug import train_aug
 
 SAVE = sys.argv[1]
 BUDGET = float(sys.argv[2]) if len(sys.argv) > 2 else 14e6
-PROC = "/workspace/drone-fly/training/proc-course-flight/model_readout.pt"
+PROC = "/workspace/drone-fly/training/07-proc-course-flight/model_readout.pt"
 
 train_aug(BatchedProcCourse, EXTRA_DIM, N=384, budget=BUDGET, roll=32, epochs=4, mb=8,
           logstd_init=-0.5, logstd_final=-1.0, anneal_start=0.5, pos_curr_frac=0.4,

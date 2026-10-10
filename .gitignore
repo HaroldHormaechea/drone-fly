@@ -51,25 +51,25 @@ events.out.tfevents.*
 .vscode/
 
 # Committed example recordings for the desktop app (reads training/<name>/recordings/)
-!training/acro-gate-flight/
-!training/acro-gate-flight/**
-!training/k1-gate-flight/
-!training/k1-gate-flight/**
-!training/oval-lap-flight/
-!training/oval-lap-flight/**
-!training/figure8-chicane-flight/
-!training/figure8-chicane-flight/**
-!training/obstacle-lap-flight/
-!training/obstacle-lap-flight/**
-!training/pad-lap-flight/
-!training/pad-lap-flight/**
-!training/proc-course-flight/
-!training/proc-course-flight/**
+!training/01-acro-gate-flight/
+!training/01-acro-gate-flight/**
+!training/02-k1-gate-flight/
+!training/02-k1-gate-flight/**
+!training/03-oval-lap-flight/
+!training/03-oval-lap-flight/**
+!training/04-figure8-chicane-flight/
+!training/04-figure8-chicane-flight/**
+!training/06-obstacle-lap-flight/
+!training/06-obstacle-lap-flight/**
+!training/05-pad-lap-flight/
+!training/05-pad-lap-flight/**
+!training/07-proc-course-flight/
+!training/07-proc-course-flight/**
 # WIP / diagnostic recordings (not working models -- kept for inspection)
-!training/proc-obstacle-fail/
-!training/proc-obstacle-fail/**
-!training/multilap-course-demo/
-!training/multilap-course-demo/**
+!training/09-proc-obstacle-fail/
+!training/09-proc-obstacle-fail/**
+!training/08-multilap-course-demo/
+!training/08-multilap-course-demo/**
 # First real random-obstacle avoider (clearance shaping + terminal + warm aggressive start)
-!training/proc-obstacle-avoid/
-!training/proc-obstacle-avoid/**
+!training/10-proc-obstacle-avoid/
+!training/10-proc-obstacle-avoid/**

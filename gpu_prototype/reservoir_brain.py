@@ -178,5 +178,5 @@ if __name__ == "__main__":
     N = int(sys.argv[1]) if len(sys.argv) > 1 else 384
     budget = float(sys.argv[2]) if len(sys.argv) > 2 else 6e6
     train_brain(BatchedProcCourse, EXTRA_DIM, N_RAYS, N=N, budget=budget,
-                warm_from="/workspace/drone-fly/training/proc-course-flight/model_readout.pt", warm_src=30,
+                warm_from="/workspace/drone-fly/training/07-proc-course-flight/model_readout.pt", warm_src=30,
                 save_path="/workspace/drone-fly/gpu_prototype/proc_brain.pt")

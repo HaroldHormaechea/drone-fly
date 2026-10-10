@@ -123,7 +123,7 @@ Two actor families (both freeze the ~3.86M real MaleCNS edges; only the readout 
 
 ```python
 from inference import load_policy, plant_step, init_state   # see gpu_prototype/inference.py
-policy = load_policy("training/oval-lap-flight/model_readout.pt", extra_dim=30)
+policy = load_policy("training/03-oval-lap-flight/model_readout.pt", extra_dim=30)
 s = init_state(pos=[0,0,0.12])                 # on the ground
 for t in range(N):
     obs   = make_obs(s, target)                # §1 layout

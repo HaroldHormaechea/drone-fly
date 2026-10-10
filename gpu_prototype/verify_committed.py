@@ -6,9 +6,9 @@ from hover_gpu import dev
 
 TR = "/workspace/drone-fly/training"
 CASES = [
-    ("k1-gate-flight", "straight", "reservoir"),
-    ("oval-lap-flight", "lap", "aug"),
-    ("figure8-chicane-flight", "track", "aug"),
+    ("02-k1-gate-flight", "straight", "reservoir"),
+    ("03-oval-lap-flight", "lap", "aug"),
+    ("04-figure8-chicane-flight", "track", "aug"),
 ]
 
 

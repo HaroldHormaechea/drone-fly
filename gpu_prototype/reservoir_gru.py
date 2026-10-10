@@ -173,5 +173,5 @@ if __name__ == "__main__":
     N = int(sys.argv[1]) if len(sys.argv) > 1 else 384
     budget = float(sys.argv[2]) if len(sys.argv) > 2 else 20e6
     train_gru(BatchedProcCourse, EXTRA_DIM, N=N, budget=budget,
-              warm_from="/workspace/drone-fly/training/proc-course-flight/model_readout.pt",
+              warm_from="/workspace/drone-fly/training/07-proc-course-flight/model_readout.pt",
               save_path="/workspace/drone-fly/gpu_prototype/proc_gru.pt")

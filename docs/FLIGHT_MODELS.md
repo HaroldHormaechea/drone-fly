@@ -77,7 +77,7 @@ which (with exploration annealing) closes a deterministic-control gap on the har
     population** (disjoint from the 12-dim obs neurons). It lifted the *stochastic* policy to ~18% peak but
     the **deterministic audit still collapsed to 5%** (`verify_brain.py`, 10/192) — *honest* (2% barging,
     0% among completed, 1.34 m/s), just can't complete. **Perception bandwidth is conclusively not the
-    bottleneck.** A recording of this failure is at `training/proc-obstacle-fail/` for inspection.
+    bottleneck.** A recording of this failure is at `training/09-proc-obstacle-fail/` for inspection.
   - **Position curriculum tried (`gates_proc_env._ocen`, `obs_pos_curr`) — FAILED, same wall.** Full-size
     obstacles start parked 3 m off-path and slide onto the path over the first 40% of training (then anneal
     from 0.55), mirroring what made `obstacle-lap-flight` evade cleanly. Completion rode ~80% while obstacles
@@ -113,7 +113,7 @@ which (with exploration annealing) closes a deterministic-control gap on the har
   21° tilt — honest, aggressive). Same policy on the same gates with obstacles **off**: **90%** (so the
   obstacle tax is ~57 pts, and it captures ~37% of achievable). This is up from the **5% wall** every prior
   method hit. The deterministic mean *climbed* through annealing (5%→34%→39%→33%) instead of collapsing —
-  the signature of a mean that genuinely solved the task. Recordings in `training/proc-obstacle-avoid/`.
+  the signature of a mean that genuinely solved the task. Recordings in `training/10-proc-obstacle-avoid/`.
   - **Counter-example (not committed):** the *non-terminal* + shaping variant scored 92% but **29% of
     completions barge** — free contact still makes plowing cheaper than detouring. Non-terminal → cheats.
   - **Next levers to push past 33%:** combine the shaping recipe with the GRU (now that timidity is handled,
@@ -125,7 +125,7 @@ which (with exploration annealing) closes a deterministic-control gap on the har
   the obs/action/plant/file formats; [`gpu_prototype/inference.py`](../gpu_prototype/inference.py) loads a
   `model_readout.pt` and flies it with a pure-NumPy reference plant (no training-env import) — for a
   liftoff/deployment harness.
-- **`training/multilap-course-demo/`** — the existing proc readout flying the **full multi-lap tier**
+- **`training/08-multilap-course-demo/`** — the existing proc readout flying the **full multi-lap tier**
   (2–3 laps, 5–20 gates, varied heights, no obstacles) so the big circuits can be *seen* (5/12 completed;
   the pilot was trained on the easier tractable tier).
 - **pad-lap-flight (landing version)** — the committed `pad-lap-flight` above recharges on a *fly-over*

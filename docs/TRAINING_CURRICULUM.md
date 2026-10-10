@@ -6,7 +6,7 @@ How the connectome-seeded policy was made to **fly the full gate course in acro 
 > Status: **SOLVED on the test fixture** — the policy completes the full 3-gate course **100%
 > deterministically** (20/20 per checkpoint, **50/50 across 5 random seeds**; independently confirmed
 > by `drone-fly evaluate`: `completion_rate=100.0%`, MASTERY @ 80%). Recordings of the learning
-> progression are in [`training/acro-gate-flight/recordings/`](../training/acro-gate-flight/recordings/). Validation on
+> progression are in [`training/01-acro-gate-flight/recordings/`](../training/01-acro-gate-flight/recordings/). Validation on
 > the 25.6K-neuron k=1 MaleCNS slice (the target connectome) uses the identical recipe.
 
 ## 0. ⚠️ Evaluate at the training control rate (50 Hz) — read this first
@@ -103,7 +103,7 @@ gradual and the obs/reward scale are held fixed across the warm resume.
 
 ## 5. Recordings
 
-[`training/acro-gate-flight/recordings/`](../training/acro-gate-flight/recordings/) holds ten neuron-activation
+[`training/01-acro-gate-flight/recordings/`](../training/01-acro-gate-flight/recordings/) holds ten neuron-activation
 recordings sampled across the winning run (step 0.15M → 4.0M), capturing the transition from
 not-completing to 100% deterministic completion, with per-frame activations of all 247 connectome
 neurons. See that folder's README for the progression table and file format.

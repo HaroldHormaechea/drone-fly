@@ -7,7 +7,7 @@ the simulator's CTBR dynamics, so a liftoff/deployment harness needs NO training
 See docs/INFERENCE_CONTRACT.md for the obs/action/plant/file-format contract this implements.
 
     from inference import load_policy, init_state, plant_step, make_obs
-    policy = load_policy("../training/oval-lap-flight/model_readout.pt", extra_dim=30)
+    policy = load_policy("../training/03-oval-lap-flight/model_readout.pt", extra_dim=30)
     s = init_state(pos=(0, 0, 0.12))
     for _ in range(500):
         obs = make_obs(s, target=(2.0, 0.0, 1.0))
@@ -131,7 +131,7 @@ def tilt_deg(s):
 if __name__ == "__main__":
     # smoke: load the oval model, fly toward a waypoint, report it climbs off the ground and stays upright.
     import sys
-    path = sys.argv[1] if len(sys.argv) > 1 else "/workspace/drone-fly/training/oval-lap-flight/model_readout.pt"
+    path = sys.argv[1] if len(sys.argv) > 1 else "/workspace/drone-fly/training/03-oval-lap-flight/model_readout.pt"
     extra_dim = int(sys.argv[2]) if len(sys.argv) > 2 else 12   # oval/track=12, proc=30, proc+raycast=70
     pol = load_policy(path, extra_dim=extra_dim, device="cpu")
     s = init_state()

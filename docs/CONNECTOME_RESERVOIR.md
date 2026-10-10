@@ -130,7 +130,7 @@ flies the gate course at **100% deterministic completion, ~7° mean tilt** — s
 controlled flight — trained in ~24 minutes on a single 6 GB GPU.
 
 Recordings of the brain in flight (per-frame activation of all 25,627 neurons, with anatomical neuron
-metadata) are committed under `training/k1-gate-flight/recordings/` and viewable in the desktop app.
+metadata) are committed under `training/02-k1-gate-flight/recordings/` and viewable in the desktop app.
 
 ### Implementation pointers
 

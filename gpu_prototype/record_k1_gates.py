@@ -4,7 +4,7 @@ Reuses the repo's ActivationRecorder (the SAME writer the pybullet pipeline uses
 byte-schema-identical to the existing training/*/recordings the desktop app reads: per-frame
 25.6k-neuron activations (the real K1 propagation, already tanh-bounded to [-1,1]) + the 4-channel
 action + drone position + per-frame target gate, with full anatomical neuron metadata from the K1
-sidecars. Writes episode_<n>.json under training/k1-gate-flight/recordings/.
+sidecars. Writes episode_<n>.json under training/02-k1-gate-flight/recordings/.
 """
 import sys
 import numpy as np
@@ -19,7 +19,7 @@ from drone_fly.record.recorder import ActivationRecorder
 
 CKPT = sys.argv[1] if len(sys.argv) > 1 else "/workspace/drone-fly/gpu_prototype/gates_k1_reservoir.pt"
 N_EP = int(sys.argv[2]) if len(sys.argv) > 2 else 10
-OUT = "/workspace/drone-fly/training/k1-gate-flight/recordings"
+OUT = "/workspace/drone-fly/training/02-k1-gate-flight/recordings"
 K1_PATH = "/workspace/drone-fly/artifacts/pruned/k1"
 MAX_STEPS = 400
 

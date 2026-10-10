@@ -1,4 +1,4 @@
-"""exp02 -- GAP-STEERING REWARD.
+"""exp12 -- GAP-STEERING REWARD.
 
 Independent A/B against the baseline (no count curriculum here, so its effect is attributable): resume the
 36% baseline (proc_shapeA_term.pt, same-arch warm) and fine-tune with the gap-steering reward
@@ -7,9 +7,9 @@ gate, so the drone threads the free gap between multiple obstacles instead of cl
 another (84% of baseline failures are obstacle collisions, all on 2+ obstacle courses). Clearance shaping +
 terminal contact stay on; mildly-stochastic anneal re-injects exploration.
 
-If both exp01 (count curriculum) and exp02 (gap) beat the baseline honestly, exp03 combines them.
+If both exp01 (count curriculum) and exp12 (gap) beat the baseline honestly, exp03 combines them.
 
-Run: PROC_TRACTABLE=1 PROC_RAYCAST=1 PROC_SHAPING=1 PROC_OBS_TERMINAL=1 PROC_GAP=1 python exp02_gap.py <save> [budget]
+Run: PROC_TRACTABLE=1 PROC_RAYCAST=1 PROC_SHAPING=1 PROC_OBS_TERMINAL=1 PROC_GAP=1 python exp12_gap-steering.py <save> [budget]
 Audit: verify_proc.py <save> 512  +  diagnose_proc.py <save> 512
 """
 import sys
