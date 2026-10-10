@@ -73,13 +73,25 @@ which (with exploration annealing) closes a deterministic-control gap on the har
     the **deterministic audit still collapsed to 5%** (`verify_brain.py`, 10/192) — *honest* (2% barging,
     0% among completed, 1.34 m/s), just can't complete. **Perception bandwidth is conclusively not the
     bottleneck.** A recording of this failure is at `training/proc-obstacle-fail/` for inspection.
-  - **Position curriculum (in progress).** Full-size obstacles start parked 3 m off-path and slide onto
-    the path over the first 40% of training (`gates_proc_env._ocen`, `obs_pos_curr`) — the mechanism that
-    made `obstacle-lap-flight` evade cleanly. Early read: completion rode ~80% while obstacles were
-    off-path but fell to ~15% once fully on-path (pre-anneal) — same ceiling as the others. Audit pending.
-  - **Other levers (future):** gentler annealing (deploy a mildly-stochastic policy, which flew clean at
-    ~50%); partial plasticity. Infra ready (`gates_proc_env.py`, `course_gen.py`, `verify_proc.py`,
-    `verify_brain.py`; env vars `PROC_TRACTABLE`/`PROC_NO_OBS`/`PROC_OBS_TERMINAL`/`PROC_RAYCAST`/`RAY_POP`).
+  - **Position curriculum tried (`gates_proc_env._ocen`, `obs_pos_curr`) — FAILED, same wall.** Full-size
+    obstacles start parked 3 m off-path and slide onto the path over the first 40% of training (then anneal
+    from 0.55), mirroring what made `obstacle-lap-flight` evade cleanly. Completion rode ~80% while obstacles
+    were off-path, fell to ~15% once fully on-path, and the deterministic audit landed at **5%** (9/192) —
+    identical to the wide-translator run, honest (0% barging among completed, 1.21 m/s).
+    - **Key diagnostic (obstacle tax):** the *same* policy on the *same* gate courses with obstacles **off**
+      completes only **38%** (72/192) — far below the 96% a dedicated clean model reaches. So the
+      terminal-crash-penalty + annealing regime produced **global timidity** (tilt fell 20°→13° through
+      annealing), degrading even plain gate-flying — the collapse is not obstacle-specific, it's the
+      deterministic mean going cautious. That reframes the fix: the problem is as much the
+      determinization/caution dynamic as the avoidance itself.
+  - **Next: recurrent (GRU) readout.** Avoidance is a committed multi-step maneuver; the memoryless readout
+    must re-derive it every 20 ms frame and forgets through occlusion. A small GRU head on the frozen brain
+    tap gives the controller working memory to *hold an arc*. Paired with potential-based clearance shaping
+    and a mildly-stochastic deployment fallback (the stochastic policy flew far better than the determinized
+    one throughout). See the design note (GRU readout for obstacle avoidance).
+  - **Other levers (future):** partial plasticity (unfreeze a slice of the ray→motor pathway). Infra ready
+    (`gates_proc_env.py`, `course_gen.py`, `verify_proc.py`, `verify_brain.py`; env vars
+    `PROC_TRACTABLE`/`PROC_NO_OBS`/`PROC_OBS_TERMINAL`/`PROC_RAYCAST`/`RAY_POP`).
 
 ### Deploying a model + visualizing the full course tier
 - **Inference contract + standalone harness:** [`INFERENCE_CONTRACT.md`](INFERENCE_CONTRACT.md) documents
