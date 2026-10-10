@@ -13,6 +13,16 @@ See docs/INFERENCE_CONTRACT.md for the obs/action/plant/file-format contract thi
         obs = make_obs(s, target=(2.0, 0.0, 1.0))
         a = policy.act(obs, extra=None)        # extra=None -> pure-reservoir; pass a vector for augmented
         s = plant_step(s, a)
+
+OBSTACLE models (extra_dim=70, e.g. 10-proc-obstacle-avoid and the count-curriculum line) consume a
+forward raycast scan as the LAST 40 of their 70 extra dims. `make_obs` builds only the 12-dim core obs;
+the raycast and the other course senses are NOT built here. For obstacle flight you MUST supply them:
+`raycast(state, obstacles, target)` is a byte-exact NumPy port of the training-env scan (validated to 0.0
+diff) -- replicate it against your own obstacle geometry. Feeding zeros to an obstacle model blinds it and
+it will fly straight into pillars. Obstacle-FREE flight needs no raycast: use the 30-dim model (or zeros).
+The full obstacle extra layout is [obs(12) || curr_gate(3) || next_lookahead(7) || obstacle_vision(8) ||
+raycast(40)] -- raycast() covers the last block; curr_gate/next_lookahead/obstacle_vision must likewise be
+rebuilt from your world (see gates_proc_env.py for the reference maths).
 """
 from __future__ import annotations
 import numpy as np
@@ -28,6 +38,26 @@ MAX_BODY_RATE = 4.0
 RATE_KP = 18.0
 DT = 0.02
 K1_PATH = "/workspace/drone-fly/artifacts/pruned/k1"
+
+# --- raycast perception constants (mirror gates_proc_env.py; OBSTACLE models consume these) ---
+N_RAYS = 40            # forward-cone free-space fan (40 of the 70 extra dims on obstacle models)
+CONE_HALF_DEG = 45.0   # 90-degree total cone (±45 around the heading)
+RAY_RANGE = 4.0        # max sensing distance (m); rays return distance-to-surface / RAY_RANGE
+
+
+def _build_cone(n_rays=N_RAYS, half_deg=CONE_HALF_DEG):
+    """Canonical ray directions in a cone around +z (Fibonacci spiral, even spread) — the SAME construction
+    as gates_proc_env.CONE. Rotated to the per-step heading in raycast()."""
+    ga = np.pi * (3 - np.sqrt(5)); cz_min = np.cos(np.radians(half_deg))
+    cone = []
+    for i in range(n_rays):
+        cz = 1.0 - (i / max(1, n_rays - 1)) * (1 - cz_min)
+        st = np.sqrt(max(0.0, 1 - cz * cz)); phi = i * ga
+        cone.append((st * np.cos(phi), st * np.sin(phi), cz))
+    return np.array(cone, np.float32)                                # (N_RAYS, 3), axis = +z
+
+
+CONE = _build_cone()
 
 
 # ----------------------------- model -----------------------------
@@ -126,6 +156,60 @@ def tilt_deg(s):
     """Angle from upright, degrees (0 = level, 180 = inverted)."""
     g_body = quat_rotate_inv(s["quat"], np.array([0.0, 0.0, -1.0], np.float32))
     return float(np.degrees(np.arccos(np.clip(-g_body[2], -1.0, 1.0))))
+
+
+def raycast(s, obstacles, target=None):
+    """Forward 90-deg cone of N_RAYS free-space distances, normalized to [0,1] (1 = clear to RAY_RANGE,
+    lower = obstacle surface nearer). This is the LAST 40 entries of the extra vector for OBSTACLE models
+    (extra_dim=70) -- without it, an obstacle model is blind and will fly into pillars. It is NOT part of
+    inference's make_obs; a deployment harness (e.g. Liftoff) must compute it from its own obstacle geometry.
+    Byte-for-byte port of gates_proc_env._ray_basis + _cast (semantics, not batched).
+
+    s          : state dict (uses pos, vel).
+    obstacles  : iterable of dicts, each:
+                 {"center": (x,y,z), "half_extents": (a,b,c), "type": "cylinder" | "box"}
+                 - cylinder: half_extents[0] = radius, half_extents[2] = half-height (half_extents[1] unused)
+                 - box:      half_extents = (hx, hy, hz) AABB half-extents (axis-aligned, as in training)
+    target     : current target/waypoint (x,y,z); used only for the heading fallback at low speed (<0.3 m/s),
+                 matching the env. Pass the same target you feed make_obs.
+    returns    : np.float32[N_RAYS] in [0,1].
+    """
+    pos = np.asarray(s["pos"], np.float32)
+    v = np.asarray(s["vel"], np.float32); sp = float(np.linalg.norm(v))
+    if sp > 0.3:
+        fwd = v / (sp + 1e-6)
+    elif target is not None:
+        t = np.asarray(target, np.float32) - pos
+        fwd = t / (np.linalg.norm(t) + 1e-6)
+    else:
+        fwd = np.array([1.0, 0.0, 0.0], np.float32)
+    wup = np.array([0.0, 0.0, 1.0], np.float32)
+    right = np.cross(fwd, wup); rn = float(np.linalg.norm(right))
+    right = np.array([1.0, 0.0, 0.0], np.float32) if rn < 1e-3 else right / (rn + 1e-6)
+    up = np.cross(right, fwd)
+    rays = (CONE[:, 0:1] * right + CONE[:, 1:2] * up + CONE[:, 2:3] * fwd).astype(np.float32)  # (N_RAYS,3)
+
+    best = np.full(N_RAYS, RAY_RANGE, np.float32)
+    for ob in obstacles:
+        oc = np.asarray(ob["center"], np.float32); od = np.asarray(ob["half_extents"], np.float32)
+        if ob.get("type", "cylinder") == "cylinder":
+            dxy = rays[:, :2]; fxy = (pos - oc)[:2]
+            a = (dxy * dxy).sum(1); b = 2 * (dxy * fxy).sum(1); c = float((fxy * fxy).sum() - od[0] ** 2)
+            disc = b * b - 4 * a * c
+            tt = (-b - np.sqrt(np.clip(disc, 0.0, None))) / (2 * a + 1e-9)
+            zhit = pos[2] + tt * rays[:, 2]
+            ok = (disc > 0) & (tt > 1e-3) & (zhit > oc[2] - od[2]) & (zhit < oc[2] + od[2])
+            t = np.where(ok, tt, np.inf)
+        else:  # box: AABB slab method
+            dsafe = np.where(np.abs(rays) < 1e-6, 1e-6, rays)
+            t1 = (oc - od - pos) / dsafe; t2 = (oc + od - pos) / dsafe
+            tmn = np.minimum(t1, t2).max(1); tmx = np.maximum(t1, t2).min(1)
+            bhit = np.where(tmn > 1e-3, tmn, tmx)
+            ok = (tmx >= np.maximum(tmn, 0.0)) & (tmx > 1e-3)
+            t = np.where(ok, bhit, np.inf)
+        cand = np.where((t > 0) & (t < RAY_RANGE), t, RAY_RANGE)
+        best = np.minimum(best, cand)
+    return (best / RAY_RANGE).astype(np.float32)
 
 
 if __name__ == "__main__":
