@@ -49,13 +49,20 @@ which (with exploration annealing) closes a deterministic-control gap on the har
 
 ## Work in progress
 
-- **proc-course-flight — full tier** — the committed proc model above is the **obstacle-free** tier
-  (random gate courses, 1 lap, apertures ≥ 5× drone width), which generalizes well (96%). The **full
-  tier** (obstacles + 2–3 laps + tight 3× apertures + occlusion) is not solved: deterministic completion
-  ~16% and ~14% of completions *barge* through an obstacle (the non-terminal nudge is exploited). Next:
-  re-add obstacles via the off-path→on-path curriculum from `obstacle-lap-flight`, and soften/extend
-  annealing. Infra ready (`gates_proc_env.py`, `course_gen.py`, `verify_proc.py`, env vars
-  `PROC_TRACTABLE` / `PROC_NO_OBS`).
+- **proc-course-flight — obstacles tier (open problem)** — the committed proc model above is the
+  **obstacle-free** tier (random gate courses), which generalizes cleanly at 96%. Adding **obstacles to
+  random courses** is not solved, and the reason is instructive — two failure modes, both audited:
+  - **non-terminal nudge** (contact bumps, recoverable): deterministic completion looks high (76–78%) but
+    it's **fake — ~52–54% of completed runs *barge* straight through obstacles** (plowing is cheaper than a
+    detour that must generalize across random placements). A size curriculum (obstacles grow 0→full) did
+    not change this.
+  - **terminal contact** (`PROC_OBS_TERMINAL=1`, hit = crash → barging impossible): **honest but low —
+    ~6–10% completion** (it crashes into randomly-placed on-path obstacles rather than reliably avoiding).
+  So: non-terminal → cheats, terminal → can't. Clean high-completion evasion worked on `obstacle-lap-flight`
+  only because that course was *fixed* with a *clear lane* + slide-in curriculum; generalizing avoidance
+  across *random* on-path obstacles is the open hard problem. Likely needs richer obstacle perception
+  (more than nearest-2) and/or courses that guarantee a clear arc around each blocker. Infra ready
+  (`gates_proc_env.py`, `course_gen.py`, `verify_proc.py`; env vars `PROC_TRACTABLE`/`PROC_NO_OBS`/`PROC_OBS_TERMINAL`).
 - **pad-lap-flight (landing version)** — the committed `pad-lap-flight` above recharges on a *fly-over*
   (a flaw). A redesigned `gates_pads.py` requires an actual **controlled landing + full stop** on the
   pad, with a **timed gradual recharge**, **battery-relative urgency** (>65% ignore pad / ~40% divert /

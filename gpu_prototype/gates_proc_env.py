@@ -79,6 +79,7 @@ _POOL = None
 POOL_KW = (dict(ng_hi=11, laps_lo=1, laps_hi=2, ap_lo=0.75)
            if os.environ.get("PROC_TRACTABLE", "") else {})
 NO_OBS = bool(os.environ.get("PROC_NO_OBS", ""))   # obstacle-free tier (isolate random-gate navigation)
+OBS_TERMINAL = bool(os.environ.get("PROC_OBS_TERMINAL", ""))   # obstacle contact = crash (forbids barging)
 
 
 class BatchedProcCourse:
@@ -107,6 +108,12 @@ class BatchedProcCourse:
 
     def _ng(self):
         return self.P["ng"][self.cid]
+
+    def _odim(self):
+        # OBSTACLE-SIZE CURRICULUM: obstacles grow from 0 (difficulty 0) to full (difficulty 1), so the
+        # policy learns to steer clear as they appear instead of meeting full on-path walls it plows
+        # through (barging). Mirrors the off-path->on-path curriculum that gave clean evasion elsewhere.
+        return self.P["odim"][self.cid] * max(float(self.difficulty), 0.0)
 
     def _spawn(self, mask):
         k = int(mask.sum())
@@ -149,7 +156,7 @@ class BatchedProcCourse:
     def _obstacle_vision(self):
         """nearest-NVIS obstacles: rel (dx,dy,dz) + size proxy, masked to real obstacles."""
         oc = self.P["oc"][self.cid]                       # (n,MO,3)
-        od = self.P["odim"][self.cid]                     # (n,MO,3)
+        od = self._odim()                                 # (n,MO,3) -- size curriculum
         om = self.P["omask"][self.cid]                    # (n,MO)
         rel = oc - self.pos.unsqueeze(1)                  # (n,MO,3)
         dist = rel.norm(dim=-1)                           # (n,MO)
@@ -171,7 +178,7 @@ class BatchedProcCourse:
         bearing = d / dist
         orient = torch.stack([torch.cos(ny), torch.sin(ny)], -1)
         # line-of-sight: closest approach of each obstacle centre to the segment pos->nc
-        oc = self.P["oc"][self.cid]; od = self.P["odim"][self.cid]; om = self.P["omask"][self.cid]
+        oc = self.P["oc"][self.cid]; od = self._odim(); om = self.P["omask"][self.cid]
         seg = (nc - self.pos)                             # (n,3)
         seglen2 = (seg * seg).sum(-1, keepdim=True) + 1e-6
         to_o = oc - self.pos.unsqueeze(1)                 # (n,MO,3)
@@ -235,7 +242,7 @@ class BatchedProcCourse:
         reward = reward + 300.0 * completed.float()
 
         # obstacle contact -> non-terminal nudge (recoverable), applied to the NEAREST obstacle
-        oc = self.P["oc"][self.cid]; od = self.P["odim"][self.cid]
+        oc = self.P["oc"][self.cid]; od = self._odim()
         om = self.P["omask"][self.cid]; otype = self.P["otype"][self.cid]
         rel = self.pos.unsqueeze(1) - oc                 # (n,MO,3) obstacle->drone
         # per-type inside test: cyl = xy within r & |dz|<h ; box = inside half-extents
@@ -258,6 +265,8 @@ class BatchedProcCourse:
         crashed = (self.pos[:, 2] < 0.08) | (self.pos[:, 2] > CEIL) | (xy_off > ARENA)
         # grace: don't insta-crash on the ground during takeoff (first 20 steps)
         crashed = crashed & (self.t > 20)
+        if OBS_TERMINAL:
+            crashed = crashed | any_hit   # obstacle contact is a CRASH -> barging impossible, must avoid
         reward = reward - 5.0 * crashed.float()
         timeout = self.t >= MAX_STEPS
         done = completed | crashed | timeout

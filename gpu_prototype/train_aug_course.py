@@ -1,5 +1,6 @@
 """Train the augmented frozen-K1 reservoir ([brain-tap || obs || senses]) on any course.
 Usage: train_aug_course.py <lap|track|obstacles> [N] [budget]"""
+import os
 import sys
 from reservoir_aug import train_aug
 
@@ -26,17 +27,21 @@ elif course == "pads":
     warm_from = OVAL
 elif course == "proc":
     from gates_proc_env import BatchedProcCourse as C, EXTRA_DIM as E
-    # warm-start from the figure-8/chicane flier (its extra is obs-only, 12 dims; the proc readout's
-    # first 12 extra dims are the same obs, so warm_start copies them and zero-inits the new senses) +
-    # curriculum ramp over the first 60% (easy courses -> full random pool).
-    warm_from = "/workspace/drone-fly/training/figure8-chicane-flight/model_readout.pt"
     curriculum_frac = 0.6
+    if os.environ.get("PROC_NO_OBS", ""):
+        # obstacle-free tier: warm-start from the figure-8/chicane flier (obs-only extra, 12 dims)
+        warm_from = "/workspace/drone-fly/training/figure8-chicane-flight/model_readout.pt"; warm_src = 12
+    else:
+        # with-obstacles tier: warm-start from the PROC no-obstacle flier (same 30-dim extra -> full
+        # readout copy) so it already flies random courses and only has to LEARN obstacle avoidance.
+        warm_from = "/workspace/drone-fly/training/proc-course-flight/model_readout.pt"; warm_src = E
 else:
     raise SystemExit(f"unknown course {course!r}")
 
 # Warm-started runs re-inject only MILD exploration (std~0.22) so the competent flying head is
 # perturbed gently to learn the new sense (avoidance/recharge) instead of being crashed back to hover.
 logstd_init = -1.5 if warm_from is not None else -0.5
+warm_src = locals().get("warm_src", 12)
 train_aug(C, E, N=N, budget=budget, logstd_final=-2.0, anneal_start=0.4, logstd_init=logstd_init,
-          warm_from=warm_from, warm_src_extra_dim=12, curriculum_frac=curriculum_frac,
+          warm_from=warm_from, warm_src_extra_dim=warm_src, curriculum_frac=curriculum_frac,
           save_path=f"/workspace/drone-fly/gpu_prototype/{course}_aug.pt")
