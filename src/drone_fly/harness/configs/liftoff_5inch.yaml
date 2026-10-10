@@ -1,0 +1,119 @@
+# Packaged default for the `liftoff` harness: Liftoff, 5-inch FPV airframe.
+# Overlay your own --config on this file to switch game / airframe settings; keys that are not
+# listed here are rejected. Values marked CALIBRATE are documented assumptions that must be
+# checked against your Liftoff setup (see docs/adr/0002-live-harness-layering.md).
+#
+# Example (obstacle-free course, 30-dim model):
+#   drone-fly harness run --harness liftoff --extra-dim 30 \
+#     --checkpoint training/07-proc-course-flight/model_readout.pt --config my_liftoff.yaml
+# The 70-dim obstacle model (training/11-count-curriculum/model_readout.pt, or the older
+# training/10-proc-obstacle-avoid/model_readout.pt) needs a raycast-capable free-space
+# estimator (parts.free_space_estimator: depth).
+harness: liftoff
+
+contract:
+  gpu_prototype_dir: null   # null -> $DRONE_FLY_GPU_PROTOTYPE -> <repo>/gpu_prototype
+  k1_path: null             # null -> $DRONE_FLY_K1_PATH -> <repo>/artifacts/pruned/k1
+  device: auto              # auto | cpu | cuda
+
+runner:
+  rate_hz: 50               # the models were trained at 50 Hz (contract DT = 0.02 s)
+  clock: wall
+  stale_after_s: 0.2        # telemetry older than this -> fail-safe
+  max_estimate_age_s: 0.25  # free-space estimate older than this -> fail-safe (when needed)
+  wait_for_state_s: 10.0    # time allowed for the first telemetry datagram
+  max_duration_s: null      # null = until abort / fail-safe
+  max_ticks: null
+
+parts:
+  state_source: liftoff-udp       # liftoff-udp | liftoff-csv (replay a recorded CSV)
+  frame_source: screen
+  gate_estimator: opencv
+  free_space_estimator: none      # none (obstacle-free, 12/30-dim only) | depth (70-dim)
+  action_sink: vgamepad
+  abort_signal: hotkey
+
+# Options for programmatically registered parts, keyed by part kind (free-form).
+part_options: {}
+
+scaling:
+  # training_m = liftoff_m / world_scale. The models know a 32 g whoop world (gates 0.45-1.5 m,
+  # RAY_RANGE 4 m); a 5-inch Liftoff track is larger. CALIBRATE against your track.
+  world_scale: 2.0
+
+telemetry:
+  host: 127.0.0.1
+  port: 9001                # Liftoff TelemetryConfiguration.json EndPoint. CALIBRATE
+  # Liftoff StreamFormat order (TelemetryConfiguration.json). CALIBRATE to match yours.
+  stream_format: [timestamp, position, attitude, velocity, gyro, inputs, battery, motor_rpm]
+  block_widths:
+    timestamp: 1
+    position: 3
+    attitude: 4
+    velocity: 3
+    gyro: 3
+    inputs: 4
+    battery: 2
+    motor_rpm: 4
+  rpm_count_prefix: false   # true if the MotorRPM block starts with a uint8 motor count
+  gyro_units: deg_s         # deg_s | rad_s. CALIBRATE (gyro_check measures it)
+  # Contract body rate (FLU) <- sign * gyro[source]. CALIBRATE: run the gyro check on a recorded
+  # flight and apply its suggested table.
+  gyro_map:
+    wx: {source: roll, sign: 1}
+    wy: {source: pitch, sign: -1}
+    wz: {source: yaw, sign: -1}
+  max_position_jump_m: 5.0  # per-sample jump (Liftoff metres) treated as a respawn
+  ring_size: 1024
+  replay_csv: null          # for state_source: liftoff-csv
+
+camera:
+  backend: auto             # auto (dxcam, else mss) | dxcam | mss
+  monitor: 1
+  region: null              # [left, top, width, height] of the game view, or null = monitor
+  fps: 60
+  resolution: null          # [w, h] the FOV refers to; null = use the captured frame size
+  hfov_deg: 120.0           # Liftoff camera FOV (horizontal). CALIBRATE
+  uptilt_deg: 25.0          # FPV camera angle. CALIBRATE
+
+gates:
+  nominal_width_m: 1.5      # OUTER gate frame size in Liftoff metres. CALIBRATE per track
+  nominal_height_m: 1.5
+  # HSV ranges (OpenCV: H 0-179) of the gate frame colour; red needs two ranges. CALIBRATE
+  hsv_ranges:
+    - [[0, 120, 80], [10, 255, 255]]
+    - [[170, 120, 80], [179, 255, 255]]
+  min_area_frac: 0.0005
+  approx_eps: 0.04
+  morph_kernel: 5
+  assoc_radius: 1.0         # x aperture: association gate for re-detecting the tracked gate
+  lost_timeout_s: 1.0       # hold the last estimate this long, then fail-safe
+  acquire_timeout_s: 3.0    # hover in place this long waiting for the first gate
+  pass_area_frac: 0.2       # gate area fraction that, once vanished nearby, counts as a pass
+  gates_per_lap: null       # set to count laps
+
+free_space:
+  assume_no_obstacles: false  # `none` estimator: set true to fly 12/30-dim models obstacle-free
+
+controls:
+  # Liftoff rate profile per axis (Betaflight rates; rc_rate 1.0 = 100). CALIBRATE to yours.
+  rates:
+    roll: {rc_rate: 1.0, super_rate: 0.7, expo: 0.0}
+    pitch: {rc_rate: 1.0, super_rate: 0.7, expo: 0.0}
+    yaw: {rc_rate: 1.0, super_rate: 0.7, expo: 0.0}
+  rate_scale: 1.0           # multiplies commanded body rates before the inverse rate curve
+  hover_stick: -0.4         # stick position [-1, 1] that hovers this airframe. CALIBRATE
+  axis_map: {throttle: left_y, yaw: left_x, pitch: right_y, roll: right_x}   # mode 2
+  # stick = sign * inverse_rate(body rate): +wx roll right, +wy pitch forward (nose down),
+  # +wz is counter-clockwise, i.e. yaw stick LEFT. Flip a sign if Liftoff's binding inverts an axis.
+  stick_signs: {roll: 1, pitch: 1, yaw: -1}
+
+abort:
+  key: F12                  # hotkey that triggers the fail-safe (works with the game focused)
+  poll_s: 0.02
+
+recording:
+  enabled: true
+  output_root: null         # null -> <repo>/artifacts/harness
+  frame_every_n: 10         # save every 10th frame (0 = metadata only)
+  queue_size: 4096

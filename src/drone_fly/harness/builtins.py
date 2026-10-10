@@ -47,6 +47,58 @@ _BUILTINS: list[tuple[str, str, str, dict]] = [
         f"{_PKG}.loopback:PlantActionSink",
         {"description": "steps the contract reference plant_step()"},
     ),
+    # --- Liftoff ---
+    (
+        "harness",
+        "liftoff",
+        f"{_PKG}.liftoff:build_liftoff_harness",
+        {
+            "description": "Liftoff FPV: UDP telemetry + screen vision + ViGEm pad",
+            "default_config": "liftoff_5inch.yaml",
+        },
+    ),
+    (
+        "state_source",
+        "liftoff-udp",
+        f"{_PKG}.liftoff.telemetry:LiftoffUdpStateSource",
+        {"description": "Liftoff UDP telemetry listener"},
+    ),
+    (
+        "state_source",
+        "liftoff-csv",
+        f"{_PKG}.liftoff.telemetry:CsvReplayStateSource",
+        {"description": "replays a recorded Liftoff telemetry CSV in real time"},
+    ),
+    (
+        "frame_source",
+        "screen",
+        f"{_PKG}.liftoff.frames:ScreenFrameSource",
+        {"description": "screen capture", "requires": ("dxcam|mss",)},
+    ),
+    (
+        "gate_estimator",
+        "opencv",
+        f"{_PKG}.liftoff.gate_cv:OpenCvGateEstimator",
+        {"description": "HSV quads + PnP gate pose", "requires": ("cv2",), "packages": _CV2},
+    ),
+    (
+        "free_space_estimator",
+        "none",
+        f"{_PKG}.estimators:NoObstacleFreeSpaceEstimator",
+        {"description": "obstacle-free world: zero obstacle_vision, never raycast"},
+    ),
+    (
+        "action_sink",
+        "vgamepad",
+        f"{_PKG}.liftoff.gamepad:VgamepadActionSink",
+        {"description": "ViGEm virtual Xbox 360 pad", "requires": ("vgamepad",)},
+    ),
+    (
+        "abort_signal",
+        "hotkey",
+        f"{_PKG}.liftoff.abort:HotkeyAbortSignal",
+        {"description": "Win32 abort hotkey (GetAsyncKeyState)"},
+    ),
     (
         "action_sink",
         "recording",
