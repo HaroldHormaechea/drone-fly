@@ -55,8 +55,6 @@ from drone_fly.controller.populations import (
     select_populations,
     select_sensory_population,
 )
-from drone_fly.controller.roundtrip import dummy_observation, run_roundtrip
-from drone_fly.controller.sb3 import ConnectomeFeaturesExtractor
 
 __all__ = [
     "ACTION_DIM",
@@ -74,7 +72,6 @@ __all__ = [
     "THROTTLE_INDEX",
     "THROTTLE_RANGE",
     "ConnectomeActorNetwork",
-    "ConnectomeFeaturesExtractor",
     "ConnectomePolicy",
     "ModalityAbsentError",
     "ModalityError",
@@ -86,12 +83,10 @@ __all__ = [
     "UnknownModalityError",
     "available_modalities",
     "decode_action",
-    "dummy_observation",
     "encode_observation",
     "graft_actor",
     "motor_neuron_indices",
     "resolve_schema",
-    "run_roundtrip",
     "select_modality",
     "select_motor_population",
     "select_populations",

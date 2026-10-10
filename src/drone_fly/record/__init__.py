@@ -26,11 +26,8 @@ from drone_fly.record.recorder import (
     dequantize_activation,
     quantize_activation,
 )
-from drone_fly.record.rollout import record_rollout
-
 __all__ = [
     "ActivationRecorder",
-    "record_rollout",
     "provision_positions",
     "neuron_roles",
     "quantize_activation",
