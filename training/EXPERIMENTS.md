@@ -10,6 +10,17 @@ One unified, sequentially-numbered timeline for the whole campaign so the order 
 
 **Current best (committed):** `10-proc-obstacle-avoid` — 33–36% honest deterministic, 0% barging. Warm-start ckpt `gpu_prototype/proc_shapeA_term.pt`.
 
+**Canonical seeded audit (AUDIT_SEED=1234, 1024 identical courses) — the fair head-to-head:**
+
+| model | completion | honest? |
+|---|---|---|
+| baseline (proc_shapeA_term) | 39% | yes (0% barge, 2.32 m/s) |
+| exp11 count-curriculum | **67%** | yes (0% barge, 2.51 m/s) |
+| exp12 gap-steering | 58% | yes (0% barge, 2.6 m/s) |
+| exp13 count+gap | _training_ | — |
+
+Obstacle-off ceiling for this model family = 90%; tax = 51 pts; exp11 recovered 28 (55%). For 75% need +8 more.
+
 ## Committed models (01–10, creation order)
 
 | # | dir | created | what it is | result |
@@ -32,5 +43,6 @@ One unified, sequentially-numbered timeline for the whole campaign so the order 
 | # | slug | date | hypothesis / change | launcher | ckpt | Result (det %) | Honest? | Outcome |
 |---|------|------|---------------------|----------|------|----------------|---------|---------|
 | — | (baseline) | 2026-10-09 | clearance shaping + terminal + warm aggressive start | train_shaping.py | proc_shapeA_term.pt | 33–36% | yes (0% barge) | committed as 10-proc-obstacle-avoid |
-| 11 | count-curriculum | 2026-10-10 | obstacle-count curriculum 1→N (count_curr_frac=0.5), resume baseline | exp11_count-curriculum.py | exp01_count.pt | _running_ | — | — |
-| 12 | gap-steering | 2026-10-10 | gap-steering reward PROC_GAP (fly along clearest gate-ward cone dir), resume baseline | exp12_gap-steering.py | exp02_gap.pt | _running_ | — | — |
+| 11 | count-curriculum | 2026-10-10 | obstacle-count curriculum 1→N (count_curr_frac=0.5), resume baseline | exp11_count-curriculum.py | exp11_count.pt | **70%** (512 eps) vs 36% baseline | **yes** (0% barge, 2.53 m/s, 21°, 0.30 m clr) | **new best — promote to 11-count-curriculum** |
+| 12 | gap-steering | 2026-10-10 | gap-steering reward PROC_GAP (fly along clearest gate-ward cone dir), resume baseline | exp12_gap-steering.py | exp12_gap.pt | **55%** (512 eps) vs 36% baseline | **yes** (0% barge, 2.63 m/s, 22°) | solid, but below count (11); remaining failures still 87% multi-obstacle |
+| 13 | count+gap | 2026-10-10 | combination: count_curr_frac=0.5 + PROC_GAP, resume baseline | exp13_count-gap.py | exp13_count-gap.pt | _running_ | — | — |
