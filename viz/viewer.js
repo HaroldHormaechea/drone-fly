@@ -1125,6 +1125,55 @@ function createFlight3D(canvas) {
     ctx.fill();
   }
 
+  // Dotted variant of line() for the altitude drop-lines. Mirrors line() exactly but strokes the
+  // segment with a short dash pattern, then restores the solid default so nothing downstream inherits
+  // the dash. The pattern is set in CSS pixels (render() already works in CSS-pixel space).
+  function dashedLine(a, b, style, width, dash) {
+    const pa = project(a), pb = project(b);
+    if (!pa || !pb) return;
+    ctx.save();
+    ctx.setLineDash(dash || [2, 3]);
+    ctx.strokeStyle = style;
+    ctx.lineWidth = width || 1;
+    ctx.beginPath();
+    ctx.moveTo(pa.x, pa.y);
+    ctx.lineTo(pb.x, pb.y);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Altitude height cue (mirrors gpu_prototype/plot_courses.py): for a point at [x,y,z] draw
+  //   1. a small centre dot at [x,y,z],
+  //   2. a thin DOTTED vertical drop-line straight down to the floor plane [x,y,floorZ],
+  //   3. a slightly LARGER dot on the floor directly below the centre.
+  // Deliberately subtle (thin dotted line, small dots, muted greys) so it reads the altitude at a
+  // glance without competing with the gate rings / trajectory. `centerColor`/`groundColor` default
+  // to the matplotlib reference's black centre + grey ground dot but can be overridden (drone cue).
+  function heightCue(center, opts) {
+    const o = opts || {};
+    const x = center[0], y = center[1], z = center[2];
+    const fz = scene.floorZ;
+    if (Math.abs(z - fz) > 1e-6) {
+      dashedLine([x, y, z], [x, y, fz], o.lineColor || "rgba(150,160,180,0.65)", o.lineWidth || 1, o.dash);
+    }
+    dot([x, y, fz], o.groundColor || "rgba(70,70,70,0.80)", o.groundRadius != null ? o.groundRadius : 4);
+    dot([x, y, z], o.centerColor || "rgba(20,20,20,0.95)", o.centerRadius != null ? o.centerRadius : 2.2);
+  }
+
+  // Draw an altitude cue under every gate centre (and the course start, when present) so the
+  // viewer can read each waypoint's height off the floor at a glance. Guarded like the other
+  // course markers: no course / no gates → nothing is drawn.
+  function drawHeightCues() {
+    const c = scene.course;
+    if (!c) return;
+    const gates = scene.gates || [];
+    for (const g of gates) {
+      if (!g || !g.center) continue;
+      heightCue(g.center);
+    }
+    if (c.start && c.start.length === 3) heightCue(c.start);
+  }
+
   function drawFloorGrid() {
     const bb = scene.bb, z = scene.floorZ;
     const N = 10;
@@ -1143,8 +1192,12 @@ function createFlight3D(canvas) {
   // target track exists (`highlightActive`), the current target gate is brighter/thicker in
   // COURSE_COLORS.gateTarget and non-targets are dimmed; without a track every gate uses the
   // uniform amber `gate` colour (UC-09 AC7).
-  function drawGateRing(center, rad, isTarget, highlightActive) {
+  function drawGateRing(center, rad, yaw, isTarget, highlightActive) {
     const [gx, gy, gz] = center;
+    // The ring lies in the plane perpendicular to the gate's travel direction (heading `yaw` about +z).
+    // Its in-plane horizontal axis is (-sin yaw, cos yaw, 0); vertical axis is +z. yaw=0 → the y-z plane
+    // (faces +x), matching legacy files that carry no yaw.
+    const hx = -Math.sin(yaw || 0), hy = Math.cos(yaw || 0);
     const SEG = 48;
     let style = COURSE_COLORS.gate;
     let width = 2;
@@ -1158,7 +1211,8 @@ function createFlight3D(canvas) {
     let started = false;
     for (let i = 0; i <= SEG; i++) {
       const a = (i / SEG) * Math.PI * 2;
-      const s = project([gx, gy + rad * Math.cos(a), gz + rad * Math.sin(a)]);
+      const ch = rad * Math.cos(a), cv = rad * Math.sin(a);
+      const s = project([gx + ch * hx, gy + ch * hy, gz + cv]);
       if (!s) { started = false; continue; }
       if (!started) { ctx.moveTo(s.x, s.y); started = true; } else ctx.lineTo(s.x, s.y);
     }
@@ -1180,7 +1234,7 @@ function createFlight3D(canvas) {
       const g = gates[gi];
       if (!g || !g.center) continue;
       const isTarget = targetIdx !== null && gi === targetIdx;
-      drawGateRing(g.center, g.aperture || 0.5, isTarget, targetIdx !== null);
+      drawGateRing(g.center, g.aperture || 0.5, g.yaw || 0, isTarget, targetIdx !== null);
     }
     // finish: low-alpha wireframe rectangle in the x = finish_x plane
     if (c.finish && c.finish.x != null) {
@@ -1328,6 +1382,16 @@ function createFlight3D(canvas) {
     ctx.strokeStyle = "rgba(108,168,255,0.95)";
     ctx.lineWidth = 2.2;
     strokePolyline(path, 0, cut);
+    // altitude cue tracking the live drone position: a dotted drop-line + ground dot below the
+    // playhead marker, tinted in the trajectory blue so it reads as the drone's height (distinct
+    // from the grey gate/waypoint cues). Drawn before the white marker so the marker stays on top.
+    heightCue(path[cut], {
+      lineColor: "rgba(108,168,255,0.70)",
+      groundColor: "rgba(108,168,255,0.85)",
+      centerColor: "rgba(108,168,255,0.95)",
+      groundRadius: 4.5,
+      centerRadius: 2.2,
+    });
     // moving drone marker at the shared playhead
     dot(path[cut], COURSE_COLORS.drone, 4.5);
   }
@@ -1352,6 +1416,8 @@ function createFlight3D(canvas) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // work in CSS pixels; crisp on HiDPI
     ctx.clearRect(0, 0, cssW, cssH);
     drawFloorGrid();
+    drawHeightCues(); // altitude drop-lines under each gate/waypoint — drawn before markers so the
+                      // gate rings/trajectory overlay on top and the cue stays a subtle backdrop.
     drawMarkers();
     drawObstacles();
     drawPads();

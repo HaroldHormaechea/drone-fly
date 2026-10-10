@@ -107,6 +107,7 @@ class GateSpec:
 
     center: tuple[float, float, float]
     aperture: float = 0.6
+    yaw: float = 0.0  # gate heading (rad, about +z): travel direction the ring faces. 0 = faces +x (y-z plane).
 
     @property
     def position(self) -> np.ndarray:

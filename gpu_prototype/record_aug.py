@@ -48,9 +48,10 @@ def course_of(env):
     if hasattr(env, "P") and hasattr(env, "cid"):   # proc: per-episode course read from the pool
         cid = int(env.cid[0]); ng = int(env.P["ng"][cid])
         cen = env.P["cen"][cid][:ng].cpu().tolist(); aps = env.P["ap"][cid][:ng].cpu().tolist()
+        yaws = env.P["yaw"][cid][:ng].cpu().tolist()
         start = env.P["start"][cid].cpu().tolist()
-        specs = tuple(GateSpec(center=(float(c[0]), float(c[1]), float(c[2])), aperture=float(a))
-                      for c, a in zip(cen, aps))
+        specs = tuple(GateSpec(center=(float(c[0]), float(c[1]), float(c[2])), aperture=float(a), yaw=float(y))
+                      for c, a, y in zip(cen, aps, yaws))
         obstacles = ()
         if bool(env.P["omask"][cid].any()):
             oc = env.P["oc"][cid].cpu().tolist(); od = env.P["odim"][cid].cpu().tolist()
@@ -120,7 +121,7 @@ for ep in range(N_EP):
     stack = np.stack(raw_acts)[::STRIDE]
     actions = actions[::STRIDE]; positions = positions[::STRIDE]; tgts = tgts[::STRIDE]
     peak = float(np.abs(stack).max()); gain = (0.97 / peak) if peak > 1e-6 else 1.0
-    rec.set_course(course); rec.start_episode(ep, seed=3000 + ep)
+    rec.set_course(course); rec.start_episode(3000 + ep, seed=3000 + ep)   # label by SEED, not a 0-based counter
     for a, act, pos, tg in zip(stack, actions, positions, tgts):
         rec.sink(a * gain); rec.capture_frame(act, pos, target_gate=tg)
     ctime = steps * DT if completed else None

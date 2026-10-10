@@ -462,6 +462,7 @@ def _course_meta(course: CourseConfig) -> dict:
                 ],
                 "aperture": float(gate.aperture),
                 "plane": "yz",
+                "yaw": float(getattr(gate, "yaw", 0.0)),  # ring heading about +z; viewer rotates the ring by this
             }
             for gate in course.gates
         ],
