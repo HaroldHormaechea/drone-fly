@@ -14,6 +14,7 @@ See [CONNECTOME_RESERVOIR.md](CONNECTOME_RESERVOIR.md) for how the frozen-reserv
 | **pad-lap-flight** | oval lap + battery + charging pad (recharge mid-lap) | **99%** | 46° (aggressive — see note) | 10 |
 | **obstacle-lap-flight** | oval lap + pillar obstacles (weave around) | **99%** (100% never enter a pillar, 0.27 m clearance) | 44° (weaving) | 10 |
 | **proc-course-flight** | **procedurally random** gate courses (different every episode: 5–10 rotated gates, varied heights, apertures) | **96%** across the random pool (flight-audited: no hover, speed 2.75 m/s) | 21° | 12 |
+| **proc-obstacle-avoid** | procedurally random gate courses **+ on-path obstacles** (weave around; terminal contact = crash) | **33%** honest (0% barging among completed, 0.26 m clearance; 90% on the same courses with obstacles off; ~97% solvable ceiling) | 21° | 14 |
 
 The navigation courses (straight/oval/track) are **upright, controlled flight** (~7–25° tilt). The
 **pad** model solves the battery/charging task at 99% but flies **aggressively** (~46° tilt, never
@@ -49,9 +50,13 @@ which (with exploration annealing) closes a deterministic-control gap on the har
 
 ## Work in progress
 
-- **proc-course-flight — obstacles tier (open problem)** — the committed proc model above is the
-  **obstacle-free** tier (random gate courses), which generalizes cleanly at 96%. Adding **obstacles to
-  random courses** is not solved, and the reason is instructive — two failure modes, both audited:
+- **proc-course-flight — obstacles tier — SOLVED at 33% honest deterministic** (`proc-obstacle-avoid`,
+  clearance shaping + terminal + warm aggressive start). Random on-path obstacle avoidance that survives
+  determinization is cracked; see the result + recipe at the end of this list. The long diagnostic journey
+  that got there (every approach that *failed*, and why) is kept below because it pinpoints the real cause.
+
+  The committed proc model is the **obstacle-free** tier (random gate courses), which generalizes cleanly at
+  96%. Adding **obstacles to random courses** was the open hard problem — two early failure modes, both audited:
   - **non-terminal nudge** (contact bumps, recoverable): deterministic completion looks high (76–78%) but
     it's **fake — ~52–54% of completed runs *barge* straight through obstacles** (plowing is cheaper than a
     detour that must generalize across random placements). A size curriculum (obstacles grow 0→full) did
@@ -84,14 +89,36 @@ which (with exploration annealing) closes a deterministic-control gap on the har
       annealing), degrading even plain gate-flying — the collapse is not obstacle-specific, it's the
       deterministic mean going cautious. That reframes the fix: the problem is as much the
       determinization/caution dynamic as the avoidance itself.
-  - **Next: recurrent (GRU) readout.** Avoidance is a committed multi-step maneuver; the memoryless readout
-    must re-derive it every 20 ms frame and forgets through occlusion. A small GRU head on the frozen brain
-    tap gives the controller working memory to *hold an arc*. Paired with potential-based clearance shaping
-    and a mildly-stochastic deployment fallback (the stochastic policy flew far better than the determinized
-    one throughout). See the design note (GRU readout for obstacle avoidance).
-  - **Other levers (future):** partial plasticity (unfreeze a slice of the ray→motor pathway). Infra ready
-    (`gates_proc_env.py`, `course_gen.py`, `verify_proc.py`, `verify_brain.py`; env vars
-    `PROC_TRACTABLE`/`PROC_NO_OBS`/`PROC_OBS_TERMINAL`/`PROC_RAYCAST`/`RAY_POP`).
+  - **Recurrent (GRU) readout tried (`reservoir_gru.py`) — FAILED, and it was the decisive clue.** A GRU
+    head gives the controller working memory to hold a multi-step avoidance arc through occlusion. Trained
+    from scratch it learned to fly but then **collapsed to timid near-hover** (tilt 8.5°→3.5°, 0% det) the
+    moment on-path obstacles + terminal crash dominated. Lesson: **memory was not the missing piece — the
+    reward was.** With a terminal crash penalty on random obstacles, timid caution is always the safe local
+    optimum, and no architecture escapes it.
+  - **Courses confirmed solvable (~97%).** A geometric audit of 1000 tractable courses: every gate is
+    reachable (the "blocking" obstacle sits at the *midpoint between* gates, never on a gate centre); the only
+    defect was ~3% spawning the drone inside the fly-over box at the start — now fixed in `course_gen.py`
+    (reject/nudge any obstacle whose footprint covers the start). So the achievable ceiling is ~97%, and the
+    deterministic gap was always a policy/training problem, not unsolvable courses.
+
+  **THE SOLUTION — `proc-obstacle-avoid` (clearance shaping + terminal + warm aggressive start).** Two fixes,
+  targeting the two real causes (timidity + no steer-around gradient):
+  1. **Warm-start aggressive** from the 96% obstacle-free flier → the policy begins at ~21° tilt, not timid.
+  2. **Potential-based clearance shaping** (`gates_proc_env`, `PROC_SHAPING=1`): a dense, policy-invariant
+     reward on the *change* in clearance to the nearest in-path obstacle — a real gradient toward "steer
+     around", not just "don't crash". Plus terminal contact (forbids barging) + position curriculum +
+     mildly-stochastic anneal (logstd_final −1.0).
+
+  **Result (deterministic, 256 courses):** **33% completion, 0% barging** (0.26 m min clearance, 2.3 m/s,
+  21° tilt — honest, aggressive). Same policy on the same gates with obstacles **off**: **90%** (so the
+  obstacle tax is ~57 pts, and it captures ~37% of achievable). This is up from the **5% wall** every prior
+  method hit. The deterministic mean *climbed* through annealing (5%→34%→39%→33%) instead of collapsing —
+  the signature of a mean that genuinely solved the task. Recordings in `training/proc-obstacle-avoid/`.
+  - **Counter-example (not committed):** the *non-terminal* + shaping variant scored 92% but **29% of
+    completions barge** — free contact still makes plowing cheaper than detouring. Non-terminal → cheats.
+  - **Next levers to push past 33%:** combine the shaping recipe with the GRU (now that timidity is handled,
+    memory may add the arc-holding capacity); stronger shaping weight; longer training; partial plasticity.
+    Reproduce: `PROC_TRACTABLE=1 PROC_RAYCAST=1 PROC_SHAPING=1 PROC_OBS_TERMINAL=1 python train_shaping.py <out.pt>`.
 
 ### Deploying a model + visualizing the full course tier
 - **Inference contract + standalone harness:** [`INFERENCE_CONTRACT.md`](INFERENCE_CONTRACT.md) documents

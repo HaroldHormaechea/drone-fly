@@ -122,6 +122,24 @@ def sample_course(seed, ng_lo=5, ng_hi=21, laps_lo=2, laps_hi=4, ap_lo=APERTURE_
                           "radius": float(r.uniform(0.2, 0.35)), "half_h": 1.5, "blocks": False,
                           "ovec": _perp(centers[(k + 1) % ng] - centers[k])})
 
+    # Keep the START spawn clear of obstacles: on small loops the wide fly-over box can land on the
+    # start point (its low z-span covers the ground spawn), which is an unavoidable spawn-crash under
+    # terminal contact. Push any offending obstacle just outside the spawn clearance along start->centre.
+    sx, sy, sz = float(start[0]), float(start[1]), float(start[2])
+    for o in obstacles:
+        cx, cy, cz = o["center"]
+        rxy = o["radius"] if o["kind"] == "cylinder" else max(o["half"][0], o["half"][1])
+        hz = o["half_h"] if o["kind"] == "cylinder" else o["half"][2]
+        dxy = math.hypot(sx - cx, sy - cy)
+        need = rxy + 0.4
+        if abs(sz - cz) < hz + 0.2 and dxy < need:
+            if dxy > 1e-3:
+                ux, uy = (cx - sx) / dxy, (cy - sy) / dxy
+            else:
+                ux, uy = o["ovec"][0], o["ovec"][1]
+            o["center"][0] = sx + ux * need
+            o["center"][1] = sy + uy * need
+
     # spacing (spec 7), incl the lap-closing gateN->gate0 link
     spac = [float(np.linalg.norm(centers[(i + 1) % ng] - centers[i])) for i in range(ng)]
     return {"seed": int(seed), "n_gates": ng, "laps": laps, "gates": gates, "start": start.tolist(),

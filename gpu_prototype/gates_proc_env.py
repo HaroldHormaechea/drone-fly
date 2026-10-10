@@ -34,6 +34,8 @@ ARENA = 16.0           # xy crash bound (courses are centred on origin, radius <
 CEIL = 3.5
 PASS_SLACK = 0.6       # precision curriculum: extra pass radius at difficulty 0 (generous), -> 0 at diff 1
 PARK = 3.0             # POSITION curriculum: metres an obstacle is parked off to the side at obs_pos_curr=0
+SHAPE_BETA = 4.0       # potential-based clearance shaping: reward weight on change in obstacle clearance
+CLEAR_CAP = 1.5        # only shape clearance within this many metres of an obstacle surface (else constant)
                        # (true aperture). Lets the policy learn course structure before fine gate precision.
 N_RAYS = 40            # forward-cone raycasts (free-space depth fan) -> generalizable obstacle perception
 CONE_HALF_DEG = 45.0   # 90-degree total cone (±45° around the heading)
@@ -100,6 +102,7 @@ POOL_KW = (dict(ng_hi=11, laps_lo=1, laps_hi=2, ap_lo=0.75)
            if os.environ.get("PROC_TRACTABLE", "") else {})
 NO_OBS = bool(os.environ.get("PROC_NO_OBS", ""))   # obstacle-free tier (isolate random-gate navigation)
 OBS_TERMINAL = bool(os.environ.get("PROC_OBS_TERMINAL", ""))   # obstacle contact = crash (forbids barging)
+SHAPING = bool(os.environ.get("PROC_SHAPING", ""))   # potential-based clearance shaping (gradient to steer around)
 
 
 class BatchedProcCourse:
@@ -156,6 +159,7 @@ class BatchedProcCourse:
             self.lap = torch.zeros(self.n, dtype=torch.long, device=dev)
             self.cid = torch.zeros(self.n, dtype=torch.long, device=dev)
             self.prev_s = torch.zeros(self.n, device=dev)
+            self.prev_clear = torch.full((self.n,), CLEAR_CAP, device=dev)
         idx = mask.nonzero(as_tuple=True)[0]
         # curriculum: draw course ids only from the easiest `difficulty` fraction of the sorted pool
         lim = max(16, int(self.difficulty * self.P["cen"].shape[0]))
@@ -170,6 +174,17 @@ class BatchedProcCourse:
         n0 = torch.stack([torch.cos(y0), torch.sin(y0), torch.zeros_like(y0)], -1)
         s = ((self.pos - c0) * n0).sum(-1)
         self.prev_s[idx] = s[idx]
+        if SHAPING:
+            self.prev_clear[idx] = self._clearance()[idx]
+
+    def _clearance(self):
+        """Clamped distance (m) from the drone to the nearest in-path obstacle surface; CLEAR_CAP when
+        all obstacles are far. Potential Phi for shaping: higher = safer."""
+        oc = self._ocen(); od = self._odim(); om = self.P["omask"][self.cid]
+        cen_d = (oc - self.pos.unsqueeze(1)).norm(dim=-1)            # (n,MO) centre distance
+        orad = od[:, :, :2].max(dim=-1).values                      # (n,MO) xy radius proxy
+        clear = torch.where(om, cen_d - orad, torch.full_like(cen_d, 1e4))
+        return clear.min(dim=1).values.clamp(0.0, CLEAR_CAP)
 
     def _gate_normal(self, yaw):
         return torch.stack([torch.cos(yaw), torch.sin(yaw), torch.zeros_like(yaw)], -1)
@@ -337,6 +352,14 @@ class BatchedProcCourse:
             cm = any_hit.float().unsqueeze(-1)
             self.vel[:, :2] = self.vel[:, :2] + cm * away * BOUNCE
             reward = reward - CONTACT_PEN * any_hit.float()
+
+        if SHAPING:
+            # potential-based clearance shaping: reward regaining clearance, penalise losing it. Gives a
+            # dense "steer around" gradient so avoidance isn't only driven by the terminal crash penalty
+            # (which collapses the policy to timid flight). Policy-invariant (depends only on dPhi).
+            clear_now = self._clearance()
+            reward = reward + SHAPE_BETA * (clear_now - self.prev_clear)
+            self.prev_clear = clear_now.detach()
 
         xy_off = self.pos[:, :2].norm(dim=-1)
         crashed = (self.pos[:, 2] < 0.08) | (self.pos[:, 2] > CEIL) | (xy_off > ARENA)

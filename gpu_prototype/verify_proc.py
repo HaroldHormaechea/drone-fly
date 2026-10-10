@@ -11,7 +11,10 @@ from reservoir_aug import K1ReservoirAug
 
 ckpt = sys.argv[1] if len(sys.argv) > 1 else "/workspace/drone-fly/gpu_prototype/proc_aug.pt"
 EPS = int(sys.argv[2]) if len(sys.argv) > 2 else 256
-ac = K1ReservoirAug(EXTRA_DIM).to(dev); ac.load_state_dict(torch.load(ckpt, map_location=dev)); ac.eval()
+ac = K1ReservoirAug(EXTRA_DIM).to(dev)
+_miss, _unexp = ac.load_state_dict(torch.load(ckpt, map_location=dev), strict=False)  # stripped readouts lack body.layer.* (rebuilt from artifacts)
+assert all(k.startswith("body.layer.") for k in _miss) and not _unexp, f"bad load: missing={_miss} unexpected={_unexp}"
+ac.eval()
 
 env = BatchedProcCourse(EPS)
 laps_req = env.P["laps"][env.cid].clone()
