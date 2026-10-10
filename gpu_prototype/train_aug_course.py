@@ -24,6 +24,13 @@ elif course == "obstacles":
 elif course == "pads":
     from gates_pads import BatchedPadCourse as C, EXTRA_DIM as E
     warm_from = OVAL
+elif course == "proc":
+    from gates_proc_env import BatchedProcCourse as C, EXTRA_DIM as E
+    # warm-start from the figure-8/chicane flier (its extra is obs-only, 12 dims; the proc readout's
+    # first 12 extra dims are the same obs, so warm_start copies them and zero-inits the new senses) +
+    # curriculum ramp over the first 60% (easy courses -> full random pool).
+    warm_from = "/workspace/drone-fly/training/figure8-chicane-flight/model_readout.pt"
+    curriculum_frac = 0.6
 else:
     raise SystemExit(f"unknown course {course!r}")
 

@@ -35,12 +35,40 @@ elif which == "pads":
     from drone_fly.env.config import PadSpec
     PAD_SPECS = (PadSpec(center=(float(PAD[0]), float(PAD[1]), float(PAD[2])), radius=float(PAD_R),
                          rechargeable=True),)
+elif which == "proc":
+    from gates_proc_env import BatchedProcCourse as Course, MAX_STEPS, EXTRA_DIM as E
+    APERTURE = 1.0   # per-gate apertures come from the pool (see course_of)
 else:
     raise SystemExit(f"unknown course {which!r}")
 
 
 def course_of(env):
     """CourseConfig for the viewer from this episode's actual gates/start/obstacles/pads."""
+    if hasattr(env, "P") and hasattr(env, "cid"):   # proc: per-episode course read from the pool
+        cid = int(env.cid[0]); ng = int(env.P["ng"][cid])
+        cen = env.P["cen"][cid][:ng].cpu().tolist(); aps = env.P["ap"][cid][:ng].cpu().tolist()
+        start = env.P["start"][cid].cpu().tolist()
+        specs = tuple(GateSpec(center=(float(c[0]), float(c[1]), float(c[2])), aperture=float(a))
+                      for c, a in zip(cen, aps))
+        obstacles = ()
+        if bool(env.P["omask"][cid].any()):
+            oc = env.P["oc"][cid].cpu().tolist(); od = env.P["odim"][cid].cpu().tolist()
+            ot = env.P["otype"][cid].cpu().tolist(); om = env.P["omask"][cid].cpu().tolist()
+            obs_specs = []
+            for j in range(len(om)):
+                if not om[j]:
+                    continue
+                if ot[j] == 0:
+                    obs_specs.append(ObstacleSpec(center=(float(oc[j][0]), float(oc[j][1]), float(oc[j][2])),
+                                                  radius=float(od[j][0]), height=float(2 * od[j][2])))
+                else:
+                    # box -> approximate as a cylinder of its xy half-extent for the viewer
+                    obs_specs.append(ObstacleSpec(center=(float(oc[j][0]), float(oc[j][1]), float(oc[j][2])),
+                                                  radius=float(max(od[j][0], od[j][1])), height=float(2 * od[j][2])))
+            obstacles = tuple(obs_specs)
+        return CourseConfig(start_position=(float(start[0]), float(start[1]), float(start[2])),
+                            gates=specs, finish_x=float(start[0]), floor_z=0.0, ceiling_z=3.5,
+                            obstacles=obstacles)
     if hasattr(env, "gates"):                     # randomized track: per-env gates
         gates = env.gates[0].cpu().tolist(); start = env.start[0].cpu().tolist()
     else:                                         # lap/obstacles/pads: static oval gates

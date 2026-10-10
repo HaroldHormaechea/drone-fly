@@ -63,3 +63,5 @@ events.out.tfevents.*
 !training/obstacle-lap-flight/**
 !training/pad-lap-flight/
 !training/pad-lap-flight/**
+!training/proc-course-flight/
+!training/proc-course-flight/**

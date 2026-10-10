@@ -13,6 +13,7 @@ See [CONNECTOME_RESERVOIR.md](CONNECTOME_RESERVOIR.md) for how the frozen-reserv
 | **figure8-chicane-flight** | randomized figure-8 *or* chicane per episode (both turn directions) | **96%** (figure-8 100% / chicane 92%) | 12° | 12 |
 | **pad-lap-flight** | oval lap + battery + charging pad (recharge mid-lap) | **99%** | 46° (aggressive — see note) | 10 |
 | **obstacle-lap-flight** | oval lap + pillar obstacles (weave around) | **99%** (100% never enter a pillar, 0.27 m clearance) | 44° (weaving) | 10 |
+| **proc-course-flight** | **procedurally random** gate courses (different every episode: 5–10 rotated gates, varied heights, apertures) | **96%** across the random pool (flight-audited: no hover, speed 2.75 m/s) | 21° | 12 |
 
 The navigation courses (straight/oval/track) are **upright, controlled flight** (~7–25° tilt). The
 **pad** model solves the battery/charging task at 99% but flies **aggressively** (~46° tilt, never
@@ -48,6 +49,13 @@ which (with exploration annealing) closes a deterministic-control gap on the har
 
 ## Work in progress
 
+- **proc-course-flight — full tier** — the committed proc model above is the **obstacle-free** tier
+  (random gate courses, 1 lap, apertures ≥ 5× drone width), which generalizes well (96%). The **full
+  tier** (obstacles + 2–3 laps + tight 3× apertures + occlusion) is not solved: deterministic completion
+  ~16% and ~14% of completions *barge* through an obstacle (the non-terminal nudge is exploited). Next:
+  re-add obstacles via the off-path→on-path curriculum from `obstacle-lap-flight`, and soften/extend
+  annealing. Infra ready (`gates_proc_env.py`, `course_gen.py`, `verify_proc.py`, env vars
+  `PROC_TRACTABLE` / `PROC_NO_OBS`).
 - **pad-lap-flight (landing version)** — the committed `pad-lap-flight` above recharges on a *fly-over*
   (a flaw). A redesigned `gates_pads.py` requires an actual **controlled landing + full stop** on the
   pad, with a **timed gradual recharge**, **battery-relative urgency** (>65% ignore pad / ~40% divert /
