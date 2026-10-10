@@ -82,6 +82,12 @@ def sample_course(seed, ng_lo=5, ng_hi=21, laps_lo=2, laps_hi=4, ap_lo=APERTURE_
              for i in range(ng)]
 
     # ---- obstacles (specs 2,3) ----
+    # Each obstacle carries a unit "ovec" perpendicular (in xy) to the gate segment it sits on, so the
+    # env can PARK it off to the side early in training and slide it onto the path (position curriculum).
+    def _perp(seg):
+        v = np.array([-seg[1], seg[0], 0.0], np.float64)
+        n = np.linalg.norm(v)
+        return (v / n).tolist() if n > 1e-6 else [1.0, 0.0, 0.0]
     obstacles = []
     # (a) a BLOCKING obstacle on the straightest consecutive gate pair (lowest turn angle)
     turn = np.full(ng, 9.9)
@@ -93,26 +99,28 @@ def sample_course(seed, ng_lo=5, ng_hi=21, laps_lo=2, laps_hi=4, ap_lo=APERTURE_
     straight_i = int(np.argmin(turn))
     g0, g1 = centers[straight_i], centers[(straight_i + 1) % ng]
     mid = 0.5 * (g0 + g1)
+    perp_a = _perp(g1 - g0)
     if r.random() < 0.5:
         # pillar that blocks the gap: a tall thin cylinder on the mid-line
         obstacles.append({"kind": "cylinder", "center": [mid[0], mid[1], 1.0],
-                          "radius": 0.35, "half_h": 1.5, "blocks": True})
+                          "radius": 0.35, "half_h": 1.5, "blocks": True, "ovec": perp_a})
     else:
         # full block spanning the gate line: a box narrow across the path, tall
         obstacles.append({"kind": "box", "center": [mid[0], mid[1], 0.9],
-                          "half": [0.45, 0.45, 0.9], "blocks": True})
+                          "half": [0.45, 0.45, 0.9], "blocks": True, "ovec": perp_a})
     # (b) a WIDE-FLAT block to fly OVER (spec 3): between another gate pair, wider than tall, low
     j = (straight_i + ng // 2) % ng
     gj, gk = centers[j], centers[(j + 1) % ng]
     midj = 0.5 * (gj + gk)
     obstacles.append({"kind": "box", "center": [midj[0], midj[1], 0.4],
-                      "half": [0.9, 0.9, 0.3], "blocks": False, "fly_over": True})
+                      "half": [0.9, 0.9, 0.3], "blocks": False, "fly_over": True, "ovec": _perp(gk - gj)})
     # (c) optional extra pillar(s)
     for _ in range(int(r.integers(0, 2))):
         k = int(r.integers(0, ng))
         mk = 0.5 * (centers[k] + centers[(k + 1) % ng]) + r.normal(0, 0.3, 3)
         obstacles.append({"kind": "cylinder", "center": [float(mk[0]), float(mk[1]), 1.0],
-                          "radius": float(r.uniform(0.2, 0.35)), "half_h": 1.5, "blocks": False})
+                          "radius": float(r.uniform(0.2, 0.35)), "half_h": 1.5, "blocks": False,
+                          "ovec": _perp(centers[(k + 1) % ng] - centers[k])})
 
     # spacing (spec 7), incl the lap-closing gateN->gate0 link
     spac = [float(np.linalg.norm(centers[(i + 1) % ng] - centers[i])) for i in range(ng)]

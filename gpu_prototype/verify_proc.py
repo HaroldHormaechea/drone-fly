@@ -25,7 +25,7 @@ gates_passed = torch.zeros(EPS, device=dev)
 prev_tgt = env.tgt.clone(); prev_lap = env.lap.clone()
 
 def obstacle_metrics(e):
-    oc = e.P["oc"][e.cid]; od = e.P["odim"][e.cid]; om = e.P["omask"][e.cid]; ot = e.P["otype"][e.cid]
+    oc = e._ocen(); od = e.P["odim"][e.cid]; om = e.P["omask"][e.cid]; ot = e.P["otype"][e.cid]
     rel = e.pos.unsqueeze(1) - oc
     dxy = rel[:, :, :2].norm(dim=-1)
     # signed surface distance: cyl = dxy - r (ignore caps); box = Chebyshev-ish outside dist

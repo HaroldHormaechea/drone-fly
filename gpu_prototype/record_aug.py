@@ -5,7 +5,7 @@ the viewer course (CourseConfig.obstacles) for the obstacle scenario, so the app
 
 Usage: record_aug.py <lap|track|obstacles> <ckpt> <out_name> [n_ep]
 """
-import sys
+import os, sys
 import numpy as np
 import torch
 
@@ -19,6 +19,7 @@ which = sys.argv[1] if len(sys.argv) > 1 else "obstacles"
 CKPT = sys.argv[2]
 OUT_NAME = sys.argv[3]
 N_EP = int(sys.argv[4]) if len(sys.argv) > 4 else 10
+STRIDE = int(os.environ.get("REC_STRIDE", "1"))   # >1 downsamples frames to bound committed JSON size
 OUT = f"/workspace/drone-fly/training/{OUT_NAME}/recordings"
 K1_PATH = "/workspace/drone-fly/artifacts/pruned/k1"
 
@@ -87,10 +88,13 @@ def course_of(env):
 
 
 ac = K1ReservoirAug(E).to(dev)
-ac.load_state_dict(torch.load(CKPT, map_location=dev)); ac.eval()
+missing, unexpected = ac.load_state_dict(torch.load(CKPT, map_location=dev), strict=False)  # readout is stripped of body.layer.* (rebuilt from artifacts)
+assert all(m.startswith("body.layer.") for m in missing), f"unexpected missing keys: {missing}"
+assert not unexpected, f"unexpected keys: {unexpected}"
+ac.eval()
 data = load_connectome(K1_PATH)
 rec = ActivationRecorder(data, out_dir=OUT, backend="gpu-batched-ctbr",
-                         checkpoint=f"gpu_prototype/{OUT_NAME} (augmented K1 reservoir)", dt=DT, course=None)
+                         checkpoint=f"gpu_prototype/{OUT_NAME} (augmented K1 reservoir)", dt=DT * STRIDE, course=None)
 
 results = []
 for ep in range(N_EP):
@@ -112,7 +116,9 @@ for ep in range(N_EP):
             total_r += float(rew[0]); steps += 1
             if bool(done[0]):
                 completed = bool(env.last_completed[0]); break
-    stack = np.stack(raw_acts); peak = float(np.abs(stack).max()); gain = (0.97 / peak) if peak > 1e-6 else 1.0
+    stack = np.stack(raw_acts)[::STRIDE]
+    actions = actions[::STRIDE]; positions = positions[::STRIDE]; tgts = tgts[::STRIDE]
+    peak = float(np.abs(stack).max()); gain = (0.97 / peak) if peak > 1e-6 else 1.0
     rec.set_course(course); rec.start_episode(ep, seed=3000 + ep)
     for a, act, pos, tg in zip(stack, actions, positions, tgts):
         rec.sink(a * gain); rec.capture_frame(act, pos, target_gate=tg)

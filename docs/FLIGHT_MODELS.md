@@ -66,10 +66,29 @@ which (with exploration annealing) closes a deterministic-control gap on the har
     size, but under annealing the **deterministic mean still collapsed to ~5%** (same as without raycasts).
     So perception was **not** the bottleneck — the small frozen-reservoir *readout* can't turn free-space
     sensing into a placement-invariant avoidance policy that survives annealing.
-  - **Next levers (future):** feed the raycasts into the **connectome itself** (a second sensory input
-    projection — use the brain's capacity, not just the ~168k readout); and/or gentler annealing (deploy a
-    mildly-stochastic policy, which flew clean at ~50%); and/or partial plasticity. Infra ready
-    (`gates_proc_env.py`, `course_gen.py`, `verify_proc.py`; env vars `PROC_TRACTABLE`/`PROC_NO_OBS`/`PROC_OBS_TERMINAL`/`PROC_RAYCAST`).
+  - **Rays INTO the connectome tried (`reservoir_brain.py` → `K1ReservoirBrainRay`).** A trainable
+    `ray_proj` injects the 40-ray cone into the brain's sensory neurons (frozen edges). First attempt
+    collided obs + rays in the same 32 neurons; fixed with a **dedicated, wider 256-neuron ray
+    population** (disjoint from the 12-dim obs neurons). It lifted the *stochastic* policy to ~18% peak but
+    the **deterministic audit still collapsed to 5%** (`verify_brain.py`, 10/192) — *honest* (2% barging,
+    0% among completed, 1.34 m/s), just can't complete. **Perception bandwidth is conclusively not the
+    bottleneck.** A recording of this failure is at `training/proc-obstacle-fail/` for inspection.
+  - **Position curriculum (in progress).** Full-size obstacles start parked 3 m off-path and slide onto
+    the path over the first 40% of training (`gates_proc_env._ocen`, `obs_pos_curr`) — the mechanism that
+    made `obstacle-lap-flight` evade cleanly. Early read: completion rode ~80% while obstacles were
+    off-path but fell to ~15% once fully on-path (pre-anneal) — same ceiling as the others. Audit pending.
+  - **Other levers (future):** gentler annealing (deploy a mildly-stochastic policy, which flew clean at
+    ~50%); partial plasticity. Infra ready (`gates_proc_env.py`, `course_gen.py`, `verify_proc.py`,
+    `verify_brain.py`; env vars `PROC_TRACTABLE`/`PROC_NO_OBS`/`PROC_OBS_TERMINAL`/`PROC_RAYCAST`/`RAY_POP`).
+
+### Deploying a model + visualizing the full course tier
+- **Inference contract + standalone harness:** [`INFERENCE_CONTRACT.md`](INFERENCE_CONTRACT.md) documents
+  the obs/action/plant/file formats; [`gpu_prototype/inference.py`](../gpu_prototype/inference.py) loads a
+  `model_readout.pt` and flies it with a pure-NumPy reference plant (no training-env import) — for a
+  liftoff/deployment harness.
+- **`training/multilap-course-demo/`** — the existing proc readout flying the **full multi-lap tier**
+  (2–3 laps, 5–20 gates, varied heights, no obstacles) so the big circuits can be *seen* (5/12 completed;
+  the pilot was trained on the easier tractable tier).
 - **pad-lap-flight (landing version)** — the committed `pad-lap-flight` above recharges on a *fly-over*
   (a flaw). A redesigned `gates_pads.py` requires an actual **controlled landing + full stop** on the
   pad, with a **timed gradual recharge**, **battery-relative urgency** (>65% ignore pad / ~40% divert /

@@ -33,6 +33,7 @@ CONTACT_PEN = 0.5
 ARENA = 16.0           # xy crash bound (courses are centred on origin, radius <~9)
 CEIL = 3.5
 PASS_SLACK = 0.6       # precision curriculum: extra pass radius at difficulty 0 (generous), -> 0 at diff 1
+PARK = 3.0             # POSITION curriculum: metres an obstacle is parked off to the side at obs_pos_curr=0
                        # (true aperture). Lets the policy learn course structure before fine gate precision.
 N_RAYS = 40            # forward-cone raycasts (free-space depth fan) -> generalizable obstacle perception
 CONE_HALF_DEG = 45.0   # 90-degree total cone (±45° around the heading)
@@ -61,6 +62,7 @@ def build_pool(P=POOL, base=0, no_obs=False, **ckw):
     ap = np.ones((P, NG_MAX), np.float32); gmask = np.zeros((P, NG_MAX), bool)
     start = np.zeros((P, 3), np.float32); ng = np.zeros(P, np.int64); laps = np.zeros(P, np.int64)
     oc = np.zeros((P, MO, 3), np.float32); odim = np.ones((P, MO, 3), np.float32)
+    ovec = np.zeros((P, MO, 3), np.float32)
     otype = np.zeros((P, MO), np.int64); omask = np.zeros((P, MO), bool)
     for p in range(P):
         c = sample_course(base + p, **ckw); n = c["n_gates"]; ng[p] = n; laps[p] = c["laps"]
@@ -68,7 +70,7 @@ def build_pool(P=POOL, base=0, no_obs=False, **ckw):
             cen[p, i] = g["center"]; yaw[p, i] = g["yaw"]; ap[p, i] = g["aperture"]; gmask[p, i] = True
         start[p] = c["start"]
         for j, o in enumerate(c["obstacles"][:MO]):
-            oc[p, j] = o["center"]; omask[p, j] = True
+            oc[p, j] = o["center"]; omask[p, j] = True; ovec[p, j] = o.get("ovec", [0.0, 0.0, 0.0])
             if o["kind"] == "cylinder":
                 otype[p, j] = 0; odim[p, j] = [o["radius"], o["radius"], o["half_h"]]
             else:
@@ -80,14 +82,14 @@ def build_pool(P=POOL, base=0, no_obs=False, **ckw):
     nobs = omask.sum(axis=1)
     score = ng + 2.0 * nobs + 4.0 / mean_ap + 3.0 * (laps - 2)
     order = np.argsort(score)
-    cen, yaw, ap, gmask, start, ng, laps, oc, odim, otype, omask = (
+    cen, yaw, ap, gmask, start, ng, laps, oc, odim, ovec, otype, omask = (
         cen[order], yaw[order], ap[order], gmask[order], start[order], ng[order], laps[order],
-        oc[order], odim[order], otype[order], omask[order])
+        oc[order], odim[order], ovec[order], otype[order], omask[order])
     if no_obs:
         omask[:] = False     # obstacle-free tier: isolate random-gate navigation (no barging, no occlusion)
     t = lambda a: torch.as_tensor(a, device=dev)
     return dict(cen=t(cen), yaw=t(yaw), ap=t(ap), gmask=t(gmask), start=t(start), ng=t(ng), laps=t(laps),
-                oc=t(oc), odim=t(odim), otype=t(otype), omask=t(omask))
+                oc=t(oc), odim=t(odim), ovec=t(ovec), otype=t(otype), omask=t(omask))
 
 
 _POOL = None
@@ -110,6 +112,7 @@ class BatchedProcCourse:
         self._comp_rate = 0.0
         self.ngates = NG_MAX   # nominal (varies per env; used by generic eval loops)
         self.difficulty = 1.0  # curriculum: fraction of the (easy->hard sorted) pool that can be drawn
+        self.obs_pos_curr = 1.0  # POSITION curriculum: 0 = obstacles parked PARK m off-path, 1 = full on-path
         self.reset_all()
 
     def reset_all(self):
@@ -132,6 +135,14 @@ class BatchedProcCourse:
         # policy learns to steer clear as they appear instead of meeting full on-path walls it plows
         # through (barging). Mirrors the off-path->on-path curriculum that gave clean evasion elsewhere.
         return self.P["odim"][self.cid] * max(float(self.difficulty), 0.0)
+
+    def _ocen(self):
+        # OBSTACLE-POSITION CURRICULUM: full-size obstacles start parked PARK m off to the side
+        # (obs_pos_curr=0, clear lane) and slide onto the path (obs_pos_curr=1) over training. The arc
+        # is learned incrementally -- what made obstacle-lap-flight evade cleanly -- instead of facing a
+        # full on-path wall from scratch under a crash penalty (which collapses the deterministic mean).
+        off = PARK * (1.0 - max(0.0, min(1.0, float(self.obs_pos_curr))))
+        return self.P["oc"][self.cid] + self.P["ovec"][self.cid] * off
 
     def _spawn(self, mask):
         k = int(mask.sum())
@@ -173,7 +184,7 @@ class BatchedProcCourse:
 
     def _obstacle_vision(self):
         """nearest-NVIS obstacles: rel (dx,dy,dz) + size proxy, masked to real obstacles."""
-        oc = self.P["oc"][self.cid]                       # (n,MO,3)
+        oc = self._ocen()                                 # (n,MO,3) position-curriculum centres
         od = self._odim()                                 # (n,MO,3) -- size curriculum
         om = self.P["omask"][self.cid]                    # (n,MO)
         rel = oc - self.pos.unsqueeze(1)                  # (n,MO,3)
@@ -196,7 +207,7 @@ class BatchedProcCourse:
         bearing = d / dist
         orient = torch.stack([torch.cos(ny), torch.sin(ny)], -1)
         # line-of-sight: closest approach of each obstacle centre to the segment pos->nc
-        oc = self.P["oc"][self.cid]; od = self._odim(); om = self.P["omask"][self.cid]
+        oc = self._ocen(); od = self._odim(); om = self.P["omask"][self.cid]
         seg = (nc - self.pos)                             # (n,3)
         seglen2 = (seg * seg).sum(-1, keepdim=True) + 1e-6
         to_o = oc - self.pos.unsqueeze(1)                 # (n,MO,3)
@@ -232,7 +243,7 @@ class BatchedProcCourse:
         cx = CONE[:, 0].view(1, R, 1); cy = CONE[:, 1].view(1, R, 1); cz = CONE[:, 2].view(1, R, 1)
         rays = cx * right.unsqueeze(1) + cy * up.unsqueeze(1) + cz * fwd.unsqueeze(1)   # (n,R,3)
 
-        oc = self.P["oc"][self.cid]; od = self._odim(); om = self.P["omask"][self.cid]; ot = self.P["otype"][self.cid]
+        oc = self._ocen(); od = self._odim(); om = self.P["omask"][self.cid]; ot = self.P["otype"][self.cid]
         o_e = self.pos.view(n, 1, 1, 3); r_e = rays.view(n, R, 1, 3)
         oc_e = oc.view(n, 1, MO, 3); od_e = od.view(n, 1, MO, 3)
         om_e = om.view(n, 1, MO); ot_e = ot.view(n, 1, MO)
@@ -308,7 +319,7 @@ class BatchedProcCourse:
         reward = reward + 300.0 * completed.float()
 
         # obstacle contact -> non-terminal nudge (recoverable), applied to the NEAREST obstacle
-        oc = self.P["oc"][self.cid]; od = self._odim()
+        oc = self._ocen(); od = self._odim()
         om = self.P["omask"][self.cid]; otype = self.P["otype"][self.cid]
         rel = self.pos.unsqueeze(1) - oc                 # (n,MO,3) obstacle->drone
         # per-type inside test: cyl = xy within r & |dz|<h ; box = inside half-extents

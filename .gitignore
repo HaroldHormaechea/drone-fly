@@ -65,3 +65,8 @@ events.out.tfevents.*
 !training/pad-lap-flight/**
 !training/proc-course-flight/
 !training/proc-course-flight/**
+# WIP / diagnostic recordings (not working models -- kept for inspection)
+!training/proc-obstacle-fail/
+!training/proc-obstacle-fail/**
+!training/multilap-course-demo/
+!training/multilap-course-demo/**
