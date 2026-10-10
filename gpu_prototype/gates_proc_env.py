@@ -23,7 +23,9 @@ from hover_gpu import (  # noqa: F401
 from course_gen import sample_course
 
 NG_MAX = 20            # pad gate lists to this
-MO = 4                 # max obstacles per course
+MO = 10                # max obstacles per course (raised from 4 for tunnels: a tunnel = 3 boxes + other obstacles).
+                       # EXTRA_DIM is independent of MO (obstacle_vision uses NVIS=2 nearest), so the inference
+                       # contract / existing extra_dim=70 models are unaffected; empty slots stay masked.
 NVIS = 2               # nearest obstacles the readout sees
 POOL = 1024            # distinct random courses in the pool
 MAX_STEPS = 1400       # up to 20 gates x 3 laps + takeoff
@@ -36,6 +38,8 @@ PASS_SLACK = 0.6       # precision curriculum: extra pass radius at difficulty 0
 PARK = 3.0             # POSITION curriculum: metres an obstacle is parked off to the side at obs_pos_curr=0
 SHAPE_BETA = 4.0       # potential-based clearance shaping: reward weight on change in obstacle clearance
 GAP_BETA = 0.4         # gap-steering (exp02): reward weight on flying along the clearest gate-ward cone dir
+FLOOR_BETA = 3.0       # floor-margin shaping: reward weight on change in altitude margin above the floor
+FLOOR_CAP = 0.5        # only shape altitude within this many metres of the floor (else constant -> no bias up high)
 CLEAR_CAP = 1.5        # only shape clearance within this many metres of an obstacle surface (else constant)
                        # (true aperture). Lets the policy learn course structure before fine gate precision.
 N_RAYS = 40            # forward-cone raycasts (free-space depth fan) -> generalizable obstacle perception
@@ -101,10 +105,13 @@ _POOL = None
 # competent deterministic mean (it collapses under annealing). Keeps heights/obstacles/occlusion/chicane.
 POOL_KW = (dict(ng_hi=11, laps_lo=1, laps_hi=2, ap_lo=0.75)
            if os.environ.get("PROC_TRACTABLE", "") else {})
+if os.environ.get("PROC_TUNNELS", ""):
+    POOL_KW = {**POOL_KW, "with_tunnels": True}   # add a fly-through tunnel/doorway to every course
 NO_OBS = bool(os.environ.get("PROC_NO_OBS", ""))   # obstacle-free tier (isolate random-gate navigation)
 OBS_TERMINAL = bool(os.environ.get("PROC_OBS_TERMINAL", ""))   # obstacle contact = crash (forbids barging)
 SHAPING = bool(os.environ.get("PROC_SHAPING", ""))   # potential-based clearance shaping (gradient to steer around)
 GAP = bool(os.environ.get("PROC_GAP", ""))           # gap-steering reward: fly along the clearest gate-ward cone dir
+FLOOR = bool(os.environ.get("PROC_FLOOR", ""))       # floor-margin shaping: discourage descending into the ground
 
 
 class BatchedProcCourse:
@@ -178,6 +185,7 @@ class BatchedProcCourse:
             self.cid = torch.zeros(self.n, dtype=torch.long, device=dev)
             self.prev_s = torch.zeros(self.n, device=dev)
             self.prev_clear = torch.full((self.n,), CLEAR_CAP, device=dev)
+            self.prev_floor = torch.full((self.n,), FLOOR_CAP, device=dev)
         idx = mask.nonzero(as_tuple=True)[0]
         # curriculum: draw course ids only from the easiest `difficulty` fraction of the sorted pool
         lim = max(16, int(self.difficulty * self.P["cen"].shape[0]))
@@ -194,6 +202,8 @@ class BatchedProcCourse:
         self.prev_s[idx] = s[idx]
         if SHAPING:
             self.prev_clear[idx] = self._clearance()[idx]
+        if FLOOR:
+            self.prev_floor[idx] = (self.pos[:, 2] - 0.08).clamp(0.0, FLOOR_CAP)[idx]
 
     def _clearance(self):
         """Clamped distance (m) from the drone to the nearest in-path obstacle surface; CLEAR_CAP when
@@ -404,6 +414,14 @@ class BatchedProcCourse:
 
         if GAP:
             reward = reward + GAP_BETA * self._gap_reward()
+
+        if FLOOR:
+            # potential-based altitude-margin shaping near the floor: reward regaining height when low,
+            # penalise sinking toward the ground. Capped at FLOOR_CAP so it's inert at normal altitude
+            # (no "fly high" bias). Attacks the ~8% floor-crash failures. Policy-invariant.
+            floor_now = (self.pos[:, 2] - 0.08).clamp(0.0, FLOOR_CAP)
+            reward = reward + FLOOR_BETA * (floor_now - self.prev_floor)
+            self.prev_floor = floor_now.detach()
 
         xy_off = self.pos[:, :2].norm(dim=-1)
         grace = self.t > 20

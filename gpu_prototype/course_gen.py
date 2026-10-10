@@ -48,7 +48,8 @@ def _gen_centers(r, ng, target_chord):
     return np.stack([cx, cy, cz], axis=1), c0
 
 
-def sample_course(seed, ng_lo=5, ng_hi=21, laps_lo=2, laps_hi=4, ap_lo=APERTURE_MIN, ap_hi=APERTURE_MAX):
+def sample_course(seed, ng_lo=5, ng_hi=21, laps_lo=2, laps_hi=4, ap_lo=APERTURE_MIN, ap_hi=APERTURE_MAX,
+                  with_tunnels=False):
     r = _rng(seed)
     ng = int(r.integers(ng_lo, ng_hi))   # gate count range (default 5..20)
     laps = int(r.integers(laps_lo, laps_hi))   # lap range (default 2..3)
@@ -122,11 +123,37 @@ def sample_course(seed, ng_lo=5, ng_hi=21, laps_lo=2, laps_hi=4, ap_lo=APERTURE_
                           "radius": float(r.uniform(0.2, 0.35)), "half_h": 1.5, "blocks": False,
                           "ovec": _perp(centers[(k + 1) % ng] - centers[k])})
 
+    # (d) TUNNEL / doorway (spec: navigate THROUGH an opening, walls on both sides + overhead). Built from
+    # 3 axis-aligned boxes around a gate-segment midpoint: a clear central lane (the drone threads it), a
+    # wall on each side (can't go around), and a ceiling (can't go over). Terminal contact => it must fly
+    # through the gap. Fixed in place (ovec=0): a tunnel is the path, so the position curriculum must not
+    # slide its walls. Placed a third of the way round from the blocking obstacle so they don't overlap.
+    if with_tunnels:
+        tn = (straight_i + ng // 3) % ng
+        a0, a1 = centers[tn], centers[(tn + 1) % ng]
+        midt = 0.5 * (a0 + a1)
+        px, py, _ = _perp(a1 - a0)                       # unit perpendicular in xy
+        zc = float(midt[2])                              # gate-height of this segment
+        GW = 0.65                                        # half-width of the clear central lane
+        WALL = 0.55                                      # wall box half-extent (xy)
+        off = GW + WALL                                  # wall-centre offset along the perpendicular
+        for sgn in (+1.0, -1.0):                         # left + right walls
+            obstacles.append({"kind": "box",
+                              "center": [float(midt[0] + sgn * px * off), float(midt[1] + sgn * py * off), 1.0],
+                              "half": [WALL, WALL, 1.6], "blocks": True, "tunnel": True,
+                              "ovec": [0.0, 0.0, 0.0]})
+        obstacles.append({"kind": "box",                 # ceiling over the lane
+                          "center": [float(midt[0]), float(midt[1]), zc + 1.1],
+                          "half": [off + WALL, off + WALL, 0.3], "blocks": True, "tunnel": True,
+                          "ovec": [0.0, 0.0, 0.0]})
+
     # Keep the START spawn clear of obstacles: on small loops the wide fly-over box can land on the
     # start point (its low z-span covers the ground spawn), which is an unavoidable spawn-crash under
     # terminal contact. Push any offending obstacle just outside the spawn clearance along start->centre.
     sx, sy, sz = float(start[0]), float(start[1]), float(start[2])
     for o in obstacles:
+        if o.get("tunnel"):
+            continue                       # tunnel walls are fixed structure; never nudge them
         cx, cy, cz = o["center"]
         rxy = o["radius"] if o["kind"] == "cylinder" else max(o["half"][0], o["half"][1])
         hz = o["half_h"] if o["kind"] == "cylinder" else o["half"][2]
