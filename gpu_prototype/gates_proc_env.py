@@ -35,6 +35,7 @@ CEIL = 3.5
 PASS_SLACK = 0.6       # precision curriculum: extra pass radius at difficulty 0 (generous), -> 0 at diff 1
 PARK = 3.0             # POSITION curriculum: metres an obstacle is parked off to the side at obs_pos_curr=0
 SHAPE_BETA = 4.0       # potential-based clearance shaping: reward weight on change in obstacle clearance
+GAP_BETA = 0.4         # gap-steering (exp02): reward weight on flying along the clearest gate-ward cone dir
 CLEAR_CAP = 1.5        # only shape clearance within this many metres of an obstacle surface (else constant)
                        # (true aperture). Lets the policy learn course structure before fine gate precision.
 N_RAYS = 40            # forward-cone raycasts (free-space depth fan) -> generalizable obstacle perception
@@ -103,6 +104,7 @@ POOL_KW = (dict(ng_hi=11, laps_lo=1, laps_hi=2, ap_lo=0.75)
 NO_OBS = bool(os.environ.get("PROC_NO_OBS", ""))   # obstacle-free tier (isolate random-gate navigation)
 OBS_TERMINAL = bool(os.environ.get("PROC_OBS_TERMINAL", ""))   # obstacle contact = crash (forbids barging)
 SHAPING = bool(os.environ.get("PROC_SHAPING", ""))   # potential-based clearance shaping (gradient to steer around)
+GAP = bool(os.environ.get("PROC_GAP", ""))           # gap-steering reward: fly along the clearest gate-ward cone dir
 
 
 class BatchedProcCourse:
@@ -116,6 +118,7 @@ class BatchedProcCourse:
         self.ngates = NG_MAX   # nominal (varies per env; used by generic eval loops)
         self.difficulty = 1.0  # curriculum: fraction of the (easy->hard sorted) pool that can be drawn
         self.obs_pos_curr = 1.0  # POSITION curriculum: 0 = obstacles parked PARK m off-path, 1 = full on-path
+        self.obs_count_curr = 1.0  # COUNT curriculum: 0 = at most 1 obstacle active, 1 = all active
         self.reset_all()
 
     def reset_all(self):
@@ -138,6 +141,21 @@ class BatchedProcCourse:
         # policy learns to steer clear as they appear instead of meeting full on-path walls it plows
         # through (barging). Mirrors the off-path->on-path curriculum that gave clean evasion elsewhere.
         return self.P["odim"][self.cid] * max(float(self.difficulty), 0.0)
+
+    def _omask(self):
+        # OBSTACLE-COUNT CURRICULUM: cap active obstacles at K per course, K growing 1 -> full over
+        # training (obs_count_curr 0 -> 1). Multi-obstacle courses are the wall (100% of obstacle
+        # deaths occur on 2+ obstacle courses), so the policy masters one in-path obstacle first, then
+        # progressively more. Masked obstacles are fully inert: no collision, no clearance shaping, and
+        # not sensed (every runtime omask read routes through here, so sensing stays consistent). At
+        # obs_count_curr=1.0 this is identical to the raw pool mask (no-op for eval/recording).
+        om = self.P["omask"][self.cid]                                  # (n, MO) true presence
+        if float(self.obs_count_curr) >= 1.0:
+            return om
+        nobs = om.sum(dim=1)                                            # (n,) obstacles on this course
+        k = (1 + torch.round(float(self.obs_count_curr) * (nobs - 1).clamp(min=0))).long()  # (n,) active count
+        rank = om.cumsum(dim=1)                                         # 1,2,.. at active cols
+        return om & (rank <= k.unsqueeze(1))
 
     def _ocen(self):
         # OBSTACLE-POSITION CURRICULUM: full-size obstacles start parked PARK m off to the side
@@ -180,7 +198,7 @@ class BatchedProcCourse:
     def _clearance(self):
         """Clamped distance (m) from the drone to the nearest in-path obstacle surface; CLEAR_CAP when
         all obstacles are far. Potential Phi for shaping: higher = safer."""
-        oc = self._ocen(); od = self._odim(); om = self.P["omask"][self.cid]
+        oc = self._ocen(); od = self._odim(); om = self._omask()
         cen_d = (oc - self.pos.unsqueeze(1)).norm(dim=-1)            # (n,MO) centre distance
         orad = od[:, :, :2].max(dim=-1).values                      # (n,MO) xy radius proxy
         clear = torch.where(om, cen_d - orad, torch.full_like(cen_d, 1e4))
@@ -201,7 +219,7 @@ class BatchedProcCourse:
         """nearest-NVIS obstacles: rel (dx,dy,dz) + size proxy, masked to real obstacles."""
         oc = self._ocen()                                 # (n,MO,3) position-curriculum centres
         od = self._odim()                                 # (n,MO,3) -- size curriculum
-        om = self.P["omask"][self.cid]                    # (n,MO)
+        om = self._omask()                                # (n,MO)
         rel = oc - self.pos.unsqueeze(1)                  # (n,MO,3)
         dist = rel.norm(dim=-1)                           # (n,MO)
         dist = torch.where(om, dist, torch.full_like(dist, 1e4))
@@ -222,7 +240,7 @@ class BatchedProcCourse:
         bearing = d / dist
         orient = torch.stack([torch.cos(ny), torch.sin(ny)], -1)
         # line-of-sight: closest approach of each obstacle centre to the segment pos->nc
-        oc = self._ocen(); od = self._odim(); om = self.P["omask"][self.cid]
+        oc = self._ocen(); od = self._odim(); om = self._omask()
         seg = (nc - self.pos)                             # (n,3)
         seglen2 = (seg * seg).sum(-1, keepdim=True) + 1e-6
         to_o = oc - self.pos.unsqueeze(1)                 # (n,MO,3)
@@ -240,12 +258,10 @@ class BatchedProcCourse:
         distn = torch.where(occ, torch.zeros_like(dist), (dist / 10.0).clamp(max=1.0))   # normalized
         return torch.cat([bearing, orient, distn, vis], dim=-1)
 
-    def _raycast(self):
-        """Forward 90-deg cone of N_RAYS rays; each returns normalized free-space distance in [0,1]
-        (1 = clear to RAY_RANGE, lower = obstacle surface nearer). Generalizable egocentric perception:
-        'where is the path blocked / open', independent of absolute obstacle positions."""
+    def _ray_basis(self):
+        """World-frame ray directions (n,R,3) of the forward 90-deg cone around the heading
+        (velocity dir, falling back to the target direction at low speed)."""
         n, R = self.n, N_RAYS
-        # heading = velocity direction; fall back to the direction to the current target at low speed
         v = self.vel; sp = v.norm(dim=-1, keepdim=True)
         tdir = self._target_pos() - self.pos
         fwd = torch.where(sp > 0.3, v / (sp + 1e-6), tdir / (tdir.norm(dim=-1, keepdim=True) + 1e-6))
@@ -254,11 +270,13 @@ class BatchedProcCourse:
         rn = right.norm(dim=-1, keepdim=True)
         right = torch.where(rn < 1e-3, torch.tensor([1.0, 0.0, 0.0], device=dev).expand(n, 3), right / (rn + 1e-6))
         up = torch.cross(right, fwd, dim=-1)
-        # ray directions in world: (n,R,3) = cx*right + cy*up + cz*fwd (canonical cone is around +z)
         cx = CONE[:, 0].view(1, R, 1); cy = CONE[:, 1].view(1, R, 1); cz = CONE[:, 2].view(1, R, 1)
-        rays = cx * right.unsqueeze(1) + cy * up.unsqueeze(1) + cz * fwd.unsqueeze(1)   # (n,R,3)
+        return cx * right.unsqueeze(1) + cy * up.unsqueeze(1) + cz * fwd.unsqueeze(1)   # (n,R,3)
 
-        oc = self._ocen(); od = self._odim(); om = self.P["omask"][self.cid]; ot = self.P["otype"][self.cid]
+    def _cast(self, rays):
+        """Normalized free-space distance in [0,1] per ray (1 = clear to RAY_RANGE)."""
+        n, R = self.n, N_RAYS
+        oc = self._ocen(); od = self._odim(); om = self._omask(); ot = self.P["otype"][self.cid]
         o_e = self.pos.view(n, 1, 1, 3); r_e = rays.view(n, R, 1, 3)
         oc_e = oc.view(n, 1, MO, 3); od_e = od.view(n, 1, MO, 3)
         om_e = om.view(n, 1, MO); ot_e = ot.view(n, 1, MO)
@@ -284,6 +302,29 @@ class BatchedProcCourse:
         t = torch.where(om_e & (t > 0) & (t < RAY_RANGE), t, INF)      # real obstacles, in range
         dist = t.min(dim=2).values.clamp(max=RAY_RANGE)                # (n,R) nearest hit per ray
         return dist / RAY_RANGE                                        # 1 = clear
+
+    def _raycast(self):
+        """Forward 90-deg cone of N_RAYS rays; each returns normalized free-space distance in [0,1].
+        Generalizable egocentric perception: 'where is the path blocked / open'."""
+        return self._cast(self._ray_basis())
+
+    def _gap_reward(self):
+        """GAP-STEERING (exp02): reward flying along the clearest cone direction that also points toward
+        the target gate, so the drone threads the free gap between multiple obstacles instead of clipping
+        one while dodging another. 0 when no obstacle is near (all rays clear -> best dir == most
+        gate-aligned ray ~ target dir, consistent with r_prog). Direct heading reward (like r_up/r_spin)."""
+        rays = self._ray_basis()                                       # (n,R,3) world unit dirs
+        free = self._cast(rays)                                        # (n,R) 0..1
+        tdir = self._target_pos() - self.pos
+        gdir = tdir / (tdir.norm(dim=-1, keepdim=True) + 1e-6)         # (n,3) toward gate
+        align = (rays * gdir.unsqueeze(1)).sum(-1).clamp(min=0.0)      # (n,R) forward-toward-gate only
+        score = free * (0.5 + 0.5 * align)                            # prefer clear AND gate-ward rays
+        best = score.argmax(dim=1)                                     # (n,)
+        best_dir = rays[self._ar(), best]                             # (n,3) the chosen gap direction
+        v = self.vel; sp = v.norm(dim=-1, keepdim=True)
+        vdir = v / (sp + 1e-6)
+        follow = (vdir * best_dir).sum(-1).clamp(min=0.0)             # (n,) cos(vel, gap dir)
+        return follow * sp.squeeze(-1).clamp(max=3.0) / 3.0           # scale by speed (0..1), reward moving INTO the gap
 
     def extra(self):
         _, cy, cap = self._gate(self.tgt)
@@ -335,7 +376,7 @@ class BatchedProcCourse:
 
         # obstacle contact -> non-terminal nudge (recoverable), applied to the NEAREST obstacle
         oc = self._ocen(); od = self._odim()
-        om = self.P["omask"][self.cid]; otype = self.P["otype"][self.cid]
+        om = self._omask(); otype = self.P["otype"][self.cid]
         rel = self.pos.unsqueeze(1) - oc                 # (n,MO,3) obstacle->drone
         # per-type inside test: cyl = xy within r & |dz|<h ; box = inside half-extents
         dxy = rel[:, :, :2].norm(dim=-1)
@@ -361,10 +402,15 @@ class BatchedProcCourse:
             reward = reward + SHAPE_BETA * (clear_now - self.prev_clear)
             self.prev_clear = clear_now.detach()
 
+        if GAP:
+            reward = reward + GAP_BETA * self._gap_reward()
+
         xy_off = self.pos[:, :2].norm(dim=-1)
-        crashed = (self.pos[:, 2] < 0.08) | (self.pos[:, 2] > CEIL) | (xy_off > ARENA)
-        # grace: don't insta-crash on the ground during takeoff (first 20 steps)
-        crashed = crashed & (self.t > 20)
+        grace = self.t > 20
+        hit_floor = (self.pos[:, 2] < 0.08) & grace
+        hit_ceil = (self.pos[:, 2] > CEIL) & grace
+        hit_arena = (xy_off > ARENA) & grace
+        crashed = hit_floor | hit_ceil | hit_arena
         if OBS_TERMINAL:
             crashed = crashed | any_hit   # obstacle contact is a CRASH -> barging impossible, must avoid
         reward = reward - 5.0 * crashed.float()
@@ -372,6 +418,13 @@ class BatchedProcCourse:
         done = completed | crashed | timeout
         self.last_completed = completed
         self.last_crashed = crashed
+        # diagnostic stash: crash-moment state + cause flags, captured BEFORE _spawn overwrites state
+        # (no effect on dynamics). Cause booleans are exact (computed from in-step pre-respawn pos).
+        self.last_crash_tilt = tilt.detach().clone()
+        self.cause_floor = hit_floor.detach().clone()
+        self.cause_ceil = hit_ceil.detach().clone()
+        self.cause_arena = hit_arena.detach().clone()
+        self.cause_obstacle = any_hit.detach().clone() if OBS_TERMINAL else torch.zeros_like(crashed)
 
         fin = done
         if fin.any():
