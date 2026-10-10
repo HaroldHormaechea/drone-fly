@@ -95,6 +95,31 @@ gates:
 free_space:
   assume_no_obstacles: false  # `none` estimator: set true to fly 12/30-dim models obstacle-free
 
+# `depth` free-space estimator (parts.free_space_estimator: depth) -> raycast for 70-dim models.
+depth:
+  backend: depth-anything-v2
+  model_id: depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf   # downloaded on first use
+  device: auto              # auto | cpu | cuda
+  inverse: false            # true if the model outputs inverse depth (then calibrate that)
+  model_kwargs: {}          # extra from_pretrained() kwargs (free-form)
+  calibration:              # metres = scale * raw + shift. CALIBRATE (offline eval suggests scale)
+    scale: 1.0
+    shift: 0.0
+    min_depth_m: 0.05
+  patch_px: 3               # half-size of the depth patch sampled per ray
+  patch_percentile: 10.0    # robust patch minimum
+  ray_range_scale: 1.0      # clamp/normalise at RAY_RANGE * this (training metres)
+  fill_policy: nearest_in_fov   # rays outside the camera image: clear | nearest_in_fov | hold_last
+  hold_max_age_s: 0.5       # hold_last: max age of a held ray value
+  obstacle_vision: depth_clusters   # depth_clusters | zeros
+  near_m: 3.0               # depth_clusters: pixels nearer than this (Liftoff m) form obstacles
+  cluster_stride: 8         # depth_clusters: pixel subsampling
+  min_cluster_cells: 4
+  ground:                   # depth hits this close to the ground are not obstacles
+    z_m: 0.0                # ground height (Liftoff metres); null disables the rejection
+    height_m: 0.15
+  warmup_timeout_s: 60.0    # wait for the first depth map (model load) before the loop starts
+
 controls:
   # Liftoff rate profile per axis (Betaflight rates; rc_rate 1.0 = 100). CALIBRATE to yours.
   rates:
@@ -107,6 +132,16 @@ controls:
   # stick = sign * inverse_rate(body rate): +wx roll right, +wy pitch forward (nose down),
   # +wz is counter-clockwise, i.e. yaw stick LEFT. Flip a sign if Liftoff's binding inverts an axis.
   stick_signs: {roll: 1, pitch: 1, yaw: -1}
+
+# Offline evaluation only (`drone-fly harness eval`): how track/race XML items map to geometry.
+# Never used at runtime. CALIBRATE the item table to your track's itemIDs.
+offline:
+  race_id_tag: instanceID   # race XML element listing gate instance ids in order
+  laps: null                # null -> race XML laps/lapCount, else 1
+  item_table:               # first regex match on itemID wins; dimensions in Liftoff metres
+    - {match: "(?i)gate", kind: gate, width: 1.5, height: 1.5}
+    - {match: "(?i)pillar|pole|cylinder", kind: cylinder, radius: 0.3, height: 3.0}
+    - {match: "(?i)cube|box|block|wall", kind: box, size: [1.0, 1.0, 1.0]}
 
 abort:
   key: F12                  # hotkey that triggers the fail-safe (works with the game focused)

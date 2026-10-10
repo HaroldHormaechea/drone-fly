@@ -45,6 +45,9 @@ def build_liftoff_harness(config: Any, ctx: BuildContext) -> Harness:
     # failure here needs no clean-up.
     state_source = make("state_source", parts.state_source)
     frame_source = make("frame_source", parts.frame_source)
+    # Async estimators (e.g. depth) pull frames + state themselves on their worker thread.
+    ctx.resources.setdefault("state_source", state_source)
+    ctx.resources.setdefault("frame_source", frame_source)
     gate_estimator = make("gate_estimator", parts.gate_estimator)
     free_space = make("free_space_estimator", parts.free_space_estimator)
     sink = make("action_sink", "recording" if ctx.dry_run else parts.action_sink)

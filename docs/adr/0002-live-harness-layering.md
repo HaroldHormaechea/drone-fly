@@ -143,8 +143,27 @@ slack).
   Betaflight rate curve (rc rate / super rate / expo per axis) → stick; throttle is piecewise
   linear through `(0, -1)`, `(HOVER_THR, hover_stick)`, `(1, +1)`. Explicit FLU signs: `+wx` → roll
   right, `+wy` (nose down) → pitch forward, `+wz` (CCW) → yaw left.
+- **Free space** (`liftoff/depth.py`, `depth`): a pluggable `DepthModel` (first backend:
+  Depth-Anything-V2 metric via `transformers`, lazily loaded) runs on its own worker thread, latest
+  frame wins, with an affine scale/shift calibration (optionally on inverse depth). Each tick, the
+  contract's 40 rays (velocity-aligned, target fallback below 0.3 m/s, built by
+  `geometry.ray_directions`, pinned to `raycast()`) are projected world → body → camera → pixel
+  with the capture-time attitude. In-image rays take a robust patch minimum; z-depth → range
+  (`z / cos`) → `WorldScale` → clamp at `RAY_RANGE × ray_range_scale` → normalise. Ground hits are
+  rejected (training rays never hit the floor). Out-of-image rays use the fill policy
+  `clear | nearest_in_fov (default) | hold_last`, and the in-FOV mask and coverage are recorded.
+  `obstacle_vision` comes from near-depth connected components (or zeros). The estimate is stamped
+  with the frame capture time, and the runner fails safe beyond `max_estimate_age_s`.
+- **Offline evaluation** (`harness/offline/`, the only XML reader): track XML items are classified by
+  a configurable item-id table, run through the Unity converter and `WorldScale`, and rotated
+  boxes become AABBs. The race XML gives the gate order. `drone-fly harness eval` replays a recorded
+  session (each sampled frame paired with the nearest telemetry sample; estimators re-run
+  synchronously). It reports gate position/yaw error and detection rate, free-space per-ray MAE and
+  near-weighted error against the contract `raycast()` on the XML obstacles, `obstacle_vision`
+  error, the gyro check, and a suggested depth-scale fit.
 - Per-game / airframe settings (telemetry port and format, FOV, uptilt, nominal gate size, HSV,
-  rate profile, hover stick, world scale) live in YAML; `liftoff_5inch.yaml` is the default.
+  rate profile, hover stick, world scale, depth calibration) live in YAML; `liftoff_5inch.yaml` is
+  the default.
 
 ## How to add a harness or an estimator
 

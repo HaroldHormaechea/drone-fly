@@ -88,6 +88,26 @@ _BUILTINS: list[tuple[str, str, str, dict]] = [
         {"description": "obstacle-free world: zero obstacle_vision, never raycast"},
     ),
     (
+        "free_space_estimator",
+        "depth",
+        f"{_PKG}.liftoff.depth:MonocularDepthFreeSpaceEstimator",
+        {
+            "description": "monocular depth net -> 40-ray scan + obstacle_vision",
+            "requires": ("transformers", "torch", "PIL"),
+            "packages": {"PIL": "pillow"},
+        },
+    ),
+    (
+        "depth_model",
+        "depth-anything-v2",
+        f"{_PKG}.liftoff.depth:DepthAnythingV2Model",
+        {
+            "description": "Depth-Anything-V2 metric (transformers)",
+            "requires": ("transformers", "torch", "PIL"),
+            "packages": {"PIL": "pillow"},
+        },
+    ),
+    (
         "action_sink",
         "vgamepad",
         f"{_PKG}.liftoff.gamepad:VgamepadActionSink",
