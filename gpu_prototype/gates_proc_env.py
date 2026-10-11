@@ -107,6 +107,8 @@ POOL_KW = (dict(ng_hi=11, laps_lo=1, laps_hi=2, ap_lo=0.75)
            if os.environ.get("PROC_TRACTABLE", "") else {})
 if os.environ.get("PROC_TUNNELS", ""):
     POOL_KW = {**POOL_KW, "with_tunnels": True}   # add a fly-through tunnel/doorway to every course
+if os.environ.get("PROC_MULTILAP", ""):
+    POOL_KW = {**POOL_KW, "laps_lo": 2, "laps_hi": 5}   # multi-lap tier: 2-4 laps per course
 NO_OBS = bool(os.environ.get("PROC_NO_OBS", ""))   # obstacle-free tier (isolate random-gate navigation)
 OBS_TERMINAL = bool(os.environ.get("PROC_OBS_TERMINAL", ""))   # obstacle contact = crash (forbids barging)
 SHAPING = bool(os.environ.get("PROC_SHAPING", ""))   # potential-based clearance shaping (gradient to steer around)
@@ -443,6 +445,7 @@ class BatchedProcCourse:
         self.cause_ceil = hit_ceil.detach().clone()
         self.cause_arena = hit_arena.detach().clone()
         self.cause_obstacle = any_hit.detach().clone() if OBS_TERMINAL else torch.zeros_like(crashed)
+        self.last_any_hit = any_hit.detach().clone()   # in-step obstacle contact (pre-respawn) for the honesty audit
 
         fin = done
         if fin.any():

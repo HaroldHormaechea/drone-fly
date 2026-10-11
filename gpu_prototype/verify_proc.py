@@ -47,8 +47,9 @@ with torch.no_grad():
     for t in range(1500):
         mean, _ = ac.act(ac.tap(ac.propagated_full(obs)), ext)
         obs, rew, done, tilt = env.step(mean); ext = env.extra()
-        inside, clr = obstacle_metrics(env)
-        contact_steps += (alive & inside).float()
+        _, clr = obstacle_metrics(env)
+        inside = env.last_any_hit   # in-step contact (pre-respawn); avoids the respawn artifact that
+        contact_steps += (alive & inside).float()   # spuriously flagged completed runs on dense courses
         min_clear = torch.minimum(min_clear, torch.where(alive, clr, min_clear))
         speed_sum += env.vel.norm(dim=-1) * alive.float()
         tilt_sum += tilt * alive.float(); nstep += alive.float()
