@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import subprocess
 import sys
 from collections.abc import Callable
@@ -109,6 +110,18 @@ def default_overlay_launcher(cmd: list[str]) -> OverlayLauncher:
         return subprocess.Popen(cmd, creationflags=flags)
 
     return launch
+
+
+def overlay_port_in_use(port: int) -> bool:
+    """True when something (an overlay already started by hand) listens on the overlay port."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.bind(("127.0.0.1", int(port)))
+    except OSError:
+        return True
+    finally:
+        sock.close()
+    return False
 
 
 def start_overlay_and_run(runner: HarnessRunner, launcher: OverlayLauncher | None) -> RunResult:
@@ -253,6 +266,11 @@ def run_harness(
             publisher.close()
         raise
 
+    if overlay_launch and launcher is None and overlay_port_in_use(overlay_cfg.port):
+        log.info(
+            "an overlay is already listening on port %d; not launching another", overlay_cfg.port
+        )
+        overlay_launch = False
     if overlay_launch and launcher is None:
         launcher = default_overlay_launcher(
             overlay_command(

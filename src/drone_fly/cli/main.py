@@ -4,7 +4,7 @@
     drone-fly harness run --harness <name> --checkpoint <model_readout.pt> --extra-dim {12,30,70}
                           [--preset <name>] [--config <yaml>] [--k1-path] [--gpu-prototype-dir]
                           [--device] [--duration] [--dry-run] [--output-root] [--no-record]
-                          [--overlay] [--overlay-launch] [--recordable]
+                          [--overlay [--no-overlay-launch]] [--recordable]
     drone-fly harness eval --session <run dir> --track <xml> --race <xml> --config <yaml>
                           [--report <json>]
     drone-fly harness eval --capture <dir> --labels <dir> [--preset] [--gate-weights] [--device]
@@ -82,7 +82,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         record=False if args.no_record else None,
         preset=args.preset,
         overlay=True if (args.overlay or args.overlay_launch or args.recordable) else None,
-        overlay_launch=args.overlay_launch,
+        overlay_launch=(args.overlay or args.overlay_launch or args.recordable)
+        and not args.no_overlay_launch,
         recordable=True if args.recordable else None,
     )
     r = session.result
@@ -323,12 +324,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--overlay",
         action="store_true",
-        help="publish ticks + brain frames to the live overlay (overlay.enabled)",
+        help="publish to the live overlay and start the overlay window (unless one is already "
+        "running; see --no-overlay-launch)",
+    )
+    p_run.add_argument(
+        "--no-overlay-launch",
+        action="store_true",
+        help="with --overlay: only publish, don't start the overlay window",
     )
     p_run.add_argument(
         "--overlay-launch",
         action="store_true",
-        help="also start `harness overlay` before the loop (implies --overlay)",
+        help="same as --overlay (kept for compatibility)",
     )
     p_run.add_argument(
         "--recordable",

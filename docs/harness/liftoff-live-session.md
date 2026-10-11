@@ -99,26 +99,31 @@ after changing rates or bindings.
    agreement, magnitude ratio, and a suggested `controls.stick_signs` block. If it suggests a flip,
    add that block to both `live*.yaml` files.
 
-## 3. Start the overlay (optional, recommended)
+## 3. The overlay
 
-In its own terminal, before the run:
+`--overlay` on `harness run` (stages 4 and 5) **starts the overlay window for you**, with no
+console window, just before the focus wait, and it outlives the run so the stop reason stays
+visible. If an overlay is already running (started by hand), the run reuses it. Use
+`--no-overlay-launch` to only publish.
+
+To start it by hand instead (e.g. to see logs), in its own terminal before the run:
 ```
 .venv-cuda\Scripts\drone-fly.exe harness overlay --preset liftoff --k1-path artifacts/pruned/k1
 ```
 - It shows "waiting for harness" until a run starts publishing.
 - It is click-through and never takes focus. If it ever causes a `focus_lost` stop, that's a bug;
   note it.
-- Stop it with Ctrl+C in its terminal.
+- A hand-started overlay stops with Ctrl+C in its terminal. An auto-started one keeps running
+  after the run; close it from Task Manager (`python.exe … harness overlay`) or leave it for the
+  next run, which reuses it.
 - If the brain panel looks sparse, set `overlay: {brain_scale: frame_peak}` in your `live*.yaml`
   (ADR 0004, quantisation).
 
-`--overlay-launch` on `harness run` starts it for you instead, with no console window.
-
 **Recording the overlay (OBS, Xbox Game Bar, etc.):** by default the overlay hides itself from
-every screen capture, so recorders don't see it either. Pass `--recordable` to **both** commands:
+every screen capture, so recorders don't see it either. Pass `--recordable` to `harness run` (it implies `--overlay` and starts the overlay in recordable
+mode); add it to `harness overlay` too if you start the overlay by hand:
 ```powershell
-.venv-cuda\Scripts\drone-fly.exe harness overlay --preset liftoff --recordable
-.venv-cuda\Scripts\drone-fly.exe harness run ... --overlay --recordable
+.venv-cuda\Scripts\drone-fly.exe harness run ... --recordable
 ```
 (or set `overlay: {recordable: true}` in your `live*.yaml`, which both commands read). The overlay
 then shows up in recordings. Because the harness's own frame capture sees it too, the run adds the

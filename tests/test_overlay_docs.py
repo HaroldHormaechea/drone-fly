@@ -41,7 +41,7 @@ def test_readme_has_an_overlay_section():
         "drone-fly harness overlay",
         "uv sync --extra overlay",
         "--overlay",
-        "--overlay-launch",
+        "--no-overlay-launch",
         "--replay",
         "0004-live-overlay.md",
     ):

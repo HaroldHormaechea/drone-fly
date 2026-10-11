@@ -270,8 +270,15 @@ def test_run_harness_without_overlay_builds_no_publisher(
     assert s.result.reason == STOP_COMPLETED
 
 
-@pytest.mark.parametrize("flag", ["--overlay", "--overlay-launch"])
-def test_cli_run_flags_reach_run_harness(monkeypatch, flag):
+@pytest.mark.parametrize(
+    ("flags", "launch"),
+    [
+        (["--overlay"], True),  # --overlay starts the overlay window too
+        (["--overlay-launch"], True),
+        (["--overlay", "--no-overlay-launch"], False),
+    ],
+)
+def test_cli_run_flags_reach_run_harness(monkeypatch, flags, launch):
     from drone_fly.cli.main import main
 
     seen = {}
@@ -295,11 +302,11 @@ def test_cli_run_flags_reach_run_harness(monkeypatch, flag):
                 "m.pt",
                 "--extra-dim",
                 "70",
-                flag,
+                *flags,
             ]
         )
     assert seen["overlay"] is True
-    assert seen["overlay_launch"] is (flag == "--overlay-launch")
+    assert seen["overlay_launch"] is launch
 
 
 def test_overlay_command_forwards_the_k1_path(tmp_path):
@@ -339,3 +346,42 @@ def test_run_harness_overlay_launch_passes_the_resolved_k1_path(
     from drone_fly.cli.main import build_parser
 
     assert build_parser().parse_args(cmd[3:]).k1_path == cmd[i + 1]
+
+
+def test_overlay_port_in_use_detects_a_listener():
+    import socket
+
+    port = _free_port()
+    assert session_mod.overlay_port_in_use(port) is False
+    listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    listener.bind(("127.0.0.1", port))
+    try:
+        assert session_mod.overlay_port_in_use(port) is True
+    finally:
+        listener.close()
+
+
+def test_run_harness_does_not_launch_a_second_overlay(
+    harness_checkpoint_70, harness_k1_dir, monkeypatch
+):
+    """An overlay started by hand already listens on the port: --overlay must not start another."""
+    monkeypatch.setattr(
+        session_mod.OverlayPublisher, "_make_socket", staticmethod(lambda: FakeSocket())
+    )
+    monkeypatch.setattr(session_mod, "overlay_port_in_use", lambda port: True)
+    cmds: list[list[str]] = []
+    monkeypatch.setattr(
+        session_mod, "default_overlay_launcher", lambda cmd: cmds.append(cmd) or (lambda: None)
+    )
+    s = session_mod.run_harness(
+        "sim-loopback",
+        harness_checkpoint_70,
+        70,
+        config={"overlay": {"port": _free_port()}},
+        k1_path=str(harness_k1_dir),
+        device="cpu",
+        duration_s=0.04,
+        record=False,
+        overlay_launch=True,
+    )
+    assert s.result.reason == STOP_COMPLETED and cmds == []

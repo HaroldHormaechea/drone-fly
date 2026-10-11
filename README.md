@@ -157,13 +157,13 @@ uv sync --extra overlay                       # PySide6 (Windows only; not in de
 drone-fly harness overlay [--preset liftoff] [--port 9100] [--monitor 1] \
     [--layout default|mask_confined] [--fps 20] [--k1-path <K1>]
 drone-fly harness run --harness liftoff --preset liftoff --extra-dim 70 \
-    --checkpoint <model_readout.pt> --overlay          # or --overlay-launch to start the overlay too
+    --checkpoint <model_readout.pt> --overlay   # also starts the overlay (--no-overlay-launch: publish only)
 drone-fly harness overlay --replay artifacts/harness/<run>   # drive it from a recorded run, no game
 ```
 
-- **Start order:** overlay → `harness run --overlay` → click into Liftoff. The runner waits for
-  focus (`focus.wait_for_focus_s`), so the console you launched from may keep focus until you click
-  the game. `--overlay-launch` starts the overlay with no console window, just before that wait.
+- **Start order:** `harness run --overlay` starts the overlay (no console window) just before the
+  runner's focus wait, then brings Liftoff to the front (`focus.auto_focus`). An overlay already
+  listening on `overlay.port` (started by hand) is reused; `--no-overlay-launch` only publishes.
   The overlay is click-through and never takes focus; it should never cause a `focus_lost` stop.
 - Liftoff must run **borderless fullscreen** (or windowed). Nothing can draw over exclusive
   fullscreen.
