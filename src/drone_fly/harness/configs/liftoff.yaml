@@ -56,6 +56,9 @@ gates:
   learned:
     # Written by `drone-fly harness train-gates` (gitignored; relative to the repo root).
     weights: artifacts/harness/liftoff/models/liftoff-gates.pt
+    # MEASURED: synchronous inference took 24-38 ms/tick on the RTX 3050 with Liftoff rendering,
+    # holding the loop to ~20 Hz; on a worker thread the 50 Hz loop uses the latest detections.
+    async_inference: true
 
 # Infinity Loop gate style. props.json (liftoff-flight-analyzer `props`, InflatableArchBrandless01):
 # leg capsules r 0.5 at x +-3.5 (centre y 1.58, height 3.521), bar capsule r 0.5 at y 3.958, chamfer

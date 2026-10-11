@@ -236,6 +236,10 @@ class HarnessRunner:
         ):
             if part is not None:
                 part.start()
+        # Optional gate-estimator hook (e.g. a background inference worker).
+        start_gate = getattr(h.gate_estimator, "start", None)
+        if start_gate is not None:
+            start_gate()
 
     def shutdown(self) -> None:
         """Stop every part and close the sink (idempotent; safe on parts never started)."""
@@ -253,6 +257,12 @@ class HarnessRunner:
                 part.stop()
             except Exception:  # noqa: BLE001
                 log.exception("error stopping %s", type(part).__name__)
+        stop_gate = getattr(h.gate_estimator, "stop", None)
+        if stop_gate is not None:
+            try:
+                stop_gate()
+            except Exception:  # noqa: BLE001
+                log.exception("error stopping the gate estimator")
         try:
             h.action_sink.close()
         except Exception:  # noqa: BLE001

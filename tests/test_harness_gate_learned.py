@@ -226,6 +226,79 @@ def test_raw_detections_are_cached_per_frame_index():
     assert net.calls == 4
 
 
+def _wait_until(cond, timeout=5.0):
+    import time as _t
+
+    end = _t.monotonic() + timeout
+    while not cond():
+        assert _t.monotonic() < end, "timed out"
+        _t.sleep(0.005)
+
+
+def test_async_inference_runs_off_the_tick_and_returns_the_latest_result():
+    import threading
+
+    gate = threading.Event()
+
+    class SlowNet(FakeNet):
+        def __call__(self, x):
+            gate.wait(5.0)  # the forward pass blocks until the test releases it
+            return super().__call__(x)
+
+    net = SlowNet()
+    est = _estimator(net, async_inference=True)
+    img = np.zeros((H, W, 3), np.uint8)
+    try:
+        est.start()
+        assert est.raw_detections(img, 1) == []  # nothing finished yet: the tick did not block
+        gate.set()
+        _wait_until(lambda: est.raw_detections(img, 1) != [])
+        dets = est.raw_detections(img, 1)
+        assert len(dets) == 1 and dets[0]["cls"] == 0
+        assert est.detection_lag_frames() == 0
+        assert est.extra_info()["detection_lag_frames"] == 0
+        calls = net.calls
+        for _ in range(5):  # same frame again: not re-submitted
+            est.raw_detections(img, 1)
+        assert net.calls == calls
+        est.raw_detections(img, 2)  # a new frame is queued; detections may lag by a frame
+        assert est.detection_lag_frames() in (0, 1)
+        _wait_until(lambda: (est.raw_detections(img, 2), est.detection_lag_frames())[1] == 0)
+    finally:
+        gate.set()
+        est.stop()
+    assert est._worker is None
+
+
+def test_async_worker_failure_surfaces_on_the_next_tick():
+    class Boom(FakeNet):
+        def __call__(self, x):
+            raise RuntimeError("cuda oom")
+
+    est = _estimator(Boom(), async_inference=True)
+    img = np.zeros((H, W, 3), np.uint8)
+    try:
+        est.raw_detections(img, 1)  # lazily starts the worker
+        _wait_until(lambda: est._worker_error is not None)
+        with pytest.raises(RuntimeError, match="gate inference worker failed"):
+            est.raw_detections(img, 2)
+    finally:
+        est.stop()
+
+
+def test_sync_mode_has_no_worker_and_no_lag():
+    est = _estimator()
+    est.start()
+    assert est._worker is None and est.detection_lag_frames() is None
+    est.stop()
+
+
+def test_async_inference_config_key():
+    cfg = load_config("liftoff")
+    assert cfg.section("gates")["learned"]["async_inference"] is False
+    assert load_config("liftoff", preset="liftoff").section("gates")["learned"]["async_inference"]
+
+
 def test_fp16_only_on_cuda():
     assert _estimator(fp16=True, device="cpu").fp16 is False
 

@@ -109,6 +109,7 @@ gates:
     score_threshold: 0.3    # centre-heatmap score for a detection
     min_keypoints: 4        # visible keypoints needed for PnP
     max_detections: 8
+    async_inference: false  # true: run the network on a worker thread (loop uses the latest result)
 
 # Gate styles: itemID regex -> class + dimensions (Liftoff metres, Unity-local x right / y up).
 # Shared by the offline tools (route parsing, auto-labelling, scoring) and the learned estimator

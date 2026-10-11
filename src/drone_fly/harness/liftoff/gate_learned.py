@@ -15,6 +15,12 @@ Per frame (:meth:`LearnedGateEstimator.detect`, image already masked by the base
 Network outputs are cached per ``frame.index`` (the loop may tick faster than frames arrive), and
 ``info["inference_s"]`` records the CUDA-synchronised network time of the latest frame.
 
+With ``gates.learned.async_inference: true`` the network runs on a background thread instead
+(like the depth estimator): each tick hands the newest masked frame to the worker and uses the
+latest *finished* detections, so a 20-40 ms forward pass no longer blocks the 50 Hz loop. PnP,
+tracking and the world transform still run per tick with the current state; ``info`` reports
+``detection_lag_frames`` (newest frame index minus the frame the detections came from).
+
 The weights file (``torch.save`` dict: ``state_dict`` + ``meta``) is written by
 ``drone-fly harness train-gates``. Its metadata (classes, keypoints, gate-type hash, backbone +
 config, input width, held-out split, captures, git head) is validated against the configured
@@ -25,6 +31,7 @@ so a missing or mismatched file refuses the run before the pad is armed.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -179,6 +186,7 @@ class LearnedGateEstimator(TrackingGateEstimator):
         min_keypoints: int = 4,
         max_detections: int = 8,
         masks: FrameMasks | None = None,
+        async_inference: bool = False,
         **tracker: Any,
     ) -> None:
         scale = scale or WorldScale(1.0)
@@ -206,6 +214,15 @@ class LearnedGateEstimator(TrackingGateEstimator):
         self._frame_index: int | None = None
         self.weights_path: Path | None = None
         self.inference_s: float | None = None
+        self.async_inference = bool(async_inference)
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._pending: tuple[int | None, np.ndarray] | None = None
+        self._done: tuple[int | None, list[dict[str, Any]]] | None = None
+        self._worker: threading.Thread | None = None
+        self._stopping = False
+        self._worker_error: BaseException | None = None
+        self._latest_index: int | None = None
 
     @classmethod
     def from_config(cls, cfg: dict[str, Any], ctx: Any) -> LearnedGateEstimator:
@@ -251,6 +268,9 @@ class LearnedGateEstimator(TrackingGateEstimator):
                 lc.get("max_detections", 8), "gates.learned.max_detections", min_value=1
             ),
             masks=FrameMasks.from_config(cam),
+            async_inference=require_bool(
+                lc.get("async_inference", False), "gates.learned.async_inference"
+            ),
             assoc_radius=num("assoc_radius", 1.0, min_value=0.0, min_exclusive=True),
             lost_timeout_s=num("lost_timeout_s", 1.0, min_value=0.0, min_exclusive=True),
             acquire_timeout_s=num("acquire_timeout_s", 3.0, min_value=0.0),
@@ -293,12 +313,77 @@ class LearnedGateEstimator(TrackingGateEstimator):
         return dets
 
     def raw_detections(self, image: np.ndarray, frame_index: int | None = None) -> list[dict]:
-        """:meth:`infer`, cached per ``frame_index`` (``None`` = always run)."""
+        """:meth:`infer`, cached per ``frame_index`` (``None`` = always run).
+
+        In async mode: queue ``image`` for the worker (newest frame wins) and return the latest
+        finished detections, possibly from an older frame (empty until the first one finishes).
+        """
+        if self.async_inference:
+            return self._raw_detections_async(image, frame_index)
         if frame_index is not None and frame_index == self._cache_index:
             return self._cache
         dets = self.infer(image)
         self._cache_index, self._cache = frame_index, dets
         return dets
+
+    # ------------------------------------------------------------------ async worker
+
+    def start(self) -> None:
+        if self.async_inference and self._worker is None:
+            self._stopping = False
+            self._worker = threading.Thread(
+                target=self._worker_loop, name="gate-inference", daemon=True
+            )
+            self._worker.start()
+
+    def stop(self) -> None:
+        worker = self._worker
+        if worker is None:
+            return
+        self._stopping = True
+        self._wake.set()
+        worker.join(timeout=2.0)
+        self._worker = None
+
+    def _worker_loop(self) -> None:
+        while not self._stopping:
+            self._wake.wait(timeout=0.2)
+            self._wake.clear()
+            with self._lock:
+                job, self._pending = self._pending, None
+            if job is None:
+                continue
+            index, image = job
+            try:
+                dets = self.infer(image)
+            except BaseException as exc:  # noqa: BLE001 - surfaced on the next tick
+                with self._lock:
+                    self._worker_error = exc
+                return
+            with self._lock:
+                self._done = (index, dets)
+
+    def _raw_detections_async(self, image: np.ndarray, frame_index: int | None) -> list[dict]:
+        if self._worker is None:
+            self.start()
+        with self._lock:
+            if self._worker_error is not None:
+                raise RuntimeError("gate inference worker failed") from self._worker_error
+            if frame_index is None or frame_index != self._latest_index:
+                self._pending = (frame_index, image)
+                self._latest_index = frame_index
+                self._wake.set()
+            done = self._done
+        if done is None:
+            return []
+        self._cache_index, self._cache = done
+        return done[1]
+
+    def detection_lag_frames(self) -> int | None:
+        """Newest submitted frame index minus the index the current detections came from."""
+        if not self.async_inference or self._latest_index is None or self._cache_index is None:
+            return None
+        return int(self._latest_index) - int(self._cache_index)
 
     def detect_frame(self, frame: Frame, state: FlightState) -> list[GateDetection]:
         self._frame_index = frame.index
@@ -308,7 +393,11 @@ class LearnedGateEstimator(TrackingGateEstimator):
             self._frame_index = None
 
     def extra_info(self) -> dict[str, Any]:
-        return {} if self.inference_s is None else {"inference_s": self.inference_s}
+        info: dict[str, Any] = {} if self.inference_s is None else {"inference_s": self.inference_s}
+        lag = self.detection_lag_frames()
+        if lag is not None:
+            info["detection_lag_frames"] = lag
+        return info
 
     # ------------------------------------------------------------------ detection
 
