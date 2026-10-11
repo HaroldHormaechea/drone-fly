@@ -70,9 +70,9 @@ def _unity_sample(pos_c, vel_c, quat_c_wxyz, omega_c, t=0.0):
     w, x, y, z = quat_c_wxyz
     vec_u = -(m.T @ np.array([x, y, z]))  # inverse of the converter's v' = -M v
     gyro_map = GyroMap()
-    # inverse of the default table: wx = roll, wy = -pitch, wz = -yaw (deg/s)
+    # inverse of the default table: wx = -roll, wy = +pitch, wz = -yaw (deg/s; UC-64 ADR 0003)
     deg = np.degrees(np.asarray(omega_c, np.float64))
-    gyro = np.array([-deg[1], deg[0], -deg[2]])  # pitch, roll, yaw
+    gyro = np.array([deg[1], -deg[0], -deg[2]])  # pitch, roll, yaw
     assert np.allclose(gyro_map.apply(gyro), omega_c, atol=1e-6)
     return TelemetrySample(
         t=t,
