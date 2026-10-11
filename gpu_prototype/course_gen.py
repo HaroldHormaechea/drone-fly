@@ -138,14 +138,17 @@ def sample_course(seed, ng_lo=5, ng_hi=21, laps_lo=2, laps_hi=4, ap_lo=APERTURE_
         WALL = 0.55                                      # wall box half-extent (xy)
         off = GW + WALL                                  # wall-centre offset along the perpendicular
         for sgn in (+1.0, -1.0):                         # left + right walls
+            # ovec points OUTWARD so the position curriculum (obs_pos_curr 0->1) starts the walls far
+            # apart (wide, easy gap) and slides them in to the designed gap -- a tunnel GAP curriculum
+            # reusing the same machinery as the obstacle position curriculum.
             obstacles.append({"kind": "box",
                               "center": [float(midt[0] + sgn * px * off), float(midt[1] + sgn * py * off), 1.0],
                               "half": [WALL, WALL, 1.6], "blocks": True, "tunnel": True,
-                              "ovec": [0.0, 0.0, 0.0]})
-        obstacles.append({"kind": "box",                 # ceiling over the lane
+                              "ovec": [float(sgn * px), float(sgn * py), 0.0]})
+        obstacles.append({"kind": "box",                 # ceiling over the lane (starts high, lowers in)
                           "center": [float(midt[0]), float(midt[1]), zc + 1.1],
                           "half": [off + WALL, off + WALL, 0.3], "blocks": True, "tunnel": True,
-                          "ovec": [0.0, 0.0, 0.0]})
+                          "ovec": [0.0, 0.0, 1.0]})
 
     # Keep the START spawn clear of obstacles: on small loops the wide fly-over box can land on the
     # start point (its low z-span covers the ground spawn), which is an unavoidable spawn-crash under
