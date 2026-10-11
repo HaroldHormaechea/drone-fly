@@ -36,7 +36,7 @@ from typing import Any
 
 import numpy as np
 
-from drone_fly.harness.config import require_choice, require_number
+from drone_fly.harness.config import require_bool, require_choice, require_number
 from drone_fly.harness.errors import HarnessConfigError, lazy_import
 from drone_fly.harness.interfaces import ActionSink
 from drone_fly.harness.types import ContractCommand
@@ -131,6 +131,22 @@ class ThrottleMap:
         return float(np.interp(c, [0.0, self.hover_fraction, 1.0], [-1.0, self.hover_stick, 1.0]))
 
 
+#: Pads kept connected after :meth:`VgamepadActionSink.close` (``controls.keep_pad_connected``):
+#: Liftoff re-arms and spins the motors up (about half throttle) when the virtual controller
+#: disconnects, so the pad stays plugged in, neutral and disarmed, until the process exits.
+KEPT_PADS: list[Any] = []
+
+
+def kept_pads() -> list[Any]:
+    """Pads still connected after their sink closed (the CLI holds them until Ctrl+C)."""
+    return KEPT_PADS
+
+
+def release_kept_pads() -> None:
+    """Disconnect every kept pad (call when the user is done, e.g. after Ctrl+C)."""
+    KEPT_PADS.clear()
+
+
 def _pad_set(pad: Any, sticks: dict[str, float]) -> None:
     pad.left_joystick_float(x_value_float=sticks["left_x"], y_value_float=sticks["left_y"])
     pad.right_joystick_float(x_value_float=sticks["right_x"], y_value_float=sticks["right_y"])
@@ -162,6 +178,7 @@ class VgamepadActionSink(ActionSink):
         arm_press_s: float = 0.15,
         arm_settle_s: float = 0.5,
         disarm_press_s: float = 0.3,
+        keep_pad_connected: bool = False,
         button_resolver: Callable[[str], Any] = default_button_resolver,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
@@ -190,6 +207,7 @@ class VgamepadActionSink(ActionSink):
         self.arm_press_s = arm_press_s
         self.arm_settle_s = arm_settle_s
         self.disarm_press_s = disarm_press_s
+        self.keep_pad_connected = keep_pad_connected
         self._settle_until: float | None = None
         self.button_resolver = button_resolver
         self.clock = clock
@@ -266,6 +284,9 @@ class VgamepadActionSink(ActionSink):
                     min_value=0.0,
                     min_exclusive=True,
                 )
+            ),
+            keep_pad_connected=require_bool(
+                cfg.get("keep_pad_connected", False), "controls.keep_pad_connected"
             ),
         )
 
@@ -403,4 +424,6 @@ class VgamepadActionSink(ActionSink):
                 self._disarm()
                 _pad_set(self.pad, self.neutral_sticks())
             finally:
+                if self.keep_pad_connected:
+                    KEPT_PADS.append(self.pad)  # neutral + disarmed; dropping it re-arms Liftoff
                 self.pad = None

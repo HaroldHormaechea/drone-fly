@@ -375,3 +375,37 @@ def test_disarm_re_presses_disarm_with_throttle_cut():
     toggle, _, _ = _arm_sink(disarm=None)
     toggle.arm()
     assert toggle.disarm() is False  # never pulse a toggle arm button blindly
+
+
+def test_keep_pad_connected_holds_the_pad_neutral_and_disarmed_after_close():
+    from drone_fly.harness.liftoff import gamepad
+
+    gamepad.release_kept_pads()
+    sink, pad, _ = _arm_sink()
+    sink.keep_pad_connected = True
+    sink.arm()
+    sink.send(_cmd(collective=1.0))
+    sink.failsafe()
+    sink.close()
+    assert sink.pad is None and gamepad.kept_pads() == [pad]
+    assert pad.sticks["left_y"] == -1.0 and pad.buttons == set()
+    gamepad.release_kept_pads()
+    assert gamepad.kept_pads() == []
+    plain, plain_pad = _sink()
+    plain.arm()
+    plain.close()
+    assert gamepad.kept_pads() == []  # default: the pad disconnects on close
+
+
+def test_preset_keeps_the_pad_connected():
+    from drone_fly.harness.config import load_config
+
+    ctx = SimpleNamespace(contract=SimpleNamespace(HOVER_THR=0.4))
+    assert (
+        VgamepadActionSink.from_config(
+            load_config("liftoff").section("controls"), ctx
+        ).keep_pad_connected
+        is False
+    )
+    preset = load_config("liftoff", preset="liftoff").section("controls")
+    assert VgamepadActionSink.from_config(preset, ctx).keep_pad_connected is True

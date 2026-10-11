@@ -104,7 +104,9 @@ after changing rates or bindings.
 `--overlay` on `harness run` (stages 4 and 5) **starts the overlay window for you** (no console
 window) and waits until the window is up before sending any input. When the run stops, the
 terminal prints the result and keeps the overlay open showing the stop reason; **press Ctrl+C to
-close the overlay and exit**. If an overlay is already running (started by hand), the run reuses it
+close the overlay and exit**. The virtual pad also stays connected (neutral, disarmed) until then:
+Liftoff re-arms and spins the motors up when the controller disconnects, so **reset or pause the
+drone in Liftoff before pressing Ctrl+C** (`controls.keep_pad_connected`, on in the preset). If an overlay is already running (started by hand), the run reuses it
 and leaves it open. `--no-overlay-launch` only publishes.
 
 To start it by hand instead (e.g. to see logs), in its own terminal before the run:

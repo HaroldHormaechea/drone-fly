@@ -94,24 +94,50 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
     if session.run_dir is not None:
         print(f"recorded: {session.run_dir}")
-    _hold_overlay_until_ctrl_c(session.overlay_process)
+    _hold_until_ctrl_c(session.overlay_process)
     return EXIT_FAILSAFE if r.is_failsafe_stop else EXIT_OK
 
 
-def _hold_overlay_until_ctrl_c(process: object) -> None:
-    """Keep a run-launched overlay showing the result until Ctrl+C, then close it."""
+PAD_KEPT_MESSAGE = (
+    "virtual pad still connected (neutral, disarmed): Liftoff re-arms and spins the motors up "
+    "when it disconnects, so reset or pause the drone in Liftoff before pressing Ctrl+C"
+)
+
+
+def _hold_until_ctrl_c(overlay_process: object = None) -> None:
+    """After a run: keep the overlay (result) and/or the virtual pad alive until Ctrl+C.
+
+    The pad is kept because Liftoff re-arms when the controller disconnects
+    (``controls.keep_pad_connected``); the overlay keeps showing the stop reason.
+    """
+    from drone_fly.harness.liftoff.gamepad import kept_pads, release_kept_pads
     from drone_fly.harness.session import stop_overlay
 
-    if process is None or process.poll() is not None:  # type: ignore[attr-defined]
+    overlay_alive = overlay_process is not None and overlay_process.poll() is None  # type: ignore[attr-defined]
+    pads = bool(kept_pads())
+    if not overlay_alive and not pads:
         return
-    print("overlay still open with the result; press Ctrl+C to close it and exit")
+    if not sys.stdin or not sys.stdin.isatty():  # scripted / test use: nobody to press Ctrl+C
+        if pads:
+            print(PAD_KEPT_MESSAGE.split(":")[0] + ": released (non-interactive)")
+        stop_overlay(overlay_process)
+        release_kept_pads()
+        return
+    if overlay_alive:
+        print("overlay still open with the result")
+    if pads:
+        print(PAD_KEPT_MESSAGE)
+    print("press Ctrl+C to close everything and exit")
     try:
-        while process.poll() is None:  # type: ignore[attr-defined]
+        while True:
+            if overlay_alive and overlay_process.poll() is not None and not pads:  # type: ignore[attr-defined]
+                break
             time.sleep(0.2)
     except KeyboardInterrupt:
         pass
     finally:
-        stop_overlay(process)
+        stop_overlay(overlay_process)
+        release_kept_pads()
 
 
 def _cmd_eval(args: argparse.Namespace) -> int:
@@ -284,6 +310,7 @@ def _cmd_pad_check(args: argparse.Namespace) -> int:
         )
     print(f"suggested controls.stick_signs: {result.suggested_stick_signs}")
     print(f"report: {result.report_path}")
+    _hold_until_ctrl_c()
     return EXIT_OK if result.completed else EXIT_FAILSAFE
 
 

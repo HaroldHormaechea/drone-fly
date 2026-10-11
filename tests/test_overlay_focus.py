@@ -464,6 +464,36 @@ def test_cli_holds_the_overlay_until_ctrl_c_then_closes_it(monkeypatch, capsys):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(cli.time, "sleep", sleep)
-    cli._hold_overlay_until_ctrl_c(proc)
+    monkeypatch.setattr(cli.sys, "stdin", type("Tty", (), {"isatty": lambda self: True})())
+    cli._hold_until_ctrl_c(proc)
     assert proc.terminated and "Ctrl+C" in capsys.readouterr().out
-    cli._hold_overlay_until_ctrl_c(None)  # nothing launched: returns at once
+    cli._hold_until_ctrl_c(None)  # nothing launched: returns at once
+
+
+def test_cli_holds_a_kept_pad_until_ctrl_c_then_releases_it(monkeypatch, capsys):
+    from drone_fly.cli import main as cli
+    from drone_fly.harness.liftoff import gamepad
+
+    gamepad.release_kept_pads()
+    gamepad.KEPT_PADS.append(object())
+
+    def sleep(_):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.time, "sleep", sleep)
+    monkeypatch.setattr(cli.sys, "stdin", type("Tty", (), {"isatty": lambda self: True})())
+    cli._hold_until_ctrl_c(None)
+    out = capsys.readouterr().out
+    assert "virtual pad still connected" in out and "Ctrl+C" in out
+    assert gamepad.kept_pads() == []
+
+
+def test_cli_does_not_hold_when_not_interactive(monkeypatch, capsys):
+    from drone_fly.cli import main as cli
+    from drone_fly.harness.liftoff import gamepad
+
+    gamepad.release_kept_pads()
+    gamepad.KEPT_PADS.append(object())
+    monkeypatch.setattr(cli.sys, "stdin", type("Pipe", (), {"isatty": lambda self: False})())
+    cli._hold_until_ctrl_c(None)  # returns at once instead of waiting for Ctrl+C
+    assert gamepad.kept_pads() == [] and "released" in capsys.readouterr().out
