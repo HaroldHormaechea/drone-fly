@@ -41,6 +41,8 @@ tracks, drones or resolutions need their own calibration (ADR 0003).
    gates:
      learned:
        weights: artifacts/harness/liftoff/models/liftoff-gates-deploy.pt
+   free_space:
+     assume_no_obstacles: true   # the 30-dim model also reads obstacle_vision; feed it zeros
    ```
    `artifacts/harness/live-depth.yaml` (stage b): the same, plus
    ```yaml
@@ -136,7 +138,9 @@ PowerShell, from the repo root:
 
 1. The command loads the model and arms the pad, then waits up to 15 s for focus: **click into
    Liftoff**.
-2. The model flies. Gate detection is learned, and free space is `none` (no obstacle input).
+2. The model flies. Gate detection is learned, and free space is `none`: the 30-dim model's
+   `obstacle_vision` block is all zeros (`assume_no_obstacles: true`). Without that setting the run
+   refuses to start with "missing obstacle_vision".
 3. **Abort any time with F12** (Ctrl+C in the terminal also works). Either one centres the sticks
    and cuts the throttle.
 4. Automatic fail-safe stops: `telemetry_stale` (> 0.2 s without a packet), `gate_lost`,
