@@ -296,6 +296,16 @@ class MockPad:
         self.right = (None, None)
         self.updates = 0
         self.history: list[dict[str, float]] = []
+        self.buttons: set = set()
+        self.button_log: list[tuple[str, object, int]] = []  # (press|release, button, updates)
+
+    def press_button(self, button) -> None:
+        self.buttons.add(button)
+        self.button_log.append(("press", button, self.updates))
+
+    def release_button(self, button) -> None:
+        self.buttons.discard(button)
+        self.button_log.append(("release", button, self.updates))
 
     def left_joystick_float(self, x_value_float: float, y_value_float: float) -> None:
         self.left = (x_value_float, y_value_float)

@@ -62,8 +62,21 @@ tracks, drones or resolutions need their own calibration (ADR 0003).
 - Unplug or ignore your physical controller. Liftoff must take input from the virtual Xbox 360 pad.
   The pad only exists while a harness command runs, so Liftoff may say "no controller" in between.
   That is expected.
-- The drone must not need an arm switch, or the arm must be bound so that throttle-low arms it.
-  The harness sends throttle at minimum when it arms and on every fail-safe.
+- **Controller settings in Liftoff** (Settings → Controls, Xbox 360 controller, with a pad connected;
+  `artifacts/harness/reference-scripts/bind_pad.py` keeps one connected): set the **deadzone to 0**
+  on every axis, with no expo or curve. The harness inverts the rate curve itself, and a deadzone
+  swallows small corrections (a 25% deadzone ate all of pad-check's 0.15 pulses).
+- **Arming.** Bind Liftoff's *Arm* to a pad button, and tell the harness which one in your
+  `live*.yaml`:
+  ```yaml
+  controls:
+    arm_button: A        # A B X Y LB RB BACK START LS RS DPAD_UP/DOWN/LEFT/RIGHT
+    arm_mode: hold       # hold: held while flying (Liftoff switch) | toggle: pulse to arm/disarm
+  ```
+  `hold` holds the button from start to fail-safe, and releasing it disarms. `toggle` pulses it on
+  the first command (after focus) and again on the fail-safe; start toggle runs disarmed. With
+  `arm_button: null` (the default) the harness never arms, so Liftoff must not require arming.
+  The harness sends throttle at minimum while arming and on every fail-safe.
 - Sit on the start pad with the drone level. Telemetry only streams while you're in a flight.
 
 Check in a terminal (PowerShell, not a sandboxed shell, because ViGEm needs a real session):

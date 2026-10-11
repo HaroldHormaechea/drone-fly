@@ -172,6 +172,11 @@ controls:
   # stick = sign * inverse_rate(body rate): +wx roll right, +wy pitch forward (nose down),
   # +wz is counter-clockwise, i.e. yaw stick LEFT. Flip a sign if Liftoff's binding inverts an axis.
   stick_signs: {roll: 1, pitch: 1, yaw: -1}
+  # Arm switch on the virtual pad: bind Liftoff's "Arm" to this button (Settings > Controls,
+  # with the pad connected). null = no arm button (Liftoff must not require arming).
+  arm_button: null          # null | A | B | X | Y | LB | RB | BACK | START | LS | RS | DPAD_*
+  arm_mode: hold            # hold: button held while flying (switch) | toggle: pulse to arm/disarm
+  arm_press_s: 0.15         # toggle pulse length (s)
 
 # Offline evaluation only (`drone-fly harness eval`): how track/race XML items map to geometry.
 # Never used at runtime. CALIBRATE the item table to your track's itemIDs.

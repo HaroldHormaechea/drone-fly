@@ -14,13 +14,20 @@ Stick conventions (defaults, mode 2; every sign is explicit config):
 * throttle: piecewise-linear through ``(0, -1)``, ``(HOVER_THR, hover_stick)``, ``(1, +1)``
   on the left stick Y.
 
+Arming (``controls.arm_button``, optional): Liftoff only flies an armed drone, and its arm binding
+is a pad button. With ``arm_mode: hold`` the button is held from :meth:`arm` until the fail-safe
+(Liftoff "switch" semantics: held = armed, released = disarmed). With ``arm_mode: toggle`` the
+button is pulsed for ``arm_press_s`` on the first command after :meth:`arm` (i.e. once the game
+has focus) and pulsed again on the fail-safe; start toggle-mode runs with the drone disarmed.
+
 ``vgamepad`` (and with it the ViGEmBus driver) is imported only in :meth:`arm`; tests inject a
-``pad_factory`` returning a mock pad.
+``pad_factory`` returning a mock pad (and a ``button_resolver``).
 """
 
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -38,6 +45,24 @@ CHANNELS = ("throttle", "yaw", "pitch", "roll")
 MODE2 = {"throttle": "left_y", "yaw": "left_x", "pitch": "right_y", "roll": "right_x"}
 #: stick = sign * f^-1(rate) per rate axis (see the module docstring).
 DEFAULT_SIGNS = {"roll": 1.0, "pitch": 1.0, "yaw": -1.0}
+#: ``controls.arm_button`` names -> ``vgamepad.XUSB_BUTTON`` members.
+ARM_BUTTONS = {
+    "A": "XUSB_GAMEPAD_A",
+    "B": "XUSB_GAMEPAD_B",
+    "X": "XUSB_GAMEPAD_X",
+    "Y": "XUSB_GAMEPAD_Y",
+    "LB": "XUSB_GAMEPAD_LEFT_SHOULDER",
+    "RB": "XUSB_GAMEPAD_RIGHT_SHOULDER",
+    "BACK": "XUSB_GAMEPAD_BACK",
+    "START": "XUSB_GAMEPAD_START",
+    "LS": "XUSB_GAMEPAD_LEFT_THUMB",
+    "RS": "XUSB_GAMEPAD_RIGHT_THUMB",
+    "DPAD_UP": "XUSB_GAMEPAD_DPAD_UP",
+    "DPAD_DOWN": "XUSB_GAMEPAD_DPAD_DOWN",
+    "DPAD_LEFT": "XUSB_GAMEPAD_DPAD_LEFT",
+    "DPAD_RIGHT": "XUSB_GAMEPAD_DPAD_RIGHT",
+}
+ARM_MODES = ("hold", "toggle")
 
 
 @dataclass(frozen=True)
@@ -116,6 +141,11 @@ def default_pad_factory() -> Any:
     return vg.VX360Gamepad()
 
 
+def default_button_resolver(name: str) -> Any:
+    vg = lazy_import("vgamepad", purpose="the ViGEm virtual gamepad (requires the ViGEmBus driver)")
+    return getattr(vg.XUSB_BUTTON, ARM_BUTTONS[name])
+
+
 class VgamepadActionSink(ActionSink):
     def __init__(
         self,
@@ -126,6 +156,12 @@ class VgamepadActionSink(ActionSink):
         signs: dict[str, float] | None = None,
         rate_scale: float = 1.0,
         pad_factory: Callable[[], Any] = default_pad_factory,
+        arm_button: str | None = None,
+        arm_mode: str = "hold",
+        arm_press_s: float = 0.15,
+        button_resolver: Callable[[str], Any] = default_button_resolver,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.profiles = profiles
         self.throttle = throttle
@@ -139,7 +175,23 @@ class VgamepadActionSink(ActionSink):
         self.signs = {**DEFAULT_SIGNS, **(signs or {})}
         self.rate_scale = rate_scale
         self.pad_factory = pad_factory
+        if arm_button is not None and arm_button not in ARM_BUTTONS:
+            raise HarnessConfigError(
+                f"controls.arm_button must be null or one of {sorted(ARM_BUTTONS)}: {arm_button!r}"
+            )
+        if arm_mode not in ARM_MODES:
+            raise HarnessConfigError(f"controls.arm_mode must be one of {list(ARM_MODES)}")
+        self.arm_button = arm_button
+        self.arm_mode = arm_mode
+        self.arm_press_s = arm_press_s
+        self.button_resolver = button_resolver
+        self.clock = clock
+        self.sleep = sleep
         self.pad: Any = None
+        self.armed = False  # our view of Liftoff's arm state (button driven)
+        self._button: Any = None
+        self._pressed = False
+        self._release_at: float | None = None
 
     @classmethod
     def from_config(cls, cfg: dict[str, Any], ctx: Any) -> VgamepadActionSink:
@@ -186,6 +238,16 @@ class VgamepadActionSink(ActionSink):
                     min_exclusive=True,
                 )
             ),
+            arm_button=cfg.get("arm_button"),
+            arm_mode=require_choice(cfg.get("arm_mode", "hold"), "controls.arm_mode", ARM_MODES),
+            arm_press_s=float(
+                require_number(
+                    cfg.get("arm_press_s", 0.15),
+                    "controls.arm_press_s",
+                    min_value=0.0,
+                    min_exclusive=True,
+                )
+            ),
         )
 
     def sticks_for(self, command: ContractCommand) -> dict[str, float]:
@@ -205,14 +267,40 @@ class VgamepadActionSink(ActionSink):
         sticks[self.axis_map["throttle"]] = -1.0
         return sticks
 
+    def _set_button(self, down: bool) -> None:
+        """Press / release the arm button (applied by the next ``pad.update()``)."""
+        if down:
+            self.pad.press_button(button=self._button)
+        else:
+            self.pad.release_button(button=self._button)
+        self._pressed = down
+
+    def _arm_tick(self) -> None:
+        """Toggle mode: pulse the arm button on the first command, release it after the pulse."""
+        if self.arm_button is None or self.arm_mode != "toggle":
+            return
+        now = self.clock()
+        if not self.armed and self._release_at is None:
+            self._set_button(True)
+            self._release_at = now + self.arm_press_s
+            self.armed = True
+        elif self._pressed and self._release_at is not None and now >= self._release_at:
+            self._set_button(False)
+
     def arm(self) -> None:
         if self.pad is None:
             self.pad = self.pad_factory()
+            if self.arm_button is not None:
+                self._button = self.button_resolver(self.arm_button)
+                if self.arm_mode == "hold":
+                    self._set_button(True)  # held for the whole run: Liftoff switch = armed
+                    self.armed = True
             _pad_set(self.pad, self.neutral_sticks())
 
     def send(self, command: ContractCommand) -> dict[str, Any]:
         if self.pad is None:
             raise RuntimeError("gamepad sink not armed")
+        self._arm_tick()
         sticks = self.sticks_for(command)
         _pad_set(self.pad, sticks)
         return {"sticks": sticks}
@@ -228,19 +316,42 @@ class VgamepadActionSink(ActionSink):
         unknown = set(channels) - set(CHANNELS)
         if unknown:
             raise HarnessConfigError(f"unknown stick channels {sorted(unknown)}")
+        self._arm_tick()
         values = {"throttle": -1.0, "roll": 0.0, "pitch": 0.0, "yaw": 0.0, **channels}
         sticks = {self.axis_map[ch]: float(np.clip(v, -1.0, 1.0)) for ch, v in values.items()}
         _pad_set(self.pad, sticks)
         return sticks
 
+    def _disarm(self) -> None:
+        """Release (hold) or pulse (toggle) the arm button so Liftoff disarms."""
+        if self.arm_button is None or self.pad is None:
+            return
+        if self.arm_mode == "hold":
+            if self._pressed:
+                self._set_button(False)
+        elif self.armed:
+            if self._pressed:  # still inside the arming pulse: finish it first
+                self._set_button(False)
+                self.pad.update()
+                self.sleep(self.arm_press_s)
+            self._set_button(True)
+            self.pad.update()
+            self.sleep(self.arm_press_s)
+            self._set_button(False)
+        self.armed = False
+        self._release_at = None
+
     def failsafe(self) -> None:
-        """Centre the rate sticks, throttle to minimum."""
+        """Centre the rate sticks, throttle to minimum, disarm (when an arm button is set)."""
         if self.pad is not None:
+            _pad_set(self.pad, self.neutral_sticks())
+            self._disarm()
             _pad_set(self.pad, self.neutral_sticks())
 
     def close(self) -> None:
         if self.pad is not None:
             try:
+                self._disarm()
                 _pad_set(self.pad, self.neutral_sticks())
             finally:
                 self.pad = None
