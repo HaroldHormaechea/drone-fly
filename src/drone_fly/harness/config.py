@@ -285,6 +285,9 @@ class PartsConfig:
 #: Overlay panels (``overlay.panels.<name>: true|false``), in drawing order.
 OVERLAY_PANELS = ("brain", "action", "inputs", "raycast", "perception", "health", "telemetry")
 OVERLAY_LAYOUTS = ("default", "mask_confined")
+#: Brain-frame quantisation: ``recorder`` (the recorder's fixed [-1, 1] uint8 scheme, AC2) or
+#: ``frame_peak`` (symmetric per-frame scale from the frame's own max |a|; see ADR 0004).
+OVERLAY_BRAIN_SCALES = ("recorder", "frame_peak")
 
 
 @dataclass(frozen=True)
@@ -297,6 +300,7 @@ class OverlayConfig:
     enabled: bool = False
     port: int = 9100
     brain_every_n: int = 3
+    brain_scale: str = "recorder"
     layout: str = "default"
     fps: float = 20.0
     stale_s: float = 1.0
@@ -355,6 +359,9 @@ class OverlayConfig:
             port=port,
             brain_every_n=require_int(
                 d.get("brain_every_n", base.brain_every_n), "overlay.brain_every_n", min_value=1
+            ),
+            brain_scale=require_choice(
+                d.get("brain_scale", base.brain_scale), "overlay.brain_scale", OVERLAY_BRAIN_SCALES
             ),
             layout=require_choice(d.get("layout", base.layout), "overlay.layout", OVERLAY_LAYOUTS),
             fps=float(

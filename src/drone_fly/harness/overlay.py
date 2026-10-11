@@ -2,7 +2,9 @@
 
 :class:`OverlayPublisher` sends one ``tick`` datagram per runner tick and, every
 ``overlay.brain_every_n`` ticks, a ``brain`` datagram carrying the full propagated K1 state
-quantised to ``uint8`` with the recorder's scheme (wire format: :mod:`drone_fly.overlay.protocol`).
+quantised to ``uint8`` with the recorder's scheme â€” or, opt-in (``overlay.brain_scale:
+frame_peak``), with a per-frame scale from the frame's own peak (:func:`quantize_frame_peak`)
+(wire format: :mod:`drone_fly.overlay.protocol`).
 The socket is non-blocking with a ~1 MB send buffer; **any** send or serialisation error
 (including ``BlockingIOError`` when the buffer is full) drops that datagram, increments
 :attr:`OverlayPublisher.drops` and is logged at most once per second — it never raises into the
@@ -47,6 +49,9 @@ META_PERIOD_S = 1.0
 STATUS_PERIOD_S = 0.25  # status datagrams are rate-limited to 4 Hz
 LOG_PERIOD_S = 1.0
 STOP_REPEATS = 2
+BRAIN_SCALES = ("recorder", "frame_peak")
+#: ``frame_peak`` floor for max |a| (an all-zero frame still gets a finite, non-zero scale).
+MIN_FRAME_PEAK = 1e-6
 
 RUN_RUNNING = "running"
 RUN_WAITING_FOR_STATE = "waiting_for_state"
@@ -205,6 +210,22 @@ def _brain_to_numpy(brain: Any) -> np.ndarray:
     return np.asarray(brain, dtype=np.float32).reshape(-1)
 
 
+def quantize_frame_peak(values: np.ndarray) -> tuple[np.ndarray, float, float]:
+    """``(codes, scale, offset)`` with a symmetric scale from the frame's own peak ``max |a|``.
+
+    Real K1 activations sit far inside the recorder's fixed ``[-1, 1]`` range (a steady
+    loopback run had 99.97 % of neuron-ticks on codes 127/128), so ``overlay.brain_scale:
+    frame_peak`` spends all 256 codes on ``[-peak, peak]`` instead; the datagram carries the
+    scale / offset, so the receiver dequantises to real units either way. Non-finite values
+    count as 0, and the peak is floored at :data:`MIN_FRAME_PEAK` (no division by zero, no NaN).
+    """
+    a = np.nan_to_num(np.asarray(values, np.float64).reshape(-1), nan=0.0, posinf=0.0, neginf=0.0)
+    peak = max(float(np.max(np.abs(a))) if a.size else 0.0, MIN_FRAME_PEAK)
+    scale = 2.0 * peak / 255.0
+    codes = np.clip(np.round((a + peak) / scale), 0, 255).astype(np.uint8)
+    return codes, scale, -peak
+
+
 # ----------------------------------------------------------------------------- publisher
 
 
@@ -222,9 +243,13 @@ class OverlayPublisher:
         quantize: Callable[[np.ndarray], np.ndarray] | None = None,
         host: str = "127.0.0.1",
         clock: Callable[[], float] = time.monotonic,
+        brain_scale: str = "recorder",
     ) -> None:
         if isinstance(brain_every_n, bool) or int(brain_every_n) < 1:
             raise ValueError(f"brain_every_n must be >= 1, got {brain_every_n!r}")
+        if brain_scale not in BRAIN_SCALES:
+            raise ValueError(f"brain_scale must be one of {BRAIN_SCALES}, got {brain_scale!r}")
+        self.brain_scale = brain_scale
         self.address = (host, int(port))
         self.brain_every_n = int(brain_every_n)
         self.run_info = dict(run_info or {})
@@ -341,8 +366,12 @@ class OverlayPublisher:
             )
             if brain is not None:
                 try:
-                    codes = self._quantize(_brain_to_numpy(brain))
-                    data = encode_brain(self.run_id, record.tick, codes, self.scale, self.offset)
+                    values = _brain_to_numpy(brain)
+                    if self.brain_scale == "frame_peak":
+                        codes, scale, offset = quantize_frame_peak(values)
+                    else:
+                        codes, scale, offset = self._quantize(values), self.scale, self.offset
+                    data = encode_brain(self.run_id, record.tick, codes, scale, offset)
                 except Exception as exc:  # noqa: BLE001
                     self._drop("brain", exc)
                 else:

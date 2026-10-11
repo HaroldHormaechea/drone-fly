@@ -179,6 +179,7 @@ def run_harness(
             publisher = OverlayPublisher(
                 overlay_cfg.port,
                 overlay_cfg.brain_every_n,
+                brain_scale=overlay_cfg.brain_scale,
                 run_info={
                     "harness": cfg.harness,
                     "checkpoint": Path(checkpoint).name,

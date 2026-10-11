@@ -193,6 +193,7 @@ overlay:
   enabled: false            # publish to the overlay (or `harness run --overlay`)
   port: 9100                # localhost UDP port; must differ from telemetry.port
   brain_every_n: 3          # brain frame every Nth tick (50 Hz / 3 ~ 16 Hz)
+  brain_scale: recorder     # recorder (fixed [-1, 1] uint8, AC2) | frame_peak (per-frame scale)
   layout: default           # default (panels at the screen edges) | mask_confined (inside camera.masks)
   fps: 20                   # overlay redraw rate, 1-20 (CPU rendering; keep it low)
   stale_s: 1.0              # "no data for N s" after this long without a datagram
