@@ -300,3 +300,42 @@ def test_cli_run_flags_reach_run_harness(monkeypatch, flag):
         )
     assert seen["overlay"] is True
     assert seen["overlay_launch"] is (flag == "--overlay-launch")
+
+
+def test_overlay_command_forwards_the_k1_path(tmp_path):
+    cmd = overlay_command("liftoff", 9100, k1_path=tmp_path)
+    assert cmd[-2:] == ["--k1-path", str(tmp_path.resolve())]
+    assert "--k1-path" not in overlay_command("liftoff", 9100)
+
+
+def test_run_harness_overlay_launch_passes_the_resolved_k1_path(
+    harness_contract, harness_checkpoint_70, harness_k1_dir, monkeypatch
+):
+    """Without an injected launcher the session builds the default one from overlay_command,
+    which must carry the run's K1 path (so the brain panel loads the policy's neurons)."""
+    monkeypatch.setattr(
+        session_mod.OverlayPublisher, "_make_socket", staticmethod(lambda: FakeSocket())
+    )
+    cmds: list[list[str]] = []
+    monkeypatch.setattr(
+        session_mod, "default_overlay_launcher", lambda cmd: cmds.append(cmd) or (lambda: None)
+    )
+    s = session_mod.run_harness(
+        "sim-loopback",
+        harness_checkpoint_70,
+        70,
+        config={"overlay": {"port": _free_port()}},
+        k1_path=str(harness_k1_dir),
+        device="cpu",
+        duration_s=0.04,
+        record=False,
+        overlay_launch=True,
+    )
+    assert s.result.reason == STOP_COMPLETED
+    (cmd,) = cmds
+    i = cmd.index("--k1-path")
+    assert Path(cmd[i + 1]) == Path(harness_contract.k1_path).resolve()
+    assert Path(cmd[i + 1]) == harness_k1_dir.resolve()
+    from drone_fly.cli.main import build_parser
+
+    assert build_parser().parse_args(cmd[3:]).k1_path == cmd[i + 1]
