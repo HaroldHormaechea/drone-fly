@@ -458,3 +458,38 @@ a.link:hover { text-decoration: underline; }
    header action slot) stays unselectable so it keeps feeling like native UI. */
 .card, .metrics, .metrics-groups, .metric, .log-panel, .modal-body { user-select: text; }
 nav.sidebar, .btn-row, button, .btn, .view-head-actions { user-select: none; }
+
+/* ---- reservoir surfaces (UC-63): read-only badges, banners, charts, audit verdicts ---- */
+.pill.readonly { background: var(--line); color: var(--muted); }
+.kind-badge { margin-left: 8px; font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 10px; padding: 1px 8px; }
+.state-tag.failed, .state-tag.stopped { color: var(--bad); }
+.state-tag.partial { color: var(--warn); }
+.state-tag.committed, .state-tag.external { color: var(--muted); }
+.banner { border: 1px solid var(--line); border-left-width: 4px; border-radius: var(--radius); padding: 10px 14px; margin: 0 0 16px; background: var(--panel); }
+.banner.warn { border-left-color: var(--warn); }
+.banner.info { border-left-color: var(--accent); }
+.banner ul { margin: 6px 0 0; padding-left: 18px; }
+.form-note { margin: 4px 0 8px; font-size: 12px; }
+.fixed-value { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.flag-boxes { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.num-sm { width: 80px; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+.charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; margin-top: 12px; }
+.chart { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; color: var(--accent); }
+.chart-title { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+.chart-svg { width: 100%; height: 110px; display: block; }
+.chart-range, .chart-empty { font-size: 11px; }
+.verdict-panel { border: 1px solid var(--line); border-left-width: 4px; border-radius: var(--radius); padding: 10px 14px; margin: 0 0 12px; background: var(--panel-2); }
+.verdict-panel.good { border-left-color: var(--good); }
+.verdict-panel.warn { border-left-color: var(--warn); }
+.verdict-panel.bad { border-left-color: var(--bad); }
+.verdict-panel.neutral { border-left-color: var(--muted); }
+.verdict-panel .verdict-tag { font-weight: 600; }
+.verdict-panel.good .verdict-tag { color: var(--good); }
+.verdict-panel.warn .verdict-tag { color: var(--warn); }
+.verdict-banner { color: var(--bad); font-weight: 600; margin-bottom: 6px; }
+.verdict-row { display: flex; gap: 8px 14px; align-items: baseline; flex-wrap: wrap; margin-top: 4px; }
+.verdict-row .k { color: var(--muted); font-size: 12px; }
+.verdict-panel .struck { text-decoration: line-through; color: var(--muted); }
+.diag h4 { margin: 14px 0 6px; font-size: 13px; }
+table.list.compact th, table.list.compact td { padding: 4px 8px; }
+ul.plain { margin: 0; padding-left: 18px; }

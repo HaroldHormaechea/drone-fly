@@ -1,36 +1,17 @@
-/* forms.js — build config forms from backend field descriptors, honouring omit-vs-default.
+/* forms.js — the reservoir-run form (UC-63 AC2), built from GET /api/schema.
  *
- * A field descriptor (from /api/train-configs/schema or /api/slice-schema) is:
- *   { name, base_type, nullable, required, always_resolves, default, choices, control }
+ * A run is a recipe + env flags + train_aug knobs + a .pt save path. The schema says, per recipe,
+ * which knobs are editable; a named launcher (exp11/12/13, train_shaping) hardcodes everything but
+ * the budget, so its other knobs render read-only as "set by <launcher>" with the fixed value. The
+ * generic train_aug recipe exposes every knob; a blank knob is not forwarded (train_aug's own
+ * default applies), and the placeholder shows that default.
  *
- * Emit rules (AC4/AC9 — "a key is emitted only when the user sets it"):
- *   - required            → always emitted.
- *   - always_resolves     → class (a): has a concrete default; emitted only when the value
- *                           DIFFERS from that default (set-to-default == omit → byte-identical run).
- *   - nullable (class b)  → emitted only when the user ticks its "set" box (number/text/select) or
- *                           chooses a concrete tri-state value (unset/true/false).
- *
- * buildForm(container, fields, values) renders the controls and returns { collect } where
- * collect() -> a plain mapping of exactly the keys that should be persisted.
+ * buildRunForm(container, schema, values, onChange) renders the controls and returns { collect },
+ * where collect() -> { recipe, flags, knobs, save_path } with only the knobs the user set. Values
+ * live in the form until the caller's explicit Save (no auto-save, UC-61 AC9).
  */
 (function (global) {
   "use strict";
-
-  // item 4: monotonic id source for the per-open-field <datalist> elements (unique within a build).
-  let datalistSeq = 0;
-
-  function coerce(baseType, raw) {
-    if (baseType === "int") {
-      const n = parseInt(raw, 10);
-      return Number.isFinite(n) ? n : null;
-    }
-    if (baseType === "float") {
-      const n = parseFloat(raw);
-      return Number.isFinite(n) ? n : null;
-    }
-    if (baseType === "bool") return raw === true || raw === "true";
-    return raw; // str
-  }
 
   function el(tag, attrs, children) {
     const node = document.createElement(tag);
@@ -43,169 +24,144 @@
     return node;
   }
 
-  function esc(s) {
-    return String(s === null || s === undefined ? "" : s)
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  function fmtValue(v) {
+    if (v === null || v === undefined) return "—";
+    if (typeof v === "number" && Number.isInteger(v)) return v.toLocaleString("en-US");
+    return String(v);
   }
 
-  // item 6: the machine-checkable constraints block shown in a field's info modal.
-  function constraintsHTML(f) {
-    const rows = [["type", f.base_type], ["required", f.required ? "yes" : "no"]];
-    if (f.nullable && !f.required) rows.push(["optional", "may be left unset"]);
-    if (f.default !== null && f.default !== undefined) rows.push(["default", JSON.stringify(f.default)]);
-    if (f.choices && f.choices.length) rows.push(["choices", f.choices.join(", ")]);
-    // item 4: open-set fields advertise their static suggestions + that free text is allowed.
-    if (f.options && f.options.length) rows.push(["suggestions", f.options.join(", ")]);
-    if (f.open) rows.push(["free text", "yes — any value allowed"]);
-    let html = '<dl class="mh-constraints">';
-    rows.forEach(([k, v]) => { html += "<dt>" + esc(k) + "</dt><dd>" + esc(v) + "</dd>"; });
-    return html + "</dl>";
+  function info(title, help, extraHTML) {
+    if (window.AppUI && window.AppUI.infoButton) return window.AppUI.infoButton(title, help, null, extraHTML || null);
+    return document.createTextNode("");
   }
 
-  function buildForm(container, fields, values, optionsByField) {
+  function fieldRow(label, meta, control, help, required) {
+    const row = el("div", { class: "field" + (required ? " is-required" : "") });
+    const key = el("label", { class: "key", text: label });
+    if (meta) key.appendChild(el("span", { class: "meta", text: meta }));
+    if (help) key.appendChild(info(label, help));
+    row.appendChild(key);
+    const ctrl = el("div", { class: "control" });
+    ctrl.appendChild(control);
+    row.appendChild(ctrl);
+    return row;
+  }
+
+  function buildRunForm(container, schema, values, onChange) {
     container.innerHTML = "";
     values = values || {};
-    // item 4: dynamic suggestion lists prefetched by the caller (fieldName -> [strings]); static
-    // suggestions ride on the descriptor's own `options`. Absent → open fields just get no datalist.
-    optionsByField = optionsByField || {};
-    const rows = [];
+    const changed = () => { if (onChange) onChange(); };
+    const recipes = {};
+    schema.recipes.forEach((r) => { recipes[r.name] = r; });
+    const knobDefs = {};
+    schema.knobs.forEach((k) => { knobDefs[k.name] = k; });
 
-    // item 2: fields carrying a `section` are wrapped into titled cards laid out in a responsive
-    // grid (`.form-sections`); fields with no section render flat in a `.form-grid` (the prune
-    // form, unchanged). Sections are created lazily in first-seen order — since the backend emits
-    // fields in descriptor order and each section is a contiguous run, this preserves field order.
-    let sectionsWrap = null, flatGrid = null;
-    const sectionGrids = {};
-    function flat() {
-      if (!flatGrid) flatGrid = el("div", { class: "form-grid" });
-      return flatGrid;
-    }
-    function sectionGrid(title) {
-      if (!sectionsWrap) sectionsWrap = el("div", { class: "form-sections" });
-      if (!sectionGrids[title]) {
-        const g = el("div", { class: "form-grid" });
-        const card = el("div", { class: "form-section" }, [
-          el("h4", { class: "form-section-title", text: title }),
-          g,
-        ]);
-        sectionsWrap.appendChild(card);
-        sectionGrids[title] = g;
-      }
-      return sectionGrids[title];
-    }
+    const wrap = el("div", { class: "form-sections" });
+    container.appendChild(wrap);
 
-    fields.forEach((f) => {
-      const present = Object.prototype.hasOwnProperty.call(values, f.name);
-      const row = el("div", { class: "field" + (f.required ? " is-required" : "") });
+    // -- recipe + save path --
+    const runGrid = el("div", { class: "form-grid" });
+    wrap.appendChild(el("div", { class: "form-section" }, [el("h4", { class: "form-section-title", text: "Recipe" }), runGrid]));
+    const recipeSel = el("select");
+    schema.recipes.forEach((r) => recipeSel.appendChild(el("option", { value: r.name, text: r.name + (r.generic ? " (generic)" : "") })));
+    recipeSel.value = values.recipe && recipes[values.recipe] ? values.recipe : schema.default_recipe;
+    runGrid.appendChild(fieldRow("recipe", null, recipeSel,
+      "Named launchers hardcode every knob except the budget; the generic train_aug recipe forwards any knob you set.", true));
+    const launcherNote = el("p", { class: "subtle form-note" });
+    runGrid.appendChild(launcherNote);
+    const savePath = el("input", { type: "text", placeholder: "training/<name>/model.pt" });
+    savePath.value = values.save_path || "";
+    savePath.addEventListener("input", changed);
+    runGrid.appendChild(fieldRow("save_path", ".pt · blank = training/<name>/model.pt", savePath,
+      "Where train_aug writes the checkpoint (every 200 iterations and at the end). Must be inside the project root and not inside a committed dir."));
 
-      const keyLabel = el("label", { class: "key", text: f.name });
-      const meta = el("span", { class: "meta" });
-      meta.textContent =
-        f.base_type +
-        (f.nullable ? " · optional" : "") +
-        (f.default !== null && f.default !== undefined ? " · default " + JSON.stringify(f.default) : "");
-      keyLabel.appendChild(meta);
-      // item 6: per-field "ⓘ" button → accessible modal (purpose + example + constraints).
-      if (window.AppUI && window.AppUI.infoButton) {
-        keyLabel.appendChild(window.AppUI.infoButton(f.name, f.help, f.example, constraintsHTML(f)));
-      }
-
-      const control = el("div", { class: "control" });
-      let input, enableBox = null, extraNode = null;
-
-      // "set" toggle for nullable non-bool fields (class b) so absence is meaningful.
-      const needsEnable = f.nullable && f.control !== "tristate" && !f.required;
-
-      if (f.control === "checkbox") {
-        input = el("input", { type: "checkbox" });
-        input.checked = present ? !!values[f.name] : !!f.default;
-      } else if (f.control === "tristate") {
-        input = el("select");
-        [["", "(unset)"], ["true", "true"], ["false", "false"]].forEach(([v, t]) => {
-          const o = el("option", { value: v, text: t });
-          input.appendChild(o);
-        });
-        input.value = present ? String(!!values[f.name]) : "";
-      } else if (f.control === "select") {
-        input = el("select");
-        if (f.nullable && !f.required) input.appendChild(el("option", { value: "", text: "(unset)" }));
-        (f.choices || []).forEach((c) => input.appendChild(el("option", { value: String(c), text: String(c) })));
-        if (present) input.value = String(values[f.name]);
-        else if (f.default !== null && f.default !== undefined) input.value = String(f.default);
-        else input.value = "";
-      } else {
-        input = el("input", { type: f.control === "number" ? "number" : "text" });
-        if (f.base_type === "float") input.step = "any";
-        if (present) input.value = values[f.name];
-        else if (f.default !== null && f.default !== undefined) input.value = f.default;
-        // item 4: open-set field (e.g. resume / connectome) → a <datalist> of suggestions backing a
-        // plain text input. Free text is preserved, so collect() stays byte-identical; the
-        // suggestions merely autocomplete. Static `f.options` + any dynamic prefetched values.
-        if (f.open) {
-          const suggestions = [];
-          (f.options || []).forEach((o) => { if (suggestions.indexOf(String(o)) === -1) suggestions.push(String(o)); });
-          (optionsByField[f.name] || []).forEach((o) => { if (suggestions.indexOf(String(o)) === -1) suggestions.push(String(o)); });
-          if (suggestions.length) {
-            const listId = "dl-" + f.name + "-" + (++datalistSeq);
-            const dl = el("datalist", { id: listId });
-            suggestions.forEach((o) => dl.appendChild(el("option", { value: o })));
-            input.setAttribute("list", listId);
-            extraNode = dl;
-          }
-        }
-      }
-
-      if (needsEnable) {
-        enableBox = el("input", { type: "checkbox" });
-        enableBox.checked = present;
-        input.disabled = !present;
-        const wrap = el("label", { class: "enable" }, [enableBox, document.createTextNode("set")]);
-        control.appendChild(wrap);
-        enableBox.addEventListener("change", () => { input.disabled = !enableBox.checked; markDirty(); });
-      }
-      control.appendChild(input);
-      if (extraNode) control.appendChild(extraNode);  // item 4: the sibling <datalist>.
-      row.appendChild(keyLabel);
-      row.appendChild(control);
-      (f.section ? sectionGrid(f.section) : flat()).appendChild(row);
-
-      function markDirty() { row.classList.add("dirty"); }
-      input.addEventListener("input", markDirty);
-      input.addEventListener("change", markDirty);
-
-      rows.push({ f, input, enableBox });
+    // -- flags --
+    const flagGrid = el("div", { class: "form-grid" });
+    wrap.appendChild(el("div", { class: "form-section" }, [el("h4", { class: "form-section-title", text: "Env flags" }), flagGrid]));
+    const flagBoxes = {};
+    schema.flags.forEach((f) => {
+      const cb = el("input", { type: "checkbox" });
+      cb.addEventListener("change", changed);
+      flagBoxes[f.name] = cb;
+      flagGrid.appendChild(fieldRow(f.name, "set to \"1\" when ticked; absent otherwise", cb, f.help));
     });
 
-    if (sectionsWrap) container.appendChild(sectionsWrap);
-    if (flatGrid) container.appendChild(flatGrid);
+    // -- knobs (re-rendered when the recipe changes) --
+    const knobGrid = el("div", { class: "form-grid" });
+    wrap.appendChild(el("div", { class: "form-section" }, [el("h4", { class: "form-section-title", text: "train_aug knobs" }), knobGrid]));
+    let knobInputs = {};
+
+    function renderKnobs(recipe, knobValues) {
+      knobGrid.innerHTML = "";
+      knobInputs = {};
+      const spec = recipes[recipe];
+      launcherNote.textContent = "Runs " + (spec.generic ? spec.launcher : "gpu_prototype/" + spec.launcher) +
+        (spec.generic ? " — only the knobs you set are forwarded." : " <save_path> <budget> — other knobs are fixed by the launcher.");
+      spec.knobs.forEach((k) => {
+        const def = knobDefs[k.name];
+        if (!k.editable) {
+          const v = el("span", { class: "fixed-value", text: fmtValue(k.fixed_value) });
+          knobGrid.appendChild(fieldRow(k.name, "set by " + spec.launcher + " (read-only)", v, def.help));
+          return;
+        }
+        const input = el("input", { type: def.type === "str" ? "text" : "number" });
+        if (def.type !== "int" && def.type !== "str") input.step = "any";
+        const dflt = k.default !== undefined ? k.default : def.default;
+        if (dflt !== null && dflt !== undefined) input.placeholder = String(dflt);
+        const v = knobValues ? knobValues[k.name] : undefined;
+        if (v !== undefined && v !== null) input.value = v;
+        input.addEventListener("input", () => { changed(); syncWarmSrc(); });
+        knobInputs[k.name] = { input, def };
+        const meta = def.type + (def.nullable ? " · optional" : "") +
+          (dflt !== null && dflt !== undefined ? " · blank = " + fmtValue(dflt) : " · blank = not set");
+        knobGrid.appendChild(fieldRow(k.name, meta, input, def.help));
+      });
+      syncWarmSrc();
+    }
+    // warm_src_extra_dim only makes sense when warm_from is set.
+    function syncWarmSrc() {
+      const warm = knobInputs.warm_from, src = knobInputs.warm_src_extra_dim;
+      if (!warm || !src) return;
+      const on = warm.input.value.trim() !== "";
+      src.input.disabled = !on;
+      if (!on) src.input.value = "";
+    }
+
+    function applyRecipeDefaults(recipe) {
+      const spec = recipes[recipe];
+      Object.keys(flagBoxes).forEach((f) => { flagBoxes[f].checked = spec.default_flags.indexOf(f) !== -1; });
+    }
+
+    if (values.flags) Object.keys(flagBoxes).forEach((f) => { flagBoxes[f].checked = values.flags.indexOf(f) !== -1; });
+    else applyRecipeDefaults(recipeSel.value);
+    renderKnobs(recipeSel.value, values.knobs || {});
+
+    recipeSel.addEventListener("change", () => {
+      applyRecipeDefaults(recipeSel.value);
+      renderKnobs(recipeSel.value, {});
+      changed();
+    });
 
     function collect() {
-      const out = {};
-      rows.forEach(({ f, input, enableBox }) => {
-        if (f.control === "checkbox") {
-          const v = input.checked;
-          if (f.required || v !== f.default) out[f.name] = v;
-          return;
-        }
-        if (f.control === "tristate") {
-          if (input.value === "") return; // unset → omit
-          out[f.name] = input.value === "true";
-          return;
-        }
-        if (enableBox && !enableBox.checked) return; // nullable, not enabled → omit
-        let raw = input.value;
-        if (raw === "" && !f.required) return; // empty non-required → omit
-        const v = coerce(f.base_type, raw);
-        if (v === null) return;
-        // class (a): omit when equal to the default (set-to-default == omit).
-        if (f.always_resolves && !f.required && v === f.default) return;
-        out[f.name] = v;
+      const knobs = {};
+      Object.keys(knobInputs).forEach((name) => {
+        const { input, def } = knobInputs[name];
+        const raw = input.value.trim();
+        if (raw === "" || input.disabled) return;
+        if (def.type === "int") knobs[name] = parseInt(raw, 10);
+        else if (def.type === "str") knobs[name] = raw;
+        else knobs[name] = parseFloat(raw);
       });
-      return out;
+      return {
+        recipe: recipeSel.value,
+        flags: Object.keys(flagBoxes).filter((f) => flagBoxes[f].checked),
+        knobs,
+        save_path: savePath.value.trim() || null,
+      };
     }
 
     return { collect };
   }
 
-  global.Forms = { buildForm };
+  global.Forms = { buildRunForm };
 })(window);
