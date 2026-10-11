@@ -1,0 +1,14 @@
+# Synthetic UC-65 replay fixture: the subset of a merged liftoff config the overlay reads.
+harness: liftoff
+runner:
+  rate_hz: 50
+  stale_after_s: 0.25
+  max_estimate_age_s: 0.3
+gates:
+  lost_timeout_s: 1.0
+camera:
+  monitor: 1
+  region: null
+  resolution: [2560, 1080]
+scaling:
+  world_scale: 2.0

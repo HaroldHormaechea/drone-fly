@@ -244,3 +244,49 @@ def test_detection_respects_world_frame_rotation(cv2):
     img = _render(cv2, camera, yawed, [(center, np.radians(40))])
     d = _estimator(camera).detect(img, yawed)[0]
     assert np.linalg.norm(d.center - np.asarray(center)) < 0.25
+
+
+# ----------------------------------------------------------------------------- UC-65 keypoints
+
+
+def test_detected_keypoints_are_exposed_in_frame_pixels(cv2):
+    """UC-65 AC8(d): the overlay draws the detections in game-screen space from ``info``."""
+    import json
+
+    camera = CameraModel(640, 480, 90.0)
+    state = _state()
+    est = _estimator(camera)
+    img = _render(cv2, camera, state, [GATE_A, GATE_B])
+    g = est.update(Frame(img, 0.0, 17), state, 0.0)
+    info = g.info
+    assert info["frame_size"] == [640, 480] and info["frame_index"] == 17
+    dets = info["detections_px"]
+    assert len(dets) == info["detections"] == 2
+    assert sum(d["matched"] for d in dets) == 1 and info["matched"] is True
+    for d in dets:
+        pts = np.asarray(d["points"])
+        assert pts.shape == (4, 2)
+        assert (pts[:, 0] >= 0).all() and (pts[:, 0] <= 640).all()
+        assert (pts[:, 1] >= 0).all() and (pts[:, 1] <= 480).all()
+        np.testing.assert_allclose(d["center"], pts.mean(axis=0), atol=40)
+        # each detection outlines red gate pixels in the rendered frame
+        cx, cy = np.round(pts.mean(axis=0)).astype(int)
+        x0, y0 = pts.min(axis=0).astype(int)
+        assert img[y0 + 2, cx][2] == 255 or img[cy, x0 + 2][2] == 255
+    matched = next(d for d in dets if d["matched"])
+    projected, _ = camera.project(
+        camera.world_to_camera(state.quat) @ (np.asarray(GATE_A[0]) - state.pos)
+    )
+    np.testing.assert_allclose(matched["center"], np.ravel(projected), atol=6)
+    json.dumps(g.as_dict())  # JSON-serialisable: it travels in ticks.jsonl and the tick datagram
+
+
+def test_no_frame_means_no_keypoint_fields(cv2):
+    camera = CameraModel(640, 480, 90.0)
+    state = _state()
+    est = _estimator(camera)
+    est.update(Frame(_render(cv2, camera, state, [GATE_A]), 0.0, 1), state, 0.0)
+    g = est.update(None, state, 0.02)
+    assert "detections_px" not in g.info and "frame_size" not in g.info
+    blank = est.update(Frame(np.full((480, 640, 3), 40, np.uint8), 0.04, 2), state, 0.04)
+    assert blank.info["detections_px"] == [] and blank.info["frame_index"] == 2

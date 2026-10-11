@@ -73,7 +73,7 @@ def liftoff_real_data() -> SimpleNamespace:
 
 
 #: Modules the hermetic (CI) path must never need.
-HEAVY_MODULES = ("torch", "cv2", "mss", "dxcam", "transformers", "vgamepad", "PIL")
+HEAVY_MODULES = ("torch", "cv2", "mss", "dxcam", "transformers", "vgamepad", "PIL", "PySide6")
 
 
 def fake_contract(**overrides: Any) -> SimpleNamespace:
