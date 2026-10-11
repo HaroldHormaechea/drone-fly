@@ -49,7 +49,7 @@ def _gen_centers(r, ng, target_chord):
 
 
 def sample_course(seed, ng_lo=5, ng_hi=21, laps_lo=2, laps_hi=4, ap_lo=APERTURE_MIN, ap_hi=APERTURE_MAX,
-                  with_tunnels=False):
+                  with_tunnels=False, with_variety=False):
     r = _rng(seed)
     ng = int(r.integers(ng_lo, ng_hi))   # gate count range (default 5..20)
     laps = int(r.integers(laps_lo, laps_hi))   # lap range (default 2..3)
@@ -149,6 +149,23 @@ def sample_course(seed, ng_lo=5, ng_hi=21, laps_lo=2, laps_hi=4, ap_lo=APERTURE_
                           "center": [float(midt[0]), float(midt[1]), zc + 1.1],
                           "half": [off + WALL, off + WALL, 0.3], "blocks": True, "tunnel": True,
                           "ovec": [0.0, 0.0, 1.0]})
+
+    # (e) VARIED SHAPES (spec: different obstacle shapes/scenery). Two new challenges beyond pillars/blocks:
+    #   - a fly-UNDER overhang: a horizontal bar above gate height -> the drone must duck LOW to pass under
+    #     (the vertical inverse of the existing fly-over slab). ovec up so a gap curriculum can lower it in.
+    #   - a tall WALL: a box wide across the lane and tall -> a bigger lateral detour than a thin pillar.
+    if with_variety:
+        jo = (straight_i + 2 * ng // 3) % ng
+        go0, go1 = centers[jo], centers[(jo + 1) % ng]
+        mo = 0.5 * (go0 + go1); zco = float(mo[2])
+        obstacles.append({"kind": "box", "center": [float(mo[0]), float(mo[1]), zco + 1.0],
+                          "half": [1.1, 1.1, 0.25], "blocks": True, "fly_under": True,
+                          "ovec": [0.0, 0.0, 1.0]})      # overhang: lower it onto the lane over the curriculum
+        jw = (straight_i + ng // 4) % ng
+        gw0, gw1 = centers[jw], centers[(jw + 1) % ng]
+        mw = 0.5 * (gw0 + gw1); pw = _perp(gw1 - gw0)
+        obstacles.append({"kind": "box", "center": [float(mw[0]), float(mw[1]), 1.0],
+                          "half": [0.9, 0.3, 1.5], "blocks": True, "wall": True, "ovec": pw})
 
     # Keep the START spawn clear of obstacles: on small loops the wide fly-over box can land on the
     # start point (its low z-span covers the ground spawn), which is an unavoidable spawn-crash under

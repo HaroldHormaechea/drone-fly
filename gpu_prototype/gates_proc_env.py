@@ -109,6 +109,8 @@ if os.environ.get("PROC_TUNNELS", ""):
     POOL_KW = {**POOL_KW, "with_tunnels": True}   # add a fly-through tunnel/doorway to every course
 if os.environ.get("PROC_MULTILAP", ""):
     POOL_KW = {**POOL_KW, "laps_lo": 2, "laps_hi": 5}   # multi-lap tier: 2-4 laps per course
+if os.environ.get("PROC_VARIETY", ""):
+    POOL_KW = {**POOL_KW, "with_variety": True}   # add fly-under overhang + tall wall shapes
 NO_OBS = bool(os.environ.get("PROC_NO_OBS", ""))   # obstacle-free tier (isolate random-gate navigation)
 OBS_TERMINAL = bool(os.environ.get("PROC_OBS_TERMINAL", ""))   # obstacle contact = crash (forbids barging)
 SHAPING = bool(os.environ.get("PROC_SHAPING", ""))   # potential-based clearance shaping (gradient to steer around)
