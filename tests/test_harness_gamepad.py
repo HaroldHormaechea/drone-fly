@@ -199,17 +199,21 @@ class _Clock:
         self.t += s
 
 
-def _arm_sink(mode: str):
+def _arm_sink(disarm="B"):
     clock = _Clock()
     sink, pad = _sink(
         arm_button="A",
-        arm_mode=mode,
+        disarm_button=disarm,
         arm_press_s=0.15,
         button_resolver=lambda name: f"btn-{name}",
         clock=clock,
         sleep=clock.sleep,
     )
     return sink, pad, clock
+
+
+def _log(pad):
+    return [(e[0], e[1]) for e in pad.button_log]
 
 
 def test_no_arm_button_never_touches_buttons():
@@ -221,73 +225,89 @@ def test_no_arm_button_never_touches_buttons():
     assert pad.button_log == [] and not sink.armed
 
 
-def test_hold_mode_holds_the_arm_button_until_the_failsafe():
-    sink, pad, _ = _arm_sink("hold")
+def test_arm_pulses_on_first_command_and_disarm_pulses_on_failsafe():
+    sink, pad, clock = _arm_sink()
     sink.arm()
-    assert pad.buttons == {"btn-A"} and sink.armed
-    assert pad.sticks["left_y"] == -1.0  # armed with the throttle cut
-    for _ in range(5):
-        sink.send(_cmd())
-        sink.send_sticks({"throttle": 0.0})
-    assert pad.buttons == {"btn-A"}  # held throughout the flight
-    sink.failsafe()
-    assert pad.buttons == set() and not sink.armed
+    assert pad.buttons == set() and not sink.armed  # nothing before the game has focus
     assert pad.sticks["left_y"] == -1.0
-    sink.close()
-    assert [e[0] for e in pad.button_log] == ["press", "release"]
-
-
-def test_toggle_mode_pulses_on_first_command_and_on_failsafe():
-    sink, pad, clock = _arm_sink("toggle")
-    sink.arm()
-    assert pad.buttons == set() and not sink.armed  # no press before the game has focus
-    sink.send(_cmd())  # first command: press
+    sink.send(_cmd())  # first command: press Arm
     assert pad.buttons == {"btn-A"} and sink.armed
     clock.t += 0.1
-    sink.send(_cmd())
+    sink.send_sticks({"throttle": 0.0})
     assert pad.buttons == {"btn-A"}  # still inside the pulse
     clock.t += 0.1
-    sink.send_sticks({})
+    sink.send(_cmd())
     assert pad.buttons == set()  # released after arm_press_s
     clock.t += 1.0
     sink.send(_cmd())
-    assert [e[0] for e in pad.button_log] == ["press", "release"]  # one pulse only
-    sink.failsafe()  # disarm pulse
-    assert [e[0] for e in pad.button_log] == ["press", "release", "press", "release"]
+    assert _log(pad) == [("press", "btn-A"), ("release", "btn-A")]  # one arm pulse only
+    sink.failsafe()
+    assert _log(pad)[2:] == [("press", "btn-B"), ("release", "btn-B")]
     assert clock.sleeps == [0.15] and pad.buttons == set() and not sink.armed
-    sink.close()  # already disarmed: no further pulse
+    assert pad.sticks["left_y"] == -1.0
+    sink.close()  # disarm happens once per run
     assert len(pad.button_log) == 4
 
 
-def test_toggle_failsafe_inside_the_arming_pulse_completes_it_then_disarms():
-    sink, pad, clock = _arm_sink("toggle")
+def test_failsafe_inside_the_arm_pulse_releases_arm_then_disarms():
+    sink, pad, _ = _arm_sink()
     sink.arm()
-    sink.send(_cmd())  # pressed, not yet released
+    sink.send(_cmd())  # Arm pressed, not yet released
     sink.failsafe()
-    assert [e[0] for e in pad.button_log] == ["press", "release", "press", "release"]
-    assert pad.buttons == set() and not sink.armed
+    assert _log(pad) == [
+        ("press", "btn-A"),
+        ("release", "btn-A"),
+        ("press", "btn-B"),
+        ("release", "btn-B"),
+    ]
 
 
-def test_toggle_failsafe_before_any_command_does_not_pulse():
-    sink, pad, _ = _arm_sink("toggle")
+def test_failsafe_before_any_command_still_pulses_disarm():
+    sink, pad, _ = _arm_sink()
     sink.arm()
     sink.failsafe()
+    assert _log(pad) == [("press", "btn-B"), ("release", "btn-B")]
+
+
+def test_close_without_failsafe_disarms():
+    sink, pad, _ = _arm_sink()
+    sink.arm()
+    sink.send(_cmd())
     sink.close()
-    assert pad.button_log == []
+    assert ("press", "btn-B") in _log(pad) and sink.pad is None
+
+
+def test_without_disarm_button_arm_toggles_only_if_this_run_armed():
+    sink, pad, _ = _arm_sink(disarm=None)
+    sink.arm()
+    sink.failsafe()
+    assert pad.button_log == []  # never armed: no toggle pulse
+    sink2, pad2, clock2 = _arm_sink(disarm=None)
+    sink2.arm()
+    sink2.send(_cmd())
+    clock2.t += 0.2
+    sink2.send(_cmd())
+    sink2.failsafe()
+    assert [e[0] for e in pad2.button_log] == ["press", "release", "press", "release"]
+    assert {e[1] for e in pad2.button_log} == {"btn-A"}
 
 
 def test_arm_config_is_validated():
     with pytest.raises(HarnessConfigError, match="arm_button"):
         _sink(arm_button="Z")
-    with pytest.raises(HarnessConfigError, match="arm_mode"):
-        _sink(arm_button="A", arm_mode="latch")
+    with pytest.raises(HarnessConfigError, match="disarm_button"):
+        _sink(arm_button="A", disarm_button="Q")
+    with pytest.raises(HarnessConfigError, match="needs controls.arm_button"):
+        _sink(disarm_button="B")
     from drone_fly.harness.config import load_config
 
-    cfg = load_config("liftoff").section("controls")
     ctx = SimpleNamespace(contract=SimpleNamespace(HOVER_THR=0.4))
-    assert cfg["arm_button"] is None and cfg["arm_mode"] == "hold"
-    sink = VgamepadActionSink.from_config({**cfg, "arm_button": "RB", "arm_mode": "toggle"}, ctx)
-    assert sink.arm_button == "RB" and sink.arm_mode == "toggle"
+    cfg = load_config("liftoff").section("controls")
+    assert cfg["arm_button"] is None and cfg["disarm_button"] is None
+    preset = load_config("liftoff", preset="liftoff").section("controls")
+    assert (preset["arm_button"], preset["disarm_button"]) == ("A", "B")
+    sink = VgamepadActionSink.from_config(preset, ctx)
+    assert (sink.arm_button, sink.disarm_button) == ("A", "B")
     with pytest.raises(HarnessConfigError, match="arm_press_s"):
         VgamepadActionSink.from_config({**cfg, "arm_press_s": 0}, ctx)
 

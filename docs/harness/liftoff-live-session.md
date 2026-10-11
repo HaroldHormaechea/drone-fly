@@ -66,16 +66,12 @@ tracks, drones or resolutions need their own calibration (ADR 0003).
   `artifacts/harness/reference-scripts/bind_pad.py` keeps one connected): set the **deadzone to 0**
   on every axis, with no expo or curve. The harness inverts the rate curve itself, and a deadzone
   swallows small corrections (a 25% deadzone ate all of pad-check's 0.15 pulses).
-- **Arming.** Bind Liftoff's *Arm* to a pad button, and tell the harness which one in your
-  `live*.yaml`:
-  ```yaml
-  controls:
-    arm_button: A        # A B X Y LB RB BACK START LS RS DPAD_UP/DOWN/LEFT/RIGHT
-    arm_mode: hold       # hold: held while flying (Liftoff switch) | toggle: pulse to arm/disarm
-  ```
-  `hold` holds the button from start to fail-safe, and releasing it disarms. `toggle` pulses it on
-  the first command (after focus) and again on the fail-safe; start toggle runs disarmed. With
-  `arm_button: null` (the default) the harness never arms, so Liftoff must not require arming.
+- **Arming.** In Liftoff's controller settings, bind **Arm to A** and **Disarm to B** on the
+  virtual pad (`bind_pad.py`: type `a` or `b` to press them while binding). The `liftoff` preset
+  already sets `controls.arm_button: A` and `controls.disarm_button: B`. The harness presses A on
+  the first command, once Liftoff has focus, and presses B on every fail-safe stop. If your
+  bindings differ, override them in `live*.yaml`. `arm_button: null` turns arming off (then Liftoff
+  must not require it).
   The harness sends throttle at minimum while arming and on every fail-safe.
 - Sit on the start pad with the drone level. Telemetry only streams while you're in a flight.
 

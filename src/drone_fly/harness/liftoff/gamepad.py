@@ -14,11 +14,11 @@ Stick conventions (defaults, mode 2; every sign is explicit config):
 * throttle: piecewise-linear through ``(0, -1)``, ``(HOVER_THR, hover_stick)``, ``(1, +1)``
   on the left stick Y.
 
-Arming (``controls.arm_button``, optional): Liftoff only flies an armed drone, and its arm binding
-is a pad button. With ``arm_mode: hold`` the button is held from :meth:`arm` until the fail-safe
-(Liftoff "switch" semantics: held = armed, released = disarmed). With ``arm_mode: toggle`` the
-button is pulsed for ``arm_press_s`` on the first command after :meth:`arm` (i.e. once the game
-has focus) and pulsed again on the fail-safe; start toggle-mode runs with the drone disarmed.
+Arming (``controls.arm_button`` / ``controls.disarm_button``, optional): Liftoff only flies an
+armed drone, and binds *Arm* and *Disarm* to pad buttons (momentary presses). ``arm_button`` is
+pulsed for ``arm_press_s`` on the first command after :meth:`arm`, i.e. once the game has focus;
+``disarm_button`` is pulsed on the fail-safe (every stop). Without a ``disarm_button`` the arm
+button is treated as a toggle and pulsed again on the fail-safe if this run armed.
 
 ``vgamepad`` (and with it the ViGEmBus driver) is imported only in :meth:`arm`; tests inject a
 ``pad_factory`` returning a mock pad (and a ``button_resolver``).
@@ -62,7 +62,6 @@ ARM_BUTTONS = {
     "DPAD_LEFT": "XUSB_GAMEPAD_DPAD_LEFT",
     "DPAD_RIGHT": "XUSB_GAMEPAD_DPAD_RIGHT",
 }
-ARM_MODES = ("hold", "toggle")
 
 
 @dataclass(frozen=True)
@@ -157,7 +156,7 @@ class VgamepadActionSink(ActionSink):
         rate_scale: float = 1.0,
         pad_factory: Callable[[], Any] = default_pad_factory,
         arm_button: str | None = None,
-        arm_mode: str = "hold",
+        disarm_button: str | None = None,
         arm_press_s: float = 0.15,
         button_resolver: Callable[[str], Any] = default_button_resolver,
         clock: Callable[[], float] = time.monotonic,
@@ -175,23 +174,25 @@ class VgamepadActionSink(ActionSink):
         self.signs = {**DEFAULT_SIGNS, **(signs or {})}
         self.rate_scale = rate_scale
         self.pad_factory = pad_factory
-        if arm_button is not None and arm_button not in ARM_BUTTONS:
-            raise HarnessConfigError(
-                f"controls.arm_button must be null or one of {sorted(ARM_BUTTONS)}: {arm_button!r}"
-            )
-        if arm_mode not in ARM_MODES:
-            raise HarnessConfigError(f"controls.arm_mode must be one of {list(ARM_MODES)}")
+        for key, name in (("arm_button", arm_button), ("disarm_button", disarm_button)):
+            if name is not None and name not in ARM_BUTTONS:
+                raise HarnessConfigError(
+                    f"controls.{key} must be null or one of {sorted(ARM_BUTTONS)}: {name!r}"
+                )
+        if disarm_button is not None and arm_button is None:
+            raise HarnessConfigError("controls.disarm_button needs controls.arm_button")
         self.arm_button = arm_button
-        self.arm_mode = arm_mode
+        self.disarm_button = disarm_button
         self.arm_press_s = arm_press_s
         self.button_resolver = button_resolver
         self.clock = clock
         self.sleep = sleep
         self.pad: Any = None
-        self.armed = False  # our view of Liftoff's arm state (button driven)
-        self._button: Any = None
-        self._pressed = False
+        self.armed = False  # this run pressed Arm (Liftoff reports no arm state)
+        self._buttons: dict[str, Any] = {}
+        self._pressed: str | None = None  # button currently held down
         self._release_at: float | None = None
+        self._disarm_done = False
 
     @classmethod
     def from_config(cls, cfg: dict[str, Any], ctx: Any) -> VgamepadActionSink:
@@ -239,7 +240,7 @@ class VgamepadActionSink(ActionSink):
                 )
             ),
             arm_button=cfg.get("arm_button"),
-            arm_mode=require_choice(cfg.get("arm_mode", "hold"), "controls.arm_mode", ARM_MODES),
+            disarm_button=cfg.get("disarm_button"),
             arm_press_s=float(
                 require_number(
                     cfg.get("arm_press_s", 0.15),
@@ -267,34 +268,41 @@ class VgamepadActionSink(ActionSink):
         sticks[self.axis_map["throttle"]] = -1.0
         return sticks
 
-    def _set_button(self, down: bool) -> None:
-        """Press / release the arm button (applied by the next ``pad.update()``)."""
-        if down:
-            self.pad.press_button(button=self._button)
-        else:
-            self.pad.release_button(button=self._button)
-        self._pressed = down
+    def _press(self, name: str) -> None:
+        self.pad.press_button(button=self._buttons[name])
+        self._pressed = name
+
+    def _release(self) -> None:
+        if self._pressed is not None:
+            self.pad.release_button(button=self._buttons[self._pressed])
+            self._pressed = None
+
+    def _pulse(self, name: str) -> None:
+        """Blocking press of ``name`` for ``arm_press_s`` (fail-safe path only)."""
+        self._press(name)
+        self.pad.update()
+        self.sleep(self.arm_press_s)
+        self._release()
+        self.pad.update()
 
     def _arm_tick(self) -> None:
-        """Toggle mode: pulse the arm button on the first command, release it after the pulse."""
-        if self.arm_button is None or self.arm_mode != "toggle":
+        """Press Arm on the first command (the game has focus by then); release after the pulse."""
+        if self.arm_button is None:
             return
-        now = self.clock()
-        if not self.armed and self._release_at is None:
-            self._set_button(True)
-            self._release_at = now + self.arm_press_s
+        if not self.armed:
+            self._press(self.arm_button)
+            self._release_at = self.clock() + self.arm_press_s
             self.armed = True
-        elif self._pressed and self._release_at is not None and now >= self._release_at:
-            self._set_button(False)
+        elif self._pressed is not None and self._release_at is not None:
+            if self.clock() >= self._release_at:
+                self._release()
+                self._release_at = None
 
     def arm(self) -> None:
         if self.pad is None:
             self.pad = self.pad_factory()
-            if self.arm_button is not None:
-                self._button = self.button_resolver(self.arm_button)
-                if self.arm_mode == "hold":
-                    self._set_button(True)  # held for the whole run: Liftoff switch = armed
-                    self.armed = True
+            for name in {self.arm_button, self.disarm_button} - {None}:
+                self._buttons[name] = self.button_resolver(name)
             _pad_set(self.pad, self.neutral_sticks())
 
     def send(self, command: ContractCommand) -> dict[str, Any]:
@@ -323,21 +331,18 @@ class VgamepadActionSink(ActionSink):
         return sticks
 
     def _disarm(self) -> None:
-        """Release (hold) or pulse (toggle) the arm button so Liftoff disarms."""
-        if self.arm_button is None or self.pad is None:
+        """Pulse Disarm (or Arm again as a toggle, if this run armed); once per run."""
+        if self.arm_button is None or self.pad is None or self._disarm_done:
             return
-        if self.arm_mode == "hold":
-            if self._pressed:
-                self._set_button(False)
-        elif self.armed:
-            if self._pressed:  # still inside the arming pulse: finish it first
-                self._set_button(False)
-                self.pad.update()
-                self.sleep(self.arm_press_s)
-            self._set_button(True)
+        self._disarm_done = True
+        if self._pressed is not None:  # still inside the arming pulse: finish it first
+            self._release()
             self.pad.update()
             self.sleep(self.arm_press_s)
-            self._set_button(False)
+        if self.disarm_button is not None:
+            self._pulse(self.disarm_button)
+        elif self.armed:
+            self._pulse(self.arm_button)
         self.armed = False
         self._release_at = None
 
