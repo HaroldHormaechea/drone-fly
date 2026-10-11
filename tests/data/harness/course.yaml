@@ -1,0 +1,12 @@
+# Synthetic UC-62 test course (target-world metres; the loader divides by scaling.world_scale).
+# Schema: {gates, obstacles, start, laps} as read by drone_fly.harness.course.course_from_mapping.
+gates:
+  - {center: [3.0, 0.0, 1.2], yaw: 0.0, aperture: 1.5}
+  - {center: [7.0, 2.0, 1.6], yaw: 0.5, aperture: 1.5}
+  - {center: [4.0, 5.0, 1.4], yaw: 2.8, aperture: 1.2}
+  - {center: [0.0, 3.0, 1.0], yaw: -2.0, aperture: 1.2}
+obstacles:
+  - {type: cylinder, center: [5.0, 1.0, 1.5], radius: 0.4, half_height: 1.5}
+  - {type: box, center: [6.0, 4.0, 0.5], half_extents: [1.0, 0.8, 0.5]}
+start: [0.0, 0.0, 0.12]
+laps: 2
