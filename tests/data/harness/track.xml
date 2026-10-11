@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Synthetic UC-62 Liftoff-style track (offline evaluation fixture only; Unity metres, Y-up).
+     Four gates on a loop (g4 placed backwards), a pillar, a rotated box and an unmatched decoration item. -->
+<Track xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <name>uc62-synthetic</name>
+  <blueprints>
+    <TrackBlueprint>
+      <itemID>Gate_Standard_01</itemID>
+      <instanceID>g1</instanceID>
+      <position><x>0</x><y>0</y><z>5</z></position>
+      <rotation><x>0</x><y>90</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>Gate_Standard_01</itemID>
+      <instanceID>g2</instanceID>
+      <position><x>5</x><y>0</y><z>10</z></position>
+      <rotation><x>0</x><y>0</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>Gate_Standard_01</itemID>
+      <instanceID>g3</instanceID>
+      <position x="0" y="0" z="15"/>
+      <rotation x="0" y="270" z="0"/>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>Gate_Standard_01</itemID>
+      <instanceID>g4</instanceID>
+      <position><x>-5</x><y>0</y><z>10</z></position>
+      <!-- deliberately placed backwards: yaw must be re-oriented along the race direction -->
+      <rotation><x>0</x><y>0</y><z>0</z></rotation>
+      <scale><x>1</x><y>1</y><z>1</z></scale>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>Pillar_Big</itemID>
+      <instanceID>p1</instanceID>
+      <position><x>1</x><y>0</y><z>7.5</z></position>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>Cube_Small</itemID>
+      <instanceID>b1</instanceID>
+      <position><x>-1</x><y>0</y><z>12</z></position>
+      <rotation><x>0</x><y>45</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>Tree_Pine</itemID>
+      <instanceID>t1</instanceID>
+      <position><x>20</x><y>0</y><z>20</z></position>
+    </TrackBlueprint>
+  </blueprints>
+</Track>

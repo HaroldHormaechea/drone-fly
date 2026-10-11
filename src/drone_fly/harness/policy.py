@@ -1,0 +1,92 @@
+"""K1 policy runner + the contract action decoding.
+
+Loading goes through the contract's own ``load_policy(path, extra_dim, device)`` (``strict=False``
+with the ``body.layer.*``-only missing-keys assertion) — nothing is reimplemented here.
+
+:func:`decode_action` is the contract §2 mapping, written out for the sinks (they need the
+physical command, not the raw action): linear-clamp collective (**not** a sigmoid) and
+``tanh * MAX_BODY_RATE`` rates. The parity test pins it against ``plant_step``.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from drone_fly.harness.errors import HarnessConfigError
+from drone_fly.harness.interfaces import PolicyRunner
+from drone_fly.harness.types import ContractCommand
+
+#: extra widths of the shipped augmented models (contract §4): 12, 30 (course), 70 (+raycast).
+SUPPORTED_EXTRA_DIMS = (12, 30, 70)
+
+
+def validate_extra_dim(extra_dim: Any) -> int:
+    if extra_dim is None:
+        raise HarnessConfigError(
+            "the pure reservoir (extra_dim=None) is not supported by the harness: its K1 path is "
+            "hardcoded in gates_k1_reservoir. Use an augmented model (extra_dim 12, 30 or 70)."
+        )
+    if isinstance(extra_dim, bool) or extra_dim not in SUPPORTED_EXTRA_DIMS:
+        raise HarnessConfigError(
+            f"extra_dim must be one of {SUPPORTED_EXTRA_DIMS} (it must match the checkpoint), "
+            f"got {extra_dim!r}"
+        )
+    return int(extra_dim)
+
+
+def sha256_file(path: str | Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def decode_action(raw: np.ndarray, contract: Any) -> ContractCommand:
+    """Contract §2: ``clip((a0+1)/2, 0, 1) * MAX_THRUST`` and ``tanh(a1:4) * MAX_BODY_RATE``."""
+    a = np.asarray(raw, dtype=np.float32).reshape(-1)
+    if a.shape[0] != 4:
+        raise ValueError(f"raw action must have 4 entries, got {a.shape[0]}")
+    collective = np.clip((a[0] + 1) * 0.5, 0, 1)
+    thrust = collective * contract.MAX_THRUST
+    rates = (np.tanh(a[1:4]) * contract.MAX_BODY_RATE).astype(np.float32)
+    return ContractCommand(
+        raw=a.copy(), collective=float(collective), thrust=float(thrust), rates=rates
+    )
+
+
+class ContractPolicyRunner(PolicyRunner):
+    """Loads a stripped ``model_readout.pt`` via the contract and acts deterministically."""
+
+    def __init__(self, contract: Any, checkpoint: str | Path, extra_dim: int) -> None:
+        self.contract = contract
+        self.checkpoint = Path(checkpoint)
+        self._extra_dim = validate_extra_dim(extra_dim)
+        self._policy: Any = None
+        self.sha256: str | None = None
+
+    @property
+    def extra_dim(self) -> int:
+        return self._extra_dim
+
+    def load(self) -> None:
+        if not self.checkpoint.is_file():
+            raise HarnessConfigError(f"checkpoint not found: {self.checkpoint}")
+        if self.contract.k1_path is None:
+            raise HarnessConfigError(
+                "the K1 connectome was not found (artifacts/pruned/k1 is absent from this "
+                "checkout). Pass --k1-path, set contract.k1_path, or set DRONE_FLY_K1_PATH."
+            )
+        self.sha256 = sha256_file(self.checkpoint)
+        self._policy = self.contract.load_policy(
+            str(self.checkpoint), extra_dim=self._extra_dim, device=self.contract.device
+        )
+
+    def act(self, obs: np.ndarray, extra: np.ndarray) -> np.ndarray:
+        if self._policy is None:
+            raise RuntimeError("policy not loaded; call load() first")
+        return np.asarray(self._policy.act(obs, extra), dtype=np.float32)

@@ -126,3 +126,73 @@ def no_network(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(socket, "create_connection", _blocked)
     monkeypatch.setattr(socket, "getaddrinfo", _blocked)
     return None
+
+
+# ----------------------------------------------------------------------------- UC-62 harness
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+GPU_PROTOTYPE_DIR = REPO_ROOT / "gpu_prototype"
+
+
+@pytest.fixture(scope="session")
+def harness_k1_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A throwaway copy of the fixture connectome used as the harness's K1 path.
+
+    The 322-neuron fixture stands in for ``artifacts/pruned/k1`` (absent from checkouts); a copy
+    keeps any loader side effect out of the committed ``tests/fixtures/``.
+    """
+    dst = tmp_path_factory.mktemp("harness_k1")
+    for src in FIXTURE_DIR.iterdir():
+        if src.is_file():
+            shutil.copy2(src, dst / src.name)
+    return dst
+
+
+@pytest.fixture(scope="session")
+def harness_contract(harness_k1_dir: Path):
+    """The inference contract loaded ONCE per session on CPU (``dev`` is process-global).
+
+    A second ``load_contract`` with a different device / dir / K1 path raises by design, so every
+    harness test shares this fixture. Bytecode writes into ``gpu_prototype/`` are suppressed.
+    """
+    import sys
+
+    from drone_fly.harness.contract import load_contract
+
+    prev = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        contract = load_contract(GPU_PROTOTYPE_DIR, harness_k1_dir, "cpu")
+        contract.import_reference("course_gen")
+        contract.import_reference("gates_proc_env")
+    finally:
+        sys.dont_write_bytecode = prev
+    return contract
+
+
+def _save_fixture_checkpoint(contract, extra_dim: int, path: Path) -> Path:
+    import sys
+
+    import torch
+
+    torch.manual_seed(0)
+    actor = sys.modules["reservoir_aug"].K1ReservoirAug(extra_dim)
+    stripped = {k: v for k, v in actor.state_dict().items() if not k.startswith("body.layer.")}
+    torch.save(stripped, path)
+    return path
+
+
+@pytest.fixture(scope="session")
+def harness_checkpoint_70(harness_contract, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A seeded, stripped ``model_readout.pt`` for K1ReservoirAug(70) on the fixture connectome."""
+    return _save_fixture_checkpoint(
+        harness_contract, 70, tmp_path_factory.mktemp("harness_ckpt") / "model_readout.pt"
+    )
+
+
+@pytest.fixture(scope="session")
+def harness_checkpoint_30(harness_contract, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A seeded, stripped ``model_readout.pt`` for K1ReservoirAug(30) (obstacle-free model)."""
+    return _save_fixture_checkpoint(
+        harness_contract, 30, tmp_path_factory.mktemp("harness_ckpt30") / "model_readout.pt"
+    )
