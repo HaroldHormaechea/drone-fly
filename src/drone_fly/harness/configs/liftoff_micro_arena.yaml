@@ -1,0 +1,96 @@
+# Preset `liftoff_micro_arena`: Liftoff Arena, race "04 - Infinity Loop", micro "Test small drone"
+# (FT Gremlin frame, FX805 micro cam, lens "None", ZetaFlight Acro, Betaflight rates 100/0/70).
+# Overlay on liftoff_5inch.yaml:  drone-fly harness run --harness liftoff --preset liftoff_micro_arena
+# Every value names its measurement source. The reference capture is
+# artifacts/harness/captures/2026-10-11-infinity-manual (raw UDP datagrams + 2,043 wall-clock
+# stamped 2560x1080 frames, 182 s of hand-flown flight, 2026-10-11); see
+# docs/adr/0003-real-liftoff-calibration.md.
+harness: liftoff
+
+parts:
+  gate_estimator: learned   # multi-type keypoint detector (UC-64); opencv only finds red quads
+
+telemetry:
+  # MEASURED on the reference capture: every datagram is 97 bytes = uint8 motor count + 4 RPM floats.
+  rpm_count_prefix: true
+  # MEASURED: gyro_check on the 182 s capture (18k samples): |corr| 0.99, |scale| 1.00, units deg/s.
+  gyro_units: deg_s
+  gyro_map:
+    wx: {source: roll, sign: -1}   # MEASURED (the UC-62 default had +1: inverted)
+    wy: {source: pitch, sign: 1}   # MEASURED (the UC-62 default had -1: inverted)
+    wz: {source: yaw, sign: -1}    # MEASURED
+
+camera:
+  resolution: [2560, 1080]  # Registry PlayerPrefs: 2560x1080 fullscreen (native)
+  hfov_deg: 120.0           # VERIFIED: XML arches projected through the telemetry pose land within ~5 px
+  uptilt_deg: 20.0          # drone file: camera <angle>20.0315456</angle>; verified with the projection
+  # Arena HUD at 2560x1080. MEASURED on frames 1791717949360510000.jpg, 1791717916196084800.jpg and
+  # 1791718083027077600.jpg of the reference capture (pixel-grid overlays). The centre crosshair is NOT
+  # masked (it would drop every gate dead ahead); the racing line and AI ghost drones cannot be masked.
+  masks:
+    - {name: mode_battery, rect: [40, 45, 340, 75]}       # top-left "ACRO 11.9v" + battery icon
+    - {name: timer_lap, rect: [1120, 30, 330, 100]}        # top-centre race timer + "LAP n/4" + split
+    - {name: alt_speed, rect: [2330, 50, 220, 185]}        # top-right ALT m / SPD km/h
+    - {name: ghost_list, rect: [2230, 380, 330, 320]}      # right: six ghost / lap entries
+    - {name: stick_widgets, rect: [1120, 920, 330, 160]}   # bottom-centre stick position widgets
+    - {name: rec, rect: [10, 1025, 120, 55]}               # bottom-left "Rec" indicator
+
+controls:
+  # Drone file (ZetaFlight InputModifierSettings, BETAFLIGHT model): Rate 100 / Expo 0 / SuperExpo 70.
+  rates:
+    roll: {rc_rate: 1.0, super_rate: 0.7, expo: 0.0}
+    pitch: {rc_rate: 1.0, super_rate: 0.7, expo: 0.0}
+    yaw: {rc_rate: 1.0, super_rate: 0.7, expo: 0.0}
+  # MEASURED: 3 hovers at 1.8-2.3 m on the reference capture, throttle input -0.054..-0.059
+  # (battery 12.3-12.0 V).
+  hover_stick: -0.06
+
+scaling:
+  # PROVISIONAL: arch trigger aperture 6.18 m vs. training gates 0.45-1.5 m -> ~4x.
+  world_scale: 4.0
+
+gates:
+  learned:
+    # Written by `drone-fly harness train-gates` (gitignored; relative to the repo root).
+    weights: artifacts/harness/liftoff/models/liftoff-gates.pt
+
+# Infinity Loop gate style. props.json (liftoff-flight-analyzer `props`, InflatableArchBrandless01):
+# leg capsules r 0.5 at x +-3.5 (centre y 1.58, height 3.521), bar capsule r 0.5 at y 3.958, chamfer
+# capsules at (+-2.937, 3.399) rotated 45 deg, trigger box centre (0, 1.74, 0) half-size (3.09, 1.847).
+gate_types:
+  - class: inflatable_arch
+    match: "^InflatableArch"
+    aperture: [6.18, 3.69]          # trigger box 2 x (3.09, 1.847)
+    outer: [8.0, 4.46]              # legs' outer faces x +-4.0; bar top 3.958 + 0.5
+    center_offset: [0.0, 1.74, 0.0] # trigger box centre; the arch is open at the bottom
+    # All on the visible tube surface (props.json colliders), left/right pairs first.
+    keypoints:
+      - [-4.0, 0.0]      # 0 foot outer L
+      - [4.0, 0.0]       # 1 foot outer R
+      - [-4.0, 1.5]      # 2 leg outer, mid-height L
+      - [4.0, 1.5]       # 3 leg outer, mid-height R
+      - [-3.0, 1.5]      # 4 leg inner, mid-height L
+      - [3.0, 1.5]       # 5 leg inner, mid-height R
+      - [-3.29, 3.753]   # 6 chamfer outer midpoint L: (-2.937, 3.399) + 0.5 along (-0.707, 0.707)
+      - [3.29, 3.753]    # 7 chamfer outer midpoint R
+      - [0.0, 4.458]     # 8 bar top
+      - [0.0, 3.458]     # 9 bar underside
+    flip_pairs: [[0, 1], [2, 3], [4, 5], [6, 7]]
+    # Tube centre line (legs -> chamfers -> bar), props.json capsule end points; depth-fit only.
+    outline: [[-3.5, 0.0], [-3.5, 2.84], [-2.378, 3.958], [2.378, 3.958], [3.5, 2.84], [3.5, 0.0]]
+    tube_radius: 0.5
+
+depth:
+  calibration:              # FITTED by `drone-fly harness depth-fit` on the reference capture (see below)
+    scale: 1.0
+    shift: 0.0
+
+offline:
+  laps: null                # the race route gives the laps (requiredLaps 4)
+  item_table:               # obstacles only; arches come from gate_types. Sizes from props.json colliders.
+    # Flag mesh collider: x -0.59..0.01, y 0..2.53 -> r 0.3 around x -0.29.
+    - {match: "^AirflagLiftoffSlalom", kind: cylinder, radius: 0.3, height: 2.54, center_offset: [-0.29, 1.27, 0.0]}
+    # Collider box centre (0.011, 0.574, -0.003), half-size (0.015, 0.343, 1.099) -> 0.03 x 0.69 x 2.20 m
+    - {match: "^ConradCrowdControlBarrier", kind: box, size: [0.03, 0.69, 2.20], center_offset: [0.011, 0.574, -0.003]}
+    # Collider bounds x -0.76..0.76, y 0..0.76, z -0.76..1.52
+    - {match: "^ConcreteBarrier", kind: box, size: [1.52, 0.76, 2.28], center_offset: [0.0, 0.38, 0.38]}

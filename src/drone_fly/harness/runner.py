@@ -6,17 +6,23 @@ Scheduling
     finishes after the next deadline counts as a **missed deadline**; the schedule then skips
     to the next future slot (no catch-up burst).
 
+Start
+    wait for the first telemetry sample, then — with a focus probe — wait (pad neutral) until the
+    target window is focused (``focus.wait_for_focus_s``).
+
 Tick
-    abort? -> state (stale check, discontinuity -> reset estimators) -> gate update (lost ->
-    fail-safe) -> free-space latest (age check) -> assemble -> policy -> decode -> sink.send ->
-    record. Per-stage latencies (state, perception, inference, actuation, total), estimate ages
-    and missed deadlines are recorded on every tick.
+    abort? -> focus? -> state (stale check, discontinuity -> reset estimators) -> gate update
+    (lost -> fail-safe) -> free-space latest (age check) -> assemble -> policy -> decode ->
+    sink.send -> record. Per-stage latencies (state, perception, inference, actuation, total),
+    the perception split per estimator (gate, free space), estimate ages and missed deadlines
+    are recorded on every tick.
 
 Fail-safe (latched)
-    On stale telemetry, gate lost, a stale free-space estimate, any perception / policy / sink
-    exception, the abort signal or Ctrl+C, the runner calls ``sink.failsafe()`` (neutral rates +
-    throttle cut; retried once if it raises), records the reason and stops. The sink only ever
-    receives the decoded contract command — no yaw shaping or rate override happens here.
+    On stale telemetry, gate lost, a stale free-space estimate, loss of window focus, any
+    perception / policy / sink exception, the abort signal or Ctrl+C, the runner calls
+    ``sink.failsafe()`` (neutral rates + throttle cut; retried once if it raises), records the
+    reason and what the sink was left at (``RunResult.failsafe_output``) and stops. The sink only
+    ever receives the decoded contract command — no yaw shaping or rate override happens here.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from typing import Any, NoReturn
 
 import numpy as np
 
+from drone_fly.harness.config import require_number
 from drone_fly.harness.interfaces import (
     ActionSink,
     Harness,
@@ -50,6 +57,7 @@ STOP_PERCEPTION_ERROR = "perception_error"
 STOP_POLICY_ERROR = "policy_error"
 STOP_SINK_ERROR = "sink_error"
 STOP_ABORT = "user_abort"
+STOP_FOCUS_LOST = "focus_lost"
 STOP_INTERRUPT = "keyboard_interrupt"
 NORMAL_STOPS = frozenset({STOP_COMPLETED, STOP_COURSE_FINISHED})
 
@@ -93,6 +101,7 @@ class RunnerSettings:
     stale_after_s: float = 0.25
     max_estimate_age_s: float = 0.3
     wait_for_state_s: float = 5.0
+    wait_for_focus_s: float = 15.0
     max_duration_s: float | None = None
     max_ticks: int | None = None
     frame_every_n: int = 0  # recording: save every Nth frame image (0 = metadata only)
@@ -100,11 +109,17 @@ class RunnerSettings:
     @classmethod
     def from_config(cls, cfg: Any) -> RunnerSettings:
         r = cfg.runner
+        focus = cfg.get("focus") or {}
         return cls(
             rate_hz=r.rate_hz,
             stale_after_s=r.stale_after_s,
             max_estimate_age_s=r.max_estimate_age_s,
             wait_for_state_s=r.wait_for_state_s,
+            wait_for_focus_s=float(
+                require_number(
+                    focus.get("wait_for_focus_s", 15.0), "focus.wait_for_focus_s", min_value=0.0
+                )
+            ),
             max_duration_s=r.max_duration_s,
             max_ticks=r.max_ticks,
             frame_every_n=cfg.recording.frame_every_n,
@@ -120,6 +135,8 @@ class RunResult:
     failsafe_ok: bool = True
     error: str | None = None
     events: list[str] = field(default_factory=list)
+    #: What the sink was left at by the fail-safe (e.g. the gamepad's neutral sticks).
+    failsafe_output: dict[str, Any] | None = None
 
     @property
     def is_failsafe_stop(self) -> bool:
@@ -194,14 +211,26 @@ class HarnessRunner:
 
     def _start_parts(self) -> None:
         h = self.harness
-        for part in (h.state_source, h.frame_source, h.free_space_estimator, h.abort_signal):
+        for part in (
+            h.state_source,
+            h.frame_source,
+            h.free_space_estimator,
+            h.abort_signal,
+            h.focus_probe,
+        ):
             if part is not None:
                 part.start()
 
     def shutdown(self) -> None:
         """Stop every part and close the sink (idempotent; safe on parts never started)."""
         h = self.harness
-        for part in (h.abort_signal, h.free_space_estimator, h.frame_source, h.state_source):
+        for part in (
+            h.focus_probe,
+            h.abort_signal,
+            h.free_space_estimator,
+            h.frame_source,
+            h.state_source,
+        ):
             if part is None:
                 continue
             try:
@@ -225,8 +254,13 @@ class HarnessRunner:
         result.failsafe = True
         for attempt in (1, 2):
             try:
-                self.harness.action_sink.failsafe()
+                sink = self.harness.action_sink
+                sink.failsafe()
                 result.failsafe_ok = True
+                neutral = getattr(sink, "neutral_sticks", None)
+                result.failsafe_output = (
+                    {"sticks": neutral()} if callable(neutral) else {"failsafe": True}
+                )
                 return
             except Exception:  # noqa: BLE001
                 result.failsafe_ok = False
@@ -237,8 +271,9 @@ class HarnessRunner:
         if not prepared:
             self.prepare()
         result = RunResult(reason=STOP_COMPLETED)
-        self._start_parts()
         try:
+            # Inside the try: a part that refuses to start still leaves the sink in fail-safe.
+            self._start_parts()
             self._loop(result)
         except _Stop as stop:
             result.reason, result.error = stop.reason, stop.error
@@ -261,10 +296,27 @@ class HarnessRunner:
                 raise _Stop(STOP_NO_TELEMETRY, "no telemetry received before wait_for_state_s")
             self.clock.sleep_until(self.clock.now() + 0.01)
 
+    def _wait_for_focus(self) -> None:
+        """With a focus probe, wait (sink armed at neutral) until the target window is focused."""
+        probe = self.harness.focus_probe
+        if probe is None:
+            return
+        deadline = self.clock.now() + self.settings.wait_for_focus_s
+        while not probe.has_focus():
+            if self.harness.abort_signal is not None and self.harness.abort_signal.is_set():
+                raise _Stop(STOP_ABORT)
+            if self.clock.now() >= deadline:
+                raise _Stop(
+                    STOP_FOCUS_LOST,
+                    f"target window not focused within {self.settings.wait_for_focus_s:.1f}s",
+                )
+            self.clock.sleep_until(self.clock.now() + 0.05)
+
     def _loop(self, result: RunResult) -> None:
         s = self.settings
         period = 1.0 / s.rate_hz
         self._wait_for_state()
+        self._wait_for_focus()
         start = self.clock.now()
         k = 0
         executed = 0
@@ -299,6 +351,8 @@ class HarnessRunner:
 
         if h.abort_signal is not None and h.abort_signal.is_set():
             self._finish(record, STOP_ABORT)
+        if h.focus_probe is not None and not h.focus_probe.has_focus():
+            self._finish(record, STOP_FOCUS_LOST, "target window lost focus")
 
         # -- state --
         state = h.state_source.latest()
@@ -326,9 +380,12 @@ class HarnessRunner:
                 self.recorder.record_frame(k, frame, save_image=s.frame_every_n > 0)
         try:
             gate: GateEstimate = h.gate_estimator.update(frame, state, t1)
+            tg = clock.now()
+            record.perception_s["gate"] = tg - t1
             fs: FreeSpaceEstimate | None = None
             if h.free_space_estimator is not None:
                 fs = h.free_space_estimator.update(frame, state, gate.target, t1)
+                record.perception_s["free_space"] = clock.now() - tg
         except Exception as exc:  # noqa: BLE001
             log.exception("perception failed")
             self._finish(record, STOP_PERCEPTION_ERROR, repr(exc))

@@ -24,7 +24,9 @@ Conversion to the contract (:class:`LiftoffConverter`): positions / velocities v
 :func:`~drone_fly.harness.geometry.unity_to_contract_position` then :class:`WorldScale`;
 the attitude via :func:`~drone_fly.harness.geometry.unity_to_contract_quat`; body rates via a
 configurable axis / sign / unit table (``telemetry.gyro_map``) whose correctness
-:mod:`~drone_fly.harness.liftoff.gyro_check` measures from the quaternion stream.
+:mod:`~drone_fly.harness.liftoff.gyro_check` measures from the quaternion stream. The defaults
+(``wx = -roll``, ``wy = +pitch``, ``wz = -yaw``, deg/s) and the MotorRPM count prefix were
+measured on a live Liftoff capture in UC-64 (``docs/adr/0003-real-liftoff-calibration.md``).
 """
 
 from __future__ import annotations
@@ -196,10 +198,13 @@ class TelemetryFormat:
 
 @dataclass(frozen=True)
 class GyroMap:
-    """Contract body rate ``[wx, wy, wz]`` <- ``sign * gyro[source] * unit`` per axis."""
+    """Contract body rate ``[wx, wy, wz]`` <- ``sign * gyro[source] * unit`` per axis.
+
+    Defaults are Liftoff's measured convention: ``wx = -roll``, ``wy = +pitch``, ``wz = -yaw``.
+    """
 
     sources: tuple[str, str, str] = ("roll", "pitch", "yaw")
-    signs: tuple[float, float, float] = (1.0, -1.0, -1.0)
+    signs: tuple[float, float, float] = (-1.0, 1.0, -1.0)
     units: str = "deg_s"
 
     @classmethod
@@ -209,7 +214,7 @@ class GyroMap:
         )
         table = cfg.get("gyro_map") or {}
         sources, signs = [], []
-        defaults = {"wx": ("roll", 1.0), "wy": ("pitch", -1.0), "wz": ("yaw", -1.0)}
+        defaults = {"wx": ("roll", -1.0), "wy": ("pitch", 1.0), "wz": ("yaw", -1.0)}
         for axis, (dsrc, dsign) in defaults.items():
             entry = table.get(axis, {"source": dsrc, "sign": dsign})
             if not isinstance(entry, dict):

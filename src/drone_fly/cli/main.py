@@ -2,10 +2,20 @@
 
     drone-fly harness list
     drone-fly harness run --harness <name> --checkpoint <model_readout.pt> --extra-dim {12,30,70}
-                          [--config <yaml>] [--k1-path] [--gpu-prototype-dir] [--device]
-                          [--duration] [--dry-run] [--output-root] [--no-record]
+                          [--preset <name>] [--config <yaml>] [--k1-path] [--gpu-prototype-dir]
+                          [--device] [--duration] [--dry-run] [--output-root] [--no-record]
     drone-fly harness eval --session <run dir> --track <xml> --race <xml> --config <yaml>
                           [--report <json>]
+    drone-fly harness eval --capture <dir> --labels <dir> [--preset] [--gate-weights] [--device]
+    drone-fly harness label --capture <dir> --track <xml> [--race] [--props] [--preset] [--out]
+                          [--preview N] [--lag-ms]
+    drone-fly harness train-gates --labels <dir>... [--out] [--preset] [--epochs] [--backbone]
+                          [--holdout-frac 0.2 | --holdout t0:t1]
+    drone-fly harness depth-fit --capture <dir> --track <xml> [--race] [--props] [--preset]
+                          [--every N] [--report <dir>]
+    drone-fly harness pad-check [--preset] [--config] [--magnitude] [--pulse-s] [--min-alt]
+                          [--max-alt] [--out]
+    drone-fly harness latency-report <run dir> [--recompute]
 
 Exit codes: 0 ok, 2 config/usage error, 3 missing optional dependency, 4 perception coverage
 refusal, 5 fail-safe stop.
@@ -14,9 +24,11 @@ refusal, 5 fail-safe stop.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from drone_fly.harness.errors import (
     HarnessConfigError,
@@ -64,6 +76,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         output_root=args.output_root,
         record=False if args.no_record else None,
+        preset=args.preset,
     )
     r = session.result
     print(
@@ -76,8 +89,30 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_eval(args: argparse.Namespace) -> int:
+    if args.capture is not None:
+        from drone_fly.harness.offline.evaluate import capture_eval_summary, run_capture_eval
+
+        if args.labels is None:
+            raise HarnessConfigError("eval --capture needs --labels (from `harness label`)")
+        rep = run_capture_eval(
+            args.capture,
+            args.labels,
+            config=args.config,
+            preset=args.preset,
+            harness=args.harness,
+            gate_weights=args.gate_weights,
+            device=args.device,
+            report_path=args.report,
+            all_frames=args.all_frames,
+        )
+        print(capture_eval_summary(rep))
+        return EXIT_OK
     from drone_fly.harness.offline.evaluate import run_offline_eval
 
+    if not (args.session and args.track):
+        raise HarnessConfigError(
+            "eval needs --session + --track (+ --race), or --capture + --labels"
+        )
     report = run_offline_eval(
         session=args.session,
         track=args.track,
@@ -86,8 +121,129 @@ def _cmd_eval(args: argparse.Namespace) -> int:
         harness=args.harness,
         report_path=args.report,
         gpu_prototype_dir=args.gpu_prototype_dir,
+        preset=args.preset,
     )
     print(report.summary())
+    return EXIT_OK
+
+
+def _cmd_label(args: argparse.Namespace) -> int:
+    from drone_fly.harness.offline.autolabel import run_autolabel
+
+    meta = run_autolabel(
+        args.capture,
+        args.track,
+        args.race,
+        args.props,
+        config=args.config,
+        preset=args.preset,
+        harness=args.harness,
+        out=args.out,
+        preview=args.preview,
+        preview_dir=args.preview_dir,
+        lag_ms=args.lag_ms,
+    )
+    print(json.dumps({"counts": meta["counts"], "drop_reasons": meta["drop_reasons"]}, indent=2))
+    for w in meta["props_warnings"]:
+        print(f"warning: {w}")
+    print(f"labels: {meta['out_dir']}")
+    if meta["previews"]:
+        print(f"previews: {Path(meta['previews'][0]).parent}")
+    return EXIT_OK
+
+
+def _cmd_train_gates(args: argparse.Namespace) -> int:
+    from drone_fly.harness.offline.gate_train import train_gates
+
+    meta = train_gates(
+        args.labels,
+        out=args.out,
+        config=args.config,
+        preset=args.preset,
+        harness=args.harness,
+        epochs=args.epochs,
+        backbone=args.backbone,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        holdout_frac=args.holdout_frac,
+        holdout=args.holdout,
+        device=args.device,
+    )
+    val = meta["final_val_loss"]
+    print(f"weights: {meta['weights']}")
+    print(f"training log: {meta['training_log']}")
+    print(
+        f"final train loss {meta['final_train_loss']:.4f}, held-out loss "
+        + ("-" if val is None else f"{val:.4f}")
+    )
+    return EXIT_OK
+
+
+def _cmd_depth_fit(args: argparse.Namespace) -> int:
+    from drone_fly.harness.offline.depth_fit import run_depth_fit
+
+    rep = run_depth_fit(
+        args.capture,
+        args.track,
+        args.race,
+        args.props,
+        config=args.config,
+        preset=args.preset,
+        harness=args.harness,
+        every=args.every,
+        report_dir=args.report,
+        lag_ms=args.lag_ms,
+        device=args.device,
+    )
+    fit, rays = rep["fit"], rep["raycast"]
+    print(
+        f"pairs {fit['pairs']} on {fit['frames']} frames: median |rel err| "
+        f"{fit['before']['median_abs_rel_error']:.1%} -> "
+        f"{fit['after']['median_abs_rel_error']:.1%}, "
+        f"RMSE {fit['before']['rmse_m']:.2f} -> {fit['after']['rmse_m']:.2f} m"
+    )
+    print(
+        f"raycast: median ray error {rays['ray_error_m_median']:.3f} m (in-FOV "
+        f"{rays['ray_error_m_median_in_fov']:.3f}), within 0.5 m {rays['ray_within_0_5m']:.1%} "
+        f"(in-FOV {rays['ray_within_0_5m_in_fov']:.1%}), coverage {rays['coverage_mean']:.1%}"
+    )
+    for w in rep["props_warnings"]:
+        print(f"warning: {w}")
+    print(rep["yaml_snippet"])
+    print(f"report: {rep['report_path']}")
+    return EXIT_OK
+
+
+def _cmd_pad_check(args: argparse.Namespace) -> int:
+    from drone_fly.harness.liftoff.pad_check import PadCheckSettings, run_pad_check
+
+    result = run_pad_check(
+        config=args.config,
+        preset=args.preset,
+        harness=args.harness,
+        settings=PadCheckSettings(
+            magnitude=args.magnitude,
+            pulse_s=args.pulse_s,
+            min_alt=args.min_alt,
+            max_alt=args.max_alt,
+        ),
+        out=args.out,
+    )
+    print(f"stop: {result.stop_reason}" + (f"  error: {result.error}" if result.error else ""))
+    for axis, a in result.axes.items():
+        print(
+            f"{axis}: sign agreement {a['sign_agreement']:.0%}, magnitude ratio "
+            f"{a['magnitude_ratio']:.2f}, stick_sign {a['current_sign']} -> {a['suggested_sign']}"
+        )
+    print(f"suggested controls.stick_signs: {result.suggested_stick_signs}")
+    print(f"report: {result.report_path}")
+    return EXIT_OK if result.completed else EXIT_FAILSAFE
+
+
+def _cmd_latency_report(args: argparse.Namespace) -> int:
+    from drone_fly.harness.recording import latency_markdown, load_latency_summary
+
+    print(latency_markdown(load_latency_summary(args.run, recompute=args.recompute)))
     return EXIT_OK
 
 
@@ -108,6 +264,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--extra-dim", type=int, required=True, choices=(12, 30, 70), help="model extra width"
     )
+    p_run.add_argument("--preset", help="packaged preset overlaid before --config")
     p_run.add_argument("--config", help="YAML overlaid on the harness's packaged default")
     p_run.add_argument("--k1-path", help="K1 connectome dir (default: artifacts/pruned/k1)")
     p_run.add_argument("--gpu-prototype-dir", help="dir holding gpu_prototype/inference.py")
@@ -120,16 +277,87 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--no-record", action="store_true", help="disable the run recording")
     p_run.set_defaults(func=_cmd_run)
 
-    p_eval = hsub.add_parser("eval", help="score vision estimators on a recorded session")
-    p_eval.add_argument("--session", required=True, help="recorded run folder")
-    p_eval.add_argument("--track", required=True, help="Liftoff track XML (placed items)")
-    p_eval.add_argument("--race", required=True, help="Liftoff race XML (gate order)")
-    p_eval.add_argument("--config", help="YAML overlaid on the harness default")
-    p_eval.add_argument("--harness", default="liftoff", help="harness whose config to use")
-    p_eval.add_argument("--report", help="eval_report.json path (default: <session>/)")
+    p_eval = hsub.add_parser(
+        "eval", help="score vision estimators on a recorded session or a labelled capture"
+    )
+    p_eval.add_argument("--session", help="recorded run folder (with --track / --race)")
+    p_eval.add_argument("--track", help="Liftoff track XML (placed items)")
+    p_eval.add_argument("--race", help="Liftoff race XML (gate order)")
+    p_eval.add_argument("--capture", help="capture folder to score the learned gate detector on")
+    p_eval.add_argument("--labels", help="label folder of --capture (from `harness label`)")
+    p_eval.add_argument("--gate-weights", help="gate-net weights (default: gates.learned.weights)")
+    p_eval.add_argument("--device", choices=("auto", "cpu", "cuda"), help="gate-net device")
+    p_eval.add_argument(
+        "--all-frames", action="store_true", help="score every frame, not only the held-out split"
+    )
+    _common(p_eval)
+    p_eval.add_argument(
+        "--report", help="eval_report.json path (default: <session>/ or artifacts/...)"
+    )
     p_eval.add_argument("--gpu-prototype-dir", help="dir holding gpu_prototype/inference.py")
     p_eval.set_defaults(func=_cmd_eval)
+
+    p_label = hsub.add_parser("label", help="auto-label gates in a capture from track XML + pose")
+    p_label.add_argument("--capture", required=True, help="capture or harness run folder")
+    p_label.add_argument("--track", required=True, help="Liftoff track XML")
+    p_label.add_argument("--race", help="Liftoff race XML (recorded in the metadata)")
+    p_label.add_argument("--props", help="props.json: cross-check gate_types against colliders")
+    _common(p_label)
+    p_label.add_argument("--out", help="label folder (default artifacts/harness/liftoff/labels/)")
+    p_label.add_argument("--preview", type=int, default=0, help="write N overlay previews")
+    p_label.add_argument("--preview-dir", help="preview root (default .../reports/label-preview)")
+    p_label.add_argument("--lag-ms", type=float, default=0.0, help="frame -> telemetry lag")
+    p_label.set_defaults(func=_cmd_label)
+
+    p_train = hsub.add_parser("train-gates", help="train the learned gate detector on labels")
+    p_train.add_argument("--labels", nargs="+", required=True, help="label folder(s)")
+    p_train.add_argument("--out", help="weights path (default .../models/liftoff-gates.pt)")
+    _common(p_train)
+    p_train.add_argument("--epochs", type=int, default=60)
+    p_train.add_argument("--backbone", choices=("resnet18-hf", "tiny-cnn"), default="resnet18-hf")
+    p_train.add_argument("--batch-size", type=int, default=8)
+    p_train.add_argument("--lr", type=float, default=1e-3)
+    split = p_train.add_mutually_exclusive_group()
+    split.add_argument("--holdout-frac", type=float, default=0.2, help="last fraction held out")
+    split.add_argument("--holdout", help="held-out window t0:t1 (s from the first frame)")
+    p_train.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    p_train.set_defaults(func=_cmd_train_gates)
+
+    p_depth = hsub.add_parser("depth-fit", help="fit depth calibration + score the 40-ray scan")
+    p_depth.add_argument("--capture", required=True, help="capture or harness run folder")
+    p_depth.add_argument("--track", required=True, help="Liftoff track XML")
+    p_depth.add_argument("--race", help="Liftoff race XML (gate order for the ray target)")
+    p_depth.add_argument("--props", help="props.json: cross-check item_table sizes")
+    _common(p_depth)
+    p_depth.add_argument("--every", type=int, default=5, help="use every Nth paired frame")
+    p_depth.add_argument("--report", help="report folder (default .../reports/depth-fit/)")
+    p_depth.add_argument("--lag-ms", type=float, default=0.0, help="frame -> telemetry lag")
+    p_depth.add_argument("--device", choices=("auto", "cpu", "cuda"), help="depth model device")
+    p_depth.set_defaults(func=_cmd_depth_fit)
+
+    p_pad = hsub.add_parser("pad-check", help="live stick-direction check (Liftoff focused)")
+    _common(p_pad)
+    p_pad.add_argument("--magnitude", type=float, default=0.15, help="pulse stick deflection")
+    p_pad.add_argument("--pulse-s", type=float, default=0.2, help="pulse length (s)")
+    p_pad.add_argument("--min-alt", type=float, default=0.5, help="abort below this height (m)")
+    p_pad.add_argument("--max-alt", type=float, default=6.0, help="abort above this height (m)")
+    p_pad.add_argument("--out", help="report folder (default .../reports/pad-check/<stamp>)")
+    p_pad.set_defaults(func=_cmd_pad_check)
+
+    p_lat = hsub.add_parser("latency-report", help="per-stage latency table of a run folder")
+    p_lat.add_argument("run", help="harness run folder")
+    p_lat.add_argument(
+        "--recompute", action="store_true", help="recompute from ticks.jsonl (ignore the summary)"
+    )
+    p_lat.set_defaults(func=_cmd_latency_report)
     return parser
+
+
+def _common(p: argparse.ArgumentParser) -> None:
+    """``--preset`` / ``--config`` / ``--harness`` shared by the offline subcommands."""
+    p.add_argument("--preset", help="packaged preset overlaid before --config")
+    p.add_argument("--config", help="YAML overlaid on the harness default")
+    p.add_argument("--harness", default="liftoff", help="harness whose config to use")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

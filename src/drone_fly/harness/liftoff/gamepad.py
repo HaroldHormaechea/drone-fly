@@ -217,6 +217,22 @@ class VgamepadActionSink(ActionSink):
         _pad_set(self.pad, sticks)
         return {"sticks": sticks}
 
+    def send_sticks(self, channels: dict[str, float]) -> dict[str, float]:
+        """Set raw stick positions per channel (``throttle``/``roll``/``pitch``/``yaw``, [-1, 1]).
+
+        Bypasses the rate curve and the stick signs (used by ``pad-check`` to send known pulses).
+        Missing channels are neutral (throttle at minimum). Returns the per-axis values sent.
+        """
+        if self.pad is None:
+            raise RuntimeError("gamepad sink not armed")
+        unknown = set(channels) - set(CHANNELS)
+        if unknown:
+            raise HarnessConfigError(f"unknown stick channels {sorted(unknown)}")
+        values = {"throttle": -1.0, "roll": 0.0, "pitch": 0.0, "yaw": 0.0, **channels}
+        sticks = {self.axis_map[ch]: float(np.clip(v, -1.0, 1.0)) for ch, v in values.items()}
+        _pad_set(self.pad, sticks)
+        return sticks
+
     def failsafe(self) -> None:
         """Centre the rate sticks, throttle to minimum."""
         if self.pad is not None:

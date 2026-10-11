@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,17 @@ def build_harness(config: HarnessConfig, ctx: BuildContext) -> Harness:
     return harness
 
 
+def gpu_name() -> str | None:
+    """The local CUDA device name, if any (torch is already loaded by the contract)."""
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return None
+    try:
+        return str(torch.cuda.get_device_name(0)) if torch.cuda.is_available() else None
+    except Exception:  # noqa: BLE001 - informational only
+        return None
+
+
 def run_harness(
     harness: str,
     checkpoint: str | os.PathLike[str],
@@ -54,8 +66,12 @@ def run_harness(
     dry_run: bool = False,
     output_root: str | None = None,
     record: bool | None = None,
+    preset: str | None = None,
 ) -> SessionResult:
-    """Run ``harness`` with ``checkpoint``; CLI-style arguments override the YAML config."""
+    """Run ``harness`` with ``checkpoint``; CLI-style arguments override the YAML config.
+
+    ``preset`` names a packaged preset overlaid on the harness default before ``config``.
+    """
     extra_dim = validate_extra_dim(extra_dim)
     overrides: dict[str, Any] = {}
     for key, value in (
@@ -68,7 +84,7 @@ def run_harness(
     ):
         if value is not None:
             overrides[key] = value
-    cfg = load_config(harness, config, overrides)
+    cfg = load_config(harness, config, overrides, preset=preset)
 
     contract = load_contract(
         cfg.contract.gpu_prototype_dir, cfg.contract.k1_path, cfg.contract.device
@@ -100,6 +116,8 @@ def run_harness(
                     "checkpoint_sha256": policy.sha256,
                     "extra_dim": extra_dim,
                     "device": contract.device,
+                    "gpu": gpu_name(),
+                    "preset": preset,
                     "contract_dir": str(contract.gpu_prototype_dir),
                     "k1_path": None if contract.k1_path is None else str(contract.k1_path),
                     "dry_run": dry_run,
@@ -108,6 +126,7 @@ def run_harness(
                 },
                 queue_size=cfg.recording.queue_size,
                 repo_root=find_repo_root(),
+                rate_hz=cfg.runner.rate_hz,
             )
             runner.recorder = recorder
         runner.arm()
@@ -129,6 +148,7 @@ def run_harness(
                 ticks=None if result is None else result.ticks,
                 missed_deadlines=None if result is None else result.missed_deadlines,
                 failsafe_ok=None if result is None else result.failsafe_ok,
+                failsafe_output=None if result is None else result.failsafe_output,
             )
     log.info("harness run finished: %s (%d ticks)", result.reason, result.ticks)
     return SessionResult(result=result, run_dir=run_dir, config=cfg)

@@ -14,6 +14,13 @@ free-space per-ray MAE (all rays and in-FOV only), a near-weighted error (weight
 ``1 - ground truth``, i.e. obstacles matter more than clear sky), ``obstacle_vision`` error;
 the gyro-convention check; and a suggested depth-calibration scale fit. Writes
 ``eval_report.json`` (default: inside the session folder) and returns an :class:`EvalReport`.
+
+**Capture mode** (:func:`run_capture_eval`, ``drone-fly harness eval --capture --labels``) scores
+the learned gate detector per frame against auto-labels (:mod:`.autolabel`), on the held-out
+frames recorded in the weights metadata only: per gate type, for labelled gates 4-25 m ahead with
+the centre in the image, detection rate, median position error (m and % of range), median yaw
+error (180 deg folded), false detections per frame, and CUDA-synchronised inference latency.
+Targets (>= 80 % detection, median error <= 15 % of range) are printed, not asserted.
 """
 
 from __future__ import annotations
@@ -93,6 +100,20 @@ def _wrap_deg(a: float) -> float:
     return (a + 180.0) % 360.0 - 180.0
 
 
+def _ray_metre_stats(errors: list[np.ndarray], suffix: str) -> dict[str, float]:
+    """Median per-ray error (training m) and the share of rays within 0.5 m."""
+    if not errors:
+        return {
+            f"ray_error_m_median{suffix}": float("nan"),
+            f"ray_within_0_5m{suffix}": float("nan"),
+        }
+    e = np.concatenate([np.asarray(x, np.float64).reshape(-1) for x in errors])
+    return {
+        f"ray_error_m_median{suffix}": float(np.median(e)),
+        f"ray_within_0_5m{suffix}": float(np.mean(e <= 0.5)),
+    }
+
+
 def load_session_frames(session: Path) -> list[tuple[int, float, Path]]:
     """``(frame_index, stamp, image path)`` for every frame saved in a run folder."""
     path = session / "frames.csv"
@@ -142,6 +163,7 @@ def evaluate_frames(
     report = EvalReport(n_frames=len(frames))
     pos_err, yaw_err, matched = [], [], 0
     ray_abs, ray_abs_fov, near_w, cov, ov_abs = [], [], [], [], []
+    ray_m, ray_m_fov = [], []  # per-ray absolute error in training metres
     fit_num = fit_den = 0.0
     obstacles = course.raycast_obstacles()
     r_range = float(contract.RAY_RANGE)
@@ -162,9 +184,11 @@ def evaluate_frames(
             if fs.raycast is not None:
                 err = np.abs(np.asarray(fs.raycast) - truth)
                 ray_abs.append(err.mean())
+                ray_m.append(err * r_range)
                 mask = fs.in_fov_mask if fs.in_fov_mask is not None else np.ones(len(err), bool)
                 if mask.any():
                     ray_abs_fov.append(err[mask].mean())
+                    ray_m_fov.append(err[mask] * r_range)
                     hit = mask & (truth < 1.0) & (np.asarray(fs.raycast) < 1.0)
                     fit_num += float(np.sum(truth[hit] * fs.raycast[hit]))
                     fit_den += float(np.sum(fs.raycast[hit] ** 2))
@@ -196,6 +220,8 @@ def evaluate_frames(
             "coverage_mean": float(np.mean(cov)) if cov else 0.0,
             "obstacle_vision_mae": float(np.mean(ov_abs)) if ov_abs else float("nan"),
             "ray_range_m_training": r_range,
+            **_ray_metre_stats(ray_m, ""),
+            **_ray_metre_stats(ray_m_fov, "_in_fov"),
         }
         # truth ~= k * estimate on in-FOV hits -> multiply the depth calibration scale by k.
         report.depth_scale_fit = fit_num / fit_den if fit_den > 0 else None
@@ -216,10 +242,11 @@ def run_offline_eval(
     free_space_estimator: FreeSpaceEstimator | None = None,
     depth_model: Any = None,
     evaluate_free_space: bool | None = None,
+    preset: str | None = None,
 ) -> EvalReport:
     """Evaluate a recorded session; see the module docstring. Estimators may be injected."""
     session = Path(session)
-    cfg: HarnessConfig = load_config(harness, config)
+    cfg: HarnessConfig = load_config(harness, config, preset=preset)
     scale = WorldScale(cfg.world_scale)
     if contract is None:
         from drone_fly.harness.contract import load_contract
@@ -233,6 +260,7 @@ def run_offline_eval(
         scale,
         race_id_tag=str(off.get("race_id_tag", "instanceID")),
         laps=off.get("laps"),
+        gate_types=cfg.get("gate_types"),
     )
 
     tele_cfg = cfg.section("telemetry")
@@ -282,3 +310,219 @@ def run_offline_eval(
     out.write_text(json.dumps(report.as_dict(), indent=2, default=float), encoding="utf-8")
     report.report_path = str(out)
     return report
+
+
+# ----------------------------------------------------------------------------- capture mode
+
+EVAL_RANGE_M = (4.0, 25.0)
+TARGET_DETECTION = 0.80
+TARGET_REL_ERROR = 0.15
+SPLIT_CAVEAT = (
+    "Held-out frames come from a time split of the training capture(s). With a single capture the "
+    "held-out laps revisit viewpoints seen in training, so these scores are optimistic; more "
+    "captures (other tracks) give an honest estimate."
+)
+
+
+def _fold_yaw_deg(a: float, b: float) -> float:
+    """Yaw error between two gate normals, ignoring the normal's sign (folded to [0, 90])."""
+    d = abs(_wrap_deg(a - b))
+    return min(d, 180.0 - d)
+
+
+def score_capture_frame(
+    detections: list[Any], gates: list[dict[str, Any]], scale: WorldScale
+) -> dict[str, Any]:
+    """Match one frame's detections to its labelled gates (Liftoff metres).
+
+    Scored gates: true range in :data:`EVAL_RANGE_M`, centre in the image and outside the masks.
+    A gate is detected by a same-class detection within ``max(1 m, 0.25 x range)``, greedily by
+    distance. A detection matching no labelled gate (any range) is a false detection.
+    """
+    det_world = [scale.to_target_vector(d.center).astype(np.float64) for d in detections]
+    pairs = []
+    for gi, g in enumerate(gates):
+        c = np.asarray(g["center_world"], np.float64)
+        tol = max(1.0, 0.25 * float(g["range_m"]))
+        for di, d in enumerate(detections):
+            if d.cls != g["cls"]:
+                continue
+            dist = float(np.linalg.norm(det_world[di] - c))
+            if dist <= tol:
+                pairs.append((dist, gi, di))
+    pairs.sort()
+    used_g: dict[int, int] = {}
+    used_d: set[int] = set()
+    for _, gi, di in pairs:
+        if gi in used_g or di in used_d:
+            continue
+        used_g[gi] = di
+        used_d.add(di)
+    scored = []
+    for gi, g in enumerate(gates):
+        in_range = EVAL_RANGE_M[0] <= g["range_m"] <= EVAL_RANGE_M[1]
+        if not (in_range and g["center_in_image"] and not g.get("center_masked")):
+            continue
+        entry: dict[str, Any] = {"cls": g["cls"], "range_m": float(g["range_m"]), "detected": False}
+        if gi in used_g:
+            d = detections[used_g[gi]]
+            err = float(np.linalg.norm(det_world[used_g[gi]] - np.asarray(g["center_world"])))
+            entry.update(
+                detected=True,
+                position_error_m=err,
+                position_error_rel=err / max(float(g["range_m"]), 1e-6),
+                yaw_error_deg=_fold_yaw_deg(math.degrees(d.yaw), float(g["normal_yaw_deg"])),
+            )
+        scored.append(entry)
+    false = [detections[i].cls for i in range(len(detections)) if i not in used_d]
+    return {"scored": scored, "false_detections": false}
+
+
+def run_capture_eval(
+    capture: str | Path,
+    labels: str | Path,
+    *,
+    config: str | Path | dict[str, Any] | None = None,
+    preset: str | None = None,
+    harness: str = "liftoff",
+    gate_weights: str | Path | None = None,
+    device: str | None = None,
+    report_path: str | Path | None = None,
+    all_frames: bool = False,
+    estimator: Any = None,
+) -> dict[str, Any]:
+    """Score the learned gate detector on a capture's held-out labelled frames (see module)."""
+    from drone_fly.harness.config import find_repo_root
+    from drone_fly.harness.offline.capture import load_capture
+    from drone_fly.harness.offline.gate_train import is_held_out, load_labels
+
+    overrides: dict[str, Any] = {}
+    if gate_weights is not None:
+        overrides["gates.learned.weights"] = str(Path(gate_weights).resolve())
+    if device is not None:
+        overrides["gates.learned.device"] = device
+    cfg = load_config(harness, config, overrides, preset=preset)
+    scale = WorldScale(cfg.world_scale)
+    lab = load_labels(labels)
+    if estimator is None:
+        from drone_fly.harness.registry import build_part
+
+        ctx = BuildContext(config=cfg, contract=None, resources={})
+        estimator = build_part("gate_estimator", "learned", cfg.section("gates"), ctx)
+    meta = getattr(estimator, "meta", {}) or {}
+    window = (meta.get("holdout") or {}).get(lab.name)
+    if window is None and not all_frames:
+        raise HarnessConfigError(
+            f"the gate weights record no held-out split for capture {lab.name!r}; pass "
+            "--all-frames to score every frame (includes training frames)"
+        )
+    cap = load_capture(
+        capture, cfg.section("telemetry"), cfg.world_scale, float(lab.meta.get("lag_ms", 0.0))
+    )
+    by_file = {str(f.path.relative_to(cap.root)).replace("\\", "/"): f for f in cap.frames}
+    rows = [r for r in lab.rows if all_frames or is_held_out(r["stamp"], window)]
+    per_cls: dict[str, dict[str, list]] = {}
+    false_per_frame, latencies, n_frames = [], [], 0
+    for r in rows:
+        f = by_file.get(r["file"])
+        if f is None:
+            continue
+        frame = Frame(load_image(f.path), f.stamp, f.index)
+        dets = estimator.detect_frame(frame, f.state)
+        if getattr(estimator, "inference_s", None) is not None:
+            latencies.append(float(estimator.inference_s))
+        res = score_capture_frame(dets, r["gates"], scale)
+        n_frames += 1
+        false_per_frame.append(len(res["false_detections"]))
+        for e in res["scored"]:
+            d = per_cls.setdefault(e["cls"], {"det": [], "err": [], "rel": [], "yaw": []})
+            d["det"].append(e["detected"])
+            if e["detected"]:
+                d["err"].append(e["position_error_m"])
+                d["rel"].append(e["position_error_rel"])
+                d["yaw"].append(e["yaw_error_deg"])
+    lat = np.asarray(latencies, np.float64) * 1000.0
+    cuda = str(getattr(estimator, "device", "cpu")).startswith("cuda")
+    types = {}
+    for cls, d in sorted(per_cls.items()):
+        n = len(d["det"])
+        rate = float(np.mean(d["det"])) if n else 0.0
+        med_rel = float(np.median(d["rel"])) if d["rel"] else None
+        types[cls] = {
+            "n": n,
+            "detected": int(np.sum(d["det"])),
+            "detection_rate": rate,
+            "position_error_m_median": float(np.median(d["err"])) if d["err"] else None,
+            "position_error_rel_median": med_rel,
+            "yaw_error_deg_median": float(np.median(d["yaw"])) if d["yaw"] else None,
+            "meets_detection_target": rate >= TARGET_DETECTION,
+            "meets_error_target": med_rel is not None and med_rel <= TARGET_REL_ERROR,
+        }
+    report = {
+        "capture": str(Path(capture).resolve()),
+        "labels": str(Path(labels).resolve()),
+        "weights": str(getattr(estimator, "weights_path", None)),
+        "split": "all frames" if all_frames else window,
+        "frames_scored": n_frames,
+        "range_m": list(EVAL_RANGE_M),
+        "targets": {"detection_rate": TARGET_DETECTION, "position_error_rel": TARGET_REL_ERROR},
+        "per_type": types,
+        "false_detections_per_frame": float(np.mean(false_per_frame)) if false_per_frame else 0.0,
+        "inference_ms": {
+            "device": str(getattr(estimator, "device", "cpu")),
+            "cuda_synchronised": cuda,
+            "representative": cuda,
+            "p50": float(np.percentile(lat, 50)) if lat.size else None,
+            "p95": float(np.percentile(lat, 95)) if lat.size else None,
+            "n": int(lat.size),
+        },
+        "caveat": SPLIT_CAVEAT,
+    }
+    if report_path is None:
+        root = find_repo_root()
+        report_path = (
+            (root if root is not None else Path.cwd())
+            / "artifacts"
+            / "harness"
+            / "liftoff"
+            / "reports"
+            / "gate-eval"
+            / "eval_report.json"
+        )
+    out = Path(report_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    report["report_path"] = str(out)
+    return report
+
+
+def capture_eval_summary(report: dict[str, Any]) -> str:
+    """Human-readable lines for a :func:`run_capture_eval` report (targets are not asserted)."""
+    lines = [
+        f"frames scored: {report['frames_scored']} (gates {report['range_m'][0]:g}-"
+        f"{report['range_m'][1]:g} m ahead, centre in image)"
+    ]
+    t = report["targets"]
+    for cls, d in report["per_type"].items():
+        err = d["position_error_m_median"]
+        rel = d["position_error_rel_median"]
+        yaw = d["yaw_error_deg_median"]
+        lines.append(
+            f"{cls}: n {d['n']}, detection {d['detection_rate']:.1%} (target "
+            f">= {t['detection_rate']:.0%}: "
+            f"{'met' if d['meets_detection_target'] else 'NOT met'}), "
+            f"median position error {'-' if err is None else f'{err:.2f} m'} "
+            f"({'-' if rel is None else f'{rel:.1%}'} of range; target <= "
+            f"{t['position_error_rel']:.0%}: {'met' if d['meets_error_target'] else 'NOT met'}), "
+            f"median yaw error {'-' if yaw is None else f'{yaw:.1f} deg'}"
+        )
+    lat = report["inference_ms"]
+    note = "" if lat["representative"] else " (CPU: not representative of the GPU budget)"
+    if lat["p50"] is not None:
+        lines.append(
+            f"inference p50 {lat['p50']:.1f} ms / p95 {lat['p95']:.1f} ms on {lat['device']}{note}"
+        )
+    lines.append(f"false detections per frame: {report['false_detections_per_frame']:.2f}")
+    lines.append(report["caveat"])
+    lines.append(f"report: {report.get('report_path')}")
+    return "\n".join(lines)

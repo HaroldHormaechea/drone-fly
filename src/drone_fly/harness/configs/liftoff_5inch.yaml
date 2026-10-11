@@ -2,6 +2,8 @@
 # Overlay your own --config on this file to switch game / airframe settings; keys that are not
 # listed here are rejected. Values marked CALIBRATE are documented assumptions that must be
 # checked against your Liftoff setup (see docs/adr/0002-live-harness-layering.md).
+# Packaged presets (e.g. `--preset liftoff_micro_arena`, the calibrated micro drone on Liftoff
+# Arena) are overlays on this file; see docs/adr/0003-real-liftoff-calibration.md.
 #
 # Example (obstacle-free course, 30-dim model):
 #   drone-fly harness run --harness liftoff --extra-dim 30 \
@@ -32,6 +34,7 @@ parts:
   free_space_estimator: none      # none (obstacle-free, 12/30-dim only) | depth (70-dim)
   action_sink: vgamepad
   abort_signal: hotkey
+  focus_probe: win32-foreground   # fail safe when the Liftoff window loses focus (null = off)
 
 # Options for programmatically registered parts, keyed by part kind (free-form).
 part_options: {}
@@ -55,13 +58,16 @@ telemetry:
     inputs: 4
     battery: 2
     motor_rpm: 4
-  rpm_count_prefix: false   # true if the MotorRPM block starts with a uint8 motor count
-  gyro_units: deg_s         # deg_s | rad_s. CALIBRATE (gyro_check measures it)
-  # Contract body rate (FLU) <- sign * gyro[source]. CALIBRATE: run the gyro check on a recorded
-  # flight and apply its suggested table.
+  # MEASURED 2026-10-11 (UC-64, live capture, 97-byte datagrams): MotorRPM = uint8 motor count +
+  # that many floats. Describes Liftoff, not the airframe.
+  rpm_count_prefix: true
+  gyro_units: deg_s         # MEASURED 2026-10-11 (gyro_check, |scale| 1.00): deg/s
+  # Contract body rate (FLU) <- sign * gyro[source]. MEASURED 2026-10-11 (UC-64, gyro_check on a
+  # 182 s hand-flown capture, |corr| 0.99): the earlier roll/pitch signs were inverted. Describes
+  # Liftoff, not the airframe.
   gyro_map:
-    wx: {source: roll, sign: 1}
-    wy: {source: pitch, sign: -1}
+    wx: {source: roll, sign: -1}
+    wy: {source: pitch, sign: 1}
     wz: {source: yaw, sign: -1}
   max_position_jump_m: 5.0  # per-sample jump (Liftoff metres) treated as a respawn
   ring_size: 1024
@@ -75,6 +81,9 @@ camera:
   resolution: null          # [w, h] the FOV refers to; null = use the captured frame size
   hfov_deg: 120.0           # Liftoff camera FOV (horizontal). CALIBRATE
   uptilt_deg: 25.0          # FPV camera angle. CALIBRATE
+  # Screen regions ignored by gate detection, auto-labelling and depth sampling (HUD, ghost list).
+  # Each {name, rect: [x, y, w, h]} in pixels at `resolution` (required when masks are set).
+  masks: []
 
 gates:
   nominal_width_m: 1.5      # OUTER gate frame size in Liftoff metres. CALIBRATE per track
@@ -91,6 +100,37 @@ gates:
   acquire_timeout_s: 3.0    # hover in place this long waiting for the first gate
   pass_area_frac: 0.2       # gate area fraction that, once vanished nearby, counts as a pass
   gates_per_lap: null       # set to count laps
+  # `learned` gate estimator (parts.gate_estimator: learned): keypoint net + PnP per gate type.
+  learned:
+    weights: null           # trained by `drone-fly harness train-gates`; relative = repo root
+    device: auto            # auto | cpu | cuda
+    fp16: true              # half precision on CUDA
+    input_width: 768        # network input width (frames are resized, aspect kept)
+    score_threshold: 0.3    # centre-heatmap score for a detection
+    min_keypoints: 4        # visible keypoints needed for PnP
+    max_detections: 8
+
+# Gate styles: itemID regex -> class + dimensions (Liftoff metres, Unity-local x right / y up).
+# Shared by the offline tools (route parsing, auto-labelling, scoring) and the learned estimator
+# (class -> dimensions for PnP). `keypoints` default to the 4 outer corners; `flip_pairs` name
+# left/right keypoint pairs (swapped for horizontal flips and gates seen from behind).
+gate_types:
+  - class: square_gate
+    match: "(?i)gate"
+    aperture: [1.5, 1.5]
+    outer: [1.5, 1.5]       # today's nominal 1.5 x 1.5 m gate (gates.nominal_*)
+    center_offset: [0.0, 0.75, 0.0]
+    keypoints: null
+    flip_pairs: [[0, 1], [2, 3]]
+    outline: null           # tube centre line for depth-fit ground truth (null = keypoint polygon)
+    tube_radius: 0.0
+
+# Focus fail-safe (parts.focus_probe: win32-foreground): pad input reaches whichever window is
+# focused, so the run waits for the game window, then fails safe if it loses focus.
+focus:
+  process_name: Liftoff.exe
+  title_regex: null         # optional extra check on the window title
+  wait_for_focus_s: 15.0    # time allowed to click into the game after arming
 
 free_space:
   assume_no_obstacles: false  # `none` estimator: set true to fly 12/30-dim models obstacle-free
