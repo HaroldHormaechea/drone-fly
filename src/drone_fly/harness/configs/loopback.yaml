@@ -38,6 +38,27 @@ course:
   path: null                # source: yaml -> a {gates, obstacles, start, laps} file
   inline: {}                # source: inline -> {gates, obstacles, start, laps}
 
+# Live brain + debug overlay (UC-65): `drone-fly harness overlay` draws what the runner publishes
+# on a localhost UDP stream. See docs/adr/0004-live-overlay.md.
+overlay:
+  enabled: false            # publish to the overlay (or `harness run --overlay`)
+  port: 9100                # localhost UDP port; must differ from telemetry.port
+  brain_every_n: 3          # brain frame every Nth tick (50 Hz / 3 ~ 16 Hz)
+  layout: default           # default (panels at the screen edges) | mask_confined (inside camera.masks)
+  fps: 20                   # overlay redraw rate, 1-20 (CPU rendering; keep it low)
+  stale_s: 1.0              # "no data for N s" after this long without a datagram
+  gain_window_s: 5.0        # brain panel: running per-neuron gain window
+  opacity: 0.85             # panel opacity 0-1
+  tap_outline: false        # brain panel: outline the readout's tap neurons
+  panels:                   # per-panel toggles
+    brain: true
+    action: true
+    inputs: true
+    raycast: true
+    perception: true
+    health: true
+    telemetry: true
+
 recording:
   enabled: true
   output_root: null         # null -> <repo>/artifacts/harness

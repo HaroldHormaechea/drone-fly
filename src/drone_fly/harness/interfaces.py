@@ -174,6 +174,18 @@ class PolicyRunner(ABC):
     def act(self, obs: np.ndarray, extra: np.ndarray) -> np.ndarray:
         """Deterministic raw action ``[collective, wx, wy, wz]``."""
 
+    def act_with_brain(self, obs: np.ndarray, extra: np.ndarray) -> tuple[np.ndarray, Any]:
+        """``(raw action, brain state)``; the brain state is ``None`` when not available.
+
+        Only called by the runner when a live overlay wants a brain frame on this tick; the
+        default runs :meth:`act` and reports no brain state.
+        """
+        return self.act(obs, extra), None
+
+    def brain_info(self) -> dict[str, Any]:
+        """Static facts about the brain state ``act_with_brain`` returns (``{}`` = none)."""
+        return {}
+
 
 class AbortSignal(ABC):
     """A user abort (e.g. a hotkey). Ctrl+C is always honoured separately by the runner."""

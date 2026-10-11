@@ -4,6 +4,7 @@
     drone-fly harness run --harness <name> --checkpoint <model_readout.pt> --extra-dim {12,30,70}
                           [--preset <name>] [--config <yaml>] [--k1-path] [--gpu-prototype-dir]
                           [--device] [--duration] [--dry-run] [--output-root] [--no-record]
+                          [--overlay] [--overlay-launch]
     drone-fly harness eval --session <run dir> --track <xml> --race <xml> --config <yaml>
                           [--report <json>]
     drone-fly harness eval --capture <dir> --labels <dir> [--preset] [--gate-weights] [--device]
@@ -77,6 +78,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         output_root=args.output_root,
         record=False if args.no_record else None,
         preset=args.preset,
+        overlay=True if (args.overlay or args.overlay_launch) else None,
+        overlay_launch=args.overlay_launch,
     )
     r = session.result
     print(
@@ -296,6 +299,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run.add_argument("--output-root", help="recording root (default: artifacts/harness)")
     p_run.add_argument("--no-record", action="store_true", help="disable the run recording")
+    p_run.add_argument(
+        "--overlay",
+        action="store_true",
+        help="publish ticks + brain frames to the live overlay (overlay.enabled)",
+    )
+    p_run.add_argument(
+        "--overlay-launch",
+        action="store_true",
+        help="also start `harness overlay` before the loop (implies --overlay)",
+    )
     p_run.set_defaults(func=_cmd_run)
 
     p_eval = hsub.add_parser(

@@ -90,3 +90,38 @@ class ContractPolicyRunner(PolicyRunner):
         if self._policy is None:
             raise RuntimeError("policy not loaded; call load() first")
         return np.asarray(self._policy.act(obs, extra), dtype=np.float32)
+
+    def act_with_brain(self, obs: np.ndarray, extra: np.ndarray) -> tuple[np.ndarray, Any]:
+        """The raw action plus the full propagated K1 state (UC-65 live overlay).
+
+        Runs exactly the ops ``inference.Policy.act`` runs for an augmented model, in the same
+        order and under ``no_grad`` â€” ``actor.propagated_full`` -> ``actor.tap`` -> ``actor.act``
+        â€” and keeps the ``propagated_full`` output instead of discarding it, so nothing is
+        computed twice and the action is bit-identical to :meth:`act`. The brain state is
+        returned as the device tensor ``(N,)``; the caller copies it to the host only when it
+        publishes it. ``inference.py`` is not modified.
+        """
+        if self._policy is None:
+            raise RuntimeError("policy not loaded; call load() first")
+        import torch  # already loaded by the contract
+
+        p = self._policy
+        actor = p.actor
+        with torch.no_grad():
+            o = torch.as_tensor(np.asarray(obs, np.float32), device=p.device).reshape(1, -1)
+            full = actor.propagated_full(o)
+            feats = actor.tap(full)
+            e = torch.as_tensor(np.asarray(extra, np.float32), device=p.device).reshape(1, -1)
+            mean, _ = actor.act(feats, e)
+            raw = mean[0].cpu().numpy()
+        return np.asarray(raw, dtype=np.float32), full[0]
+
+    def brain_info(self) -> dict[str, Any]:
+        """``{n_neurons, tap_index}`` of the loaded K1 actor (``{}`` before :meth:`load`)."""
+        if self._policy is None:
+            return {}
+        actor = self._policy.actor
+        return {
+            "n_neurons": int(actor.N),
+            "tap_index": [int(i) for i in actor.tap_index.cpu().tolist()],
+        }
