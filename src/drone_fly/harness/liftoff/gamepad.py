@@ -161,6 +161,7 @@ class VgamepadActionSink(ActionSink):
         disarm_button: str | None = None,
         arm_press_s: float = 0.15,
         arm_settle_s: float = 0.5,
+        disarm_press_s: float = 0.3,
         button_resolver: Callable[[str], Any] = default_button_resolver,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
@@ -188,6 +189,7 @@ class VgamepadActionSink(ActionSink):
         self.disarm_button = disarm_button
         self.arm_press_s = arm_press_s
         self.arm_settle_s = arm_settle_s
+        self.disarm_press_s = disarm_press_s
         self._settle_until: float | None = None
         self.button_resolver = button_resolver
         self.clock = clock
@@ -257,6 +259,14 @@ class VgamepadActionSink(ActionSink):
             arm_settle_s=float(
                 require_number(cfg.get("arm_settle_s", 0.5), "controls.arm_settle_s", min_value=0.0)
             ),
+            disarm_press_s=float(
+                require_number(
+                    cfg.get("disarm_press_s", 0.3),
+                    "controls.disarm_press_s",
+                    min_value=0.0,
+                    min_exclusive=True,
+                )
+            ),
         )
 
     def sticks_for(self, command: ContractCommand) -> dict[str, float]:
@@ -285,11 +295,11 @@ class VgamepadActionSink(ActionSink):
             self.pad.release_button(button=self._buttons[self._pressed])
             self._pressed = None
 
-    def _pulse(self, name: str) -> None:
-        """Blocking press of ``name`` for ``arm_press_s`` (fail-safe path only)."""
+    def _pulse(self, name: str, hold_s: float | None = None) -> None:
+        """Blocking press of ``name`` for ``hold_s`` (default ``arm_press_s``; fail-safe path)."""
         self._press(name)
         self.pad.update()
-        self.sleep(self.arm_press_s)
+        self.sleep(self.arm_press_s if hold_s is None else hold_s)
         self._release()
         self.pad.update()
 
@@ -361,11 +371,24 @@ class VgamepadActionSink(ActionSink):
             self.pad.update()
             self.sleep(self.arm_press_s)
         if self.disarm_button is not None:
-            self._pulse(self.disarm_button)
+            self._pulse(self.disarm_button, self.disarm_press_s)
         elif self.armed:
             self._pulse(self.arm_button)
         self.armed = False
         self._release_at = None
+
+    def disarm(self) -> bool:
+        """Press Disarm again (throttle at minimum); the runner retries until the motors stop.
+
+        Returns False when there is nothing to press (no pad, or no ``disarm_button``: a toggle
+        arm button must not be pulsed blindly, it could re-arm).
+        """
+        if self.pad is None or self.disarm_button is None:
+            return False
+        _pad_set(self.pad, self.neutral_sticks())
+        self._pulse(self.disarm_button, self.disarm_press_s)
+        _pad_set(self.pad, self.neutral_sticks())
+        return True
 
     def failsafe(self) -> None:
         """Centre the rate sticks, throttle to minimum, disarm (when an arm button is set)."""

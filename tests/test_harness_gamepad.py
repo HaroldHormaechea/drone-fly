@@ -243,7 +243,7 @@ def test_arm_pulses_on_first_command_and_disarm_pulses_on_failsafe():
     assert _log(pad) == [("press", "btn-A"), ("release", "btn-A")]  # one arm pulse only
     sink.failsafe()
     assert _log(pad)[2:] == [("press", "btn-B"), ("release", "btn-B")]
-    assert clock.sleeps == [0.15] and pad.buttons == set() and not sink.armed
+    assert clock.sleeps == [0.3] and pad.buttons == set() and not sink.armed  # disarm_press_s
     assert pad.sticks["left_y"] == -1.0
     sink.close()  # disarm happens once per run
     assert len(pad.button_log) == 4
@@ -363,3 +363,15 @@ def test_arm_settle_is_validated_and_defaults():
     assert cfg["arm_settle_s"] == 0.5
     with pytest.raises(HarnessConfigError, match="arm_settle_s"):
         VgamepadActionSink.from_config({**cfg, "arm_settle_s": -1}, ctx)
+
+
+def test_disarm_re_presses_disarm_with_throttle_cut():
+    sink, pad, clock = _arm_sink()
+    assert sink.disarm() is False  # no pad yet
+    sink.arm()
+    assert sink.disarm() is True
+    assert _log(pad) == [("press", "btn-B"), ("release", "btn-B")]
+    assert clock.sleeps == [0.3] and pad.sticks["left_y"] == -1.0
+    toggle, _, _ = _arm_sink(disarm=None)
+    toggle.arm()
+    assert toggle.disarm() is False  # never pulse a toggle arm button blindly

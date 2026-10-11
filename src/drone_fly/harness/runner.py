@@ -120,6 +120,9 @@ class RunnerSettings:
     #: With an arm button configured: fail safe if telemetry shows no motor RPM this long after
     #: the first command (the Arm press did not arm). 0 = no check.
     arm_confirm_s: float = 0.0
+    #: After the fail-safe (arm button configured): retry Disarm until telemetry shows the motors
+    #: stopped, for at most this long.
+    disarm_confirm_s: float = 2.0
 
     @classmethod
     def from_config(cls, cfg: Any) -> RunnerSettings:
@@ -145,6 +148,13 @@ class RunnerSettings:
             max_ticks=r.max_ticks,
             frame_every_n=cfg.recording.frame_every_n,
             arm_confirm_s=arm_confirm if controls.get("arm_button") else 0.0,
+            disarm_confirm_s=float(
+                require_number(
+                    controls.get("disarm_confirm_s", 2.0),
+                    "controls.disarm_confirm_s",
+                    min_value=0.0,
+                )
+            ),
         )
 
 
@@ -299,10 +309,43 @@ class HarnessRunner:
                 result.failsafe_output = (
                     {"sticks": neutral()} if callable(neutral) else {"failsafe": True}
                 )
+                self._confirm_disarmed(result)
                 return
             except Exception:  # noqa: BLE001
                 result.failsafe_ok = False
                 log.exception("sink.failsafe() failed (attempt %d)", attempt)
+
+    def _confirm_disarmed(self, result: RunResult) -> None:
+        """With an arm button: re-press Disarm every 0.5 s until motor RPM reads 0 (or give up).
+
+        Records ``disarmed`` or ``disarm_unconfirmed`` in the run's events.
+        """
+        s = self.settings
+        sink = self.harness.action_sink
+        disarm = getattr(sink, "disarm", None)
+        if s.arm_confirm_s <= 0 or s.disarm_confirm_s <= 0 or disarm is None:
+            return
+        clock = self.clock
+        start = clock.now()
+        next_press = start + 0.5
+        try:
+            while clock.now() - start < s.disarm_confirm_s:
+                samples = self.harness.state_source.drain_raw()
+                rpm = getattr(samples[-1], "rpm", None) if samples else None
+                if samples and rpm is None:
+                    return  # stream without RPM: cannot confirm
+                if rpm is not None and float(np.max(np.abs(rpm))) == 0.0:
+                    result.events.append("disarmed")
+                    return
+                if clock.now() >= next_press:
+                    if not disarm():
+                        return
+                    next_press = clock.now() + 0.5
+                clock.sleep_until(clock.now() + 0.05)
+        except Exception:  # noqa: BLE001 - never mask the stop reason
+            log.exception("confirming the disarm failed")
+        result.events.append("disarm_unconfirmed")
+        log.error("could not confirm the drone disarmed (motor RPM still > 0 or no telemetry)")
 
     def run(self, *, prepared: bool = False) -> RunResult:
         """Run until a stop condition; always ends with the sink in fail-safe."""

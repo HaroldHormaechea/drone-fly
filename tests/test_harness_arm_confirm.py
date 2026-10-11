@@ -104,3 +104,57 @@ def test_settings_enable_the_check_only_with_an_arm_button():
     assert preset.arm_confirm_s == 3.0
     off = load_config("liftoff", {"controls": {"arm_confirm_s": 0}}, preset="liftoff")
     assert RunnerSettings.from_config(off).arm_confirm_s == 0.0
+
+
+class DisarmSink(FakeSink):
+    def __init__(self):
+        super().__init__()
+        self.disarms = 0
+
+    def disarm(self):
+        self.disarms += 1
+        return True
+
+
+def _run_with(sink, source, **settings):
+    contract = fake_contract()
+    h = Harness(
+        name="fake",
+        state_source=source,
+        gate_estimator=FakeGateEstimator(),
+        action_sink=sink,
+        free_space_estimator=FakeFreeSpaceEstimator(),
+        clock=SimClock(),
+    )
+    runner = HarnessRunner(
+        h,
+        FakePolicy(extra_dim=30, action=(0.8, 1.0, -0.5, 0.3)),
+        ContractObservationAssembler(contract),
+        contract,
+        RunnerSettings(**settings),
+        recorder=ListRecorder(),
+    )
+    return runner.run()
+
+
+def test_failsafe_confirms_the_motors_stopped():
+    sink = DisarmSink()
+    # armed during the run, RPM drops to 0 a few drains after the stop
+    src = RpmSource([[900] * 4] * 12 + [[0] * 4])
+    r = _run_with(sink, src, max_ticks=10, arm_confirm_s=1.0, disarm_confirm_s=2.0)
+    assert r.reason == STOP_COMPLETED and "disarmed" in r.events
+    assert sink.failsafe_calls == 1
+
+
+def test_failsafe_re_presses_disarm_until_confirmed_then_gives_up():
+    sink = DisarmSink()
+    src = RpmSource([[900] * 4])  # motors never stop
+    r = _run_with(sink, src, max_ticks=5, arm_confirm_s=1.0, disarm_confirm_s=2.0)
+    assert "disarm_unconfirmed" in r.events
+    assert 3 <= sink.disarms <= 4  # every 0.5 s for 2 s
+
+
+def test_no_disarm_confirmation_without_an_arm_button():
+    sink = DisarmSink()
+    r = _run_with(sink, RpmSource([[900] * 4]), max_ticks=5, arm_confirm_s=0.0)
+    assert sink.disarms == 0 and "disarm_unconfirmed" not in r.events
