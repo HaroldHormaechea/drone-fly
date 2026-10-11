@@ -188,3 +188,11 @@ def harness_checkpoint_70(harness_contract, tmp_path_factory: pytest.TempPathFac
     return _save_fixture_checkpoint(
         harness_contract, 70, tmp_path_factory.mktemp("harness_ckpt") / "model_readout.pt"
     )
+
+
+@pytest.fixture(scope="session")
+def harness_checkpoint_30(harness_contract, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A seeded, stripped ``model_readout.pt`` for K1ReservoirAug(30) (obstacle-free model)."""
+    return _save_fixture_checkpoint(
+        harness_contract, 30, tmp_path_factory.mktemp("harness_ckpt30") / "model_readout.pt"
+    )

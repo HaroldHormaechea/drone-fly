@@ -34,16 +34,18 @@ EXIT_FAILSAFE = 5
 def _cmd_list(args: argparse.Namespace) -> int:
     from drone_fly.harness import registry
 
-    print(f"{'kind':<22}{'name':<16}{'status':<12}notes")
-    for kind in registry.KINDS:
-        for name in registry.names(kind):
-            e = registry.entry(kind, name)
-            p = registry.probe(kind, name)
-            status = "available" if p["available"] else "missing"
-            notes = e.description
-            if p["missing"]:
-                notes = f"needs {', '.join(p['missing'])} (uv sync --extra harness)"
-            print(f"{kind:<22}{name:<16}{status:<12}{notes}")
+    rows = [(kind, name) for kind in registry.KINDS for name in registry.names(kind)]
+    kw = max([len("kind"), *(len(k) for k, _ in rows)]) + 2
+    nw = max([len("name"), *(len(n) for _, n in rows)]) + 2
+    print(f"{'kind':<{kw}}{'name':<{nw}}{'status':<12}notes")
+    for kind, name in rows:
+        e = registry.entry(kind, name)
+        p = registry.probe(kind, name)
+        status = "available" if p["available"] else "missing"
+        notes = e.description
+        if p["missing"]:
+            notes = f"needs {', '.join(p['missing'])} (uv sync --extra harness)"
+        print(f"{kind:<{kw}}{name:<{nw}}{status:<12}{notes}")
     return EXIT_OK
 
 
