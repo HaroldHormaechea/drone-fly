@@ -394,7 +394,7 @@ def run_capture_eval(
     """Score the learned gate detector on a capture's held-out labelled frames (see module)."""
     from drone_fly.harness.config import find_repo_root
     from drone_fly.harness.offline.capture import load_capture
-    from drone_fly.harness.offline.gate_train import is_held_out, load_labels
+    from drone_fly.harness.offline.gate_train import check_disjoint, is_held_out, load_labels
 
     overrides: dict[str, Any] = {}
     if gate_weights is not None:
@@ -410,12 +410,15 @@ def run_capture_eval(
         ctx = BuildContext(config=cfg, contract=None, resources={})
         estimator = build_part("gate_estimator", "learned", cfg.section("gates"), ctx)
     meta = getattr(estimator, "meta", {}) or {}
-    window = (meta.get("holdout") or {}).get(lab.name)
+    split = (meta.get("splits") or {}).get(lab.name)
+    window = None if split is None else split["holdout"]
     if window is None and not all_frames:
         raise HarnessConfigError(
-            f"the gate weights record no held-out split for capture {lab.name!r}; pass "
+            f"the gate weights record no train/val/held-out split for capture {lab.name!r}; pass "
             "--all-frames to score every frame (includes training frames)"
         )
+    if split is not None and not all_frames:
+        check_disjoint(split)  # held-out frames were never trained on nor used for selection
     cap = load_capture(
         capture, cfg.section("telemetry"), cfg.world_scale, float(lab.meta.get("lag_ms", 0.0))
     )

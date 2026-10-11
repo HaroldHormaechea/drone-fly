@@ -167,13 +167,18 @@ def _cmd_train_gates(args: argparse.Namespace) -> int:
         lr=args.lr,
         holdout_frac=args.holdout_frac,
         holdout=args.holdout,
+        val_frac=args.val_frac,
+        guard_s=args.guard_s,
+        select=args.select,
+        patience=None if args.patience <= 0 else args.patience,
         device=args.device,
     )
-    val = meta["final_val_loss"]
+    val = meta["chosen_val_loss"]
     print(f"weights: {meta['weights']}")
     print(f"training log: {meta['training_log']}")
     print(
-        f"final train loss {meta['final_train_loss']:.4f}, held-out loss "
+        f"kept epoch {meta['chosen_epoch']} of {meta['epochs_run']} ({meta['select']}): train loss "
+        f"{meta['chosen_train_loss']:.4f}, validation loss "
         + ("-" if val is None else f"{val:.4f}")
     )
     return EXIT_OK
@@ -320,6 +325,16 @@ def build_parser() -> argparse.ArgumentParser:
     split = p_train.add_mutually_exclusive_group()
     split.add_argument("--holdout-frac", type=float, default=0.2, help="last fraction held out")
     split.add_argument("--holdout", help="held-out window t0:t1 (s from the first frame)")
+    p_train.add_argument(
+        "--val-frac", type=float, default=0.1, help="validation slice before the held-out one"
+    )
+    p_train.add_argument("--guard-s", type=float, default=2.0, help="gap between time slices")
+    p_train.add_argument(
+        "--select", choices=("best-val", "last"), default="best-val", help="epoch to keep"
+    )
+    p_train.add_argument(
+        "--patience", type=int, default=10, help="early-stop patience in epochs (0 = off)"
+    )
     p_train.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     p_train.set_defaults(func=_cmd_train_gates)
 

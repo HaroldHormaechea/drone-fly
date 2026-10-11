@@ -194,6 +194,29 @@ according to a coarse z-buffer. The fit is robust (RANSAC, then Huber). depth-fi
 reconstructed 40-ray scan against the contract `raycast()` on the XML obstacles at training scale.
 Arches are gates, not raycast obstacles, so the ray truth ignores their legs.
 
+## Training splits and model selection
+
+`train-gates` cuts each capture's in-flight time into three disjoint slices, all recorded in the
+weights metadata (`splits`):
+
+| Slice | Default | Used for |
+|---|---|---|
+| held out | the last 20 % (or `--holdout t0:t1`) | `eval --capture` only; never loaded for training |
+| validation | the 10 % immediately before the held-out slice | choosing the epoch to keep |
+| train | the rest | gradient steps |
+
+A 2 s guard gap separates neighbouring slices, to limit leakage between consecutive frames.
+
+By default the epoch with the lowest validation loss is kept, with early stopping after 10 epochs
+without improvement. `--select last` keeps the final epoch instead.
+
+This is a plan amendment made during UC-64. The first run kept only the last epoch, and on the
+single capture the held-out loss rose from epoch ~7 (about 3.3) to about 6 by epoch 20, while the
+train loss kept falling: the model was overfitting. Choosing the epoch on the held-out frames
+would have contaminated the evaluation, so model selection got its own validation slice.
+`eval --capture` checks that the held-out range is disjoint from the train and validation ranges
+before scoring.
+
 ## Offline evaluation and its caveats
 
 `drone-fly harness eval --capture … --labels …` scores the learned detector only on the held-out

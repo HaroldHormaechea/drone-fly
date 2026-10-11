@@ -355,6 +355,13 @@ Prerequisites:
 - **Untouched.** training/, gpu_prototype/, docs/INFERENCE_CONTRACT.md, training configs, PROJECT_BRIEF.md (stale `stack.frameworks` ignored).
 - **Never committed.** Game data: track XMLs, props, frames.
 
+## Amendments during implementation (orchestrator)
+
+- **2026-10-11 — training split / model selection (§6 Training, §8).** The first train-gates run overfit the single capture (train loss 0.40 → 0.18 while held-out loss rose from 3.3 at epoch 7 to ~4.9) and saved only the last epoch. Amendment: `train-gates` uses three disjoint time slices per capture — eval/held-out = last 20 % of in-flight time (unchanged; used only by `eval --capture`), validation = the 10 % immediately before it, train = the rest — with a ~2 s guard gap between slices. It keeps the best-**validation** epoch by default (`--select last` opts out), early-stops on validation (patience ~10, max 60 epochs), and records all slice ranges and the chosen epoch in the weights metadata and training_log.json. `eval --capture` asserts its frames are disjoint from train and validation. Rationale: model selection must not use the eval frames.
+- **2026-10-11 — Infinity Loop crossings (§3).** Telemetry shows all centre-arch crossings run the same way (figure-eight), so both arch-8 passages get the same yaw on this race. Per-passage yaw from travel direction remains the contract; the 180°-apart case is covered by the synthetic fixture.
+
+- **2026-10-11 — user decision: PoC scope for AC6.** UC-64 is a proof of concept for the end-to-end chain (telemetry → senses → policy → output mapping → pad into Liftoff). Memorising Infinity Loop is acceptable; more tracks will be captured later. AC6 numbers are still reported, but a miss on 80 % / 15 % does not block — provisional thresholds are pre-accepted by the user and recorded in ADR 0003.
+
 ## Challenger verdict
 
 **Approve** (round 2). Every AC (1–15) maps to a section; every UC pitfall is acknowledged in Risks; scope creep minimal (`latency-report` and session-mode depth metrics tied to AC9/AC12); nothing under training/, gpu_prototype/ or docs/INFERENCE_CONTRACT.md changes; no new dependencies. Non-blocking notes: (i) fail-safe neutral evidence must be written after `_failsafe` (see §12); (ii) a5 needs wall clearance because the runner hovers during acquire; (iii) b6 may trip during depth warm-up — expected stop `perception_stale` either way.

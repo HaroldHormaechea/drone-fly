@@ -1,7 +1,8 @@
 """Train the learned gate estimator's keypoint network on auto-labelled captures.
 
 ``drone-fly harness train-gates --labels <dir> [<dir> ...] [--out ...] [--preset ...]
-[--epochs N] [--backbone resnet18-hf|tiny-cnn] [--holdout-frac 0.2 | --holdout t0:t1]``
+[--epochs N] [--backbone resnet18-hf|tiny-cnn] [--holdout-frac 0.2 | --holdout t0:t1]
+[--val-frac 0.1] [--guard-s 2] [--select best-val|last] [--patience 10]``
 
 * Inputs: one or more label folders written by ``drone-fly harness label`` (``labels.jsonl`` +
   ``labels_meta.json``, which names the capture). Their gate-type hash must match the configured
@@ -10,12 +11,24 @@
   (:func:`~drone_fly.harness.liftoff.gate_net.prepare_input` building blocks), then cached in
   memory. Augmentation: brightness / contrast / saturation jitter, blur, and horizontal flips
   that swap the gate type's ``flip_pairs``.
-* **Time split**: by default the last ``holdout_frac`` (20 %) of each capture's in-flight time is
-  held out (never trained on); ``--holdout t0:t1`` holds out that window instead (seconds from
-  the capture's first labelled frame). The split is stored in the weights metadata so
-  ``drone-fly harness eval --capture`` scores only held-out frames. With one capture, held-out
-  laps revisit the same viewpoints: the split is optimistic.
-* AdamW + cosine schedule, mixed precision on CUDA; ``training_log.json`` beside the weights.
+* **Three disjoint time slices** per capture (in-flight time; :func:`split_capture`):
+
+  - *held out* (evaluation only): the last ``holdout_frac`` (20 %), or ``--holdout t0:t1``
+    (seconds from the capture's first labelled frame). Never loaded for training or selection;
+    ``drone-fly harness eval --capture`` scores only these frames and checks the disjointness.
+  - *validation* (model selection): the ``val_frac`` (10 %) of in-flight time immediately before
+    the held-out slice.
+  - *train*: the rest.
+
+  A ``guard_s`` (2 s) gap separates neighbouring slices against temporal leakage. All ranges are
+  stored in the weights metadata (``splits``). With one capture, held-out laps revisit the same
+  viewpoints: the evaluation is optimistic.
+* AdamW + cosine schedule, mixed precision on CUDA. By default (``--select best-val``) the epoch
+  with the lowest validation loss is kept, with early stopping after ``patience`` (10) epochs
+  without improvement; ``--select last`` keeps the final epoch. ``training_log.json`` (per-epoch
+  train and validation losses, chosen epoch) is written beside the weights.
+  (Plan amendment during UC-64: the first run overfit the single capture, so model selection got
+  its own validation slice rather than reusing the held-out evaluation frames.)
 * ``resnet18-hf`` downloads ``microsoft/resnet-18`` once; if that fails the error names the model
   id and the ``tiny-cnn`` fallback.
 
@@ -85,33 +98,79 @@ def in_flight_clock(stamps: np.ndarray, gap_s: float = IN_FLIGHT_GAP_S) -> np.nd
     return np.cumsum(dt)
 
 
-def holdout_window(
-    rows: list[dict[str, Any]], frac: float = 0.2, window: tuple[float, float] | None = None
-) -> dict[str, Any]:
-    """The held-out stamp range of one capture (absolute stamps, inclusive)."""
-    stamps = np.sort(np.array([r["stamp"] for r in rows], np.float64))
-    if len(stamps) == 0:
+def _ranges(stamps: np.ndarray) -> list[list[float]]:
+    """Contiguous (in sorted order) stamp runs -> ``[[start, end], ...]``."""
+    return [[float(stamps[0]), float(stamps[-1])]] if len(stamps) else []
+
+
+def split_capture(
+    rows: list[dict[str, Any]],
+    holdout_frac: float = 0.2,
+    val_frac: float = 0.1,
+    guard_s: float = 2.0,
+    window: tuple[float, float] | None = None,
+) -> tuple[list[str], dict[str, Any]]:
+    """Assign each row to ``train`` / ``val`` / ``holdout`` / ``guard`` (see the module docstring).
+
+    Returns the per-row slice names (input order) and the split record: stamp ranges per slice
+    (absolute, inclusive; ``train`` may be two runs around a ``--holdout`` window) and the
+    parameters.
+    """
+    if not rows:
         raise HarnessConfigError("a label set has no frames")
+    if not 0.0 < holdout_frac < 1.0 or not 0.0 <= val_frac < 1.0 or guard_s < 0:
+        raise HarnessConfigError("holdout_frac in (0, 1), val_frac in [0, 1), guard_s >= 0")
+    stamps = np.array([r["stamp"] for r in rows], np.float64)
+    order = np.argsort(stamps, kind="stable")
+    st = stamps[order]
+    clock = in_flight_clock(st)
+    total = float(clock[-1])
     if window is not None:
-        t0, t1 = window
-        return {
-            "mode": "window",
-            "t_start": float(stamps[0] + t0),
-            "t_end": float(stamps[0] + t1),
-            "window_s": [t0, t1],
-        }
-    if not 0.0 < frac < 1.0:
-        raise HarnessConfigError(f"--holdout-frac must be in (0, 1), got {frac}")
-    clock = in_flight_clock(stamps)
-    split = int(np.searchsorted(clock, (1.0 - frac) * clock[-1]))
-    split = min(max(split, 1), len(stamps) - 1)
-    return {
-        "mode": "last_fraction",
-        "frac": frac,
-        "t_start": float(stamps[split]),
-        "t_end": float(stamps[-1]),
-        "in_flight_s": float(clock[-1]),
+        hold = (st >= st[0] + window[0]) & (st <= st[0] + window[1])
+        if not hold.any():
+            raise HarnessConfigError(f"--holdout {window} selects no frame")
+        h0, h1 = float(clock[hold].min()), float(clock[hold].max())
+        hold_rec = {"t_start": float(st[0] + window[0]), "t_end": float(st[0] + window[1])}
+    else:
+        h0, h1 = (1.0 - holdout_frac) * total, total
+        hold = clock >= h0
+        hold_rec = {"t_start": float(st[hold].min()), "t_end": float(st[-1])}
+    v1 = h0 - guard_s
+    v0 = h0 - val_frac * total
+    val = (clock >= v0) & (clock <= v1) & ~hold if val_frac > 0 else np.zeros(len(st), bool)
+    train = ((clock < v0 - guard_s) | (clock > h1 + guard_s)) & ~hold & ~val
+    names_sorted = np.where(
+        hold, "holdout", np.where(val, "val", np.where(train, "train", "guard"))
+    )
+    names = np.empty(len(rows), dtype=object)
+    names[order] = names_sorted
+    before = st[train & (clock < h0)]
+    after = st[train & (clock > h1)]
+    record = {
+        "mode": "window" if window is not None else "last_fraction",
+        "holdout_frac": None if window is not None else holdout_frac,
+        "holdout_window_s": None if window is None else list(window),
+        "val_frac": val_frac,
+        "guard_s": guard_s,
+        "in_flight_s": total,
+        "holdout": hold_rec,
+        "val": _ranges(st[val]),
+        "train": _ranges(before) + _ranges(after),
+        "counts": {k: int(np.sum(names_sorted == k)) for k in ("train", "val", "holdout", "guard")},
     }
+    check_disjoint(record)
+    return [str(n) for n in names], record
+
+
+def check_disjoint(split: dict[str, Any]) -> None:
+    """Raise unless the held-out range overlaps no train / validation range."""
+    h0, h1 = split["holdout"]["t_start"], split["holdout"]["t_end"]
+    for name in ("train", "val"):
+        for a, b in split.get(name) or []:
+            if a <= h1 and b >= h0:
+                raise HarnessConfigError(
+                    f"held-out range [{h0}, {h1}] overlaps the {name} range [{a}, {b}]"
+                )
 
 
 def is_held_out(stamp: float, window: dict[str, Any]) -> bool:
@@ -198,6 +257,10 @@ def train_gates(
     lr: float = 1e-3,
     holdout_frac: float = 0.2,
     holdout: str | None = None,
+    val_frac: float = 0.1,
+    guard_s: float = 2.0,
+    select: str = "best-val",
+    patience: int | None = 10,
     input_width: int | None = None,
     device: str = "auto",
     seed: int = 0,
@@ -216,6 +279,10 @@ def train_gates(
     )
     from drone_fly.harness.offline.evaluate import load_image
 
+    if select not in ("best-val", "last"):
+        raise HarnessConfigError(f"--select must be best-val or last, got {select!r}")
+    if select == "best-val" and val_frac <= 0:
+        raise HarnessConfigError("--select best-val needs a validation slice (--val-frac > 0)")
     if backbone not in BACKBONES:
         raise HarnessConfigError(f"--backbone must be one of {BACKBONES}, got {backbone!r}")
     cfg = load_config(harness, config, preset=preset)
@@ -238,15 +305,16 @@ def train_gates(
             )
 
     # -- load + preprocess every frame once (masked, resized as at runtime) --
-    images, targets_raw, held, names = [], [], [], []
+    images, targets_raw, is_val = [], [], []
     geometry = None
     split_meta, captures = {}, []
     t_load = time.perf_counter()
     for s in sets:
-        win = holdout_window(s.rows, holdout_frac, window)
-        split_meta[s.name] = win
-        n_train = n_hold = 0
-        for row in s.rows:
+        slices, record = split_capture(s.rows, holdout_frac, val_frac, guard_s, window)
+        split_meta[s.name] = record
+        for row, sl in zip(s.rows, slices, strict=True):
+            if sl not in ("train", "val"):
+                continue  # held-out and guard frames are never loaded
             img = load_image(s.capture / row["file"])
             h, w = img.shape[:2]
             g = input_geometry(w, h, lw)
@@ -260,29 +328,24 @@ def train_gates(
             x = resize_images(x.unsqueeze(0), g[0], g[1])[0].round().clamp(0, 255).to(torch.uint8)
             images.append(x.cpu())
             targets_raw.append(_train_gates(row, table, g[3]))
-            ho = is_held_out(row["stamp"], win)
-            held.append(ho)
-            names.append(s.name)
-            n_hold += ho
-            n_train += not ho
+            is_val.append(sl == "val")
         captures.append(
             {
                 "name": s.name,
                 "capture": str(s.capture),
                 "labels_dir": str(s.labels_dir),
-                "n_train": n_train,
-                "n_holdout": n_hold,
+                **{f"n_{k}": v for k, v in record["counts"].items()},
             }
         )
     assert geometry is not None
     in_w, in_h, padded, _ = geometry
     out_h, out_w = padded // STRIDE, in_w // STRIDE
-    held_arr = np.array(held)
-    train_idx, val_idx = np.flatnonzero(~held_arr), np.flatnonzero(held_arr)
+    val_arr = np.array(is_val)
+    train_idx, val_idx = np.flatnonzero(~val_arr), np.flatnonzero(val_arr)
     if len(train_idx) == 0:
-        raise HarnessConfigError("no training frames left after the hold-out split")
+        raise HarnessConfigError("no training frames left after the time split")
     log.info(
-        "loaded %d frames (%d train / %d held out) in %.0fs at %dx%d",
+        "loaded %d frames (%d train / %d validation; held-out frames not loaded) in %.0fs at %dx%d",
         len(images),
         len(train_idx),
         len(val_idx),
@@ -346,6 +409,8 @@ def train_gates(
         return total / max(n, 1)
 
     history = []
+    best: dict[str, Any] = {"epoch": None, "val_loss": math.inf, "state": None}
+    stopped_early = False
     net.train()
     t_train = time.perf_counter()
     for epoch in range(1, epochs + 1):
@@ -375,6 +440,13 @@ def train_gates(
             "elapsed_s": time.perf_counter() - t_train,
         }
         history.append(entry)
+        val_loss = entry["val_loss"]
+        if select == "best-val" and val_loss is not None and val_loss < best["val_loss"]:
+            best = {
+                "epoch": epoch,
+                "val_loss": val_loss,
+                "state": {k: v.detach().clone().cpu() for k, v in net.state_dict().items()},
+            }
         log.info(
             "epoch %d/%d train %.4f val %s (%.0fs)",
             epoch,
@@ -383,7 +455,21 @@ def train_gates(
             "-" if entry["val_loss"] is None else f"{entry['val_loss']:.4f}",
             entry["elapsed_s"],
         )
+        if (
+            select == "best-val"
+            and patience is not None
+            and best["epoch"] is not None
+            and epoch - best["epoch"] >= patience
+        ):
+            stopped_early = True
+            log.info("early stop: no validation improvement for %d epochs", patience)
+            break
 
+    chosen_epoch = history[-1]["epoch"] if history else 0
+    if select == "best-val" and best["state"] is not None:
+        net.load_state_dict(best["state"])
+        chosen_epoch = best["epoch"]
+    chosen = next((h for h in history if h["epoch"] == chosen_epoch), None)
     root = find_repo_root()
     out_path = (
         Path(out)
@@ -409,10 +495,18 @@ def train_gates(
         "fpn_channels": 96,
         "input_width": in_w,
         "stride": STRIDE,
-        "holdout": split_meta,
-        "holdout_frac": None if window is not None else holdout_frac,
+        # held-out (evaluation) stamp range per capture, as read by `eval --capture`
+        "holdout": {name: rec["holdout"] for name, rec in split_meta.items()},
+        "splits": split_meta,
         "captures": captures,
         "epochs": epochs,
+        "epochs_run": len(history),
+        "select": select,
+        "patience": patience,
+        "stopped_early": stopped_early,
+        "chosen_epoch": chosen_epoch,
+        "chosen_train_loss": None if chosen is None else chosen["train"]["total"],
+        "chosen_val_loss": None if chosen is None else chosen["val_loss"],
         "batch_size": batch_size,
         "lr": lr,
         "preset": preset,
@@ -426,7 +520,10 @@ def train_gates(
     }
     torch.save({"state_dict": state, "meta": meta}, out_path)
     log_path = out_path.parent / "training_log.json"
-    log_path.write_text(json.dumps({"meta": meta, "history": history}, indent=2), encoding="utf-8")
+    log_path.write_text(
+        json.dumps({"meta": meta, "chosen_epoch": chosen_epoch, "history": history}, indent=2),
+        encoding="utf-8",
+    )
     meta["weights"] = str(out_path)
     meta["training_log"] = str(log_path)
     return meta
