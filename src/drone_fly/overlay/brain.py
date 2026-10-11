@@ -352,17 +352,21 @@ class BrainRenderer:
         self.outline = None
         if fixed and asset.outline_polygon is not None and len(asset.outline_polygon) > 1:
             self.outline = self.to_panel(asset.outline_polygon)
-        self.taps = None
+        self._xy = xy
+        self.taps: np.ndarray | None = None
         if tap_index is not None:
-            ti = np.asarray(tap_index, np.int64).reshape(-1)
-            ti = ti[(ti >= 0) & (ti < len(pts))]
-            ti = ti[valid[ti]]
-            self.taps = xy[ti]
+            self.set_taps(tap_index)
         self.box_rects = self._layout_boxes()
         self._lo: np.ndarray | None = None
         self._hi: np.ndarray | None = None
         self._peak = 0.0
         self._last_t: float | None = None
+
+    def set_taps(self, tap_index: Any) -> None:
+        """Panel pixels of the readout's tap neurons (in-map ones only), for tap outlining."""
+        ti = np.asarray(tap_index, np.int64).reshape(-1)
+        ti = ti[(ti >= 0) & (ti < len(self.valid))]
+        self.taps = self._xy[ti[self.valid[ti]]]
 
     # -- geometry --
 

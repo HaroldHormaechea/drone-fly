@@ -17,6 +17,9 @@
     drone-fly harness pad-check [--preset] [--config] [--magnitude] [--pulse-s] [--min-alt]
                           [--max-alt] [--out]
     drone-fly harness latency-report <run dir> [--recompute]
+    drone-fly harness overlay [--port N] [--monitor M] [--layout default|mask_confined]
+                          [--replay <run dir>] [--fps F] [--k1-path] [--preset] [--config]
+                          [--harness]
 
 Exit codes: 0 ok, 2 config/usage error, 3 missing optional dependency, 4 perception coverage
 refusal, 5 fail-safe stop.
@@ -271,6 +274,22 @@ def _cmd_latency_report(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_overlay(args: argparse.Namespace) -> int:
+    from drone_fly.overlay.app import run_overlay
+
+    return run_overlay(
+        harness=args.harness,
+        preset=args.preset,
+        config=args.config,
+        port=args.port,
+        monitor=args.monitor,
+        layout=args.layout,
+        replay=args.replay,
+        fps=args.fps,
+        k1_path=args.k1_path,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="drone-fly", description="drone-fly tools")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
@@ -402,6 +421,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--recompute", action="store_true", help="recompute from ticks.jsonl (ignore the summary)"
     )
     p_lat.set_defaults(func=_cmd_latency_report)
+
+    p_ovl = hsub.add_parser(
+        "overlay",
+        help="live brain + debug overlay window over the game (needs `uv sync --extra overlay`)",
+    )
+    p_ovl.add_argument("--port", type=int, help="UDP port to listen on (default overlay.port)")
+    p_ovl.add_argument(
+        "--monitor", type=int, help="mss monitor index to cover (default camera.monitor; 0 = all)"
+    )
+    p_ovl.add_argument(
+        "--layout", choices=("default", "mask_confined"), help="panel layout (overlay.layout)"
+    )
+    p_ovl.add_argument("--replay", help="drive the overlay from a recorded harness run folder")
+    p_ovl.add_argument("--fps", type=float, help="redraw rate 1-20 (overlay.fps)")
+    p_ovl.add_argument("--k1-path", help="K1 connectome dir for the brain panel")
+    _common(p_ovl)
+    p_ovl.set_defaults(func=_cmd_overlay)
     return parser
 
 
