@@ -196,11 +196,22 @@ def _cmd_depth_fit(args: argparse.Namespace) -> int:
         preset=args.preset,
         harness=args.harness,
         every=args.every,
+        fit_range=_float_pair(args.fit_range, "--fit-range"),
         report_dir=args.report,
         lag_ms=args.lag_ms,
         device=args.device,
     )
     fit, rays = rep["fit"], rep["raycast"]
+    for v in fit["variants"]:
+        bins = ", ".join(
+            f"{k} {b['median_abs_rel_error']:.0%}" for k, b in v["bins"].items() if b.get("n")
+        )
+        rc = v["raycast"]
+        print(
+            f"variant {v['name']}: near score {v['near_score']:.1%} ({bins}); rays: median "
+            f"{rc['ray_error_m_median']:.2f} m, within 0.5 m {rc['ray_within_0_5m']:.0%}"
+        )
+    print(f"chosen: {fit['chosen']}")
     print(
         f"pairs {fit['pairs']} on {fit['frames']} frames: median |rel err| "
         f"{fit['before']['median_abs_rel_error']:.1%} -> "
@@ -211,6 +222,11 @@ def _cmd_depth_fit(args: argparse.Namespace) -> int:
         f"raycast: median ray error {rays['ray_error_m_median']:.3f} m (in-FOV "
         f"{rays['ray_error_m_median_in_fov']:.3f}), within 0.5 m {rays['ray_within_0_5m']:.1%} "
         f"(in-FOV {rays['ray_within_0_5m_in_fov']:.1%}), coverage {rays['coverage_mean']:.1%}"
+    )
+    ref = rays["all_clear_reference"]
+    print(
+        f"reference all-clear scan: within 0.5 m {ref['ray_within_0_5m']:.0%} (truth rays that "
+        f"hit something: {rays['truth_ray_hit_share']:.0%})"
     )
     for w in rep["props_warnings"]:
         print(f"warning: {w}")
@@ -350,6 +366,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_depth.add_argument("--props", help="props.json: cross-check item_table sizes")
     _common(p_depth)
     p_depth.add_argument("--every", type=int, default=5, help="use every Nth paired frame")
+    p_depth.add_argument(
+        "--fit-range", default="2:20", help="range (m) the calibration is chosen for, lo:hi"
+    )
     p_depth.add_argument("--report", help="report folder (default .../reports/depth-fit/)")
     p_depth.add_argument("--lag-ms", type=float, default=0.0, help="frame -> telemetry lag")
     p_depth.add_argument("--device", choices=("auto", "cpu", "cuda"), help="depth model device")
@@ -371,6 +390,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_lat.set_defaults(func=_cmd_latency_report)
     return parser
+
+
+def _float_pair(text: str, flag: str) -> tuple[float, float]:
+    try:
+        lo, hi = (float(v) for v in text.split(":"))
+    except ValueError as exc:
+        raise HarnessConfigError(f"{flag} must be lo:hi, got {text!r}") from exc
+    if hi <= lo:
+        raise HarnessConfigError(f"{flag} needs hi > lo, got {text!r}")
+    return lo, hi
 
 
 def _common(p: argparse.ArgumentParser) -> None:

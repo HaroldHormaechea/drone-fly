@@ -81,9 +81,17 @@ gate_types:
     tube_radius: 0.5
 
 depth:
-  calibration:              # FITTED by `drone-fly harness depth-fit` on the reference capture (see below)
-    scale: 1.0
-    shift: 0.0
+  # FITTED 2026-10-11 by `drone-fly harness depth-fit --every 5` on the reference capture (316 frames,
+  # 71,418 ground-truth pairs in 2-20 m from XML arches / barriers / flags; depth_fit_report.json).
+  # Variant inverse_near_bin_weighted (best near-range error): 1/z = scale * raw + shift. Median |rel err|
+  # per bin: 2-5 m 63 %, 5-10 m 19 %, 10-20 m 49 % (uncalibrated: 194 / 70 / 53 %). Raw depth beyond
+  # ~46 m reads as infinitely far. POOR FIT, PoC only: against the contract raycast on the same frames,
+  # median ray error 2.0 m and 23 % of rays within 0.5 m (an always-clear scan scores 88 %, since only
+  # 12 % of truth rays hit an obstacle), i.e. the depth net reports many false near obstacles here.
+  inverse: true
+  calibration:
+    scale: -0.00535155
+    shift: 0.247091
 
 offline:
   laps: null                # the race route gives the laps (requiredLaps 4)

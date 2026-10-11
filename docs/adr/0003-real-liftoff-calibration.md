@@ -194,6 +194,29 @@ according to a coarse z-buffer. The fit is robust (RANSAC, then Huber). depth-fi
 reconstructed 40-ray scan against the contract `raycast()` on the XML obstacles at training scale.
 Arches are gates, not raycast obstacles, so the ray truth ignores their legs.
 
+Far points dominate the pairs: 378k of 449k are 20–40 m away. The raycast, however, only reaches
+`RAY_RANGE × world_scale` = 16 m. depth-fit therefore fits several variants and keeps the one with
+the lowest mean per-bin error in 2–20 m. Result on the reference capture (316 frames):
+
+| Variant | 2-5 m | 5-10 m | 10-20 m | ray error (median) | rays within 0.5 m |
+|---|---:|---:|---:|---:|---:|
+| uncalibrated | 194 % | 70 % | 53 % | | |
+| affine, all pairs | 548 % | 250 % | 87 % | 0.00 m | 88 % |
+| affine, 2-20 m, bin-weighted | 98 % | 20 % | 39 % | 1.60 m | 25 % |
+| scale only, 2-20 m | 64 % | 34 % | 47 % | 1.35 m | 36 % |
+| **inverse, 2-20 m (chosen)** | **63 %** | **19 %** | **49 %** | 2.01 m | 23 % |
+
+The bin columns are the median absolute relative depth error per range bin.
+
+- The all-pairs affine fit has a 17 m shift. Every ray then reads beyond the 16 m range, so the fit
+  is effectively blind. Its 88 % equals an always-clear scan, because only 12 % of truth rays hit
+  an obstacle.
+- The near-range variants see obstacles but report many false ones.
+- Monocular depth is poor on this low-texture arena floor.
+
+The preset ships the chosen inverse fit, marked as PoC-quality. Better depth, or a learned
+free-space head, is a follow-up.
+
 ## Training splits and model selection
 
 `train-gates` cuts each capture's in-flight time into three disjoint slices, all recorded in the

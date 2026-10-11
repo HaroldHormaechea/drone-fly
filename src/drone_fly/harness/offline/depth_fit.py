@@ -9,10 +9,15 @@
    along ``cylinder`` axes (flags) offset by their radius toward the camera. Kept when in front,
    in the image, outside ``camera.masks`` and 2-40 m away; a coarse z-buffer (16 px cells) drops
    points well behind the nearest one in their cell.
-2. **Fit**: the depth model's raw patch median at each point vs. the true camera ``z`` (or
-   ``1 / z`` with ``depth.inverse``), robustly (RANSAC, then Huber IRLS):
-   ``z = scale * raw + shift``. Reported: pairs, median absolute relative error and RMSE before
-   (the configured calibration) and after, per range bin.
+2. **Fit**: the depth model's raw patch median at each point vs. the true camera ``z``, robustly
+   (RANSAC, then Huber IRLS). Far points vastly outnumber near ones, and the raycast only needs
+   near range (``RAY_RANGE x world_scale``), so several variants are fitted and the one with the
+   lowest mean per-bin error inside ``fit_range`` (default 2-20 m) is chosen
+   (:func:`fit_variants`): affine on all pairs (``z = scale * raw + shift``), affine and
+   scale-only restricted to ``fit_range`` with equal weight per range bin, and the inverse form
+   (``1 / z = scale * raw + shift``, i.e. ``depth.inverse: true``) on the same pairs. Reported:
+   pairs, every variant's median absolute relative error and RMSE per range bin, before (the
+   configured calibration) and after.
 3. **Raycast scoring**: the synchronous
    :class:`~drone_fly.harness.liftoff.depth.MonocularDepthFreeSpaceEstimator`, with the fitted
    calibration, against the contract ``raycast()`` on the XML obstacles at training scale: median
@@ -191,37 +196,117 @@ def patch_median(raw: np.ndarray, px: np.ndarray, half: int = 3) -> np.ndarray:
 
 
 def robust_affine_fit(
-    x: np.ndarray, y: np.ndarray, *, iters: int = 300, rel_tol: float = 0.15, seed: int = 0
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    weights: np.ndarray | None = None,
+    iters: int = 300,
+    rel_tol: float = 0.15,
+    seed: int = 0,
 ) -> tuple[float, float, int]:
-    """``y ~= a * x + b``: RANSAC (relative residual), then Huber IRLS -> ``(a, b, inliers)``."""
+    """``y ~= a * x + b``: RANSAC (relative residual), then Huber IRLS -> ``(a, b, inliers)``.
+
+    ``weights`` (per pair) scale both the RANSAC inlier score and the IRLS weights.
+    """
     x, y = np.asarray(x, np.float64), np.asarray(y, np.float64)
     if len(x) < 2:
         raise HarnessConfigError("depth-fit needs at least 2 ground-truth pairs")
+    base = np.ones(len(x)) if weights is None else np.asarray(weights, np.float64)
     rng = np.random.default_rng(seed)
-    best, best_n = (1.0, 0.0), -1
+    best, best_n = (1.0, 0.0), -1.0
+    p = base / base.sum()
     for _ in range(iters):
-        i, j = rng.choice(len(x), 2, replace=False)
+        i, j = rng.choice(len(x), 2, replace=False, p=p)
         if abs(x[i] - x[j]) < 1e-9:
             continue
         a = (y[i] - y[j]) / (x[i] - x[j])
         b = y[i] - a * x[i]
-        n = int(np.sum(np.abs(a * x + b - y) <= rel_tol * np.abs(y)))
+        n = float(np.sum(base * (np.abs(a * x + b - y) <= rel_tol * np.abs(y))))
         if n > best_n:
             best, best_n = (a, b), n
     a, b = best
     inl = np.abs(a * x + b - y) <= rel_tol * np.abs(y)
     if inl.sum() >= 2:
-        a, b = np.polyfit(x[inl], y[inl], 1)
+        a, b = np.polyfit(x[inl], y[inl], 1, w=np.sqrt(base[inl]))
     for _ in range(20):  # Huber IRLS on all pairs
         r = a * x + b - y
-        mad = float(np.median(np.abs(r - np.median(r)))) * 1.4826 + 1e-9
+        mad = float(np.median(np.abs(r - np.median(r)))) * 1.4826 + 1e-12
         delta = 1.345 * mad
-        wts = np.where(np.abs(r) <= delta, 1.0, delta / np.maximum(np.abs(r), 1e-12))
+        wts = base * np.where(np.abs(r) <= delta, 1.0, delta / np.maximum(np.abs(r), 1e-12))
         sw = np.sqrt(wts)
         A = np.stack([x * sw, sw], axis=1)
         a, b = np.linalg.lstsq(A, y * sw, rcond=None)[0]
     inl = np.abs(a * x + b - y) <= rel_tol * np.abs(y)
     return float(a), float(b), int(inl.sum())
+
+
+def _bin_weights(rng: np.ndarray, fit_range: tuple[float, float]) -> np.ndarray:
+    """Equal total weight per :data:`RANGE_BINS` bin inside ``fit_range`` (0 outside)."""
+    w = np.zeros(len(rng))
+    for lo, hi in RANGE_BINS:
+        lo, hi = max(lo, fit_range[0]), min(hi, fit_range[1])
+        sel = (rng >= lo) & (rng < hi)
+        if hi > lo and sel.any():
+            w[sel] = 1.0 / sel.sum()
+    return w
+
+
+def near_score(errors: dict[str, Any], fit_range: tuple[float, float]) -> float:
+    """Mean of the per-bin median relative errors over the bins overlapping ``fit_range``."""
+    vals = [
+        b["median_abs_rel_error"]
+        for (lo, hi), b in zip(RANGE_BINS, errors["bins"].values(), strict=True)
+        if lo < fit_range[1] and hi > fit_range[0] and b.get("n")
+    ]
+    return float(np.mean(vals)) if vals else float("inf")
+
+
+def fit_variants(
+    x: np.ndarray,
+    z: np.ndarray,
+    rng: np.ndarray,
+    fit_range: tuple[float, float] = (2.0, 20.0),
+    min_depth_m: float = 0.05,
+) -> list[dict[str, Any]]:
+    """Fit every calibration variant (see the module docstring), best near-range score first."""
+    from drone_fly.harness.liftoff.depth import DepthCalibration
+
+    w = _bin_weights(rng, fit_range)
+    near = w > 0
+    out = []
+
+    def add(name: str, a: float, b: float, inverse: bool) -> None:
+        cal = DepthCalibration(a, b, inverse, min_depth_m)
+        errs = depth_errors(cal.apply(x), z, rng)
+        out.append(
+            {
+                "name": name,
+                "scale": a,
+                "shift": b,
+                "inverse": inverse,
+                "near_score": near_score(errs, fit_range),
+                **errs,
+            }
+        )
+
+    a, b, _ = robust_affine_fit(x, z)
+    add("affine_all_pairs", a, b, False)
+    if near.sum() >= 2:
+        a, b, _ = robust_affine_fit(x[near], z[near], weights=w[near])
+        add("affine_near_bin_weighted", a, b, False)
+        ratio = z[near] / np.maximum(x[near], 1e-6)
+        order = np.argsort(ratio)
+        cw = np.cumsum(w[near][order])
+        add(
+            "scale_only_near_bin_weighted",
+            float(ratio[order][np.searchsorted(cw, cw[-1] / 2)]),
+            0.0,
+            False,
+        )
+        a, b, _ = robust_affine_fit(x[near], 1.0 / z[near], weights=w[near])
+        add("inverse_near_bin_weighted", a, b, True)
+    out.sort(key=lambda v: v["near_score"])
+    return out
 
 
 def depth_errors(pred: np.ndarray, z: np.ndarray, rng: np.ndarray) -> dict[str, Any]:
@@ -254,6 +339,7 @@ def run_depth_fit(
     preset: str | None = None,
     harness: str = "liftoff",
     every: int = 5,
+    fit_range: tuple[float, float] = (2.0, 20.0),
     report_dir: str | Path | None = None,
     lag_ms: float = 0.0,
     device: str | None = None,
@@ -325,22 +411,29 @@ def run_depth_fit(
     if not xs:
         raise HarnessConfigError("no ground-truth points were visible in the sampled frames")
     x, z, rng = np.concatenate(xs), np.concatenate(zs), np.concatenate(rngs)
-    y = 1.0 / z if inverse else z
-    a, b, n_inl = robust_affine_fit(x, y)
+    variants = fit_variants(x, z, rng, fit_range, before.min_depth_m)
+    chosen = variants[0]
+    a, b, inverse = chosen["scale"], chosen["shift"], chosen["inverse"]
     after = DepthCalibration(a, b, inverse, before.min_depth_m)
+    before_errs = depth_errors(before.apply(x), z, rng)
     fit = {
         "pairs": int(len(z)),
-        "inliers_15pct": n_inl,
+        "pairs_in_fit_range": int(np.sum((rng >= fit_range[0]) & (rng < fit_range[1]))),
+        "fit_range_m": list(fit_range),
         "frames": len(frames),
+        "chosen": chosen["name"],
         "scale": a,
         "shift": b,
         "inverse": inverse,
         "before": {
             "scale": before.scale,
             "shift": before.shift,
-            **depth_errors(before.apply(x), z, rng),
+            "inverse": before.inverse,
+            "near_score": near_score(before_errs, fit_range),
+            **before_errs,
         },
-        "after": depth_errors(after.apply(x), z, rng),
+        "after": {k: chosen[k] for k in ("near_score", "median_abs_rel_error", "rmse_m", "bins")},
+        "variants": variants,
     }
 
     # -- pass 2: synchronous depth estimator with the fitted calibration vs contract raycast --
@@ -371,34 +464,57 @@ def run_depth_fit(
 
     states_t = [scaled(s) for s in cap.states]
     truth_idx = ground_truth_targets(states_t, course)
-    err_all, err_fov, cov = [], [], []
-    for f, raw in zip(frames, raws, strict=True):
+    r_range = float(contract.RAY_RANGE)
+    truths = []
+    for f in frames:
         st = states_t[f.sample_index]
         target = course.gates[truth_idx[f.sample_index]].center
-        est.process_raw(
-            raw.astype(np.float32), Frame(np.zeros((1, 1, 3), np.uint8), f.stamp, f.index), st
+        truths.append(
+            np.asarray(contract.raycast(st.as_state_dict(), obstacles, target), np.float64)
         )
-        fs = est.update(None, st, target, f.stamp)
-        truth = np.asarray(contract.raycast(st.as_state_dict(), obstacles, target), np.float64)
-        e = np.abs(np.asarray(fs.raycast, np.float64) - truth) * float(contract.RAY_RANGE)
-        err_all.append(e)
-        if fs.in_fov_mask is not None and fs.in_fov_mask.any():
-            err_fov.append(e[fs.in_fov_mask])
-        cov.append(float(np.mean(fs.in_fov_mask)) if fs.in_fov_mask is not None else 0.0)
+
+    def score_rays(cal: DepthCalibration) -> dict[str, Any]:
+        est.calibration = cal
+        est.reset()
+        err_all, err_fov, cov = [], [], []
+        for f, raw, truth in zip(frames, raws, truths, strict=True):
+            st = states_t[f.sample_index]
+            target = course.gates[truth_idx[f.sample_index]].center
+            blank = Frame(np.zeros((1, 1, 3), np.uint8), f.stamp, f.index)
+            est.process_raw(raw.astype(np.float32), blank, st)
+            fs = est.update(None, st, target, f.stamp)
+            e = np.abs(np.asarray(fs.raycast, np.float64) - truth) * r_range
+            err_all.append(e)
+            if fs.in_fov_mask is not None and fs.in_fov_mask.any():
+                err_fov.append(e[fs.in_fov_mask])
+            cov.append(float(np.mean(fs.in_fov_mask)) if fs.in_fov_mask is not None else 0.0)
+        return {
+            **_ray_metre_stats(err_all, ""),
+            **_ray_metre_stats(err_fov, "_in_fov"),
+            "coverage_mean": float(np.mean(cov)) if cov else 0.0,
+        }
+
+    for v in variants:
+        v["raycast"] = score_rays(
+            DepthCalibration(v["scale"], v["shift"], v["inverse"], before.min_depth_m)
+        )
+    # Reference: a scan that always reads "clear" (shows how much of the truth is open space).
+    all_clear = _ray_metre_stats([np.abs(1.0 - t) * r_range for t in truths], "")
     rays = {
-        **_ray_metre_stats(err_all, ""),
-        **_ray_metre_stats(err_fov, "_in_fov"),
-        "coverage_mean": float(np.mean(cov)) if cov else 0.0,
+        **chosen["raycast"],
+        "all_clear_reference": all_clear,
+        "truth_ray_hit_share": float(np.mean(np.concatenate(truths) < 1.0)),
         "ray_range_m_training": float(contract.RAY_RANGE),
         "world_scale": cfg.world_scale,
         "frames": len(frames),
         "note": "arches are gates, not raycast obstacles: ray truth ignores the arch legs",
     }
     snippet = (
-        "depth:\n  calibration:\n"
-        f"    scale: {a:.4f}\n    shift: {b:.4f}\n"
-        f"    # fitted by depth-fit on {cap.name}: {len(z)} pairs, median |rel err| "
-        f"{fit['after']['median_abs_rel_error']:.1%}"
+        f"depth:\n  inverse: {'true' if inverse else 'false'}\n  calibration:\n"
+        f"    scale: {a:.6g}\n    shift: {b:.6g}\n"
+        f"    # depth-fit {chosen['name']} on {cap.name}: {fit['pairs_in_fit_range']} pairs in "
+        f"{fit_range[0]:g}-{fit_range[1]:g} m, mean per-bin median |rel err| "
+        f"{chosen['near_score']:.1%}"
     )
     report = {
         "capture": str(Path(capture).resolve()),
