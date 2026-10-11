@@ -1,0 +1,6 @@
+ckpt=/workspace/drone-fly/training/run-a/model.pt  EPS=512  (random courses, deterministic)
+  completion: 302/512 (59%)   laps required: 1.0 avg
+Traceback (most recent call last):
+  File "/workspace/drone-fly/gpu_prototype/verify_proc.py", line 70, in <module>
+    float(min_clear.mean())
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB
