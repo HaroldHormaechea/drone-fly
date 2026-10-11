@@ -86,6 +86,16 @@ class ContractPolicyRunner(PolicyRunner):
             str(self.checkpoint), extra_dim=self._extra_dim, device=self.contract.device
         )
 
+    def warm_up(self, passes: int = 3) -> None:
+        """Run a few dummy forward passes (both act paths) so CUDA/cuBLAS initialisation happens
+        before the first live tick instead of inside it (the first call can take ~0.3 s, enough to
+        trip the stale-telemetry fail-safe)."""
+        obs = np.zeros(12, np.float32)
+        extra = np.zeros(self._extra_dim, np.float32)
+        for _ in range(passes):
+            self.act(obs, extra)
+            self.act_with_brain(obs, extra)
+
     def act(self, obs: np.ndarray, extra: np.ndarray) -> np.ndarray:
         if self._policy is None:
             raise RuntimeError("policy not loaded; call load() first")

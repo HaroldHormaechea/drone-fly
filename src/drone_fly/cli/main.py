@@ -31,6 +31,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -93,7 +94,24 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
     if session.run_dir is not None:
         print(f"recorded: {session.run_dir}")
+    _hold_overlay_until_ctrl_c(session.overlay_process)
     return EXIT_FAILSAFE if r.is_failsafe_stop else EXIT_OK
+
+
+def _hold_overlay_until_ctrl_c(process: object) -> None:
+    """Keep a run-launched overlay showing the result until Ctrl+C, then close it."""
+    from drone_fly.harness.session import stop_overlay
+
+    if process is None or process.poll() is not None:  # type: ignore[attr-defined]
+        return
+    print("overlay still open with the result; press Ctrl+C to close it and exit")
+    try:
+        while process.poll() is None:  # type: ignore[attr-defined]
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_overlay(process)
 
 
 def _cmd_eval(args: argparse.Namespace) -> int:
@@ -290,6 +308,7 @@ def _cmd_overlay(args: argparse.Namespace) -> int:
         fps=args.fps,
         k1_path=args.k1_path,
         recordable=True if args.recordable else None,
+        ready_file=args.ready_file,
     )
 
 
@@ -456,6 +475,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="let screen recorders (OBS, Game Bar) capture the overlay; run the harness with "
         "--recordable too so it masks the panels (overlay.recordable)",
+    )
+    p_ovl.add_argument(
+        "--ready-file",
+        help=argparse.SUPPRESS,  # created once the window is up (used by `harness run --overlay`)
     )
     _common(p_ovl)
     p_ovl.set_defaults(func=_cmd_overlay)

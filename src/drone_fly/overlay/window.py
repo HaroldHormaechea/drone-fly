@@ -96,6 +96,7 @@ class OverlayOptions:
     brain_asset: Any = None
     brain_error: str | None = None
     recordable: bool = False  # overlay.recordable: visible to screen recorders, no in-game drawings
+    ready_file: str | None = None  # created once the window is up (`harness run` waits for it)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -204,6 +205,12 @@ class OverlayWindow(QtWidgets.QWidget):
                 log.exception("brain renderer setup failed")
                 self.opts.brain_error = f"brain renderer failed: {exc}"
         self.timer.start()
+        if self.opts.ready_file:
+            try:
+                with open(self.opts.ready_file, "w", encoding="utf-8") as fh:
+                    fh.write(str(os.getpid()))
+            except OSError:
+                log.warning("could not write the ready file %s", self.opts.ready_file)
 
     # -- per redraw --
 

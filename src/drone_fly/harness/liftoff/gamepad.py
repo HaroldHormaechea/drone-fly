@@ -18,7 +18,9 @@ Arming (``controls.arm_button`` / ``controls.disarm_button``, optional): Liftoff
 armed drone, and binds *Arm* and *Disarm* to pad buttons (momentary presses). ``arm_button`` is
 pulsed for ``arm_press_s`` on the first command after :meth:`arm`, i.e. once the game has focus;
 ``disarm_button`` is pulsed on the fail-safe (every stop). Without a ``disarm_button`` the arm
-button is treated as a toggle and pulsed again on the fail-safe if this run armed.
+button is treated as a toggle and pulsed again on the fail-safe if this run armed. For
+``arm_settle_s`` after the Arm press the sticks stay neutral with the throttle at minimum
+(Liftoff, like real flight controllers, refuses to arm with the throttle up).
 
 ``vgamepad`` (and with it the ViGEmBus driver) is imported only in :meth:`arm`; tests inject a
 ``pad_factory`` returning a mock pad (and a ``button_resolver``).
@@ -158,6 +160,7 @@ class VgamepadActionSink(ActionSink):
         arm_button: str | None = None,
         disarm_button: str | None = None,
         arm_press_s: float = 0.15,
+        arm_settle_s: float = 0.5,
         button_resolver: Callable[[str], Any] = default_button_resolver,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
@@ -184,6 +187,8 @@ class VgamepadActionSink(ActionSink):
         self.arm_button = arm_button
         self.disarm_button = disarm_button
         self.arm_press_s = arm_press_s
+        self.arm_settle_s = arm_settle_s
+        self._settle_until: float | None = None
         self.button_resolver = button_resolver
         self.clock = clock
         self.sleep = sleep
@@ -249,6 +254,9 @@ class VgamepadActionSink(ActionSink):
                     min_exclusive=True,
                 )
             ),
+            arm_settle_s=float(
+                require_number(cfg.get("arm_settle_s", 0.5), "controls.arm_settle_s", min_value=0.0)
+            ),
         )
 
     def sticks_for(self, command: ContractCommand) -> dict[str, float]:
@@ -291,7 +299,9 @@ class VgamepadActionSink(ActionSink):
             return
         if not self.armed:
             self._press(self.arm_button)
-            self._release_at = self.clock() + self.arm_press_s
+            now = self.clock()
+            self._release_at = now + self.arm_press_s
+            self._settle_until = now + max(self.arm_settle_s, self.arm_press_s)
             self.armed = True
         elif self._pressed is not None and self._release_at is not None:
             if self.clock() >= self._release_at:
@@ -309,9 +319,18 @@ class VgamepadActionSink(ActionSink):
         if self.pad is None:
             raise RuntimeError("gamepad sink not armed")
         self._arm_tick()
-        sticks = self.sticks_for(command)
+        sticks = self.neutral_sticks() if self._settling() else self.sticks_for(command)
         _pad_set(self.pad, sticks)
         return {"sticks": sticks}
+
+    def _settling(self) -> bool:
+        """True while the drone is being armed (throttle held at minimum)."""
+        if self._settle_until is None:
+            return False
+        if self.clock() < self._settle_until:
+            return True
+        self._settle_until = None
+        return False
 
     def send_sticks(self, channels: dict[str, float]) -> dict[str, float]:
         """Set raw stick positions per channel (``throttle``/``roll``/``pitch``/``yaw``, [-1, 1]).
@@ -325,6 +344,8 @@ class VgamepadActionSink(ActionSink):
         if unknown:
             raise HarnessConfigError(f"unknown stick channels {sorted(unknown)}")
         self._arm_tick()
+        if self._settling():
+            channels = {}
         values = {"throttle": -1.0, "roll": 0.0, "pitch": 0.0, "yaw": 0.0, **channels}
         sticks = {self.axis_map[ch]: float(np.clip(v, -1.0, 1.0)) for ch, v in values.items()}
         _pad_set(self.pad, sticks)

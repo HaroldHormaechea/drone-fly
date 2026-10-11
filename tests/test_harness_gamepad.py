@@ -340,3 +340,26 @@ def test_missing_vgamepad_raises_dependency_error(monkeypatch):
     )
     with pytest.raises(HarnessDependencyError):
         sink.arm()
+
+
+def test_throttle_is_held_at_minimum_while_arming():
+    sink, pad, clock = _arm_sink()
+    sink.arm()
+    full = _cmd(collective=1.0, rates=(1.0, -1.0, 0.5))
+    out = sink.send(full)  # Arm pressed now: settle window starts
+    assert out["sticks"] == sink.neutral_sticks() and pad.sticks["left_y"] == -1.0
+    clock.t += 0.3
+    assert sink.send(full)["sticks"]["left_y"] == -1.0  # still settling (arm_settle_s 0.5)
+    assert sink.send_sticks({"throttle": 0.5})["left_y"] == -1.0
+    clock.t += 0.3
+    assert sink.send(full)["sticks"]["left_y"] > -1.0  # settled: the policy flies
+
+
+def test_arm_settle_is_validated_and_defaults():
+    from drone_fly.harness.config import load_config
+
+    ctx = SimpleNamespace(contract=SimpleNamespace(HOVER_THR=0.4))
+    cfg = load_config("liftoff").section("controls")
+    assert cfg["arm_settle_s"] == 0.5
+    with pytest.raises(HarnessConfigError, match="arm_settle_s"):
+        VgamepadActionSink.from_config({**cfg, "arm_settle_s": -1}, ctx)

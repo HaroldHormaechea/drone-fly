@@ -101,10 +101,11 @@ after changing rates or bindings.
 
 ## 3. The overlay
 
-`--overlay` on `harness run` (stages 4 and 5) **starts the overlay window for you**, with no
-console window, just before the focus wait, and it outlives the run so the stop reason stays
-visible. If an overlay is already running (started by hand), the run reuses it. Use
-`--no-overlay-launch` to only publish.
+`--overlay` on `harness run` (stages 4 and 5) **starts the overlay window for you** (no console
+window) and waits until the window is up before sending any input. When the run stops, the
+terminal prints the result and keeps the overlay open showing the stop reason; **press Ctrl+C to
+close the overlay and exit**. If an overlay is already running (started by hand), the run reuses it
+and leaves it open. `--no-overlay-launch` only publishes.
 
 To start it by hand instead (e.g. to see logs), in its own terminal before the run:
 ```
@@ -113,9 +114,7 @@ To start it by hand instead (e.g. to see logs), in its own terminal before the r
 - It shows "waiting for harness" until a run starts publishing.
 - It is click-through and never takes focus. If it ever causes a `focus_lost` stop, that's a bug;
   note it.
-- A hand-started overlay stops with Ctrl+C in its terminal. An auto-started one keeps running
-  after the run; close it from Task Manager (`python.exe … harness overlay`) or leave it for the
-  next run, which reuses it.
+- A hand-started overlay stops with Ctrl+C in its own terminal.
 - If the brain panel looks sparse, set `overlay: {brain_scale: frame_peak}` in your `live*.yaml`
   (ADR 0004, quantisation).
 

@@ -385,3 +385,85 @@ def test_run_harness_does_not_launch_a_second_overlay(
         overlay_launch=True,
     )
     assert s.result.reason == STOP_COMPLETED and cmds == []
+
+
+# ----------------------------------------------------------------------------- overlay lifecycle
+
+
+class _Proc:
+    def __init__(self, exits_after: int | None = None):
+        self.polls = 0
+        self.exits_after = exits_after
+        self.terminated = self.killed = False
+
+    def poll(self):
+        self.polls += 1
+        if self.terminated or (self.exits_after is not None and self.polls > self.exits_after):
+            return 0
+        return None
+
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        self.killed = True
+
+
+def test_wait_for_overlay_ready_sees_the_ready_file(tmp_path):
+    ready = tmp_path / "ready"
+    ready.write_text("1")
+    assert session_mod.wait_for_overlay_ready(ready, _Proc(), timeout_s=1.0) is True
+
+
+def test_wait_for_overlay_ready_gives_up_when_the_overlay_exits(tmp_path):
+    proc = _Proc(exits_after=2)
+    assert session_mod.wait_for_overlay_ready(tmp_path / "r", proc, 5.0, poll_s=0.001) is False
+
+
+def test_wait_for_overlay_ready_times_out(tmp_path):
+    assert session_mod.wait_for_overlay_ready(tmp_path / "r", None, 0.05, poll_s=0.01) is False
+
+
+def test_on_launched_runs_before_the_first_tick():
+    order = []
+
+    class Runner:
+        def run(self, prepared):
+            order.append("run")
+
+    session_mod.start_overlay_and_run(
+        Runner(), lambda: order.append("launch") or "proc", lambda p: order.append(f"ready:{p}")
+    )
+    assert order == ["launch", "ready:proc", "run"]
+
+
+def test_stop_overlay_terminates_a_live_process_only():
+    live = _Proc()
+    session_mod.stop_overlay(live)
+    assert live.terminated
+    gone = _Proc(exits_after=0)
+    session_mod.stop_overlay(gone)
+    assert not gone.terminated
+    session_mod.stop_overlay(None)
+
+
+def test_overlay_command_passes_the_ready_file(tmp_path):
+    cmd = overlay_command("liftoff", 9100, ready_file=tmp_path / "r")
+    assert cmd[-2:] == ["--ready-file", str(tmp_path / "r")]
+
+
+def test_cli_holds_the_overlay_until_ctrl_c_then_closes_it(monkeypatch, capsys):
+    from drone_fly.cli import main as cli
+
+    proc = _Proc()
+
+    def sleep(_):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.time, "sleep", sleep)
+    cli._hold_overlay_until_ctrl_c(proc)
+    assert proc.terminated and "Ctrl+C" in capsys.readouterr().out
+    cli._hold_overlay_until_ctrl_c(None)  # nothing launched: returns at once

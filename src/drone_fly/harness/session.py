@@ -18,6 +18,8 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +52,8 @@ class SessionResult:
     result: RunResult
     run_dir: Path | None
     config: HarnessConfig
+    #: the overlay process this run launched (still showing the stop reason), else None
+    overlay_process: Any = None
 
 
 def build_harness(config: HarnessConfig, ctx: BuildContext) -> Harness:
@@ -80,6 +84,7 @@ def overlay_command(
     config: str | os.PathLike[str] | dict[str, Any] | None = None,
     k1_path: str | os.PathLike[str] | None = None,
     recordable: bool = False,
+    ready_file: str | os.PathLike[str] | None = None,
 ) -> list[str]:
     """The ``drone-fly harness overlay`` command line matching this run's config.
 
@@ -96,6 +101,8 @@ def overlay_command(
         cmd += ["--k1-path", str(Path(k1_path).resolve())]
     if recordable:
         cmd += ["--recordable"]
+    if ready_file is not None:
+        cmd += ["--ready-file", str(ready_file)]
     return cmd
 
 
@@ -124,18 +131,57 @@ def overlay_port_in_use(port: int) -> bool:
     return False
 
 
-def start_overlay_and_run(runner: HarnessRunner, launcher: OverlayLauncher | None) -> RunResult:
+def wait_for_overlay_ready(
+    ready_file: Path, process: Any = None, timeout_s: float = 30.0, poll_s: float = 0.1
+) -> bool:
+    """Wait until the launched overlay reports its window is up (it creates ``ready_file``).
+
+    Returns False on timeout or when the overlay process exits first; the run then continues
+    without waiting further (the overlay is a debugging aid, never a blocker).
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if ready_file.exists():
+            return True
+        if process is not None and getattr(process, "poll", lambda: None)() is not None:
+            log.warning("the overlay exited before its window came up; continuing without it")
+            return False
+        time.sleep(poll_s)
+    log.warning("the overlay was not ready after %.0f s; continuing without waiting", timeout_s)
+    return False
+
+
+def start_overlay_and_run(
+    runner: HarnessRunner,
+    launcher: OverlayLauncher | None,
+    on_launched: Callable[[Any], None] | None = None,
+) -> RunResult:
     """Launch the overlay (if any), then run the prepared + armed runner.
 
-    The launch precedes ``runner.run``, so the runner's focus wait follows it; a failed launch is
-    logged and the run continues without the overlay window (the publisher keeps sending).
+    The launch precedes ``runner.run``, so the runner's focus wait follows it, and
+    ``on_launched(process)`` (e.g. waiting for the overlay window) runs before the first input. A
+    failed launch is logged and the run continues without the overlay window (the publisher keeps
+    sending).
     """
     if launcher is not None:
         try:
-            launcher()
+            process = launcher()
+            if on_launched is not None:
+                on_launched(process)
         except Exception:  # noqa: BLE001 - the overlay is a debugging aid, never a blocker
             log.exception("could not launch the overlay; continuing without it")
     return runner.run(prepared=True)
+
+
+def stop_overlay(process: Any, timeout_s: float = 5.0) -> None:
+    """Terminate an overlay this run launched (no-op when it already exited)."""
+    if process is None or getattr(process, "poll", lambda: 0)() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=timeout_s)
+    except Exception:  # noqa: BLE001
+        process.kill()
 
 
 def run_harness(
@@ -213,6 +259,7 @@ def run_harness(
         # load, and the recording root / run folder. Any failure up to and including arming
         # shuts the harness down (sink closed), so a refused run never leaves the device armed.
         runner.prepare(arm=False)
+        policy.warm_up()  # first forward pass off the live loop (CUDA init)
         if overlay_cfg.enabled:
             publisher = OverlayPublisher(
                 overlay_cfg.port,
@@ -271,7 +318,10 @@ def run_harness(
             "an overlay is already listening on port %d; not launching another", overlay_cfg.port
         )
         overlay_launch = False
+    ready_file: Path | None = None
     if overlay_launch and launcher is None:
+        ready_file = Path(tempfile.gettempdir()) / f"drone-fly-overlay-ready-{os.getpid()}"
+        ready_file.unlink(missing_ok=True)
         launcher = default_overlay_launcher(
             overlay_command(
                 cfg.harness,
@@ -280,11 +330,26 @@ def run_harness(
                 config=config,
                 k1_path=contract.k1_path,
                 recordable=overlay_cfg.recordable,
+                ready_file=ready_file,
             )
         )
+    launched: list[Any] = []
+
+    def on_launched(process: Any) -> None:
+        launched.append(process)
+        if ready_file is not None:
+            log.info("waiting for the overlay window before starting the run")
+            wait_for_overlay_ready(ready_file, process)
+
     result: RunResult | None = None
     try:
-        result = start_overlay_and_run(runner, launcher if overlay_launch else None)
+        result = start_overlay_and_run(
+            runner, launcher if overlay_launch else None, on_launched=on_launched
+        )
+    except BaseException:
+        for process in launched:
+            stop_overlay(process)
+        raise
     finally:
         if publisher is not None:
             publisher.close()
@@ -299,4 +364,11 @@ def run_harness(
                 failsafe_output=None if result is None else result.failsafe_output,
             )
     log.info("harness run finished: %s (%d ticks)", result.reason, result.ticks)
-    return SessionResult(result=result, run_dir=run_dir, config=cfg)
+    if ready_file is not None:
+        ready_file.unlink(missing_ok=True)
+    return SessionResult(
+        result=result,
+        run_dir=run_dir,
+        config=cfg,
+        overlay_process=launched[0] if launched else None,
+    )

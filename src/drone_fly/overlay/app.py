@@ -47,6 +47,7 @@ def run_overlay(
     fps: float | None = None,
     k1_path: str | None = None,
     recordable: bool | None = None,
+    ready_file: str | os.PathLike[str] | None = None,
     view: str = "top",
     shim: Any = None,
 ) -> int:
@@ -142,6 +143,7 @@ def run_overlay(
             brain_asset=brain_asset,
             brain_error=brain_error,
             recordable=ocfg.recordable,
+            ready_file=None if ready_file is None else str(ready_file),
         )
         return run_window(state, shim, opts)
     finally:
