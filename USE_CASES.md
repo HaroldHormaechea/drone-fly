@@ -74,4 +74,4 @@ Statuses:
 | 62 | [use-cases/62-liftoff-vision-harness.md](use-cases/62-liftoff-vision-harness.md) | Pluggable live-harness framework + vision-driven Liftoff harness | done | 2026-10-11 |
 | 63 | [use-cases/63-tie-desktop-app-to-reservoir-runs.md](use-cases/63-tie-desktop-app-to-reservoir-runs.md) | Repoint the desktop app at the reservoir pipeline (launch / monitor / audit / view gpu_prototype runs) | done | 2026-10-11 |
 | 64 | [use-cases/64-liftoff-real-calibration-and-gates.md](use-cases/64-liftoff-real-calibration-and-gates.md) | Calibrate and connect the live harness to real Liftoff (Arena / Infinity Loop, micro drone) | done | 2026-10-11 |
-| 65 | [use-cases/65-live-brain-debug-overlay.md](use-cases/65-live-brain-debug-overlay.md) | Live brain + debug overlay on top of Liftoff (Windows, click-through, capture-excluded) | pending | 2026-10-11 |
+| 65 | [use-cases/65-live-brain-debug-overlay.md](use-cases/65-live-brain-debug-overlay.md) | Live brain + debug overlay on top of Liftoff (Windows, click-through, capture-excluded) | in-progress | 2026-10-11 |
