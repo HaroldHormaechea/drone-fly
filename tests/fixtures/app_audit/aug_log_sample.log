@@ -1,0 +1,9 @@
+warm-started from /workspace/drone-fly/gpu_prototype/proc_shapeA_term.pt (src_extra_dim=70, new senses zero-init)
+K1ReservoirAug: feat_dim=1234 extra=70 trainable=98.8k frozen=12.35M N=384
+[aug] it   20 steps    0.2M fps  41234 ep_rew/step  0.012 tilt  18.0deg compl  0.0% lap 0.0
+[aug] it   40 steps    0.5M fps  42002 ep_rew/step -0.046 tilt  19.5deg compl  3.2% lap 0.1
+[aug] it   60 steps    0.7M fps  41876 ep_rew/step  0.103 tilt  21.1deg compl 12.5% lap 0.4
+/opt/conda/lib/python3.11/site-packages/torch/warnings.py:1: UserWarning: something noisy
+[aug] it   80 steps    0.9M fps  41
+[aug] it   80 steps    1.0M fps  41500 ep_rew/step  0.200 tilt  22.5deg compl 20.0% lap 0.6
+[aug] saved /workspace/drone-fly/training/run-a/model.pt

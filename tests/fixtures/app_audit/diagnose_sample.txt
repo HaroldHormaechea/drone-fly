@@ -1,0 +1,27 @@
+ckpt=/workspace/drone-fly/training/run-a/model.pt  EPS=512  (random courses, deterministic)
+OVERALL completion: 302/512 (59%)
+
+by OBSTACLE COUNT:
+    0 obstacles      n=140  completion   86%  (120/140)
+    1 obstacle       n=180  completion   61%  (110/180)
+    2+ obstacles     n=192  completion   38%  (72/192)
+
+by TIGHTEST GATE aperture:
+    tight <0.8       n=0
+    mid 0.8-1.0      n=212  completion   56%  (118/212)
+    wide >=1.0       n=300  completion   61%  (184/300)
+
+by GATE COUNT:
+    <=4 gates        n=160  completion   69%  (110/160)
+    5-7 gates        n=250  completion   60%  (150/250)
+    8+ gates         n=102  completion   41%  (42/102)
+
+FAILURE ANATOMY  (210 failures):
+    obstacle collision :  150  (71%)
+    crash: floor       :   30  (14%)   (descended into ground)
+    crash: ceiling     :    5  (2%)   (climbed out the top)
+    crash: out-of-arena:   10  (5%)   (flew off sideways)
+    mean death tilt    : 47 deg
+    timeout (ran out)  :   15  (7%)
+    progress before death: 41% of required gates cleared (mean)
+    of obstacle-collision deaths: 97% on 2+ obstacle courses

@@ -1,0 +1,3 @@
+ckpt=/workspace/drone-fly/training/run-a/model.pt  EPS=512  (random courses, deterministic)
+  completion: 302/512 (59%)   laps required: 1.0 avg
+  gate passes / episode: mean 5.3  (should be ~ gates x laps)

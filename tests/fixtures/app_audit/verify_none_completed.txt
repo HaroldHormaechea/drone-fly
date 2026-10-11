@@ -1,0 +1,7 @@
+ckpt=/workspace/drone-fly/training/run-a/model.pt  EPS=512  (random courses, deterministic)
+  completion: 0/512 (0%)   laps required: 1.0 avg
+  gate passes / episode: mean 1.7  (should be ~ gates x laps)
+  -- cheat checks --
+  obstacle BARGING: episodes with any inside-obstacle step: 12%  | avg inside-steps/ep 0.20  | min surface clearance 0.35 m
+  HOVERING: mean speed 1.80 m/s  mean tilt 18 deg  (hovering => ~0 speed, ~0 tilt)
+  mean steps alive 420/1500

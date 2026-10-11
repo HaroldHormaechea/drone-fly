@@ -1,0 +1,495 @@
+/* drone-fly desktop app — vanilla shell styles (UC-61). No framework, no build step. */
+:root {
+  --bg: #10141b;
+  --panel: #171d27;
+  --panel-2: #1e2633;
+  --line: #2a3444;
+  --fg: #e6ebf2;
+  --muted: #8fa0b5;
+  --accent: #4da3ff;
+  --good: #46c17a;
+  --warn: #e0a740;
+  --bad: #e0604d;
+  --radius: 8px;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  display: flex;
+}
+
+/* ---- left nav ---- */
+nav.sidebar {
+  width: 250px;
+  min-width: 250px;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  padding: 14px 0;
+  overflow-y: auto;
+  height: 100vh;
+}
+.brand { display: flex; align-items: center; gap: 8px; padding: 0 16px 14px; }
+.brand-mark { display: block; }
+.brand h1 { font-size: 15px; margin: 0; letter-spacing: 0.3px; }
+.brand h1 .dot { color: var(--accent); }
+
+/* Nav tree: keyboard-operable disclosures (buttons) + leaf links, with inline-SVG icons. */
+.nav-tree { display: flex; flex-direction: column; }
+.ic { flex: none; opacity: 0.85; }
+.nav-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.nav-disclosure {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  background: none;
+  border: 0;
+  border-left: 3px solid transparent;
+  border-radius: 0;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+.nav-disclosure:hover { background: var(--panel-2); }
+.nav-disclosure:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.nav-disclosure.run { padding-left: 26px; font-size: 13px; }
+.nav-disclosure .chev { transition: transform 0.15s ease; opacity: 0.6; }
+.nav-disclosure[aria-expanded="true"] .chev { transform: rotate(90deg); }
+
+.nav-leaf {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 14px 7px 26px;
+  color: var(--muted);
+  text-decoration: none;
+  border-left: 3px solid transparent;
+}
+.nav-leaf:hover { background: var(--panel-2); color: var(--fg); }
+.nav-leaf:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.nav-leaf.active { background: var(--panel-2); color: var(--fg); border-left-color: var(--accent); }
+/* item 1: top-level leaves (Settings, About) align with the group heads, not child leaves. */
+.nav-leaf.nav-top { padding-left: 14px; color: var(--fg); }
+.run-children .nav-leaf { padding-left: 40px; }
+.nav-empty { padding: 5px 14px 5px 26px; color: var(--muted); font-size: 12px; font-style: italic; }
+
+.pill {
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: var(--line);
+  color: var(--muted);
+}
+.pill.running { background: rgba(70,193,122,0.18); color: var(--good); }
+.pill.paused { background: rgba(224,167,64,0.18); color: var(--warn); }
+
+/* ---- main ---- */
+main.view {
+  flex: 1;
+  height: 100vh;
+  overflow-y: auto;
+  padding: 24px 28px;
+}
+/* Status-view polish item 4: the status view fills the window height so the log panel can grow to
+   the bottom. `route()` toggles `.view-fill` on for the status view only and off everywhere else,
+   so no other view is affected. The definite-height ancestor chain the flex-fill relies on is
+   html/body 100% → body flex → main.view 100vh. */
+#view.view-fill {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+/* The single status card becomes a flex column that claims the remaining height. */
+#view.view-fill .card {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+/* And its log panel fills what's left below the metrics grid (min-height floor stops a tall
+   metrics grid from crushing it to zero); the fixed 320px cap is dropped in fill mode. */
+#view.view-fill .log-panel {
+  flex: 1;
+  min-height: 120px;
+  max-height: none;
+}
+.view-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+.view-head h2 { margin: 0; font-size: 20px; }
+/* item 2: right-aligned header actions slot (the top-right Save convention on every screen). */
+.view-head-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.subtle { color: var(--muted); }
+
+/* ---- cards / panels ---- */
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  margin-bottom: 16px;
+}
+.card h3 { margin: 0 0 12px; font-size: 15px; }
+
+/* ---- buttons ---- */
+button, .btn {
+  font: inherit;
+  color: var(--fg);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 14px;
+  cursor: pointer;
+}
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: #05151f; border-color: var(--accent); font-weight: 600; }
+button.danger { border-color: var(--bad); color: var(--bad); }
+button.danger:hover { border-color: var(--bad); background: rgba(224,96,77,0.12); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+/* item 3: a compact button for inline table-row actions. */
+.btn-sm { padding: 3px 10px; font-size: 12px; }
+.row-actions { display: flex; gap: 14px; align-items: center; }
+
+/* ---- forms ---- */
+.form-grid { display: grid; grid-template-columns: 1fr; gap: 2px; }
+/* item 2: train-config fields grouped into titled section cards in a responsive grid. */
+.form-sections {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 14px;
+  align-items: start;
+  margin-bottom: 4px;
+}
+.form-section {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 2px 12px 8px;
+}
+.form-section-title {
+  margin: 12px 2px 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+}
+/* Narrow section cards: stack the label above the control instead of the 260px 2-col layout. */
+.form-section .field {
+  grid-template-columns: 1fr;
+  align-items: stretch;
+  gap: 4px;
+}
+.form-section .field:hover { background: transparent; }
+.form-section .field:last-child { border-bottom: 0; }
+.form-section .field .control { flex-wrap: wrap; }
+.field {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.field:hover { background: var(--panel-2); }
+.field label.key { color: var(--fg); font-weight: 500; }
+.field .meta { display: block; font-size: 11px; color: var(--muted); font-weight: 400; }
+.field .control { display: flex; align-items: center; gap: 10px; }
+.field input[type="text"], .field input[type="number"], .field select {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 5px 8px;
+  min-width: 180px;
+}
+.field input:disabled, .field select:disabled { opacity: 0.4; }
+.field .enable { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+.field.is-required label.key::after { content: " *"; color: var(--accent); }
+.field.dirty { background: rgba(77,163,255,0.06); }
+
+/* ---- status / metrics ---- */
+.progress { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; height: 16px; overflow: hidden; }
+.progress > span { display: block; height: 100%; background: var(--accent); width: 0%; transition: width 0.3s; }
+/* item 2: the "launching / no measurable progress" state — a striped marquee filling the whole bar
+   (pure CSS, offline). Overrides the determinate width; removing `.indeterminate` restores it. */
+.progress.indeterminate > span {
+  width: 100% !important;
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(77, 163, 255, 0.85) 0, rgba(77, 163, 255, 0.85) 12px,
+    rgba(77, 163, 255, 0.4) 12px, rgba(77, 163, 255, 0.4) 24px
+  );
+  background-size: 34px 100%;
+  animation: prog-marquee 0.9s linear infinite;
+}
+@keyframes prog-marquee { from { background-position: 0 0; } to { background-position: 34px 0; } }
+@media (prefers-reduced-motion: reduce) { .progress.indeterminate > span { animation: none; } }
+.metrics { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+/* Status-view polish item 5: the grouped status renderer stacks a titled heading + a `.metrics`
+   grid per group inside this container. The CSV fallback wraps its flat cards in a single
+   `.metrics` grid here too, so it stays visually identical (ungrouped). */
+.metrics-groups { display: flex; flex-direction: column; }
+.metric-group-title {
+  margin: 14px 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+}
+.metrics-groups > .metric-group-title:first-child { margin-top: 0; }
+/* item 6: per-metric info button sits inline with the label. */
+.metric .k { display: flex; align-items: center; gap: 2px; }
+.metric .k .info-btn { width: 16px; height: 16px; margin-left: 2px; }
+.metric { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+.metric .k { font-size: 11px; color: var(--muted); }
+.metric .v { font-size: 16px; font-weight: 600; }
+.badge { padding: 2px 9px; border-radius: 10px; font-size: 12px; }
+.badge.normal { background: rgba(70,193,122,0.18); color: var(--good); }
+.badge.warning { background: rgba(224,167,64,0.18); color: var(--warn); }
+.badge.critical { background: rgba(224,96,77,0.2); color: var(--bad); }
+.state-tag { font-size: 12px; padding: 2px 10px; border-radius: 10px; background: var(--line); }
+.state-tag.running { color: var(--good); }
+.state-tag.paused { color: var(--warn); }
+.state-tag.finished { color: var(--accent); }
+
+table.list { width: 100%; border-collapse: collapse; }
+table.list th, table.list td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+table.list th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; }
+a.link { color: var(--accent); cursor: pointer; text-decoration: none; }
+a.link:hover { text-decoration: underline; }
+
+.toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  padding: 10px 14px;
+  border-radius: 6px;
+  max-width: 380px;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.2s, transform 0.2s;
+}
+.toast.show { opacity: 1; transform: none; }
+.toast.error { border-left-color: var(--bad); }
+
+/* ---- run detail sub-view head ---- */
+.view-sub { margin: 2px 0 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+/* ---- recordings picker (item 2) ---- */
+.picker-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.picker-label { color: var(--muted); font-size: 13px; }
+.picker {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 6px 10px;
+  min-width: 200px;
+}
+.viewer-host { min-height: 40px; }
+
+/* ---- empty states (item 7) ---- */
+.empty-state {
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  padding: 22px 18px;
+  text-align: center;
+  background: var(--panel);
+}
+.empty-state .empty-title { margin: 0 0 4px; font-weight: 600; }
+
+/* ---- info button + modal (item 6) ---- */
+.info-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 6px;
+  padding: 0;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  vertical-align: middle;
+}
+.info-btn:hover { color: var(--accent); background: var(--panel-2); border-color: transparent; }
+.info-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 8, 14, 0.62);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 1000;
+}
+.modal-dialog {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  width: min(520px, 100%);
+  max-height: 80vh;
+  overflow: auto;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.modal-title { margin: 0; font-size: 15px; }
+.modal-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--fg);
+  cursor: pointer;
+}
+.modal-close:hover { border-color: var(--accent); color: var(--accent); }
+.modal-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.modal-body { padding: 16px; }
+/* item 3: confirm-dialog footer action row (e.g. Cancel / Delete). */
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--line);
+}
+.modal-body .mh-help { margin: 0 0 12px; }
+/* item 3: the "also delete the saved config" opt-in inside the confirm dialog. */
+.modal-body .enable { display: flex; align-items: center; gap: 8px; color: var(--fg); font-size: 13px; }
+.modal-body .mh-example { margin: 0 0 12px; color: var(--muted); }
+.modal-body .mh-example .mh-k { text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; margin-right: 6px; }
+.modal-body code { background: var(--bg); border: 1px solid var(--line); padding: 1px 6px; border-radius: 4px; }
+.mh-constraints {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 14px;
+  margin: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+.mh-constraints dt { color: var(--muted); }
+.mh-constraints dd { margin: 0; }
+
+/* ---- live process-log panel (item 5) ---- */
+.log-head { margin: 16px 0 0; font-size: 12px; }
+.log-panel {
+  margin: 6px 0 0;
+  max-height: 320px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---- about page (items 6+7) ---- */
+.about-card h3 .dot { color: var(--accent); }
+.about-card p { max-width: 60ch; color: var(--fg); }
+.about-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 14px;
+  margin: 14px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+.about-meta dt { color: var(--muted); }
+.about-meta dd { margin: 0; }
+
+/* ---- embedded viewer ---- */
+.viewer-frame { width: 100%; height: calc(100vh - 220px); min-height: 420px; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; }
+.hidden { display: none !important; }
+
+/* ---- skeleton loaders (item 5) ----
+   A threshold placeholder painted only when a view takes > 120 ms to render (route() clears the
+   timer for fast views), replaced wholesale by the real view. Pure CSS shimmer, offline. */
+.skeleton { display: flex; flex-direction: column; }
+.skel-head { margin-bottom: 18px; }
+.skel-line, .skel-block {
+  background: linear-gradient(90deg, var(--panel) 25%, var(--panel-2) 37%, var(--panel) 63%);
+  background-size: 400% 100%;
+  animation: skel-shimmer 1.3s ease-in-out infinite;
+  border-radius: 6px;
+}
+.skel-line { height: 14px; margin: 6px 0; }
+.skel-block { margin-bottom: 14px; border: 1px solid var(--line); }
+@keyframes skel-shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+@media (prefers-reduced-motion: reduce) { .skel-line, .skel-block { animation: none; } }
+
+/* ---- text selection (status-view polish item 1) ----
+   Make the status data, metric boxes, log lines and modal copy selectable so the user can
+   copy values out. This backs up the native pywebview text_select=True (app/__main__.py) and
+   works regardless of the webview backend's default. Interactive chrome (nav, buttons, the
+   header action slot) stays unselectable so it keeps feeling like native UI. */
+.card, .metrics, .metrics-groups, .metric, .log-panel, .modal-body { user-select: text; }
+nav.sidebar, .btn-row, button, .btn, .view-head-actions { user-select: none; }
+
+/* ---- reservoir surfaces (UC-63): read-only badges, banners, charts, audit verdicts ---- */
+.pill.readonly { background: var(--line); color: var(--muted); }
+.kind-badge { margin-left: 8px; font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 10px; padding: 1px 8px; }
+.state-tag.failed, .state-tag.stopped { color: var(--bad); }
+.state-tag.partial { color: var(--warn); }
+.state-tag.committed, .state-tag.external { color: var(--muted); }
+.banner { border: 1px solid var(--line); border-left-width: 4px; border-radius: var(--radius); padding: 10px 14px; margin: 0 0 16px; background: var(--panel); }
+.banner.warn { border-left-color: var(--warn); }
+.banner.info { border-left-color: var(--accent); }
+.banner ul { margin: 6px 0 0; padding-left: 18px; }
+.form-note { margin: 4px 0 8px; font-size: 12px; }
+.fixed-value { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.flag-boxes { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.num-sm { width: 80px; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+.charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; margin-top: 12px; }
+.chart { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; color: var(--accent); }
+.chart-title { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+.chart-svg { width: 100%; height: 110px; display: block; }
+.chart-range, .chart-empty { font-size: 11px; }
+.verdict-panel { border: 1px solid var(--line); border-left-width: 4px; border-radius: var(--radius); padding: 10px 14px; margin: 0 0 12px; background: var(--panel-2); }
+.verdict-panel.good { border-left-color: var(--good); }
+.verdict-panel.warn { border-left-color: var(--warn); }
+.verdict-panel.bad { border-left-color: var(--bad); }
+.verdict-panel.neutral { border-left-color: var(--muted); }
+.verdict-panel .verdict-tag { font-weight: 600; }
+.verdict-panel.good .verdict-tag { color: var(--good); }
+.verdict-panel.warn .verdict-tag { color: var(--warn); }
+.verdict-banner { color: var(--bad); font-weight: 600; margin-bottom: 6px; }
+.verdict-row { display: flex; gap: 8px 14px; align-items: baseline; flex-wrap: wrap; margin-top: 4px; }
+.verdict-row .k { color: var(--muted); font-size: 12px; }
+.verdict-panel .struck { text-decoration: line-through; color: var(--muted); }
+.diag h4 { margin: 14px 0 6px; font-size: 13px; }
+table.list.compact th, table.list.compact td { padding: 4px 8px; }
+ul.plain { margin: 0; padding-left: 18px; }
