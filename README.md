@@ -69,6 +69,10 @@ drone-fly harness eval --session artifacts/harness/<run> --track <track.xml> --r
 drone-fly harness latency-report artifacts/harness/<run>    # per-stage latency table (p50/p95/p99/max)
 ```
 
+**Flying a live session step by step** (Liftoff settings, telemetry, pad-check, stage (a) and (b)
+commands, the overlay, what to record afterwards):
+[docs/harness/liftoff-live-session.md](docs/harness/liftoff-live-session.md).
+
 Real Liftoff, calibrated (UC-64, micro drone on Liftoff Arena "04 - Infinity Loop"; see
 [docs/adr/0003-real-liftoff-calibration.md](docs/adr/0003-real-liftoff-calibration.md)):
 
