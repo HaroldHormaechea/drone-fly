@@ -76,3 +76,6 @@ events.out.tfevents.*
 # Obstacle-count curriculum (1->N) -- 67% honest, nearly 2x the avoider above
 !training/11-count-curriculum/
 !training/11-count-curriculum/**
+# First tunnel-navigating model -- thread a fly-through doorway, 28% honest (4x the base)
+!training/12-tunnels/
+!training/12-tunnels/**
