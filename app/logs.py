@@ -112,6 +112,7 @@ def tail(path: str, since: int = 0) -> dict:
         raw_lines.pop()  # trailing "" from the final newline.
     if skipped and raw_lines:
         raw_lines = raw_lines[1:]  # first line is a torn fragment (we started mid-line).
+    raw_lines = [line.rstrip("\r") for line in raw_lines]  # CRLF output (Windows children).
 
     out: list[str] = []
     if skipped:

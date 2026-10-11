@@ -125,5 +125,6 @@ The committed slice `artifacts/pruned/k1/` is all the deployed models need. The 
 
 An earlier lineage trained the connectome as a *trainable* layer via a Stable-Baselines3 PPO loop over a
 gymnasium racing env, with a desktop app and pybullet backend. That approach was **superseded by the
-frozen-reservoir method and removed in the 2026-10 cleanup** (SB3/gymnasium/pybullet code, the `app/`,
-training `configs/`, and their tests). The reservoir pipeline in `gpu_prototype/` is the project today.
+frozen-reservoir method and removed in the 2026-10 cleanup** (SB3/gymnasium/pybullet code, training
+`configs/`, and their tests). The reservoir pipeline in `gpu_prototype/` is the project today. The
+desktop app was later restored and repointed at the reservoir pipeline (UC-63, see `app/README.md`).

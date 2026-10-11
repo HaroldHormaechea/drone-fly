@@ -176,3 +176,13 @@ def test_absent_file_returns_empty_and_preserves_cursor(tmp_path):
 def test_log_path_for_builds_training_logs_app_log():
     p = logs.log_path_for("/proj", "demo")
     assert p == os.path.join("/proj", "training", "demo", "logs", "app.log")
+
+
+def test_crlf_lines_are_returned_without_carriage_returns(tmp_path):
+    # A Windows child writes CRLF; the returned lines carry no stray "\r" and the cursor still
+    # advances over the full bytes.
+    path = tmp_path / "app.log"
+    path.write_bytes(b"hello\r\nworld\r\npartial")
+    result = logs.tail(str(path))
+    assert result["lines"] == ["hello", "world"]
+    assert result["next"] == len(b"hello\r\nworld\r\n")
