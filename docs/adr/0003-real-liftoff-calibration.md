@@ -217,6 +217,32 @@ would have contaminated the evaluation, so model selection got its own validatio
 `eval --capture` checks that the held-out range is disjoint from the train and validation ranges
 before scoring.
 
+**Known limitation: the selection signal.** The validation loss is a weighted sum, and the
+heatmap focal term dominates it. On the reference capture it bottoms out at epoch 3, while the
+keypoint offsets are still under-trained. The predicted keypoint spread on held-out arches is about
+0.72x the true spread, so PnP places gates about 1.4x too far.
+
+Detection on the held-out laps (faster, banked, motion-blurred) was 19.6 %:
+
+- the network peaked on only about half of the in-range arches;
+- most of the remaining misses are range errors outside the matching tolerance.
+
+On training frames the same pipeline finds about 96 % of the arches, so the shortfall is
+generalisation from one capture, not a pipeline bug. A keypoint- or detection-based selection
+metric is a candidate follow-up; it was deliberately not tuned in this proof of concept.
+
+**Evaluation model vs. deploy model.** There are two weight files:
+
+| File | Trained on | Purpose |
+|---|---|---|
+| `models/liftoff-gates.pt` | the three-way split | the honest held-out measurement above; the preset's default weights |
+| `models/liftoff-gates-deploy.pt` | every labelled frame (`--holdout-frac 0 --val-frac 0 --select last`) | the live proof-of-concept run, through an overlay |
+
+The deploy model is trained for 30 epochs so that the keypoint offsets converge. Its metadata says
+`purpose: deploy`, and `eval --capture` refuses it, because no frame of it is held out. It
+memorises Infinity Loop by design. Its numbers are in-sample and cannot stand in for the AC6
+measurement.
+
 ## Offline evaluation and its caveats
 
 `drone-fly harness eval --capture … --labels …` scores the learned detector only on the held-out
@@ -229,7 +255,15 @@ in-flight time. Per gate type, for gates 4–25 m ahead with their centre in the
 - false detections per frame;
 - CUDA-synchronised inference latency.
 
-The targets are printed, not asserted.
+The targets are printed, not asserted. For UC-64, which is a proof of concept of the end-to-end
+chain (telemetry → senses → policy → pad), the owner decided on 2026-10-11 to treat the 80 % / 15 %
+targets as provisional:
+
+- A miss is reported but does not block.
+- Memorising Infinity Loop is acceptable.
+- More tracks will be captured later.
+
+The eval report carries the same note.
 
 **The time split is optimistic.** With one 4-lap capture, the held-out laps revisit the
 viewpoints seen in training. About 380 in-range arch frames, from one gate type on one track, are

@@ -317,6 +317,10 @@ def run_offline_eval(
 EVAL_RANGE_M = (4.0, 25.0)
 TARGET_DETECTION = 0.80
 TARGET_REL_ERROR = 0.15
+THRESHOLD_NOTE = (
+    "Targets are provisional and reported, not asserted: for the UC-64 proof of concept the owner "
+    "pre-accepted that a miss does not block (more tracks will be captured later)."
+)
 SPLIT_CAVEAT = (
     "Held-out frames come from a time split of the training capture(s). With a single capture the "
     "held-out laps revisit viewpoints seen in training, so these scores are optimistic; more "
@@ -412,6 +416,11 @@ def run_capture_eval(
     meta = getattr(estimator, "meta", {}) or {}
     split = (meta.get("splits") or {}).get(lab.name)
     window = None if split is None else split["holdout"]
+    if meta.get("purpose") == "deploy" and not all_frames:
+        raise HarnessConfigError(
+            "these gate weights are a deploy model (trained on every frame, no held-out split); "
+            "they cannot be scored. Evaluate weights trained with a held-out split."
+        )
     if window is None and not all_frames:
         raise HarnessConfigError(
             f"the gate weights record no train/val/held-out split for capture {lab.name!r}; pass "
@@ -480,6 +489,7 @@ def run_capture_eval(
             "n": int(lat.size),
         },
         "caveat": SPLIT_CAVEAT,
+        "threshold_note": THRESHOLD_NOTE,
     }
     if report_path is None:
         root = find_repo_root()
@@ -527,5 +537,6 @@ def capture_eval_summary(report: dict[str, Any]) -> str:
         )
     lines.append(f"false detections per frame: {report['false_detections_per_frame']:.2f}")
     lines.append(report["caveat"])
+    lines.append(report["threshold_note"])
     lines.append(f"report: {report.get('report_path')}")
     return "\n".join(lines)

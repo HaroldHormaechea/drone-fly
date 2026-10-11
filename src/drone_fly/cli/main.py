@@ -323,7 +323,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--batch-size", type=int, default=8)
     p_train.add_argument("--lr", type=float, default=1e-3)
     split = p_train.add_mutually_exclusive_group()
-    split.add_argument("--holdout-frac", type=float, default=0.2, help="last fraction held out")
+    split.add_argument(
+        "--holdout-frac",
+        type=float,
+        default=0.2,
+        help="last fraction held out (0 with --val-frac 0 --select last: deploy model)",
+    )
     split.add_argument("--holdout", help="held-out window t0:t1 (s from the first frame)")
     p_train.add_argument(
         "--val-frac", type=float, default=0.1, help="validation slice before the held-out one"

@@ -23,6 +23,9 @@
   A ``guard_s`` (2 s) gap separates neighbouring slices against temporal leakage. All ranges are
   stored in the weights metadata (``splits``). With one capture, held-out laps revisit the same
   viewpoints: the evaluation is optimistic.
+* **Deploy models**: ``--holdout-frac 0 --val-frac 0 --select last`` trains on every labelled frame
+  (metadata ``purpose: deploy``, no held-out range). Such weights can be flown but not scored:
+  ``eval --capture`` refuses them.
 * AdamW + cosine schedule, mixed precision on CUDA. By default (``--select best-val``) the epoch
   with the lowest validation loss is kept, with early stopping after ``patience`` (10) epochs
   without improvement; ``--select last`` keeps the final epoch. ``training_log.json`` (per-epoch
@@ -118,9 +121,21 @@ def split_capture(
     """
     if not rows:
         raise HarnessConfigError("a label set has no frames")
-    if not 0.0 < holdout_frac < 1.0 or not 0.0 <= val_frac < 1.0 or guard_s < 0:
-        raise HarnessConfigError("holdout_frac in (0, 1), val_frac in [0, 1), guard_s >= 0")
+    if not 0.0 <= holdout_frac < 1.0 or not 0.0 <= val_frac < 1.0 or guard_s < 0:
+        raise HarnessConfigError("holdout_frac in [0, 1), val_frac in [0, 1), guard_s >= 0")
     stamps = np.array([r["stamp"] for r in rows], np.float64)
+    if window is None and holdout_frac == 0.0:
+        if val_frac > 0:
+            raise HarnessConfigError("a validation slice needs a held-out slice after it")
+        st = np.sort(stamps)
+        return ["train"] * len(rows), {
+            "mode": "none",
+            "holdout": None,
+            "val": [],
+            "train": _ranges(st),
+            "in_flight_s": float(in_flight_clock(st)[-1]),
+            "counts": {"train": len(rows), "val": 0, "holdout": 0, "guard": 0},
+        }
     order = np.argsort(stamps, kind="stable")
     st = stamps[order]
     clock = in_flight_clock(st)
@@ -163,7 +178,9 @@ def split_capture(
 
 
 def check_disjoint(split: dict[str, Any]) -> None:
-    """Raise unless the held-out range overlaps no train / validation range."""
+    """Raise unless there is a held-out range and it overlaps no train / validation range."""
+    if not split.get("holdout"):
+        raise HarnessConfigError("these weights have no held-out split (a deploy model)")
     h0, h1 = split["holdout"]["t_start"], split["holdout"]["t_end"]
     for name in ("train", "val"):
         for a, b in split.get(name) or []:
@@ -498,6 +515,9 @@ def train_gates(
         # held-out (evaluation) stamp range per capture, as read by `eval --capture`
         "holdout": {name: rec["holdout"] for name, rec in split_meta.items()},
         "splits": split_meta,
+        "purpose": (
+            "deploy" if all(rec["holdout"] is None for rec in split_meta.values()) else "evaluate"
+        ),
         "captures": captures,
         "epochs": epochs,
         "epochs_run": len(history),
