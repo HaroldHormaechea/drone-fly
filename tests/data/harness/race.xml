@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Synthetic UC-62 race for track.xml: gate order by instanceID, two laps. -->
+<Race>
+  <name>uc62-synthetic-race</name>
+  <laps>2</laps>
+  <checkpoints>
+    <Checkpoint><instanceID>g1</instanceID></Checkpoint>
+    <Checkpoint><instanceID>g2</instanceID></Checkpoint>
+    <Checkpoint><instanceID>g3</instanceID></Checkpoint>
+    <Checkpoint><instanceID>g4</instanceID></Checkpoint>
+  </checkpoints>
+</Race>
