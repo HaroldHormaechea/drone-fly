@@ -2,7 +2,7 @@
 
 :class:`OverlayPublisher` sends one ``tick`` datagram per runner tick and, every
 ``overlay.brain_every_n`` ticks, a ``brain`` datagram carrying the full propagated K1 state
-quantised to ``uint8`` with the recorder's scheme â€” or, opt-in (``overlay.brain_scale:
+quantised to ``uint8`` with the recorder's scheme — or, opt-in (``overlay.brain_scale:
 frame_peak``), with a per-frame scale from the frame's own peak (:func:`quantize_frame_peak`)
 (wire format: :mod:`drone_fly.overlay.protocol`).
 The socket is non-blocking with a ~1 MB send buffer; **any** send or serialisation error

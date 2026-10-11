@@ -72,14 +72,21 @@ def overlay_command(
     *,
     preset: str | None = None,
     config: str | os.PathLike[str] | dict[str, Any] | None = None,
+    k1_path: str | os.PathLike[str] | None = None,
 ) -> list[str]:
-    """The ``drone-fly harness overlay`` command line matching this run's config."""
+    """The ``drone-fly harness overlay`` command line matching this run's config.
+
+    ``k1_path`` is the K1 connectome the run resolved, so the overlay's brain panel loads the
+    same neurons the policy runs on.
+    """
     cmd = [sys.executable, "-m", "drone_fly.cli.main", "harness", "overlay"]
     cmd += ["--harness", harness, "--port", str(port)]
     if preset is not None:
         cmd += ["--preset", preset]
     if config is not None and not isinstance(config, dict):
         cmd += ["--config", str(Path(config).resolve())]
+    if k1_path is not None:
+        cmd += ["--k1-path", str(Path(k1_path).resolve())]
     return cmd
 
 
@@ -132,7 +139,7 @@ def run_harness(
 
     ``preset`` names a packaged preset overlaid on the harness default before ``config``.
     ``overlay`` overrides ``overlay.enabled``; ``overlay_launch`` (implies ``overlay``) starts the
-    overlay process before the loop â€” ``launcher`` replaces :func:`default_overlay_launcher`.
+    overlay process before the loop — ``launcher`` replaces :func:`default_overlay_launcher`.
     """
     extra_dim = validate_extra_dim(extra_dim)
     if overlay_launch and overlay is None:
@@ -230,7 +237,13 @@ def run_harness(
 
     if overlay_launch and launcher is None:
         launcher = default_overlay_launcher(
-            overlay_command(cfg.harness, overlay_cfg.port, preset=preset, config=config)
+            overlay_command(
+                cfg.harness,
+                overlay_cfg.port,
+                preset=preset,
+                config=config,
+                k1_path=contract.k1_path,
+            )
         )
     result: RunResult | None = None
     try:

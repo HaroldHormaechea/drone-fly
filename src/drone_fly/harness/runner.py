@@ -21,7 +21,7 @@ Tick
 Live overlay (UC-65, optional)
     With a publisher, ticks for which ``publisher.wants_brain(k)`` is true call
     ``policy.act_with_brain`` (same ops, also returns the propagated K1 state); every other tick
-    â€” and every tick without a publisher â€” calls ``policy.act`` unchanged. After actuation the
+    — and every tick without a publisher — calls ``policy.act`` unchanged. After actuation the
     tick is published (never raising: a publisher failure is logged and the run continues) and
     the cost lands in ``latency_s["overlay"]``; ``total`` stays state -> actuation, but the
     overlay cost still counts toward the missed-deadline check. The wait loops publish status

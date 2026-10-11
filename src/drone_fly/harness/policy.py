@@ -95,8 +95,8 @@ class ContractPolicyRunner(PolicyRunner):
         """The raw action plus the full propagated K1 state (UC-65 live overlay).
 
         Runs exactly the ops ``inference.Policy.act`` runs for an augmented model, in the same
-        order and under ``no_grad`` â€” ``actor.propagated_full`` -> ``actor.tap`` -> ``actor.act``
-        â€” and keeps the ``propagated_full`` output instead of discarding it, so nothing is
+        order and under ``no_grad`` — ``actor.propagated_full`` -> ``actor.tap`` -> ``actor.act``
+        — and keeps the ``propagated_full`` output instead of discarding it, so nothing is
         computed twice and the action is bit-identical to :meth:`act`. The brain state is
         returned as the device tensor ``(N,)``; the caller copies it to the host only when it
         publishes it. ``inference.py`` is not modified.

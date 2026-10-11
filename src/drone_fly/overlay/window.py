@@ -271,11 +271,17 @@ class OverlayWindow(QtWidgets.QWidget):
             "raycast": self._paint_raycast,
         }
         for name, rect in rects.items():
-            self._panel(p, rect, name)
+            # Every panel paints only inside its own rect: in mask_confined mode that rect is a
+            # HUD mask, so nothing (long text lines, warnings, the frame) may spill out of it.
+            p.save()
+            p.setClipRect(QtCore.QRect(rect.x, rect.y, rect.w, rect.h))
             try:
+                self._panel(p, rect, name)
                 draw[name](p, rect, m)
             except Exception:  # noqa: BLE001
                 log.exception("painting the %s panel failed", name)
+            finally:
+                p.restore()
         if self.layout_.draw_keypoints and "perception" in rects:
             self._paint_keypoints(p, m)
 
