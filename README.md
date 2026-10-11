@@ -135,6 +135,48 @@ The core package and CI need none of the harness backends. Install them with
 the ViGEmBus driver installer** (a UAC prompt), pulled in by `vgamepad`. The driver is required for
 live Liftoff runs. Run the test suite with `uv run --extra dev pytest`.
 
+### Overlay (live brain + debug HUD, Windows)
+
+`drone-fly harness overlay` floats a borderless, transparent, always-on-top window over the game. It
+shows the K1 brain heatmap (the visualizer's method, live) and what the model is doing: obs/extra
+inputs, raw action → collective / body rates → sticks sent, detected gate keypoints drawn over the
+gate, the 40-ray fan, per-stage latency, estimate ages vs. their fail-safe limits, focus, stop reason
+and telemetry. It is a separate process fed by a non-blocking localhost UDP stream from the runner,
+which drops data rather than ever blocking the 50 Hz loop. Design, schema and live-check results:
+[docs/adr/0004-live-overlay.md](docs/adr/0004-live-overlay.md).
+
+```
+uv sync --extra overlay                       # PySide6 (Windows only; not in dev/CI)
+drone-fly harness overlay [--preset liftoff_micro_arena] [--port 9100] [--monitor 1] \
+    [--layout default|mask_confined] [--fps 20] [--k1-path <K1>]
+drone-fly harness run --harness liftoff --preset liftoff_micro_arena --extra-dim 70 \
+    --checkpoint <model_readout.pt> --overlay          # or --overlay-launch to start the overlay too
+drone-fly harness overlay --replay artifacts/harness/<run>   # drive it from a recorded run, no game
+```
+
+- **Start order:** overlay → `harness run --overlay` → click into Liftoff. The runner waits for
+  focus (`focus.wait_for_focus_s`), so the console you launched from may keep focus until you click
+  the game. `--overlay-launch` starts the overlay with no console window, just before that wait.
+  The overlay is click-through and never takes focus; it should never cause a `focus_lost` stop.
+- Liftoff must run **borderless fullscreen** (or windowed). Nothing can draw over exclusive
+  fullscreen.
+- The window excludes itself from screen capture (`SetWindowDisplayAffinity`), so the gate
+  detector and depth model never see it. If that fails, it falls back to placing every panel inside
+  `camera.masks` with no in-game drawings, or hides all panels when no masks are configured. Force
+  that layout with `--layout mask_confined`.
+- Settings live in the `overlay:` config section: `enabled`, `port` (must differ from
+  `telemetry.port`), `brain_every_n` (default 3 ≈ 16 Hz brain frames), `brain_scale`
+  (`recorder` | `frame_peak`; try `frame_peak` if the brain panel looks sparse), `layout`, `fps`
+  (≤ 20), `stale_s`, `gain_window_s`, `opacity`, `tap_outline` and per-panel `panels` toggles.
+  `--monitor` follows `camera.monitor` (mss index: 1-based, 0 = all monitors).
+- Without the game: `harness run --harness sim-loopback ... --overlay` with the overlay listening,
+  or `--replay` of any run folder. Run folders carry no brain frames, so in replay the brain panel
+  says "no brain data (replay)".
+- Overhead: the runner records what publishing costs as the `overlay` row of
+  `drone-fly harness latency-report <run>`. To check it, compare `missed_deadline_rate` and the
+  overlay p99 (target ≤ 1 ms) against the same config run without `--overlay`.
+- Without the extra, `harness overlay` exits with code 3 and the install command.
+
 ## Audit a model (honesty-gated)
 
 A completion % only counts if the flight is real (no barging through obstacles, no hovering, no
