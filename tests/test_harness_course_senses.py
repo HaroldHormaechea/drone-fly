@@ -302,3 +302,30 @@ def test_gate_progress_advance_wrap_and_laps():
     assert prog.next is gates[1]
     prog.reset()
     assert (prog.tgt, prog.lap, prog.finished) == (0, 0, False)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_course_senses_match_training_env_on_tunnel_courses(harness_contract, seed):
+    """PROC_TUNNELS courses (3 fixed boxes per course, MO raised to 10) still match the env."""
+    gpe = harness_contract.import_reference("gates_proc_env")
+    raw = harness_contract.import_reference("course_gen").sample_course(
+        seed, with_tunnels=True, **TRACTABLE_KW
+    )
+    course = course_from_mapping(raw)
+    assert sum(bool(o.get("tunnel")) for o in raw["obstacles"]) == 3
+    assert len(course.obstacles) <= gpe.MO
+    rng = np.random.default_rng(100 + seed)
+    for pos, tgt in _probe_positions(course, rng):
+        env = _env_stub(gpe, course, pos, tgt)
+        with torch.no_grad():
+            ref = env.extra()[0].numpy()
+        nxt = course.gates[(tgt + 1) % course.n_gates]
+        np.testing.assert_allclose(curr_gate_block(course.gates[tgt]), ref[12:15], atol=1e-6)
+        np.testing.assert_allclose(
+            obstacle_vision_block(pos, course.obstacles), ref[22:30], atol=1e-5
+        )
+        ours = next_lookahead_block(pos, nxt, course.obstacles)
+        if segment_occluded(pos, nxt.center, course.obstacles):
+            np.testing.assert_allclose(ours[3:7], ref[18:22], atol=1e-6)
+        else:
+            np.testing.assert_allclose(ours, ref[15:22], atol=1e-5)

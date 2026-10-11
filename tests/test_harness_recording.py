@@ -230,3 +230,44 @@ def test_recorder_refusal_creates_nothing(fake_repo):
 def test_git_head_is_none_outside_a_repo(tmp_path):
     assert git_head(None) is None
     assert git_head(tmp_path) is None
+
+
+def test_refused_output_root_never_leaves_the_sink_armed(
+    harness_contract, harness_checkpoint_70, harness_k1_dir
+):
+    """A refused recording root must not leave an armed output device behind.
+
+    Either the root is validated before ``sink.arm()`` or the harness is shut down (sink closed)
+    when the recorder cannot be created.
+    """
+    from drone_fly.harness import registry
+    from drone_fly.harness.session import run_harness
+    from tests.harness_support import FakeSink
+
+    sinks: list[FakeSink] = []
+
+    class TrackedSink(FakeSink):
+        @classmethod
+        def from_config(cls, cfg, ctx):
+            sinks.append(cls())
+            return sinks[-1]
+
+    repo = Path(__file__).resolve().parent.parent
+    bad_root = repo / "training" / "uc62-must-not-exist"
+    registry.register("action_sink", "uc62-tracked", TrackedSink)
+    try:
+        with pytest.raises(HarnessConfigError, match="training"):
+            run_harness(
+                "sim-loopback",
+                harness_checkpoint_70,
+                70,
+                config={"parts": {"action_sink": "uc62-tracked"}},
+                k1_path=str(harness_k1_dir),
+                device="cpu",
+                output_root=str(bad_root),
+            )
+    finally:
+        registry.unregister("action_sink", "uc62-tracked")
+    assert not bad_root.exists()
+    (sink,) = sinks
+    assert (not sink.armed) or sink.closed >= 1, "sink armed and never closed after the refusal"

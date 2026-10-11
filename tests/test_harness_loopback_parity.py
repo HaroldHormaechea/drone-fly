@@ -260,3 +260,23 @@ def _assert_basis_matches_raycast(contract, pos, vel, target):
 def test_ray_directions_equal_contract_raycast_basis(harness_contract, vel, target):
     tgt = None if target is None else np.asarray(target, np.float32)
     _assert_basis_matches_raycast(harness_contract, (0.0, 0.0, 1.0), vel, tgt)
+
+
+def test_parity_on_tunnel_course(harness_contract, harness_checkpoint_70, harness_k1_dir, tmp_path):
+    """A course_gen PROC_TUNNELS course (fed inline) keeps per-step parity with the reference."""
+    raw = harness_contract.import_reference("course_gen").sample_course(
+        1, with_tunnels=True, **TRACTABLE_KW
+    )
+    raw = json.loads(json.dumps(raw, default=float))  # plain YAML-like values (no numpy scalars)
+    session = _run(
+        harness_contract,
+        harness_checkpoint_70,
+        harness_k1_dir,
+        tmp_path,
+        {"course": {"source": "inline", "inline": raw}},
+        2.0,
+    )
+    course = course_from_mapping(raw)
+    assert len(course.obstacles) >= 5
+    steps = _reference_loop(harness_contract, harness_checkpoint_70, course, 100)
+    assert _compare(steps, _harness_ticks(session.run_dir)) <= 1e-6
