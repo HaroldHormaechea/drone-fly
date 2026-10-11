@@ -1,7 +1,8 @@
 """Name-based registry of harness parts.
 
 Each *kind* (``harness``, ``state_source``, ``frame_source``, ``gate_estimator``,
-``free_space_estimator``, ``action_sink``, ``abort_signal``, ``depth_model``) maps names to a
+``free_space_estimator``, ``action_sink``, ``abort_signal``, ``depth_model``, ``focus_probe``)
+maps names to a
 target. A target is normally a lazy ``"module:attr"`` string, imported only when
 :func:`resolve` is called, so registering a part never imports its backend. Programmatic
 registration may also pass the object itself (handy for tests and notebooks).
@@ -29,6 +30,7 @@ KINDS: tuple[str, ...] = (
     "action_sink",
     "abort_signal",
     "depth_model",
+    "focus_probe",
 )
 
 

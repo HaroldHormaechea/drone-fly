@@ -8,7 +8,8 @@ so the harness must recover it exactly:
 * attitude: integrated from smooth body rates with the exact exponential map, the rate over each
   interval being the mean of its two endpoint samples (what the gyro check compares against);
 * gyro: the endpoint body rates in deg/s through the inverse of the default
-  ``telemetry.gyro_map`` (wx = roll, wy = -pitch, wz = -yaw).
+  ``telemetry.gyro_map`` (wx = -roll, wy = +pitch, wz = -yaw — Liftoff's convention as measured
+  on a real capture in UC-64; the UC-62 fixture encoded the inverted roll/pitch signs).
 
     uv run python tests/data/harness/generate_liftoff_telemetry.py
 """
@@ -59,7 +60,7 @@ def rows(n: int = 200, dt: float = 0.01) -> list[list[float]]:
         vel_c = np.array([3.0, 0.5 * math.cos(t), 0.2])
         vec_u = -(M.T @ q[1:])  # inverse of the converter's v' = -M v
         deg = np.degrees(w)
-        gyro = [-deg[1], deg[0], -deg[2]]  # pitch, roll, yaw
+        gyro = [deg[1], -deg[0], -deg[2]]  # pitch, roll, yaw
         out.append(
             [
                 round(t, 6),

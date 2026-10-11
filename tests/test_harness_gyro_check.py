@@ -31,8 +31,8 @@ def test_fixture_gyro_matches_its_own_quaternions():
     assert suggested == {
         "gyro_units": "deg_s",
         "gyro_map": {
-            "wx": {"source": "roll", "sign": 1.0},
-            "wy": {"source": "pitch", "sign": -1.0},
+            "wx": {"source": "roll", "sign": -1.0},
+            "wy": {"source": "pitch", "sign": 1.0},
             "wz": {"source": "yaw", "sign": -1.0},
         },
     }
@@ -42,12 +42,12 @@ def test_fixture_gyro_matches_its_own_quaternions():
 
 def test_flipped_axis_is_detected_and_correction_suggested():
     samples = read_telemetry_csv(FIXTURE_CSV)
-    wrong = GyroMap(signs=(1.0, 1.0, -1.0))  # wy sign flipped
+    wrong = GyroMap(signs=(-1.0, -1.0, -1.0))  # wy sign flipped
     report = check_gyro_convention(samples, wrong)
     assert not report.ok
     wy = report.axes[1]
     assert wy.sign_agreement < 0.05 and wy.scale == pytest.approx(-1.0, abs=1e-3)
-    assert wy.suggested_source == "pitch" and wy.suggested_sign == -1.0
+    assert wy.suggested_source == "pitch" and wy.suggested_sign == 1.0
     assert report.axes[0].sign_agreement == pytest.approx(1.0)
 
 

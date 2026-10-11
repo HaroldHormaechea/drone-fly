@@ -55,7 +55,8 @@ exactly as written. A harness is built from separate parts: a state source (tele
 source (screen capture), perception estimators (gate senses, free space / 40-ray scan), the contract
 observation assembler, and an action sink. A fixed-rate runner (50 Hz by default) drives them, records
 everything and fails safe on stale telemetry, a lost gate, stale perception, any exception or the
-abort hotkey (F12; Ctrl+C always works): it centres the rate sticks and cuts the throttle. Layering,
+abort hotkey (F12; Ctrl+C always works), or loss of game-window focus: it centres the rate sticks
+and cuts the throttle. Layering,
 frame conventions and how to add a harness or estimator:
 [docs/adr/0002-live-harness-layering.md](docs/adr/0002-live-harness-layering.md).
 
@@ -65,14 +66,46 @@ drone-fly harness run --harness sim-loopback --checkpoint <model_readout.pt> --e
 drone-fly harness run --harness liftoff --checkpoint training/07-proc-course-flight/model_readout.pt \
     --extra-dim 30 --config my_liftoff.yaml [--dry-run] [--duration 60]
 drone-fly harness eval --session artifacts/harness/<run> --track <track.xml> --race <race.xml> --config my_liftoff.yaml
+drone-fly harness latency-report artifacts/harness/<run>    # per-stage latency table (p50/p95/p99/max)
 ```
+
+Real Liftoff, calibrated (UC-64, micro drone on Liftoff Arena "04 - Infinity Loop"; see
+[docs/adr/0003-real-liftoff-calibration.md](docs/adr/0003-real-liftoff-calibration.md)):
+
+```
+drone-fly harness label --preset liftoff_micro_arena --capture <capture> --track <track.xml> \
+    --race <race.xml> --props <props.json> --preview 12            # auto-label gates from XML + pose
+drone-fly harness train-gates --preset liftoff_micro_arena --labels artifacts/harness/liftoff/labels/<capture>
+drone-fly harness eval --preset liftoff_micro_arena --capture <capture> --labels artifacts/harness/liftoff/labels/<capture>
+drone-fly harness depth-fit --preset liftoff_micro_arena --capture <capture> --track <track.xml> --race <race.xml>
+drone-fly harness pad-check --preset liftoff_micro_arena          # live: stick directions vs. telemetry
+drone-fly harness run --harness liftoff --preset liftoff_micro_arena --extra-dim 70 --checkpoint <model_readout.pt> \
+    --output-root artifacts/harness/liftoff/runs
+```
+
+- `--preset` overlays a packaged preset (`src/drone_fly/harness/configs/`) on the harness default,
+  before `--config`. `liftoff_micro_arena` carries the measured telemetry convention, camera
+  (2560x1080, 120° HFOV, 20° uptilt), Arena HUD masks, rates, hover stick, the arch gate type and
+  the fitted depth calibration, each with its measurement source.
+- `label` projects every gate listed in the `gate_types` table into each frame of a hand-flown
+  capture (telemetry pose + track XML), `train-gates` trains the `learned` gate detector on those
+  labels (a held-out time split is kept aside), and `eval --capture` scores it on the held-out
+  frames only (detection rate, position / yaw error, latency per gate type). A new gate style is a
+  `gate_types` entry plus capture, label, retrain.
+- `depth-fit` fits `depth.calibration` against XML geometry and scores the 40-ray scan against the
+  contract `raycast()`. `pad-check` pulses each stick while holding altitude and suggests
+  `controls.stick_signs`.
+- Liftoff outputs go under `artifacts/harness/liftoff/` (`labels/`, `models/`, `reports/`, `runs/`;
+  gitignored). Track XMLs, props and game frames are never committed.
 
 - **sim-loopback** flies the contract's reference `plant_step` through the harness interfaces, with
   ground-truth gates and the contract `raycast()`. It checks that the harness reproduces the
   reference inference path.
 - **liftoff** (5-inch FPV) reads Liftoff's UDP telemetry, detects gates on screen with OpenCV
-  (PnP against a configured nominal gate size), and drives a ViGEm virtual Xbox 360 pad through the
-  inverse of your Liftoff rate profile. Settings for each game and airframe (telemetry port and
+  (PnP against a configured nominal gate size) or with the `learned` keypoint detector
+  (`parts.gate_estimator: learned`), and drives a ViGEm virtual Xbox 360 pad through the
+  inverse of your Liftoff rate profile. The run waits up to 15 s for the Liftoff window to be
+  focused and fails safe (`focus_lost`) if it loses focus (`parts.focus_probe`). Settings for each game and airframe (telemetry port and
   format, FOV, uptilt, gate size and colour, rates, hover stick, `world_scale`) live in YAML. Your
   `--config` is overlaid on the packaged default `src/drone_fly/harness/configs/liftoff_5inch.yaml`;
   unknown keys are rejected. The values marked `CALIBRATE` there are assumptions to check against
@@ -89,7 +122,8 @@ drone-fly harness eval --session artifacts/harness/<run> --track <track.xml> --r
   guaranteed zero-shot flight. The policy also does not keep the camera pointed where it flies (no yaw
   shaping); see the ADR.
 - Runs are recorded under `artifacts/harness/<harness>-<UTC>/`: config, checkpoint sha256, raw
-  telemetry, sampled frames, estimator outputs, obs/extra vectors, actions and per-stage latencies.
+  telemetry, sampled frames, estimator outputs, obs/extra vectors, actions and per-stage latencies,
+  plus `latency_summary.json` and the sink's neutral output after the fail-safe (`meta.json`).
   Recording into `training/` is refused.
 - Paths: `--gpu-prototype-dir` / `DRONE_FLY_GPU_PROTOTYPE` (default `gpu_prototype/`) and
   `--k1-path` / `DRONE_FLY_K1_PATH` (default `artifacts/pruned/k1/`).

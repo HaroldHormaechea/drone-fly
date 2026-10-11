@@ -36,6 +36,42 @@ RECORDED_CSV_HEADER = (
     "gyro_yaw,in_throttle,in_yaw,in_pitch,in_roll,batt_charge,batt_volts,rpm_0,rpm_1,rpm_2,rpm_3"
 )
 
+#: UC-64 AC13: local opt-in real-data tests read the gitignored Liftoff data from the folder this
+#: variable names (the main checkout's ``artifacts/harness``: ``captures/<name>/`` + ``trackdata/``)
+#: and skip when it is unset or incomplete. Nothing from it is ever committed.
+LIFTOFF_DATA_ENV = "DRONE_FLY_LIFTOFF_DATA"
+REAL_CAPTURE_NAME = "2026-10-11-infinity-manual"
+REAL_TRACK_XML = "LiftoffArenaTrack04_0001.xml"
+REAL_RACE_XML = "LiftoffArenaRace04_0001.xml"
+
+
+def liftoff_real_data() -> SimpleNamespace:
+    """Paths of the real Infinity Loop data, or ``pytest.skip`` when absent (local opt-in)."""
+    import os
+
+    import pytest
+
+    root = os.environ.get(LIFTOFF_DATA_ENV)
+    if not root:
+        pytest.skip(f"real Liftoff data not configured (set {LIFTOFF_DATA_ENV})")
+    base = Path(root)
+    data = SimpleNamespace(
+        root=base,
+        capture=base / "captures" / REAL_CAPTURE_NAME,
+        track=base / "trackdata" / REAL_TRACK_XML,
+        race=base / "trackdata" / REAL_RACE_XML,
+        props=base / "trackdata" / "props.json",
+    )
+    missing = [
+        str(p)
+        for p in (data.capture / "telemetry_raw.csv", data.track, data.race, data.props)
+        if not p.is_file()
+    ]
+    if missing:
+        pytest.skip(f"real Liftoff data incomplete under {base}: missing {missing}")
+    return data
+
+
 #: Modules the hermetic (CI) path must never need.
 HEAVY_MODULES = ("torch", "cv2", "mss", "dxcam", "transformers", "vgamepad", "PIL")
 

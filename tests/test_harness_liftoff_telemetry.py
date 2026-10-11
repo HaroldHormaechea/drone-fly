@@ -274,13 +274,15 @@ def test_converter_scales_lengths_only():
 
 
 def test_default_gyro_map_units_axes_and_signs():
+    # UC-64 / ADR 0003: Liftoff's convention measured on a real capture is wx = -roll,
+    # wy = +pitch, wz = -yaw (the UC-62 default had the roll and pitch signs inverted).
     gm = GyroMap()
     pitch, roll, yaw = 10.0, 20.0, 30.0
     out = gm.apply([pitch, roll, yaw])
-    np.testing.assert_allclose(out, np.radians([roll, -pitch, -yaw]), rtol=1e-6)
+    np.testing.assert_allclose(out, np.radians([-roll, pitch, -yaw]), rtol=1e-6)
     assert out.dtype == np.float32
     rad = GyroMap(units="rad_s").apply([1.0, 2.0, 3.0])
-    np.testing.assert_allclose(rad, [2.0, -1.0, -3.0])
+    np.testing.assert_allclose(rad, [-2.0, 1.0, -3.0])
 
 
 def test_gyro_map_from_config():

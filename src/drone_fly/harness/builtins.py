@@ -77,6 +77,16 @@ _BUILTINS: list[tuple[str, str, str, dict]] = [
     ),
     (
         "gate_estimator",
+        "learned",
+        f"{_PKG}.liftoff.gate_learned:LearnedGateEstimator",
+        {
+            "description": "keypoint net (per gate type) + PnP",
+            "requires": ("torch", "cv2"),
+            "packages": _CV2,
+        },
+    ),
+    (
+        "gate_estimator",
         "opencv",
         f"{_PKG}.liftoff.gate_cv:OpenCvGateEstimator",
         {"description": "HSV quads + PnP gate pose", "requires": ("cv2",), "packages": _CV2},
@@ -118,6 +128,12 @@ _BUILTINS: list[tuple[str, str, str, dict]] = [
         "hotkey",
         f"{_PKG}.liftoff.abort:HotkeyAbortSignal",
         {"description": "Win32 abort hotkey (GetAsyncKeyState)"},
+    ),
+    (
+        "focus_probe",
+        "win32-foreground",
+        f"{_PKG}.liftoff.focus:Win32ForegroundFocusProbe",
+        {"description": "Win32 foreground window == the game process"},
     ),
     (
         "action_sink",

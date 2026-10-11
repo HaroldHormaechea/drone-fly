@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Synthetic UC-64 Liftoff 1.4-style track for race_passages.xml (offline fixture; Unity metres, Y-up).
+     Seven inflatable arches laid out as a figure-of-eight through the centre arch 8 at the origin:
+     the left lobe (1, 5) runs +z through 8 and the right lobe (6, 4) runs -z back through it, so
+     arch 8 is crossed twice per lap in opposite directions. Arch 2 is off-route (branch target in
+     race_branch.xml); one crowd barrier and one unmatched decoration. -->
+<Track xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <name>uc64-synthetic-passages</name>
+  <blueprints>
+    <TrackBlueprint>
+      <itemID>InflatableArchBrandless01</itemID>
+      <instanceID>8</instanceID>
+      <position><x>0</x><y>0</y><z>0</z></position>
+      <rotation><x>0</x><y>0</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>InflatableArchBrandless01</itemID>
+      <instanceID>5</instanceID>
+      <position><x>-6</x><y>0</y><z>12</z></position>
+      <rotation><x>0</x><y>0</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>InflatableArchBrandless01</itemID>
+      <instanceID>7</instanceID>
+      <position><x>0</x><y>0</y><z>20</z></position>
+      <rotation><x>0</x><y>90</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>InflatableArchBrandless01</itemID>
+      <instanceID>6</instanceID>
+      <position><x>6</x><y>0</y><z>12</z></position>
+      <rotation><x>0</x><y>0</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>InflatableArchBrandless01</itemID>
+      <instanceID>4</instanceID>
+      <position><x>6</x><y>0</y><z>-12</z></position>
+      <rotation><x>0</x><y>180</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>InflatableArchBrandless01</itemID>
+      <instanceID>3</instanceID>
+      <position><x>0</x><y>0</y><z>-20</z></position>
+      <rotation><x>0</x><y>270</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>InflatableArchBrandless01</itemID>
+      <instanceID>1</instanceID>
+      <position><x>-6</x><y>0</y><z>-12</z></position>
+      <rotation><x>0</x><y>0</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>InflatableArchBrandless01</itemID>
+      <instanceID>2</instanceID>
+      <position><x>-20</x><y>0</y><z>0</z></position>
+      <rotation><x>0</x><y>0</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>ConradCrowdControlBarrier01</itemID>
+      <instanceID>30</instanceID>
+      <position><x>12</x><y>0</y><z>0</z></position>
+      <rotation><x>0</x><y>0</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>SpectatorTent01</itemID>
+      <instanceID>40</instanceID>
+      <position><x>30</x><y>0</y><z>30</z></position>
+    </TrackBlueprint>
+  </blueprints>
+</Track>

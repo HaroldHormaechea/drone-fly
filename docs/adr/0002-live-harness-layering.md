@@ -1,6 +1,7 @@
 # ADR 0002: Live-harness layering (Liftoff as the worked example)
 
-- **Status:** accepted (UC-62)
+- **Status:** accepted (UC-62); real-Liftoff calibration in
+  [ADR 0003](0003-real-liftoff-calibration.md) (UC-64)
 - **Date:** 2026-10-11
 - **Code:** `src/drone_fly/harness/`, CLI `drone-fly harness …`
 
@@ -44,12 +45,13 @@ Two hard constraints shape it:
 |---|---|---|---|
 | `StateSource` | telemetry -> `FlightState` (contract world frame, training scale) | `liftoff-udp` (`liftoff-csv` replays a recording) | `plant` (reads the reference plant) |
 | `FrameSource` | screen/camera -> `Frame` | `screen` (dxcam, else mss) | none |
-| `GateEstimator` | -> `target`, `curr_gate(3)`, `next_lookahead(7)` | `opencv` (HSV quads + PnP) | `course` (ground truth) |
+| `GateEstimator` | -> `target`, `curr_gate(3)`, `next_lookahead(7)` | `opencv` (HSV quads + PnP); `learned` (keypoint net per gate type + PnP, UC-64) | `course` (ground truth) |
 | `FreeSpaceEstimator` | -> `obstacle_vision(8)`, `raycast(40)` | `none` (obstacle-free) / `depth` (monocular depth net) | `raycast` (contract `raycast()`) |
 | `ObservationAssembler` | -> `obs(12)`, `extra(extra_dim)` | `ContractObservationAssembler` (shared) | same |
 | `PolicyRunner` | `act(obs, extra)` -> raw[4] | `ContractPolicyRunner` (shared) | same |
 | `ActionSink` | `ContractCommand` -> native input | `vgamepad` (ViGEm Xbox 360 pad) | `plant` (contract `plant_step`) |
 | `AbortSignal` | user abort | `hotkey` (F12) | none |
+| `FocusProbe` | target window focused? | `win32-foreground` (UC-64; skipped in dry runs) | none |
 
 A `Harness` is a **composition object** built by a registered factory from YAML config — never a
 subclass per target. Parts and harness factories are registered by name
@@ -163,7 +165,12 @@ slack).
   error, the gyro check, and a suggested depth-scale fit.
 - Per-game / airframe settings (telemetry port and format, FOV, uptilt, nominal gate size, HSV,
   rate profile, hover stick, world scale, depth calibration) live in YAML; `liftoff_5inch.yaml` is
-  the default.
+  the default. Packaged presets (`--preset liftoff_micro_arena`) overlay it with measured values.
+- UC-64 additions (see [ADR 0003](0003-real-liftoff-calibration.md)): the corrected gyro
+  convention (`wx = -roll`, `wy = +pitch`, `wz = -yaw`) and MotorRPM count prefix, linked-list race
+  routes, the `gate_types` table and the `learned` gate estimator (the tracker is now the shared
+  `TrackingGateEstimator` base), `camera.masks`, the `focus_lost` fail-safe, per-estimator
+  perception timing (`perception_s`) and `latency_summary.json`.
 
 ## How to add a harness or an estimator
 

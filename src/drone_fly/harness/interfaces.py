@@ -16,6 +16,8 @@ Threading contracts
   (``start()`` / ``stop()``) and ``update()`` returns an estimate built from the latest
   finished result, stamped with that result's capture time so the runner can check its age.
 * :class:`ActionSink` and :class:`PolicyRunner` are only used from the runner thread.
+* :class:`FocusProbe` ``has_focus()`` is called from the runner thread once per tick and must be
+  cheap and non-blocking.
 """
 
 from __future__ import annotations
@@ -187,6 +189,20 @@ class AbortSignal(ABC):
         """True once the user asked to abort."""
 
 
+class FocusProbe(ABC):
+    """Whether the target's window has keyboard / gamepad focus (pad input goes to that window)."""
+
+    def start(self) -> None:  # noqa: B027 - optional hook
+        """Begin probing (may raise when the platform is unsupported)."""
+
+    def stop(self) -> None:  # noqa: B027 - optional hook
+        """Release resources."""
+
+    @abstractmethod
+    def has_focus(self) -> bool:
+        """True while the target window is in the foreground."""
+
+
 class DepthModel(ABC):
     """A monocular depth backend: BGR image -> per-pixel depth (metres before calibration)."""
 
@@ -226,6 +242,7 @@ class Harness:
     frame_source: FrameSource | None = None
     free_space_estimator: FreeSpaceEstimator | None = None
     abort_signal: AbortSignal | None = None
+    focus_probe: FocusProbe | None = None
     clock: Any = None  # a runner clock (WallClock / SimClock); None -> WallClock
     info: dict[str, Any] = field(default_factory=dict)
     on_close: list[Callable[[], None]] = field(default_factory=list)

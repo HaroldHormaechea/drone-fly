@@ -3,13 +3,18 @@
 Layout::
 
     config.yaml      merged run configuration
-    meta.json        checkpoint path + sha256, extra_dim, device, git HEAD, contract dir,
-                     stop reason, tick / missed-deadline / dropped-record counts
+    meta.json        checkpoint path + sha256, extra_dim, device, GPU, git HEAD, contract dir,
+                     stop reason, tick / missed-deadline / dropped-record counts, fail-safe
+                     result and the sink's neutral output (``failsafe_output``)
     telemetry.csv    raw telemetry samples (source frame, unconverted)
     ticks.jsonl      one line per tick: obs, extra, raw action, decoded command, sink output,
                      estimator outputs / status / ages, per-stage latencies, events
     frames/ + frames.csv   every Nth frame (N = recording.frame_every_n; 0 = metadata only),
                      written as PNG with OpenCV when available, else ``.npy``
+    latency_summary.json   written on close: p50/p95/p99/max per stage (state, gate detector,
+                     depth worker + update, policy, actuation, total), effective rate, missed
+                     deadlines, estimate ages (:func:`summarize_ticks`; ``drone-fly harness
+                     latency-report`` prints it as a table)
 
 Writes happen on a background thread fed by a bounded queue; when the queue is full the
 record is dropped and counted (the control loop never blocks on disk).
@@ -43,6 +48,146 @@ TELEMETRY_COLUMNS = (
     + ["rpm_0", "rpm_1", "rpm_2", "rpm_3"]
 )
 FRAME_COLUMNS = ["tick", "frame_index", "stamp", "width", "height", "file"]
+LATENCY_FILE = "latency_summary.json"
+
+#: latency_summary.json rows: name -> where the per-tick value comes from (seconds).
+LATENCY_STAGES = (
+    ("state", "latency_s", "state"),
+    ("gate_detector", "perception_s", "gate"),
+    ("gate_inference", "gate_info", "inference_s"),
+    ("depth_worker", "free_space_info", "inference_s"),
+    ("depth_update", "perception_s", "free_space"),
+    ("perception", "latency_s", "perception"),
+    ("policy", "latency_s", "inference"),
+    ("actuation", "latency_s", "actuation"),
+    ("total", "latency_s", "total"),
+)
+AGE_KEYS = ("telemetry", "frame", "gate", "free_space")
+
+
+def _stats_ms(values: list[float]) -> dict[str, float] | None:
+    arr = np.asarray([v for v in values if v is not None and np.isfinite(v)], np.float64)
+    if arr.size == 0:
+        return None
+    ms = arr * 1000.0
+    return {
+        "n": int(arr.size),
+        "p50": float(np.percentile(ms, 50)),
+        "p95": float(np.percentile(ms, 95)),
+        "p99": float(np.percentile(ms, 99)),
+        "max": float(ms.max()),
+    }
+
+
+def summarize_ticks(ticks: list[dict[str, Any]], rate_hz: float | None = None) -> dict[str, Any]:
+    """Per-stage latency / age percentiles (ms) over ``ticks.jsonl`` records.
+
+    The depth worker's inference time is counted once per depth frame (it is reported on every
+    tick that reuses the same result).
+    """
+    series: dict[str, list[float]] = {name: [] for name, _, _ in LATENCY_STAGES}
+    ages: dict[str, list[float]] = {k: [] for k in AGE_KEYS}
+    seen_depth: set[Any] = set()
+    times: list[float] = []
+    missed = 0
+    for t in ticks:
+        missed += bool(t.get("missed_deadline"))
+        clock = t.get("sim_time") if t.get("sim_time") is not None else t.get("wall_time")
+        if clock is not None:
+            times.append(float(clock))
+        gate_info = (t.get("gate") or {}).get("info") or {}
+        fs_info = (t.get("free_space") or {}).get("info") or {}
+        src = {
+            "latency_s": t.get("latency_s") or {},
+            "perception_s": t.get("perception_s") or {},
+            "gate_info": gate_info,
+            "free_space_info": fs_info,
+        }
+        for name, where, key in LATENCY_STAGES:
+            value = src[where].get(key)
+            if value is None:
+                continue
+            if name == "depth_worker":
+                frame_key = fs_info.get("frame_index")
+                if frame_key in seen_depth:
+                    continue
+                seen_depth.add(frame_key)
+            series[name].append(float(value))
+        for k in AGE_KEYS:
+            v = (t.get("ages_s") or {}).get(k)
+            if v is not None:
+                ages[k].append(float(v))
+    n = len(ticks)
+    span = (max(times) - min(times)) if len(times) > 1 else 0.0
+    return {
+        "ticks": n,
+        "rate_hz_target": rate_hz,
+        "effective_rate_hz": (len(times) - 1) / span if span > 0 else None,
+        "missed_deadlines": missed,
+        "missed_deadline_rate": missed / n if n else 0.0,
+        "latency_ms": {name: _stats_ms(v) for name, v in series.items()},
+        "ages_ms": {k: _stats_ms(v) for k, v in ages.items()},
+    }
+
+
+def latency_markdown(summary: dict[str, Any]) -> str:
+    """``summary`` (see :func:`summarize_ticks`) as a Markdown table."""
+    lines = [
+        "| stage | n | p50 ms | p95 ms | p99 ms | max ms |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+
+    def row(name: str, st: dict[str, float] | None) -> str:
+        if st is None:
+            return f"| {name} | 0 | - | - | - | - |"
+        return (
+            f"| {name} | {st['n']} | {st['p50']:.1f} | {st['p95']:.1f} | {st['p99']:.1f} "
+            f"| {st['max']:.1f} |"
+        )
+
+    for name, st in summary.get("latency_ms", {}).items():
+        lines.append(row(name, st))
+    for name, st in summary.get("ages_ms", {}).items():
+        lines.append(row(f"age: {name}", st))
+    rate = summary.get("effective_rate_hz")
+    target = summary.get("rate_hz_target")
+    rate_text = "-" if rate is None else f"{rate:.1f}"
+    target_text = f" (target {target:g} Hz)" if target else ""
+    lines.append("")
+    lines.append(
+        f"ticks {summary.get('ticks', 0)}, effective rate {rate_text} Hz{target_text}, "
+        f"missed deadlines {summary.get('missed_deadlines', 0)} "
+        f"({100 * summary.get('missed_deadline_rate', 0.0):.1f} %)"
+    )
+    if summary.get("gpu"):
+        lines.append(f"GPU: {summary['gpu']}")
+    return "\n".join(lines)
+
+
+def load_latency_summary(run_dir: str | Path, *, recompute: bool = False) -> dict[str, Any]:
+    """``latency_summary.json`` of a run folder, recomputed from ``ticks.jsonl`` when missing."""
+    run = Path(run_dir)
+    path = run / LATENCY_FILE
+    if path.is_file() and not recompute:
+        return json.loads(path.read_text(encoding="utf-8"))
+    ticks_path = run / "ticks.jsonl"
+    if not ticks_path.is_file():
+        raise HarnessConfigError(f"{run} has no ticks.jsonl (is it a harness run folder?)")
+    ticks = [
+        json.loads(line)
+        for line in ticks_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    meta_path = run / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
+    cfg_path = run / "config.yaml"
+    rate = None
+    if cfg_path.is_file():
+        cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        rate = (cfg.get("runner") or {}).get("rate_hz")
+    summary = summarize_ticks(ticks, rate)
+    summary["gpu"] = meta.get("gpu")
+    return summary
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -118,6 +263,24 @@ def git_head(repo_root: Path | None) -> str | None:
     return out.stdout.strip() or None if out.returncode == 0 else None
 
 
+def _latency_view(d: dict[str, Any]) -> dict[str, Any]:
+    """The subset of a tick dict :func:`summarize_ticks` reads (kept in memory until close)."""
+    gate_info = (d.get("gate") or {}).get("info") or {}
+    fs_info = (d.get("free_space") or {}).get("info") or {}
+    return {
+        "sim_time": d.get("sim_time"),
+        "wall_time": d.get("wall_time"),
+        "missed_deadline": d.get("missed_deadline"),
+        "latency_s": d.get("latency_s"),
+        "perception_s": d.get("perception_s"),
+        "ages_s": d.get("ages_s"),
+        "gate": {"info": {"inference_s": gate_info.get("inference_s")}},
+        "free_space": {
+            "info": {k: fs_info.get(k) for k in ("inference_s", "frame_index")},
+        },
+    }
+
+
 def _row(sample: TelemetrySample) -> list[Any]:
     def vals(arr: np.ndarray | None, n: int) -> list[Any]:
         return [""] * n if arr is None else [float(x) for x in np.asarray(arr).reshape(-1)[:n]]
@@ -146,6 +309,7 @@ class RunRecorder:
         *,
         queue_size: int = 2048,
         repo_root: Path | None = None,
+        rate_hz: float | None = None,
     ) -> None:
         root = resolve_output_root(output_root, repo_root)
         try:  # serialise first, so a bad config fails before the run folder exists
@@ -161,6 +325,8 @@ class RunRecorder:
         self.meta.setdefault("started_utc", stamp)
         self.meta.setdefault("git_head", git_head(repo_root or find_repo_root()))
         self.dropped = 0
+        self.rate_hz = rate_hz
+        self._tick_views: list[dict[str, Any]] = []
         self._q: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=queue_size)
         (self.run_dir / "config.yaml").write_text(config_text, encoding="utf-8")
         self._write_meta()
@@ -207,7 +373,9 @@ class RunRecorder:
                 if kind == "stop":
                     return
                 if kind == "tick":
-                    self._ticks.write(json.dumps(payload.as_dict()) + "\n")
+                    d = payload.as_dict()
+                    self._ticks.write(json.dumps(d) + "\n")
+                    self._tick_views.append(_latency_view(d))
                 elif kind == "telemetry":
                     self._tele.writerow(_row(payload))
                 elif kind == "frame":
@@ -247,4 +415,12 @@ class RunRecorder:
             fh.close()
         self.meta.update(final_meta)
         self._write_meta()
+        try:
+            summary = summarize_ticks(self._tick_views, self.rate_hz)
+            summary["gpu"] = self.meta.get("gpu")
+            (self.run_dir / LATENCY_FILE).write_text(
+                json.dumps(summary, indent=2), encoding="utf-8"
+            )
+        except Exception:  # noqa: BLE001 - a summary failure must not lose the run folder
+            log.exception("writing %s failed", LATENCY_FILE)
         return self.run_dir

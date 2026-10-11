@@ -5,7 +5,8 @@ Reconstructs the contract's 40-ray scan (and ``obstacle_vision``) from a single 
 1. A pluggable :class:`DepthModel` turns the latest frame into a depth map on its **own worker
    thread** (latest frame wins); the map is calibrated (affine ``scale * raw + shift``; with
    ``inverse: true`` the affine result is inverse depth) and published with its capture time
-   and the drone pose at capture.
+   and the drone pose at capture. Pixels inside ``camera.masks`` (HUD, ghost list) become ``+inf``
+   after calibration, so no ray hits them and they form no obstacle cluster.
 2. ``update()`` (synchronous, non-blocking) builds the ray fan with
    :func:`~drone_fly.harness.geometry.ray_directions` — the contract cone, velocity-aligned with
    the target-direction fallback below 0.3 m/s — and projects each ray world -> body -> camera ->
@@ -152,6 +153,7 @@ class DepthResult:
     quat: np.ndarray  # attitude at capture
     pos: np.ndarray  # position at capture (training scale)
     frame_index: int
+    inference_s: float | None = None  # model time for this frame
 
 
 # ----------------------------------------------------------------------------- estimator
@@ -183,6 +185,7 @@ class MonocularDepthFreeSpaceEstimator(FreeSpaceEstimator):
         state_source: Any = None,
         warmup_timeout_s: float = 60.0,
         clock: Any = time.perf_counter,
+        masks: Any = None,
     ) -> None:
         require_choice(fill_policy, "free_space.fill_policy", FILL_POLICIES)
         require_choice(obstacle_mode, "free_space.obstacle_vision", OBSTACLE_MODES)
@@ -206,6 +209,7 @@ class MonocularDepthFreeSpaceEstimator(FreeSpaceEstimator):
         self.state_source = state_source
         self.warmup_timeout_s = warmup_timeout_s
         self.clock = clock
+        self.masks = masks
         self._lock = threading.Lock()
         self._result: DepthResult | None = None
         self._stop = threading.Event()
@@ -238,6 +242,8 @@ class MonocularDepthFreeSpaceEstimator(FreeSpaceEstimator):
                 )
             ),
         )
+        from drone_fly.harness.liftoff.masks import FrameMasks
+
         model = ctx.resources.get("depth_model") or depth_model_from_config(dcfg)
         calib = dcfg.get("calibration") or {}
         ground = dcfg.get("ground") or {}
@@ -277,6 +283,7 @@ class MonocularDepthFreeSpaceEstimator(FreeSpaceEstimator):
             frame_source=ctx.resources.get("frame_source"),
             state_source=ctx.resources.get("state_source"),
             warmup_timeout_s=num(dcfg, "warmup_timeout_s", 60.0, min_value=0.0),
+            masks=FrameMasks.from_config(cam),
         )
 
     # ------------------------------------------------------------------ lifecycle
@@ -326,9 +333,25 @@ class MonocularDepthFreeSpaceEstimator(FreeSpaceEstimator):
 
     def process(self, frame: Frame, state: FlightState) -> DepthResult:
         """Run the model on one frame and publish the result (worker thread or synchronous)."""
-        depth = self.calibration.apply(self.model.predict(frame.image))
+        t0 = time.perf_counter()
+        raw = self.model.predict(frame.image)
+        return self.process_raw(raw, frame, state, inference_s=time.perf_counter() - t0)
+
+    def process_raw(
+        self, raw: np.ndarray, frame: Frame, state: FlightState, inference_s: float | None = None
+    ) -> DepthResult:
+        """Calibrate + mask a raw model output for ``frame`` and publish it."""
+        depth = self.calibration.apply(raw)
+        if self.masks:
+            h, w = depth.shape[:2]
+            depth = np.where(self.masks.valid_mask(w, h), depth, np.inf).astype(np.float32)
         result = DepthResult(
-            depth, frame.stamp, np.asarray(state.quat), np.asarray(state.pos), frame.index
+            depth,
+            frame.stamp,
+            np.asarray(state.quat),
+            np.asarray(state.pos),
+            frame.index,
+            inference_s,
         )
         with self._lock:
             self._result = result
@@ -363,6 +386,9 @@ class MonocularDepthFreeSpaceEstimator(FreeSpaceEstimator):
         for i in np.flatnonzero(in_fov):
             u, v = int(round(px[i, 0])), int(round(px[i, 1]))
             patch = depth[max(v - k, 0) : min(v + k + 1, h), max(u - k, 0) : min(u + k + 1, w)]
+            patch = patch[np.isfinite(patch)]
+            if patch.size == 0:
+                continue  # masked: no hit, the ray reads clear
             z = float(np.percentile(patch, self.patch_percentile))
             cos = dirs[i, 2] / (np.linalg.norm(dirs[i]) + 1e-12)
             rng = self.scale.length(z / max(cos, 1e-6))
@@ -408,7 +434,7 @@ class MonocularDepthFreeSpaceEstimator(FreeSpaceEstimator):
         r_wc = quat_to_matrix(result.quat) @ cam.body_to_camera().T
         pts_w = pts_c @ r_wc.T / self.scale.factor + result.pos  # training scale
         dist = np.linalg.norm(pts_w - result.pos, axis=1)
-        near = dist < self.scale.length(self.near_m)
+        near = np.isfinite(dist) & (dist < self.scale.length(self.near_m))
         if self.ground_z_m is not None:
             near &= pts_w[:, 2] >= self.scale.length(self.ground_z_m + self.ground_height_m)
         labels, n = ndimage.label(near.reshape(z.shape))
@@ -460,5 +486,9 @@ class MonocularDepthFreeSpaceEstimator(FreeSpaceEstimator):
             raycast=rays.astype(np.float32),
             in_fov_mask=in_fov,
             stamp=result.stamp,
-            info={"frame_index": result.frame_index, "fill_policy": self.fill_policy},
+            info={
+                "frame_index": result.frame_index,
+                "fill_policy": self.fill_policy,
+                "inference_s": result.inference_s,
+            },
         )

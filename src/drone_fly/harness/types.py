@@ -224,6 +224,8 @@ class TickRecord:
     gate: GateEstimate | None = None
     free_space: FreeSpaceEstimate | None = None
     latency_s: dict[str, float] = field(default_factory=dict)
+    #: The perception stage split by estimator: ``{"gate": s, "free_space": s}``.
+    perception_s: dict[str, float] = field(default_factory=dict)
     ages_s: dict[str, float] = field(default_factory=dict)
     missed_deadline: bool = False
     events: list[str] = field(default_factory=list)
@@ -242,6 +244,7 @@ class TickRecord:
                 "gate": None if self.gate is None else self.gate.as_dict(),
                 "free_space": None if self.free_space is None else self.free_space.as_dict(),
                 "latency_s": self.latency_s,
+                "perception_s": self.perception_s,
                 "ages_s": self.ages_s,
                 "missed_deadline": self.missed_deadline,
                 "events": self.events,

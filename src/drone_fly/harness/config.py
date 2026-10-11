@@ -1,7 +1,10 @@
 """Harness configuration: packaged YAML defaults + a user overlay, validated.
 
-Each registered harness names a packaged default YAML (``harness/configs/<file>.yaml``). The
-user's ``--config`` file is overlaid on it recursively; **any key not present in the default is
+Each registered harness names a packaged default YAML (``harness/configs/<file>.yaml``). A
+**preset** is another packaged YAML in the same folder that is itself an overlay on that default
+(e.g. ``liftoff_micro_arena`` for the micro drone on Liftoff Arena); the chain is
+default <- preset <- user ``--config`` <- dotted overrides. The user's file is overlaid
+recursively; **any key not present in the default is
 rejected** (typos fail loudly instead of being silently ignored). Lists are replaced, not
 merged. Keys under :data:`OPEN_SECTIONS` accept arbitrary sub-keys (backend-specific params).
 
@@ -261,6 +264,7 @@ class PartsConfig:
     frame_source: str | None
     free_space_estimator: str | None
     abort_signal: str | None
+    focus_probe: str | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> PartsConfig:
@@ -274,6 +278,7 @@ class PartsConfig:
             frame_source=d.get("frame_source"),
             free_space_estimator=d.get("free_space_estimator"),
             abort_signal=d.get("abort_signal"),
+            focus_probe=d.get("focus_probe"),
         )
 
 
@@ -317,18 +322,60 @@ def validate(harness: str, data: dict[str, Any]) -> HarnessConfig:
     )
 
 
+def _default_config_names() -> set[str]:
+    from drone_fly.harness import registry
+
+    return {
+        e.default_config
+        for name in registry.names("harness")
+        if (e := registry.entry("harness", name)).default_config
+    }
+
+
+def list_presets(harness: str | None = None) -> dict[str, str]:
+    """Packaged presets ``{name: harness}`` (every packaged YAML that is not a harness default)."""
+    defaults = _default_config_names()
+    out: dict[str, str] = {}
+    folder = resources.files("drone_fly.harness").joinpath("configs")
+    for entry in sorted(folder.iterdir(), key=lambda e: e.name):
+        if not entry.name.endswith(".yaml") or entry.name in defaults:
+            continue
+        data = yaml.safe_load(entry.read_text("utf-8")) or {}
+        target = data.get("harness") if isinstance(data, dict) else None
+        if harness is None or target == harness:
+            out[entry.name[: -len(".yaml")]] = str(target)
+    return out
+
+
+def load_preset(harness: str, preset: str) -> dict[str, Any]:
+    """Load packaged preset ``preset`` (name or ``<name>.yaml``); it must target ``harness``."""
+    name = preset[: -len(".yaml")] if preset.endswith(".yaml") else preset
+    available = list_presets()
+    if name not in available:
+        known = ", ".join(sorted(available)) or "none"
+        raise HarnessConfigError(f"unknown preset {preset!r}; available presets: {known}")
+    if available[name] != harness:
+        raise HarnessConfigError(
+            f"preset {name!r} is for harness {available[name]!r}, but {harness!r} was requested"
+        )
+    return load_packaged_default(f"{name}.yaml")
+
+
 def load_config(
     harness: str,
     user_config: str | os.PathLike[str] | dict[str, Any] | None = None,
     overrides: dict[str, Any] | None = None,
+    preset: str | None = None,
 ) -> HarnessConfig:
-    """Packaged default for ``harness`` <- user YAML (path or mapping) <- dotted overrides."""
+    """Packaged default <- packaged ``preset`` <- user YAML (path / mapping) <- overrides."""
     from drone_fly.harness import registry
 
     default_name = registry.entry("harness", harness).default_config
     if default_name is None:
         raise HarnessConfigError(f"harness {harness!r} has no packaged default config")
     data = load_packaged_default(default_name)
+    if preset is not None:
+        data = overlay(data, load_preset(harness, preset))
     if user_config is not None:
         user = user_config if isinstance(user_config, dict) else load_yaml_file(user_config)
         data = overlay(data, user)

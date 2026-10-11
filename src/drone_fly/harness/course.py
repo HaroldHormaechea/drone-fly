@@ -26,6 +26,7 @@ class Gate:
     center: np.ndarray  # (3,) float32
     yaw: float  # gate normal heading (rad), travel direction
     aperture: float  # metres
+    cls: str | None = None  # gate class (gate-type table), when known
 
 
 @dataclass(frozen=True)
@@ -59,7 +60,8 @@ class Course:
             return self
         return Course(
             gates=tuple(
-                Gate(scale.vector(g.center), g.yaw, scale.length(g.aperture)) for g in self.gates
+                Gate(scale.vector(g.center), g.yaw, scale.length(g.aperture), g.cls)
+                for g in self.gates
             ),
             obstacles=tuple(
                 Obstacle(scale.vector(o.center), scale.vector(o.half_extents), o.type)

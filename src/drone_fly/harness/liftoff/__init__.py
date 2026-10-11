@@ -23,6 +23,7 @@ SECTION_FOR_KIND = {
     "free_space_estimator": "free_space",
     "action_sink": "controls",
     "abort_signal": "abort",
+    "focus_probe": "focus",
 }
 
 
@@ -52,6 +53,10 @@ def build_liftoff_harness(config: Any, ctx: BuildContext) -> Harness:
     free_space = make("free_space_estimator", parts.free_space_estimator)
     sink = make("action_sink", "recording" if ctx.dry_run else parts.action_sink)
     abort = make("abort_signal", parts.abort_signal)
+    # Pad input reaches whichever window is focused; a dry run actuates nothing, so no probe.
+    focus = None
+    if parts.focus_probe is not None and not ctx.dry_run:
+        focus = build_part("focus_probe", parts.focus_probe, config.get("focus") or {}, ctx)
     return Harness(
         name=config.harness,
         state_source=state_source,
@@ -60,6 +65,7 @@ def build_liftoff_harness(config: Any, ctx: BuildContext) -> Harness:
         frame_source=frame_source,
         free_space_estimator=free_space,
         abort_signal=abort,
+        focus_probe=focus,
         clock=SimClock() if config.runner.clock == "sim" else WallClock(),
         info={"world_scale": config.world_scale, "parts": parts.__dict__},
     )
