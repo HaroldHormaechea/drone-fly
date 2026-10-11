@@ -1,0 +1,16 @@
+{
+  "checkpoint": "artifacts/models/stage_b/model_readout.pt",
+  "checkpoint_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "extra_dim": 70,
+  "device": "cuda",
+  "harness": "liftoff",
+  "k1_path": null,
+  "stop_reason": "focus_lost",
+  "stop_error": "target window lost focus",
+  "ticks": 6,
+  "missed_deadlines": 1,
+  "failsafe_ok": true,
+  "failsafe_output": {
+    "failsafe": true
+  }
+}

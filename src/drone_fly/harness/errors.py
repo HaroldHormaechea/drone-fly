@@ -15,6 +15,8 @@ from types import ModuleType
 
 #: The command that installs every optional harness backend.
 INSTALL_HINT = "uv sync --extra harness"
+#: The command that installs the live overlay's GUI toolkit (PySide6: ``harness overlay``).
+OVERLAY_INSTALL_HINT = "uv sync --extra overlay"
 
 
 class HarnessError(Exception):
@@ -29,7 +31,7 @@ class HarnessDependencyError(HarnessError, ImportError):
         self.purpose = purpose
         what = f" (needed for {purpose})" if purpose else ""
         super().__init__(
-            f"Missing optional dependency '{package}'{what}. Install the harness extra: {hint}"
+            f"Missing optional dependency '{package}'{what}. Install the optional extra: {hint}"
         )
 
 
@@ -51,13 +53,16 @@ class PerceptionCoverageError(HarnessError):
         )
 
 
-def lazy_import(module: str, *, package: str | None = None, purpose: str = "") -> ModuleType:
+def lazy_import(
+    module: str, *, package: str | None = None, purpose: str = "", hint: str = INSTALL_HINT
+) -> ModuleType:
     """Import ``module`` on demand, raising :class:`HarnessDependencyError` when it is missing.
 
     ``package`` is the pip distribution name shown to the user when it differs from the
-    import name (e.g. ``opencv-python`` for ``cv2``).
+    import name (e.g. ``opencv-python`` for ``cv2``); ``hint`` is the install command shown
+    (default: the ``harness`` extra).
     """
     try:
         return importlib.import_module(module)
     except ImportError as exc:
-        raise HarnessDependencyError(package or module.split(".")[0], purpose) from exc
+        raise HarnessDependencyError(package or module.split(".")[0], purpose, hint) from exc

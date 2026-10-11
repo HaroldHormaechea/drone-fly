@@ -13,9 +13,20 @@ Start
 Tick
     abort? -> focus? -> state (stale check, discontinuity -> reset estimators) -> gate update
     (lost -> fail-safe) -> free-space latest (age check) -> assemble -> policy -> decode ->
-    sink.send -> record. Per-stage latencies (state, perception, inference, actuation, total),
-    the perception split per estimator (gate, free space), estimate ages and missed deadlines
-    are recorded on every tick.
+    sink.send -> [overlay publish] -> record. Per-stage latencies (state, perception, inference,
+    actuation, total; plus overlay when a live-overlay publisher is attached), the perception
+    split per estimator (gate, free space), estimate ages and missed deadlines are recorded on
+    every tick.
+
+Live overlay (UC-65, optional)
+    With a publisher, ticks for which ``publisher.wants_brain(k)`` is true call
+    ``policy.act_with_brain`` (same ops, also returns the propagated K1 state); every other tick
+    — and every tick without a publisher — calls ``policy.act`` unchanged. After actuation the
+    tick is published (never raising: a publisher failure is logged and the run continues) and
+    the cost lands in ``latency_s["overlay"]``; ``total`` stays state -> actuation, but the
+    overlay cost still counts toward the missed-deadline check. The wait loops publish status
+    and ``run()`` publishes the stop reason after the fail-safe. The publisher never calls the
+    focus probe: the runner hands it its own focus result.
 
 Fail-safe (latched)
     On stale telemetry, gate lost, a stale free-space estimate, loss of window focus, any
@@ -181,6 +192,7 @@ class HarnessRunner:
         settings: RunnerSettings | None = None,
         recorder: Any = None,
         clock: Any = None,
+        publisher: Any = None,
     ) -> None:
         self.harness = harness
         self.policy = policy
@@ -188,10 +200,14 @@ class HarnessRunner:
         self.contract = contract
         self.settings = settings or RunnerSettings()
         self.recorder = recorder
+        self.publisher = publisher
         self.clock = clock or harness.clock or WallClock()
         self.extra_dim = policy.extra_dim
         self._failsafe_latched = False
         self._last_disc = 0
+        self._last_sample: Any = None  # newest raw telemetry sample (overlay extras)
+        self._focus: bool | None = None  # this tick's focus-probe result (None = no probe)
+        self._last_overlay_s: float | None = None
         self._fs_required = any(
             b in ("obstacle_vision", "raycast") for b in assembler.required_blocks(self.extra_dim)
         )
@@ -281,6 +297,11 @@ class HarnessRunner:
             result.reason = STOP_INTERRUPT
         finally:
             self._failsafe(result)
+            if self.publisher is not None:
+                try:
+                    self.publisher.publish_stop(result)
+                except Exception:  # noqa: BLE001 - the overlay must never affect the run
+                    log.exception("overlay publish_stop failed")
             if result.is_failsafe_stop:
                 log.warning("fail-safe stop: %s %s", result.reason, result.error or "")
             self.shutdown()
@@ -288,10 +309,19 @@ class HarnessRunner:
 
     # -- loop --
 
+    def _publish_status(self, run_state: str) -> None:
+        if self.publisher is None:
+            return
+        try:
+            self.publisher.publish_status(run_state)
+        except Exception:  # noqa: BLE001 - the overlay must never affect the run
+            log.exception("overlay publish_status failed")
+
     def _wait_for_state(self) -> None:
         src = self.harness.state_source
         deadline = self.clock.now() + self.settings.wait_for_state_s
         while src.latest() is None:
+            self._publish_status("waiting_for_state")
             if self.clock.now() >= deadline:
                 raise _Stop(STOP_NO_TELEMETRY, "no telemetry received before wait_for_state_s")
             self.clock.sleep_until(self.clock.now() + 0.01)
@@ -303,6 +333,7 @@ class HarnessRunner:
             return
         deadline = self.clock.now() + self.settings.wait_for_focus_s
         while not probe.has_focus():
+            self._publish_status("waiting_for_focus")
             if self.harness.abort_signal is not None and self.harness.abort_signal.is_set():
                 raise _Stop(STOP_ABORT)
             if self.clock.now() >= deadline:
@@ -351,15 +382,21 @@ class HarnessRunner:
 
         if h.abort_signal is not None and h.abort_signal.is_set():
             self._finish(record, STOP_ABORT)
-        if h.focus_probe is not None and not h.focus_probe.has_focus():
-            self._finish(record, STOP_FOCUS_LOST, "target window lost focus")
+        if h.focus_probe is not None:
+            self._focus = h.focus_probe.has_focus()
+            if not self._focus:
+                self._finish(record, STOP_FOCUS_LOST, "target window lost focus")
 
         # -- state --
         state = h.state_source.latest()
         age = h.state_source.age(t0)
         record.ages_s["telemetry"] = float(age)
-        if self.recorder is not None:
-            self.recorder.record_telemetry(h.state_source.drain_raw())
+        if self.recorder is not None or self.publisher is not None:
+            samples = h.state_source.drain_raw()
+            if samples:
+                self._last_sample = samples[-1]
+            if self.recorder is not None:
+                self.recorder.record_telemetry(samples)
         if state is None or age > s.stale_after_s:
             self._finish(record, STOP_STALE_TELEMETRY, f"telemetry age {age:.3f}s")
         record.state = state.as_state_dict()
@@ -404,10 +441,15 @@ class HarnessRunner:
         t2 = clock.now()
 
         # -- assemble + act --
+        pub = self.publisher
+        brain: Any = None
         try:
             obs, extra = self.assembler.assemble(state, gate, fs, self.extra_dim)
             record.obs, record.extra = obs, extra
-            raw = self.policy.act(obs, extra)
+            if pub is not None and pub.wants_brain(k):
+                raw, brain = self.policy.act_with_brain(obs, extra)
+            else:
+                raw = self.policy.act(obs, extra)
             command = decode_action(raw, self.contract)
         except Exception as exc:  # noqa: BLE001
             log.exception("policy failed")
@@ -430,6 +472,24 @@ class HarnessRunner:
             "actuation": t4 - t3,
             "total": t4 - t0,
         }
+
+        # -- live overlay (optional; never stops the run) --
+        if pub is not None:
+            try:
+                fg = getattr(h.focus_probe, "last_foreground", None)  # (hwnd, process, title)
+                pub.publish_tick(
+                    record,
+                    brain=brain,
+                    sample=self._last_sample,
+                    missed_deadlines=result.missed_deadlines,
+                    focus=self._focus,
+                    focus_window=fg[1] if isinstance(fg, tuple) and len(fg) > 1 else None,
+                    overlay_prev_s=self._last_overlay_s,
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("overlay publish failed")
+            self._last_overlay_s = clock.now() - t4
+            record.latency_s["overlay"] = self._last_overlay_s
         return record
 
     def _finish(self, record: TickRecord, reason: str, error: str | None = None) -> NoReturn:

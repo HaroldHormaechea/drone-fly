@@ -282,6 +282,103 @@ class PartsConfig:
         )
 
 
+#: Overlay panels (``overlay.panels.<name>: true|false``), in drawing order.
+OVERLAY_PANELS = ("brain", "action", "inputs", "raycast", "perception", "health", "telemetry")
+OVERLAY_LAYOUTS = ("default", "mask_confined")
+#: Brain-frame quantisation: ``recorder`` (the recorder's fixed [-1, 1] uint8 scheme, AC2) or
+#: ``frame_peak`` (symmetric per-frame scale from the frame's own max |a|; see ADR 0004).
+OVERLAY_BRAIN_SCALES = ("recorder", "frame_peak")
+
+
+@dataclass(frozen=True)
+class OverlayConfig:
+    """The ``overlay`` section (UC-65): the runner-side publisher and the overlay window.
+
+    A harness whose config has no ``overlay`` section gets these defaults (overlay disabled).
+    """
+
+    enabled: bool = False
+    port: int = 9100
+    brain_every_n: int = 3
+    brain_scale: str = "recorder"
+    layout: str = "default"
+    fps: float = 20.0
+    stale_s: float = 1.0
+    gain_window_s: float = 5.0
+    opacity: float = 0.85
+    tap_outline: bool = False
+    panels: tuple[tuple[str, bool], ...] = tuple((p, True) for p in OVERLAY_PANELS)
+
+    def panel_enabled(self, name: str) -> bool:
+        return dict(self.panels).get(name, False)
+
+    @classmethod
+    def from_config(cls, cfg: Any) -> OverlayConfig:
+        """Validate the ``overlay`` section of ``cfg`` (a :class:`HarnessConfig` or a mapping)."""
+        data = cfg.data if isinstance(cfg, HarnessConfig) else cfg
+        d = data.get("overlay")
+        if d is None:
+            return cls()
+        if not isinstance(d, dict):
+            raise HarnessConfigError("config section 'overlay' must be a mapping")
+        base = cls()
+        port = require_int(d.get("port", base.port), "overlay.port", min_value=1024)
+        if port > 65535:
+            raise HarnessConfigError(f"config 'overlay.port' must be <= 65535, got {port}")
+        telemetry = data.get("telemetry")
+        if isinstance(telemetry, dict) and telemetry.get("port") == port:
+            raise HarnessConfigError(
+                f"config 'overlay.port' ({port}) must differ from 'telemetry.port' (the telemetry "
+                "listener already binds it)"
+            )
+        raw_panels = d.get("panels", {})
+        if not isinstance(raw_panels, dict):
+            raise HarnessConfigError("config 'overlay.panels' must be a mapping of panel: bool")
+        unknown = sorted(set(raw_panels) - set(OVERLAY_PANELS))
+        if unknown:
+            raise HarnessConfigError(
+                f"unknown overlay panel(s) {unknown} (allowed: {list(OVERLAY_PANELS)})"
+            )
+        panels = tuple(
+            (p, require_bool(raw_panels.get(p, True), f"overlay.panels.{p}"))
+            for p in OVERLAY_PANELS
+        )
+
+        def positive(key: str) -> float:
+            return float(
+                require_number(
+                    d.get(key, getattr(base, key)),
+                    f"overlay.{key}",
+                    min_value=0.0,
+                    min_exclusive=True,
+                )
+            )
+
+        return cls(
+            enabled=require_bool(d.get("enabled", base.enabled), "overlay.enabled"),
+            port=port,
+            brain_every_n=require_int(
+                d.get("brain_every_n", base.brain_every_n), "overlay.brain_every_n", min_value=1
+            ),
+            brain_scale=require_choice(
+                d.get("brain_scale", base.brain_scale), "overlay.brain_scale", OVERLAY_BRAIN_SCALES
+            ),
+            layout=require_choice(d.get("layout", base.layout), "overlay.layout", OVERLAY_LAYOUTS),
+            fps=float(
+                require_number(d.get("fps", base.fps), "overlay.fps", min_value=1.0, max_value=20.0)
+            ),
+            stale_s=positive("stale_s"),
+            gain_window_s=positive("gain_window_s"),
+            opacity=float(
+                require_number(
+                    d.get("opacity", base.opacity), "overlay.opacity", min_value=0.0, max_value=1.0
+                )
+            ),
+            tap_outline=require_bool(d.get("tap_outline", base.tap_outline), "overlay.tap_outline"),
+            panels=panels,
+        )
+
+
 @dataclass(frozen=True)
 class HarnessConfig:
     """The merged, validated configuration for one harness run."""

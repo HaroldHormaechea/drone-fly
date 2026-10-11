@@ -355,6 +355,20 @@ class TrackingGateEstimator(GateEstimator):
         info: dict[str, Any] = {"detections": len(dets), "matched": match is not None}
         if self.current is not None and self.current.cls is not None:
             info["gate_class"] = self.current.cls
+        if frame is not None:
+            # UC-65 live overlay: what was detected, in **frame pixel** coordinates.
+            h, w = frame.image.shape[:2]
+            info["detections_px"] = [
+                {
+                    "cls": d.cls,
+                    "points": np.asarray(d.corners, np.float64).reshape(-1, 2).tolist(),
+                    "center": d.center_px.tolist(),
+                    "matched": d is match,
+                }
+                for d in dets
+            ]
+            info["frame_size"] = [int(w), int(h)]
+            info["frame_index"] = int(frame.index)
         info.update(self.extra_info())
         return GateEstimate(
             target=target,

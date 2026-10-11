@@ -54,6 +54,13 @@ harness = [
     "transformers",
     "pillow",
 ]
+# UC-65: the live brain + debug overlay window (`drone-fly harness overlay`). PySide6 (Qt, the
+# Essentials wheel: QtCore/QtGui/QtWidgets only) is imported lazily and only by
+# drone_fly/overlay/window.py; it needs a desktop, so it is NOT in `dev`/CI. The window applies
+# Win32 styles, hence the Windows marker. Install with `uv sync --extra overlay`.
+overlay = [
+    "PySide6-Essentials; sys_platform == 'win32'",
+]
 
 [project.scripts]
 drone-fly = "drone_fly.cli.main:main"

@@ -12,7 +12,8 @@ Layout::
     frames/ + frames.csv   every Nth frame (N = recording.frame_every_n; 0 = metadata only),
                      written as PNG with OpenCV when available, else ``.npy``
     latency_summary.json   written on close: p50/p95/p99/max per stage (state, gate detector,
-                     depth worker + update, policy, actuation, total), effective rate, missed
+                     depth worker + update, policy, actuation, live-overlay publish, total),
+                     effective rate, missed
                      deadlines, estimate ages (:func:`summarize_ticks`; ``drone-fly harness
                      latency-report`` prints it as a table)
 
@@ -60,8 +61,12 @@ LATENCY_STAGES = (
     ("perception", "latency_s", "perception"),
     ("policy", "latency_s", "inference"),
     ("actuation", "latency_s", "actuation"),
+    ("overlay", "latency_s", "overlay"),
     ("total", "latency_s", "total"),
 )
+#: Stages reported only when at least one tick carries them (a run without the live overlay
+#: keeps the pre-UC-65 summary shape).
+OPTIONAL_STAGES = frozenset({"overlay"})
 AGE_KEYS = ("telemetry", "frame", "gate", "free_space")
 
 
@@ -125,7 +130,9 @@ def summarize_ticks(ticks: list[dict[str, Any]], rate_hz: float | None = None) -
         "effective_rate_hz": (len(times) - 1) / span if span > 0 else None,
         "missed_deadlines": missed,
         "missed_deadline_rate": missed / n if n else 0.0,
-        "latency_ms": {name: _stats_ms(v) for name, v in series.items()},
+        "latency_ms": {
+            name: _stats_ms(v) for name, v in series.items() if v or name not in OPTIONAL_STAGES
+        },
         "ages_ms": {k: _stats_ms(v) for k, v in ages.items()},
     }
 
