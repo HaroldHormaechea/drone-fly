@@ -252,7 +252,7 @@ composited desktop.
 ## AC13 live check (pending user live run)
 
 Setup: Liftoff in borderless fullscreen on the capture monitor. Start `drone-fly harness overlay
---preset liftoff_micro_arena`, then run the UC-64 stage (b) configuration with `--overlay` (70-dim
+--preset liftoff`, then run the UC-64 stage (b) configuration with `--overlay` (70-dim
 model, depth free space). Optionally repeat with `overlay.brain_scale: frame_peak`.
 
 Screenshots must be taken with a phone or an external capture: the overlay excludes itself from

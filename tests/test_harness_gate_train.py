@@ -23,7 +23,7 @@ from drone_fly.harness.offline.gate_train import (
 )
 from tests.liftoff_capture_support import SMALL_CAMERA, labelled_capture
 
-PRESET = "liftoff_micro_arena"
+PRESET = "liftoff"
 
 
 def _rows(stamps):

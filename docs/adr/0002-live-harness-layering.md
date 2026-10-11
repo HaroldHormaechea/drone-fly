@@ -165,7 +165,7 @@ slack).
   error, the gyro check, and a suggested depth-scale fit.
 - Per-game / airframe settings (telemetry port and format, FOV, uptilt, nominal gate size, HSV,
   rate profile, hover stick, world scale, depth calibration) live in YAML; `liftoff_5inch.yaml` is
-  the default. Packaged presets (`--preset liftoff_micro_arena`) overlay it with measured values.
+  the default. Packaged presets (`--preset liftoff`) overlay it with measured values.
 - UC-64 additions (see [ADR 0003](0003-real-liftoff-calibration.md)): the corrected gyro
   convention (`wx = -roll`, `wy = +pitch`, `wz = -yaw`) and MotorRPM count prefix, linked-list race
   routes, the `gate_types` table and the `learned` gate estimator (the tracker is now the shared

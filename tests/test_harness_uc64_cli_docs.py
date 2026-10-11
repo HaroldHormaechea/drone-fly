@@ -34,14 +34,14 @@ def test_run_accepts_a_preset():
             "--harness",
             "liftoff",
             "--preset",
-            "liftoff_micro_arena",
+            "liftoff",
             "--checkpoint",
             "m.pt",
             "--extra-dim",
             "70",
         ]
     )
-    assert a.preset == "liftoff_micro_arena" and a.extra_dim == 70
+    assert a.preset == "liftoff" and a.extra_dim == 70
 
 
 def test_offline_subcommand_shapes():
@@ -91,7 +91,7 @@ def test_offline_subcommand_shapes():
     assert ev.capture == "c" and ev.labels == "l" and ev.device == "cpu" and not ev.all_frames
     df = p.parse_args(["harness", "depth-fit", "--capture", "c", "--track", "t"])
     assert df.every == 5 and df.fit_range == "2:20"
-    pc = p.parse_args(["harness", "pad-check", "--preset", "liftoff_micro_arena"])
+    pc = p.parse_args(["harness", "pad-check", "--preset", "liftoff"])
     assert (pc.magnitude, pc.pulse_s, pc.min_alt, pc.max_alt) == (0.15, 0.2, 0.5, 6.0)
     lr = p.parse_args(["harness", "latency-report", "runs/x", "--recompute"])
     assert lr.run == "runs/x" and lr.recompute
@@ -139,7 +139,7 @@ def test_label_and_train_gates_commands_end_to_end(tmp_path, capsys):
             "harness",
             "label",
             "--preset",
-            "liftoff_micro_arena",
+            "liftoff",
             "--config",
             str(cfg),
             "--capture",
@@ -157,7 +157,7 @@ def test_label_and_train_gates_commands_end_to_end(tmp_path, capsys):
             "harness",
             "train-gates",
             "--preset",
-            "liftoff_micro_arena",
+            "liftoff",
             "--config",
             str(cfg),
             "--labels",
@@ -195,10 +195,9 @@ def test_pad_check_exit_code_reflects_completion(monkeypatch, capsys):
 
     monkeypatch.setattr(pad_check, "run_pad_check", fake)
     assert (
-        main(["harness", "pad-check", "--preset", "liftoff_micro_arena", "--magnitude", "0.2"])
-        == EXIT_FAILSAFE
+        main(["harness", "pad-check", "--preset", "liftoff", "--magnitude", "0.2"]) == EXIT_FAILSAFE
     )
-    assert seen["preset"] == "liftoff_micro_arena" and seen["settings"].magnitude == 0.2
+    assert seen["preset"] == "liftoff" and seen["settings"].magnitude == 0.2
     assert "stop: focus_lost" in capsys.readouterr().out
     R.completed, R.stop_reason, R.error = True, "completed", None
     assert main(["harness", "pad-check"]) == EXIT_OK

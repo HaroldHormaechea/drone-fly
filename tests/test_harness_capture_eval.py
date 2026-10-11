@@ -30,7 +30,7 @@ from drone_fly.harness.scale import WorldScale
 from tests.harness_support import liftoff_real_data
 from tests.liftoff_capture_support import SMALL_CAMERA, labelled_capture
 
-PRESET = "liftoff_micro_arena"
+PRESET = "liftoff"
 WORLD_SCALE = 4.0  # the preset's
 REPO = Path(__file__).resolve().parent.parent
 

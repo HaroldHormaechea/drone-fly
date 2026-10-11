@@ -29,7 +29,7 @@ from tests.harness_support import DATA_DIR, liftoff_real_data
 TRACK = DATA_DIR / "passages_track.xml"
 RACE = DATA_DIR / "race_passages.xml"
 BRANCH = DATA_DIR / "race_branch.xml"
-PRESET = load_config("liftoff", preset="liftoff_micro_arena")
+PRESET = load_config("liftoff", preset="liftoff")
 GATE_TYPES = PRESET.data["gate_types"]
 ITEM_TABLE = PRESET.section("offline")["item_table"]
 

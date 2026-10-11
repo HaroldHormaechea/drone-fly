@@ -148,5 +148,5 @@ def labelled_capture(tmp: Path, duration_s: float = 12.0, fps: float = 10.0) -> 
         tmp / "track.xml", [(str(i), (0.0, 0.0, 15.0 * i), 0.0) for i in range(1, 6)]
     )
     labels = tmp / "labels"
-    run_autolabel(cap, track, preset="liftoff_micro_arena", config=SMALL_CAMERA, out=labels)
+    run_autolabel(cap, track, preset="liftoff", config=SMALL_CAMERA, out=labels)
     return cap, labels

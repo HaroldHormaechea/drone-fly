@@ -1,6 +1,6 @@
-# Preset `liftoff_micro_arena`: Liftoff Arena, race "04 - Infinity Loop", micro "Test small drone"
+# Preset `liftoff`: Liftoff Arena, race "04 - Infinity Loop", small quad "Test small drone"
 # (FT Gremlin frame, FX805 micro cam, lens "None", ZetaFlight Acro, Betaflight rates 100/0/70).
-# Overlay on liftoff_5inch.yaml:  drone-fly harness run --harness liftoff --preset liftoff_micro_arena
+# Overlay on liftoff_5inch.yaml:  drone-fly harness run --harness liftoff --preset liftoff
 # Every value names its measurement source. The reference capture is
 # artifacts/harness/captures/2026-10-11-infinity-manual (raw UDP datagrams + 2,043 wall-clock
 # stamped 2560x1080 frames, 182 s of hand-flown flight, 2026-10-11); see

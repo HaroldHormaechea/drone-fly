@@ -35,7 +35,7 @@ def _samples(telemetry_cfg: dict) -> list[TelemetrySample]:
 
 @pytest.fixture(scope="module")
 def preset_telemetry() -> dict:
-    return load_config("liftoff", preset="liftoff_micro_arena").section("telemetry")
+    return load_config("liftoff", preset="liftoff").section("telemetry")
 
 
 def test_fixture_is_a_few_seconds_of_97_byte_datagrams():
@@ -112,6 +112,6 @@ def test_five_inch_default_received_the_same_fix():
     assert telemetry["rpm_count_prefix"] is True
     assert telemetry["gyro_units"] == "deg_s"
     assert GyroMap.from_config(telemetry) == GyroMap.from_config(
-        load_config("liftoff", preset="liftoff_micro_arena").section("telemetry")
+        load_config("liftoff", preset="liftoff").section("telemetry")
     )
     assert check_gyro_convention(_samples(telemetry), GyroMap.from_config(telemetry)).ok

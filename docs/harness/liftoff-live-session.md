@@ -7,9 +7,9 @@ with the debug overlay on top. The commands and design behind it are in the READ
 
 The game is **Liftoff** (the main FPV simulator), not *Liftoff: Micro Drones*. The reference setup
 is Liftoff's "Liftoff Arena" track, race "04 - Infinity Loop", flying a small custom quad ("Test
-small drone": FT Gremlin frame, FX805 cam) at 2560x1080. The preset `liftoff_micro_arena` is named
-after that small airframe and the Arena track; it is **not** for the Micro Drones game. Other tracks,
-drones or resolutions need their own calibration (ADR 0003).
+small drone": FT Gremlin frame, FX805 cam) at 2560x1080. The preset `liftoff` holds that
+calibration (telemetry convention, camera, HUD masks, rates, gate types, depth calibration). Other
+tracks, drones or resolutions need their own calibration (ADR 0003).
 
 ## 0. One-time setup
 
@@ -77,7 +77,7 @@ This confirms each stick moves the drone the way the harness assumes. Run it onc
 after changing rates or bindings.
 
 ```
-.venv-cuda\Scripts\drone-fly.exe harness pad-check --preset liftoff_micro_arena
+.venv-cuda\Scripts\drone-fly.exe harness pad-check --preset liftoff
 ```
 1. Run the command, then **click into Liftoff within 15 s**. It waits for focus.
 2. It climbs, holds 0.5–6 m altitude with a throttle loop, and sends short ± pulses on roll, pitch
@@ -92,7 +92,7 @@ after changing rates or bindings.
 
 In its own terminal, before the run:
 ```
-.venv-cuda\Scripts\drone-fly.exe harness overlay --preset liftoff_micro_arena --k1-path artifacts/pruned/k1
+.venv-cuda\Scripts\drone-fly.exe harness overlay --preset liftoff --k1-path artifacts/pruned/k1
 ```
 - It shows "waiting for harness" until a run starts publishing.
 - It is click-through and never takes focus. If it ever causes a `focus_lost` stop, that's a bug;
@@ -107,7 +107,7 @@ In its own terminal, before the run:
 
 PowerShell, from the repo root:
 ```powershell
-.venv-cuda\Scripts\drone-fly.exe harness run --harness liftoff --preset liftoff_micro_arena `
+.venv-cuda\Scripts\drone-fly.exe harness run --harness liftoff --preset liftoff `
     --config artifacts/harness/live.yaml --extra-dim 30 `
     --checkpoint training/07-proc-course-flight/model_readout.pt `
     --k1-path artifacts/pruned/k1 --output-root artifacts/harness/liftoff/runs --overlay
@@ -125,7 +125,7 @@ PowerShell, from the repo root:
 ## 5. Stage (b): 70-dim obstacle model with live depth (acceptance target)
 
 ```powershell
-.venv-cuda\Scripts\drone-fly.exe harness run --harness liftoff --preset liftoff_micro_arena `
+.venv-cuda\Scripts\drone-fly.exe harness run --harness liftoff --preset liftoff `
     --config artifacts/harness/live-depth.yaml --extra-dim 70 `
     --checkpoint training/11-count-curriculum/model_readout.pt `
     --k1-path artifacts/pruned/k1 --output-root artifacts/harness/liftoff/runs --overlay

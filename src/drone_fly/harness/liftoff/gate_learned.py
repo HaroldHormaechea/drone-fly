@@ -24,6 +24,7 @@ so a missing or mismatched file refuses the run before the pad is armed.
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -49,22 +50,89 @@ from drone_fly.harness.liftoff.masks import FrameMasks
 from drone_fly.harness.scale import WorldScale
 from drone_fly.harness.types import FlightState, Frame
 
+log = logging.getLogger(__name__)
+
 TRAIN_HINT = (
     "train one with `drone-fly harness train-gates` (docs/adr/0003-real-liftoff-calibration.md)"
 )
 
 
-def resolve_weights_path(path: str | Path | None) -> Path:
-    """``gates.learned.weights``: absolute, or relative to the repo root (else the cwd)."""
+RELEASE_URL = "https://github.com/HaroldHormaechea/drone-fly/releases/download/liftoff-gates-v1"
+
+# Published weights (GitHub release ``liftoff-gates-v1``): file name -> sha256. A configured weights
+# path whose file name is listed here is downloaded from the release on first use when missing.
+RELEASED_WEIGHTS = {
+    "liftoff-gates-deploy.pt": "753452e742973bfe666f30c3c91bfce74bf7108f04d54930c0bcc7e623d94e00",
+    "liftoff-gates.pt": "161f7a83aa2a2866b5efd3c34b096ccda6ba87e201ecffece2833a5a4be5c111",
+}
+
+
+def _urlretrieve(url: str, dest: Path) -> None:
+    import urllib.request
+
+    urllib.request.urlretrieve(url, dest)  # noqa: S310 - fixed https release URL
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def download_released_weights(dest: Path, download: Any = None) -> Path:
+    """Fetch the released weights named ``dest.name`` into ``dest`` and verify their sha256.
+
+    Downloads to a temporary sibling and renames it only after the checksum matches, so an
+    interrupted or corrupted download never leaves a file at ``dest``.
+    """
+    expected = RELEASED_WEIGHTS.get(dest.name)
+    if expected is None:
+        raise HarnessConfigError(f"no published gate weights named {dest.name!r}; {TRAIN_HINT}")
+    url = f"{RELEASE_URL}/{dest.name}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".part")
+    log.info("downloading gate weights %s -> %s", url, dest)
+    try:
+        (download or _urlretrieve)(url, tmp)
+        actual = _sha256(tmp)
+        if actual != expected:
+            raise HarnessConfigError(
+                f"downloaded gate weights {dest.name} failed the checksum "
+                f"(sha256 {actual}, expected {expected}); not using them"
+            )
+        tmp.replace(dest)
+    except HarnessConfigError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - network/disk errors become a clear config error
+        raise HarnessConfigError(
+            f"gate weights not found: {dest}, and downloading {url} failed: {exc}; {TRAIN_HINT}"
+        ) from exc
+    finally:
+        tmp.unlink(missing_ok=True)
+    return dest
+
+
+def resolve_weights_path(path: str | Path | None, download: Any = None) -> Path:
+    """``gates.learned.weights``: absolute, or relative to the repo root (else the cwd).
+
+    A missing file whose name is one of :data:`RELEASED_WEIGHTS` is downloaded from the GitHub
+    release (sha256-verified) into that path; any other missing file is a config error.
+    """
     if not path:
         raise HarnessConfigError(f"gates.learned.weights is not set; {TRAIN_HINT}")
     p = Path(path).expanduser()
     if not p.is_absolute():
         root = find_repo_root()
         p = (root if root is not None else Path.cwd()) / p
-    if not p.is_file():
-        raise HarnessConfigError(f"gate weights not found: {p}; {TRAIN_HINT}")
-    return p
+    if p.is_file():
+        return p
+    if p.name in RELEASED_WEIGHTS:
+        return download_released_weights(p, download=download)
+    raise HarnessConfigError(f"gate weights not found: {p}; {TRAIN_HINT}")
 
 
 def load_weights(path: Path, table: GateTypeTable, device: str = "cpu") -> tuple[Any, dict]:

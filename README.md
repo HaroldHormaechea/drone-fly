@@ -80,18 +80,18 @@ Real Liftoff, calibrated (UC-64, micro drone on Liftoff Arena "04 - Infinity Loo
 [docs/adr/0003-real-liftoff-calibration.md](docs/adr/0003-real-liftoff-calibration.md)):
 
 ```
-drone-fly harness label --preset liftoff_micro_arena --capture <capture> --track <track.xml> \
+drone-fly harness label --preset liftoff --capture <capture> --track <track.xml> \
     --race <race.xml> --props <props.json> --preview 12            # auto-label gates from XML + pose
-drone-fly harness train-gates --preset liftoff_micro_arena --labels artifacts/harness/liftoff/labels/<capture>
-drone-fly harness eval --preset liftoff_micro_arena --capture <capture> --labels artifacts/harness/liftoff/labels/<capture>
-drone-fly harness depth-fit --preset liftoff_micro_arena --capture <capture> --track <track.xml> --race <race.xml>
-drone-fly harness pad-check --preset liftoff_micro_arena          # live: stick directions vs. telemetry
-drone-fly harness run --harness liftoff --preset liftoff_micro_arena --extra-dim 70 --checkpoint <model_readout.pt> \
+drone-fly harness train-gates --preset liftoff --labels artifacts/harness/liftoff/labels/<capture>
+drone-fly harness eval --preset liftoff --capture <capture> --labels artifacts/harness/liftoff/labels/<capture>
+drone-fly harness depth-fit --preset liftoff --capture <capture> --track <track.xml> --race <race.xml>
+drone-fly harness pad-check --preset liftoff          # live: stick directions vs. telemetry
+drone-fly harness run --harness liftoff --preset liftoff --extra-dim 70 --checkpoint <model_readout.pt> \
     --output-root artifacts/harness/liftoff/runs
 ```
 
 - `--preset` overlays a packaged preset (`src/drone_fly/harness/configs/`) on the harness default,
-  before `--config`. `liftoff_micro_arena` carries the measured telemetry convention, camera
+  before `--config`. `liftoff` carries the measured telemetry convention, camera
   (2560x1080, 120° HFOV, 20° uptilt), Arena HUD masks, rates, hover stick, the arch gate type and
   the fitted depth calibration, each with its measurement source.
 - `label` projects every gate listed in the `gate_types` table into each frame of a hand-flown
@@ -154,9 +154,9 @@ which drops data rather than ever blocking the 50 Hz loop. Design, schema and li
 
 ```
 uv sync --extra overlay                       # PySide6 (Windows only; not in dev/CI)
-drone-fly harness overlay [--preset liftoff_micro_arena] [--port 9100] [--monitor 1] \
+drone-fly harness overlay [--preset liftoff] [--port 9100] [--monitor 1] \
     [--layout default|mask_confined] [--fps 20] [--k1-path <K1>]
-drone-fly harness run --harness liftoff --preset liftoff_micro_arena --extra-dim 70 \
+drone-fly harness run --harness liftoff --preset liftoff --extra-dim 70 \
     --checkpoint <model_readout.pt> --overlay          # or --overlay-launch to start the overlay too
 drone-fly harness overlay --replay artifacts/harness/<run>   # drive it from a recorded run, no game
 ```

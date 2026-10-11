@@ -2,7 +2,7 @@
 
 Each registered harness names a packaged default YAML (``harness/configs/<file>.yaml``). A
 **preset** is another packaged YAML in the same folder that is itself an overlay on that default
-(e.g. ``liftoff_micro_arena`` for the micro drone on Liftoff Arena); the chain is
+(e.g. ``liftoff``: the calibrated small quad on Liftoff Arena); the chain is
 default <- preset <- user ``--config`` <- dotted overrides. The user's file is overlaid
 recursively; **any key not present in the default is
 rejected** (typos fail loudly instead of being silently ignored). Lists are replaced, not

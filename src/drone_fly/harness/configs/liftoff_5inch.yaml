@@ -2,7 +2,7 @@
 # Overlay your own --config on this file to switch game / airframe settings; keys that are not
 # listed here are rejected. Values marked CALIBRATE are documented assumptions that must be
 # checked against your Liftoff setup (see docs/adr/0002-live-harness-layering.md).
-# Packaged presets (e.g. `--preset liftoff_micro_arena`, the calibrated micro drone on Liftoff
+# Packaged presets (e.g. `--preset liftoff`, the calibrated small quad on Liftoff
 # Arena) are overlays on this file; see docs/adr/0003-real-liftoff-calibration.md.
 #
 # Example (obstacle-free course, 30-dim model):

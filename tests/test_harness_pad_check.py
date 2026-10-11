@@ -409,12 +409,12 @@ def test_run_pad_check_end_to_end_writes_the_report(tmp_path, monkeypatch):
         classmethod(lambda c, a, b: AlwaysFocused()),
     )
     settings = PadCheckSettings(pulse_s=0.04, gap_s=0.0, pulses_per_axis=2, settle_s=0.05)
-    result = run_pad_check(preset="liftoff_micro_arena", settings=settings, out=tmp_path / "pc")
+    result = run_pad_check(preset="liftoff", settings=settings, out=tmp_path / "pc")
     assert result.stop_reason == STOP_COMPLETED, (result.stop_reason, result.error)
     # the UDP source got the preset's datagram layout and Liftoff metres (world scale 1)
     assert holder["source_args"] == (True, 1.0, "127.0.0.1", 9001)
     report = json.loads((tmp_path / "pc" / "report.json").read_text(encoding="utf-8"))
-    assert report["preset"] == "liftoff_micro_arena" and report["stop_reason"] == "completed"
+    assert report["preset"] == "liftoff" and report["stop_reason"] == "completed"
     assert set(report["axes"]) == {"roll", "pitch", "yaw"}
     assert report["suggested"] == {"controls": {"stick_signs": {"roll": 1, "pitch": 1, "yaw": -1}}}
     assert report["settings"]["wait_for_focus_s"] == 15.0

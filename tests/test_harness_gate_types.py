@@ -9,7 +9,7 @@ from drone_fly.harness.config import load_config
 from drone_fly.harness.errors import HarnessConfigError
 from drone_fly.harness.gate_types import GateType, GateTypeTable
 
-ARCH_CFG = load_config("liftoff", preset="liftoff_micro_arena").data["gate_types"]
+ARCH_CFG = load_config("liftoff", preset="liftoff").data["gate_types"]
 
 
 def _entry(**kw):

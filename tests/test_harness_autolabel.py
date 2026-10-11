@@ -43,7 +43,7 @@ from tests.liftoff_capture_support import (
     write_manual_capture,
 )
 
-PRESET = "liftoff_micro_arena"
+PRESET = "liftoff"
 CFG = load_config("liftoff", preset=PRESET)
 TABLE = GateTypeTable.from_config(CFG.data["gate_types"])
 ARCH = TABLE["inflatable_arch"]

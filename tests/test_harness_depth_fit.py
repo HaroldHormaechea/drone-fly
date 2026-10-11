@@ -33,7 +33,7 @@ from drone_fly.harness.offline.track_xml import parse_track_items
 from tests.harness_support import liftoff_real_data
 from tests.liftoff_capture_support import SMALL_CAMERA, straight_flight, write_manual_capture
 
-PRESET = "liftoff_micro_arena"
+PRESET = "liftoff"
 CFG = load_config("liftoff", SMALL_CAMERA, preset=PRESET)
 TABLE = GateTypeTable.from_config(CFG.data["gate_types"])
 ITEM_TABLE = CFG.section("offline")["item_table"]

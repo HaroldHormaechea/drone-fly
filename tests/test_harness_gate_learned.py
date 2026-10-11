@@ -8,6 +8,7 @@ recovers the gate pose, masked / too few keypoints are dropped, and the tracker 
 
 from __future__ import annotations
 
+import hashlib
 import math
 from pathlib import Path
 
@@ -22,7 +23,7 @@ from drone_fly.harness.errors import HarnessConfigError  # noqa: E402
 from drone_fly.harness.gate_types import GateTypeTable  # noqa: E402
 from drone_fly.harness.geometry import CameraModel  # noqa: E402
 from drone_fly.harness.interfaces import BuildContext  # noqa: E402
-from drone_fly.harness.liftoff import gate_net  # noqa: E402
+from drone_fly.harness.liftoff import gate_learned, gate_net  # noqa: E402
 from drone_fly.harness.liftoff.gate_learned import (  # noqa: E402
     LearnedGateEstimator,
     load_weights,
@@ -33,7 +34,7 @@ from drone_fly.harness.scale import WorldScale  # noqa: E402
 from drone_fly.harness.types import FlightState, Frame  # noqa: E402
 from tests.liftoff_capture_support import SMALL_CAMERA  # noqa: E402
 
-PRESET = "liftoff_micro_arena"
+PRESET = "liftoff"
 CFG = load_config("liftoff", SMALL_CAMERA, preset=PRESET)
 TABLE = GateTypeTable.from_config(CFG.data["gate_types"])
 ARCH = TABLE["inflatable_arch"]
@@ -281,6 +282,57 @@ def test_relative_weights_resolve_against_the_repo_root():
     with pytest.raises(HarnessConfigError) as exc:
         resolve_weights_path("artifacts/harness/liftoff/models/__no_such__.pt")
     assert str(REPO / "artifacts") in str(exc.value)
+
+
+def _fake_download(payload: bytes, calls: list):
+    def download(url, dest):
+        calls.append(url)
+        Path(dest).write_bytes(payload)
+
+    return download
+
+
+def test_missing_released_weights_are_downloaded_and_checksum_verified(tmp_path, monkeypatch):
+    payload = b"released weights"
+    monkeypatch.setitem(
+        gate_learned.RELEASED_WEIGHTS,
+        "liftoff-gates-deploy.pt",
+        hashlib.sha256(payload).hexdigest(),
+    )
+    calls: list = []
+    dest = tmp_path / "models" / "liftoff-gates-deploy.pt"
+    got = resolve_weights_path(dest, download=_fake_download(payload, calls))
+    assert got == dest and dest.read_bytes() == payload
+    assert calls == [f"{gate_learned.RELEASE_URL}/liftoff-gates-deploy.pt"]
+    assert not dest.with_name(dest.name + ".part").exists()
+    # present now: no second download
+    assert resolve_weights_path(dest, download=_fake_download(payload, calls)) == dest
+    assert len(calls) == 1
+
+
+def test_released_weights_with_a_bad_checksum_are_not_kept(tmp_path):
+    dest = tmp_path / "liftoff-gates.pt"
+    with pytest.raises(HarnessConfigError, match="checksum"):
+        resolve_weights_path(dest, download=_fake_download(b"tampered", []))
+    assert not dest.exists() and not dest.with_name(dest.name + ".part").exists()
+
+
+def test_failed_download_is_a_config_error_naming_the_url(tmp_path):
+    def broken(url, dest):
+        raise OSError("network down")
+
+    dest = tmp_path / "liftoff-gates.pt"
+    with pytest.raises(HarnessConfigError, match="downloading .*liftoff-gates.pt failed"):
+        resolve_weights_path(dest, download=broken)
+    assert not dest.exists()
+
+
+def test_unpublished_missing_weights_are_not_downloaded(tmp_path):
+    def never(url, dest):
+        raise AssertionError("must not download")
+
+    with pytest.raises(HarnessConfigError, match="not found.*train-gates"):
+        resolve_weights_path(tmp_path / "my-own.pt", download=never)
 
 
 def test_weights_for_other_classes_or_keypoints_are_refused(tmp_path):

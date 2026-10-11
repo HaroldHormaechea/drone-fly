@@ -30,7 +30,7 @@ def _masks(*rects, resolution=(W, H)):
 
 
 def test_from_config_and_preset_masks():
-    cam = load_config("liftoff", preset="liftoff_micro_arena").section("camera")
+    cam = load_config("liftoff", preset="liftoff").section("camera")
     m = FrameMasks.from_config(cam)
     assert len(m) == 6 and bool(m) and m.resolution == (2560, 1080)
     assert not FrameMasks.from_config({"masks": []})

@@ -19,7 +19,7 @@ from drone_fly.harness.errors import HarnessConfigError
 from drone_fly.harness.gate_types import GateTypeTable
 from drone_fly.harness.liftoff.telemetry import GyroMap
 
-PRESET = "liftoff_micro_arena"
+PRESET = "liftoff"
 REPO = Path(__file__).resolve().parent.parent
 
 

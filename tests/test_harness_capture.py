@@ -15,7 +15,7 @@ from drone_fly.harness.offline.capture import load_capture, segment_samples
 from tests.harness_support import liftoff_real_data
 from tests.liftoff_capture_support import Pose, straight_flight, write_manual_capture, yaw_quat_xyzw
 
-TELEMETRY = load_config("liftoff", preset="liftoff_micro_arena").section("telemetry")
+TELEMETRY = load_config("liftoff", preset="liftoff").section("telemetry")
 
 
 def test_frames_pair_with_the_nearest_datagram_within_30_ms(tmp_path):

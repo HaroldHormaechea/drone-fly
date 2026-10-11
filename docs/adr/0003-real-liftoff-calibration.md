@@ -3,7 +3,7 @@
 - **Status:** accepted (UC-64)
 - **Date:** 2026-10-11
 - **Builds on:** [ADR 0002](0002-live-harness-layering.md) (harness layering)
-- **Code:** `src/drone_fly/harness/` (preset `configs/liftoff_micro_arena.yaml`, `gate_types.py`,
+- **Code:** `src/drone_fly/harness/` (preset `configs/liftoff.yaml`, `gate_types.py`,
   `liftoff/{gate_learned,gate_net,masks,focus,pad_check}.py`,
   `offline/{capture,autolabel,gate_train,depth_fit}.py`)
 
@@ -153,7 +153,7 @@ throttle at -1.
 ### Presets and the artifacts layout
 
 A **preset** is a packaged YAML overlay on a harness default. The config chain is: default ←
-`--preset` ← `--config` ← CLI overrides. `--preset liftoff_micro_arena` carries every calibrated
+`--preset` ← `--config` ← CLI overrides. `--preset liftoff` carries every calibrated
 value, each with a comment naming its measurement source:
 
 - telemetry fixes;
@@ -332,7 +332,7 @@ Prerequisites:
 - the "Test small drone" on Arena "04 - Infinity Loop", ghosts off if possible;
 - trained weights and the fitted preset.
 
-Every run uses `--preset liftoff_micro_arena --output-root artifacts/harness/liftoff/runs`. After
+Every run uses `--preset liftoff --output-root artifacts/harness/liftoff/runs`. After
 each run, check:
 
 - `stop_reason` and `failsafe_ok: true` in `meta.json`;
@@ -343,7 +343,7 @@ Steps:
 
 1. **Model check**: a 1 s `--dry-run --duration 1` of the 30-dim checkpoint and of the newest
    70-dim checkpoint. A width mismatch fails before arming.
-2. **`pad-check --preset liftoff_micro_arena`**: click into Liftoff within 15 s, then apply the
+2. **`pad-check --preset liftoff`**: click into Liftoff within 15 s, then apply the
    suggested `stick_signs` if they differ.
 3. **Stage (a), 30-dim**, with `free_space_estimator: none` and `assume_no_obstacles: true`:
 
