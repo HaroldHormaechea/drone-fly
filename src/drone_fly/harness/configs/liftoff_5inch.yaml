@@ -131,6 +131,7 @@ focus:
   process_name: Liftoff.exe
   title_regex: null         # optional extra check on the window title
   wait_for_focus_s: 15.0    # time allowed to click into the game after arming
+  auto_focus: true          # try to bring the game window to the foreground when a run starts
 
 free_space:
   assume_no_obstacles: false  # `none` estimator: set true to fly 12/30-dim models obstacle-free

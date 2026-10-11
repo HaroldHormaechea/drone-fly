@@ -12,14 +12,18 @@ name per window handle, so the process lookup only runs when the foreground wind
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sys
 from collections.abc import Callable
 from typing import Any
 
+from drone_fly.harness.config import require_bool
 from drone_fly.harness.errors import HarnessConfigError
 from drone_fly.harness.interfaces import FocusProbe
+
+log = logging.getLogger(__name__)
 
 Foreground = Callable[[], tuple[int, str, str]]
 
@@ -69,6 +73,70 @@ def _win32_foreground() -> Foreground:
     return foreground
 
 
+Activator = Callable[[str, "re.Pattern[str] | None"], bool]
+
+
+def _win32_activator() -> Activator:
+    """``activate(process_name, title_re)``: raise the game's top-level window to the foreground.
+
+    Windows only lets the foreground process change the foreground window, so this uses the
+    usual workaround: a synthetic Alt key tap (which unlocks ``SetForegroundWindow``), restore the
+    window if minimised, then ``SetForegroundWindow`` + ``BringWindowToTop``. Best effort: it
+    returns False when no matching window exists; the caller still waits for real focus.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    vk_menu, keyup, sw_restore = 0x12, 0x0002, 9
+
+    def exe_of(hwnd: int) -> str:
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        handle = kernel32.OpenProcess(0x1000, False, pid.value)
+        if not handle:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(len(buf))
+            ok = kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size))
+            return os.path.basename(buf.value) if ok else ""
+        finally:
+            kernel32.CloseHandle(handle)
+
+    def activate(process_name: str, title_re: re.Pattern[str] | None) -> bool:
+        found: list[int] = []
+
+        def visit(hwnd: int, _lparam: int) -> bool:
+            if not user32.IsWindowVisible(hwnd) or user32.GetWindow(hwnd, 4):  # 4 = GW_OWNER
+                return True
+            if exe_of(hwnd).lower() != process_name:
+                return True
+            if title_re is not None:
+                buf = ctypes.create_unicode_buffer(512)
+                user32.GetWindowTextW(hwnd, buf, len(buf))
+                if not title_re.search(buf.value):
+                    return True
+            found.append(hwnd)
+            return False
+
+        user32.EnumWindows(enum_proc(visit), 0)
+        if not found:
+            return False
+        hwnd = found[0]
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, sw_restore)
+        user32.keybd_event(vk_menu, 0, 0, 0)
+        user32.keybd_event(vk_menu, 0, keyup, 0)
+        user32.SetForegroundWindow(hwnd)
+        user32.BringWindowToTop(hwnd)
+        return True
+
+    return activate
+
+
 class Win32ForegroundFocusProbe(FocusProbe):
     """Foreground window's process name == ``focus.process_name`` (and title matches, if set)."""
 
@@ -77,6 +145,8 @@ class Win32ForegroundFocusProbe(FocusProbe):
         process_name: str = "Liftoff.exe",
         title_regex: str | None = None,
         foreground: Foreground | None = None,
+        auto_focus: bool = True,
+        activator: Activator | None = None,
     ) -> None:
         if not process_name:
             raise HarnessConfigError("focus.process_name must name the game executable")
@@ -86,6 +156,8 @@ class Win32ForegroundFocusProbe(FocusProbe):
         except re.error as exc:
             raise HarnessConfigError(f"focus.title_regex is not a valid regex: {exc}") from exc
         self._foreground = foreground
+        self.auto_focus = auto_focus
+        self._activator = activator
         self.last_foreground: tuple[int, str, str] | None = None
 
     @classmethod
@@ -93,7 +165,25 @@ class Win32ForegroundFocusProbe(FocusProbe):
         return cls(
             process_name=str(cfg.get("process_name") or "Liftoff.exe"),
             title_regex=cfg.get("title_regex"),
+            auto_focus=require_bool(cfg.get("auto_focus", True), "focus.auto_focus"),
         )
+
+    def request_focus(self) -> bool:
+        """Raise the game window (``focus.auto_focus``); never raises, the wait still applies."""
+        if not self.auto_focus:
+            return False
+        try:
+            if self._activator is None:
+                self._activator = _win32_activator()
+            ok = bool(self._activator(self.process_name, self.title_re))
+        except Exception:  # noqa: BLE001 - best effort only
+            log.warning("could not bring %s to the foreground", self.process_name, exc_info=True)
+            return False
+        if ok:
+            log.info("switched focus to %s", self.process_name)
+        else:
+            log.warning("no %s window found to focus; click into the game", self.process_name)
+        return ok
 
     def start(self) -> None:
         if self._foreground is None:

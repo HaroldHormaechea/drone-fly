@@ -187,7 +187,11 @@ class PadCheck:
         if self.focus is None:
             return
         deadline = self.clock.now() + self.s.wait_for_focus_s
+        request = getattr(self.focus, "request_focus", None)
         while not self.focus.has_focus():
+            if request is not None:
+                request()  # best effort (focus.auto_focus), once; the wait still applies
+                request = None
             if self.abort is not None and self.abort.is_set():
                 raise _Abort(STOP_ABORT)
             if self.clock.now() >= deadline:

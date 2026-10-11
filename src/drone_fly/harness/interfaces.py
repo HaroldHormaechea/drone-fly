@@ -214,6 +214,10 @@ class FocusProbe(ABC):
     def has_focus(self) -> bool:
         """True while the target window is in the foreground."""
 
+    def request_focus(self) -> bool:
+        """Best effort: bring the target window to the foreground. True if it was attempted."""
+        return False
+
 
 class DepthModel(ABC):
     """A monocular depth backend: BGR image -> per-pixel depth (metres before calibration)."""

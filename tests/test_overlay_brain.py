@@ -346,9 +346,25 @@ def test_load_brain_asset_without_outline_and_bad_view(fixture_dir_copy, tmp_pat
 
 
 def test_loader_never_initialises_cuda(fixture_dir_copy):
-    torch = pytest.importorskip("torch")
-    load_brain_asset(fixture_dir_copy)
-    assert torch.cuda.is_initialized() is False
+    """Runs in a fresh interpreter: earlier tests in the same process may have started CUDA."""
+    import subprocess
+    import sys
+
+    pytest.importorskip("torch")
+    code = (
+        "import sys, torch\n"
+        "from drone_fly.overlay.brain import load_brain_asset\n"
+        "load_brain_asset(sys.argv[1])\n"
+        "print(torch.cuda.is_initialized())\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code, str(fixture_dir_copy)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=True,
+    )
+    assert out.stdout.strip().splitlines()[-1] == "False"
 
 
 def test_k1_scale_frame_renders_within_the_20hz_budget():

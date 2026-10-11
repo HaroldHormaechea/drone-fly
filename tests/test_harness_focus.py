@@ -222,7 +222,62 @@ def test_from_config_and_registry():
         "process_name": "Liftoff.exe",
         "title_regex": None,
         "wait_for_focus_s": 15.0,
+        "auto_focus": True,
     }
+    with pytest.raises(HarnessConfigError, match="auto_focus"):
+        Win32ForegroundFocusProbe.from_config({"auto_focus": "yes"}, None)
+
+
+# ----------------------------------------------------------------------------- auto-focus
+
+
+class _RequestingFocus(ScriptedFocus):
+    def __init__(self, script):
+        super().__init__(script)
+        self.requests = 0
+
+    def request_focus(self):
+        self.requests += 1
+        return True
+
+
+def test_runner_requests_focus_once_when_not_focused():
+    focus = _RequestingFocus([False, False, True])
+    assert _runner(focus).run().reason == STOP_COMPLETED
+    assert focus.requests == 1
+
+
+def test_runner_does_not_request_focus_when_already_focused():
+    focus = _RequestingFocus([True])
+    _runner(focus).run()
+    assert focus.requests == 0
+
+
+def test_probe_request_focus_uses_the_activator_with_its_target():
+    seen = []
+
+    def activator(name, title_re):
+        seen.append((name, title_re.pattern if title_re else None))
+        return True
+
+    probe = Win32ForegroundFocusProbe("Liftoff.exe", title_regex="^Lift", activator=activator)
+    assert probe.request_focus() is True and seen == [("liftoff.exe", "^Lift")]
+
+
+def test_probe_request_focus_is_best_effort():
+    def boom(name, title_re):
+        raise OSError("access denied")
+
+    assert Win32ForegroundFocusProbe(activator=boom).request_focus() is False
+    assert Win32ForegroundFocusProbe(activator=lambda n, t: False).request_focus() is False
+    never = Win32ForegroundFocusProbe(auto_focus=False, activator=lambda n, t: 1 / 0)
+    assert never.request_focus() is False  # disabled: activator never called
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Win32 window enumeration")
+def test_real_activator_finds_no_window_for_a_missing_process():
+    probe = Win32ForegroundFocusProbe("definitely-not-running.exe")
+    assert probe.request_focus() is False
 
 
 # ----------------------------------------------------------------------------- factory + session

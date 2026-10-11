@@ -332,7 +332,11 @@ class HarnessRunner:
         if probe is None:
             return
         deadline = self.clock.now() + self.settings.wait_for_focus_s
+        requested = False
         while not probe.has_focus():
+            if not requested:
+                probe.request_focus()  # best effort (focus.auto_focus); the wait still applies
+                requested = True
             self._publish_status("waiting_for_focus")
             if self.harness.abort_signal is not None and self.harness.abort_signal.is_set():
                 raise _Stop(STOP_ABORT)
