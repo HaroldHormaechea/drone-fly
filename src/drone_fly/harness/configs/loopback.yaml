@@ -51,6 +51,8 @@ overlay:
   gain_window_s: 5.0        # brain panel: running per-neuron gain window
   opacity: 0.85             # panel opacity 0-1
   tap_outline: false        # brain panel: outline the readout's tap neurons
+  recordable: false         # true: screen recorders (OBS, Game Bar) can capture the overlay; the
+                            # runner then masks the overlay's panels out of its own capture
   panels:                   # per-panel toggles
     brain: true
     action: true

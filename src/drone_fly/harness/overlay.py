@@ -62,6 +62,38 @@ RUN_STOPPED = "stopped"
 # ----------------------------------------------------------------------------- pure payloads
 
 
+def recordable_panel_masks(data: Mapping[str, Any], ocfg: Any) -> list[dict[str, Any]]:
+    """``camera.masks`` entries covering the overlay's panels (``overlay.recordable``).
+
+    A recordable overlay is visible to the harness's own screen capture, so its panels must be
+    masked out of gate detection and depth like the game HUD. The default layout's panel rects are
+    fractions of the overlay monitor; they are mapped onto ``camera.resolution`` assuming the
+    frame is that whole monitor (``camera.region: null``, as in the packaged presets). The
+    ``mask_confined`` layout only draws inside existing masks, so it needs none.
+    """
+    from drone_fly.overlay.layout import DEFAULT_RECTS
+
+    if ocfg.layout != "default":
+        return []
+    camera = data.get("camera") or {}
+    res = camera.get("resolution")
+    if not res:
+        log.warning("overlay.recordable: camera.resolution is not set; cannot mask the panels")
+        return []
+    if camera.get("region"):
+        log.warning(
+            "overlay.recordable with camera.region set: panel masks assume the frame is the whole "
+            "monitor and may be off"
+        )
+    w, h = float(res[0]), float(res[1])
+    masks = []
+    for name, (x0, y0, x1, y1) in DEFAULT_RECTS.items():
+        if ocfg.panel_enabled(name):
+            rect = [round(x0 * w), round(y0 * h), round((x1 - x0) * w), round((y1 - y0) * h)]
+            masks.append({"name": f"overlay_{name}", "rect": rect})
+    return masks
+
+
 def sample_extras(sample: Any) -> dict[str, Any] | None:
     """Telemetry extras not in ``TickRecord.state``: battery, stick inputs, motor RPM."""
     if sample is None:

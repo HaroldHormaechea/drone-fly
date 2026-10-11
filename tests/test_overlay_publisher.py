@@ -738,3 +738,42 @@ def test_default_quantiser_constants_match_the_recorder():
 
     assert DEFAULT_SCALE == pytest.approx(ACTIVATION_SCALE)
     assert DEFAULT_OFFSET == pytest.approx(ACTIVATION_OFFSET)
+
+
+# ----------------------------------------------------------------------------- recordable
+
+
+def test_recordable_panel_masks_cover_the_default_layout_panels():
+    from drone_fly.harness.config import OverlayConfig, load_config
+    from drone_fly.harness.liftoff.masks import FrameMasks
+    from drone_fly.harness.overlay import recordable_panel_masks
+    from drone_fly.overlay.layout import DEFAULT_RECTS
+
+    cfg = load_config("liftoff", {"overlay": {"recordable": True, "panels": {"raycast": False}}})
+    cfg = load_config(
+        "liftoff", {**cfg.data, "camera": {**cfg.data["camera"], "resolution": [2560, 1080]}}
+    )
+    ocfg = OverlayConfig.from_config(cfg)
+    masks = recordable_panel_masks(cfg.data, ocfg)
+    names = {m["name"] for m in masks}
+    assert names == {f"overlay_{p}" for p in DEFAULT_RECTS if p != "raycast"}
+    brain = next(m for m in masks if m["name"] == "overlay_brain")
+    x0, y0, x1, y1 = DEFAULT_RECTS["brain"]
+    assert brain["rect"] == [
+        round(x0 * 2560),
+        round(y0 * 1080),
+        round((x1 - x0) * 2560),
+        round((y1 - y0) * 1080),
+    ]
+    # valid camera.masks entries
+    FrameMasks.from_config({"masks": masks, "resolution": [2560, 1080]})
+    # mask_confined draws only inside existing masks; no resolution -> nothing to map onto
+    assert recordable_panel_masks(cfg.data, OverlayConfig(layout="mask_confined")) == []
+    assert recordable_panel_masks({"camera": {}}, ocfg) == []
+
+
+def test_overlay_command_forwards_recordable():
+    from drone_fly.harness.session import overlay_command
+
+    assert "--recordable" in overlay_command("liftoff", 9100, recordable=True)
+    assert "--recordable" not in overlay_command("liftoff", 9100)

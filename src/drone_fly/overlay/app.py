@@ -46,6 +46,7 @@ def run_overlay(
     replay: str | os.PathLike[str] | None = None,
     fps: float | None = None,
     k1_path: str | None = None,
+    recordable: bool | None = None,
     view: str = "top",
     shim: Any = None,
 ) -> int:
@@ -62,7 +63,12 @@ def run_overlay(
     prepare_process(shim)  # per-monitor DPI awareness before Qt
 
     overrides: dict[str, Any] = {}
-    for key, value in (("overlay.port", port), ("overlay.layout", layout), ("overlay.fps", fps)):
+    for key, value in (
+        ("overlay.port", port),
+        ("overlay.layout", layout),
+        ("overlay.fps", fps),
+        ("overlay.recordable", recordable),
+    ):
         if value is not None:
             overrides[key] = value
     cfg = load_config(harness, config, overrides, preset=preset)
@@ -135,6 +141,7 @@ def run_overlay(
             frame_size=frame_size,
             brain_asset=brain_asset,
             brain_error=brain_error,
+            recordable=ocfg.recordable,
         )
         return run_window(state, shim, opts)
     finally:

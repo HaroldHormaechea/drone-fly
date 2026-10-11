@@ -307,6 +307,7 @@ class OverlayConfig:
     gain_window_s: float = 5.0
     opacity: float = 0.85
     tap_outline: bool = False
+    recordable: bool = False
     panels: tuple[tuple[str, bool], ...] = tuple((p, True) for p in OVERLAY_PANELS)
 
     def panel_enabled(self, name: str) -> bool:
@@ -375,6 +376,7 @@ class OverlayConfig:
                 )
             ),
             tap_outline=require_bool(d.get("tap_outline", base.tap_outline), "overlay.tap_outline"),
+            recordable=require_bool(d.get("recordable", base.recordable), "overlay.recordable"),
             panels=panels,
         )
 

@@ -373,3 +373,16 @@ def test_run_overlay_bad_monitor_is_a_config_error(fake_window):
 
     with pytest.raises(HarnessConfigError, match="out of range"):
         run_overlay(harness="liftoff", monitor=5, replay=str(OVERLAY_RUN_DIR), shim=FakeShim())
+
+
+# ----------------------------------------------------------------------------- recordable
+
+
+def test_recordable_window_skips_capture_exclusion():
+    from drone_fly.overlay.win32 import WDA_NONE
+
+    shim = FakeShim()
+    setup = configure_overlay_window(42, shim, (0, 0, 2560, 1080), exclude_from_capture=False)
+    affinity = [c for c in shim.calls if c[0] == "set_display_affinity"]
+    assert affinity == [("set_display_affinity", 42, WDA_NONE)]
+    assert setup.affinity_ok  # no capture fallback: the default layout stays

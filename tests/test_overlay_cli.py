@@ -85,6 +85,7 @@ def test_cli_forwards_every_option_to_run_overlay(monkeypatch):
         "replay": "r",
         "fps": 5.0,
         "k1_path": None,
+        "recordable": None,
     }
 
 

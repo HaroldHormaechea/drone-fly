@@ -21,7 +21,7 @@ import os
 import signal
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -95,6 +95,7 @@ class OverlayOptions:
     frame_size: tuple[int, int] | None = None
     brain_asset: Any = None
     brain_error: str | None = None
+    recordable: bool = False  # overlay.recordable: visible to screen recorders, no in-game drawings
     warnings: list[str] = field(default_factory=list)
 
 
@@ -148,7 +149,12 @@ class OverlayWindow(QtWidgets.QWidget):
     # -- setup --
 
     def _apply_native(self) -> None:
-        setup = configure_overlay_window(self.hwnd, self.shim, self.opts.monitor_rect)
+        setup = configure_overlay_window(
+            self.hwnd,
+            self.shim,
+            self.opts.monitor_rect,
+            exclude_from_capture=not self.opts.recordable,
+        )
         self.affinity_ok = setup.affinity_ok
 
     def start(self) -> None:
@@ -171,6 +177,10 @@ class OverlayWindow(QtWidgets.QWidget):
             affinity_ok=self.affinity_ok,
             masks=masks,
         )
+        if self.opts.recordable and self.layout_.draw_keypoints:
+            # Drawings over the game centre would enter the harness's capture (it only masks the
+            # panels), so recordable mode keeps the game area clean.
+            self.layout_ = replace(self.layout_, draw_keypoints=False)
         log.info(
             "overlay window up: hwnd %#x, rect %s, dpr %.2f, capture exclusion %s, layout %s "
             "(panels: %s)",

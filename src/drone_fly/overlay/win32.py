@@ -46,6 +46,7 @@ WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_APPWINDOW = 0x00040000
 GWL_EXSTYLE = -20
+WDA_NONE = 0x00000000
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 SW_SHOWNOACTIVATE = 4
 HWND_TOPMOST = -1
@@ -121,13 +122,26 @@ def overlay_ex_style(current: int) -> int:
     return (int(current) | OVERLAY_EX_STYLES) & ~WS_EX_APPWINDOW
 
 
-def configure_overlay_window(hwnd: int, shim: Win32Shim, rect: MonitorRect) -> WindowSetup:
-    """Apply the styles, topmost placement over ``rect``, show-no-activate and capture exclusion."""
+def configure_overlay_window(
+    hwnd: int, shim: Win32Shim, rect: MonitorRect, *, exclude_from_capture: bool = True
+) -> WindowSetup:
+    """Apply the styles, topmost placement over ``rect``, show-no-activate and capture exclusion.
+
+    ``exclude_from_capture=False`` (``overlay.recordable``) leaves the window visible to screen
+    recorders; the runner then masks the overlay panels out of its own capture instead.
+    """
     style = overlay_ex_style(shim.get_ex_style(hwnd))
     shim.set_ex_style(hwnd, style)
     x, y, w, h = rect
     shim.set_window_pos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_FRAMECHANGED)
     shim.show_no_activate(hwnd)
+    if not exclude_from_capture:
+        shim.set_display_affinity(hwnd, WDA_NONE)
+        log.warning(
+            "overlay.recordable: the overlay is VISIBLE to screen capture (recorders and the "
+            "harness's own frame source); run the harness with --recordable so it masks the panels"
+        )
+        return WindowSetup(style, True)
     affinity_ok = bool(shim.set_display_affinity(hwnd, WDA_EXCLUDEFROMCAPTURE))
     if not affinity_ok:
         log.error(

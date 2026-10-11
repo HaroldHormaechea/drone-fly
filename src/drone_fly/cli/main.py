@@ -4,7 +4,7 @@
     drone-fly harness run --harness <name> --checkpoint <model_readout.pt> --extra-dim {12,30,70}
                           [--preset <name>] [--config <yaml>] [--k1-path] [--gpu-prototype-dir]
                           [--device] [--duration] [--dry-run] [--output-root] [--no-record]
-                          [--overlay] [--overlay-launch]
+                          [--overlay] [--overlay-launch] [--recordable]
     drone-fly harness eval --session <run dir> --track <xml> --race <xml> --config <yaml>
                           [--report <json>]
     drone-fly harness eval --capture <dir> --labels <dir> [--preset] [--gate-weights] [--device]
@@ -81,8 +81,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
         output_root=args.output_root,
         record=False if args.no_record else None,
         preset=args.preset,
-        overlay=True if (args.overlay or args.overlay_launch) else None,
+        overlay=True if (args.overlay or args.overlay_launch or args.recordable) else None,
         overlay_launch=args.overlay_launch,
+        recordable=True if args.recordable else None,
     )
     r = session.result
     print(
@@ -287,6 +288,7 @@ def _cmd_overlay(args: argparse.Namespace) -> int:
         replay=args.replay,
         fps=args.fps,
         k1_path=args.k1_path,
+        recordable=True if args.recordable else None,
     )
 
 
@@ -327,6 +329,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--overlay-launch",
         action="store_true",
         help="also start `harness overlay` before the loop (implies --overlay)",
+    )
+    p_run.add_argument(
+        "--recordable",
+        action="store_true",
+        help="overlay visible to screen recorders; mask its panels out of the capture "
+        "(implies --overlay; overlay.recordable)",
     )
     p_run.set_defaults(func=_cmd_run)
 
@@ -436,6 +444,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_ovl.add_argument("--replay", help="drive the overlay from a recorded harness run folder")
     p_ovl.add_argument("--fps", type=float, help="redraw rate 1-20 (overlay.fps)")
     p_ovl.add_argument("--k1-path", help="K1 connectome dir for the brain panel")
+    p_ovl.add_argument(
+        "--recordable",
+        action="store_true",
+        help="let screen recorders (OBS, Game Bar) capture the overlay; run the harness with "
+        "--recordable too so it masks the panels (overlay.recordable)",
+    )
     _common(p_ovl)
     p_ovl.set_defaults(func=_cmd_overlay)
     return parser

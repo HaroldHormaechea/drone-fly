@@ -116,6 +116,18 @@ In its own terminal, before the run:
 
 `--overlay-launch` on `harness run` starts it for you instead, with no console window.
 
+**Recording the overlay (OBS, Xbox Game Bar, etc.):** by default the overlay hides itself from
+every screen capture, so recorders don't see it either. Pass `--recordable` to **both** commands:
+```powershell
+.venv-cuda\Scripts\drone-fly.exe harness overlay --preset liftoff --recordable
+.venv-cuda\Scripts\drone-fly.exe harness run ... --overlay --recordable
+```
+(or set `overlay: {recordable: true}` in your `live*.yaml`, which both commands read). The overlay
+then shows up in recordings. Because the harness's own frame capture sees it too, the run adds the
+overlay's panel areas to `camera.masks`, so gate detection and depth ignore them, and the overlay
+stops drawing gate outlines over the game centre. Don't run a recordable overlay with a harness
+started without `--recordable`.
+
 ## 4. Stage (a): 30-dim model, gates only
 
 PowerShell, from the repo root:

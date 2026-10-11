@@ -28,7 +28,12 @@ from drone_fly.harness.config import HarnessConfig, OverlayConfig, find_repo_roo
 from drone_fly.harness.contract import load_contract
 from drone_fly.harness.errors import HarnessConfigError
 from drone_fly.harness.interfaces import BuildContext, Harness
-from drone_fly.harness.overlay import OverlayPublisher, build_meta, contract_constants
+from drone_fly.harness.overlay import (
+    OverlayPublisher,
+    build_meta,
+    contract_constants,
+    recordable_panel_masks,
+)
 from drone_fly.harness.policy import ContractPolicyRunner, validate_extra_dim
 from drone_fly.harness.recording import RunRecorder
 from drone_fly.harness.runner import HarnessRunner, RunnerSettings, RunResult, SimClock, WallClock
@@ -73,6 +78,7 @@ def overlay_command(
     preset: str | None = None,
     config: str | os.PathLike[str] | dict[str, Any] | None = None,
     k1_path: str | os.PathLike[str] | None = None,
+    recordable: bool = False,
 ) -> list[str]:
     """The ``drone-fly harness overlay`` command line matching this run's config.
 
@@ -87,6 +93,8 @@ def overlay_command(
         cmd += ["--config", str(Path(config).resolve())]
     if k1_path is not None:
         cmd += ["--k1-path", str(Path(k1_path).resolve())]
+    if recordable:
+        cmd += ["--recordable"]
     return cmd
 
 
@@ -134,12 +142,15 @@ def run_harness(
     overlay: bool | None = None,
     overlay_launch: bool = False,
     launcher: OverlayLauncher | None = None,
+    recordable: bool | None = None,
 ) -> SessionResult:
     """Run ``harness`` with ``checkpoint``; CLI-style arguments override the YAML config.
 
     ``preset`` names a packaged preset overlaid on the harness default before ``config``.
     ``overlay`` overrides ``overlay.enabled``; ``overlay_launch`` (implies ``overlay``) starts the
     overlay process before the loop — ``launcher`` replaces :func:`default_overlay_launcher`.
+    ``recordable`` overrides ``overlay.recordable``: the overlay stays visible to screen recorders
+    and the run masks the overlay's panels out of its own frame capture.
     """
     extra_dim = validate_extra_dim(extra_dim)
     if overlay_launch and overlay is None:
@@ -153,11 +164,18 @@ def run_harness(
         ("recording.output_root", output_root),
         ("recording.enabled", record),
         ("overlay.enabled", overlay),
+        ("overlay.recordable", recordable),
     ):
         if value is not None:
             overrides[key] = value
     cfg = load_config(harness, config, overrides, preset=preset)
     overlay_cfg = OverlayConfig.from_config(cfg)
+    if overlay_cfg.enabled and overlay_cfg.recordable:
+        panel_masks = recordable_panel_masks(cfg.data, overlay_cfg)
+        if panel_masks:
+            camera = cfg.get("camera") or {}
+            overrides["camera.masks"] = list(camera.get("masks") or []) + panel_masks
+            cfg = load_config(harness, config, overrides, preset=preset)
     if overlay_launch and not overlay_cfg.enabled:
         raise HarnessConfigError("--overlay-launch needs the overlay enabled")
 
@@ -243,6 +261,7 @@ def run_harness(
                 preset=preset,
                 config=config,
                 k1_path=contract.k1_path,
+                recordable=overlay_cfg.recordable,
             )
         )
     result: RunResult | None = None

@@ -32,6 +32,7 @@ EXPECTED_KEYS = {
     "gain_window_s",
     "opacity",
     "tap_outline",
+    "recordable",
     "panels",
 }
 
