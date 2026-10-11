@@ -61,6 +61,14 @@ tracks, drones or resolutions need their own calibration (ADR 0003).
   2560x1080 on monitor 1. Use lens "None", the "Test small drone" airframe, and Liftoff Arena →
   "04 - Infinity Loop". Prefer a session without AI ghost drones, because the depth model reads them
   as obstacles.
+- **One long-lived virtual pad.** With the `liftoff` preset (`controls.pad: server`) the first run
+  or pad-check opens a separate **"drone-fly harness pad"** console window that owns the virtual
+  Xbox pad, holds it neutral (throttle at minimum) and **stays open between runs**: every run drives
+  that same pad, so Liftoff never sees the controller disconnect (it re-arms and spins the motors
+  up when it does) or a second controller. If a run dies, the pad window centres the sticks and
+  cuts the throttle after 0.5 s without commands. At the end of the session: **reset or pause the
+  drone in Liftoff, then press Ctrl+C in the pad window.** You can also start it yourself first:
+  `.venv-cuda\Scripts\drone-fly.exe harness pad`.
 - Unplug or ignore your physical controller. Liftoff must take input from the virtual Xbox 360 pad.
   The pad only exists while a harness command runs, so Liftoff may say "no controller" in between.
   That is expected.
@@ -104,9 +112,7 @@ after changing rates or bindings.
 `--overlay` on `harness run` (stages 4 and 5) **starts the overlay window for you** (no console
 window) and waits until the window is up before sending any input. When the run stops, the
 terminal prints the result and keeps the overlay open showing the stop reason; **press Ctrl+C to
-close the overlay and exit**. The virtual pad also stays connected (neutral, disarmed) until then:
-Liftoff re-arms and spins the motors up when the controller disconnects, so **reset or pause the
-drone in Liftoff before pressing Ctrl+C** (`controls.keep_pad_connected`, on in the preset). If an overlay is already running (started by hand), the run reuses it
+close the overlay and exit**. If an overlay is already running (started by hand), the run reuses it
 and leaves it open. `--no-overlay-launch` only publishes.
 
 To start it by hand instead (e.g. to see logs), in its own terminal before the run:

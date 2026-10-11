@@ -22,6 +22,10 @@ button is treated as a toggle and pulsed again on the fail-safe if this run arme
 ``arm_settle_s`` after the Arm press the sticks stay neutral with the throttle at minimum
 (Liftoff, like real flight controllers, refuses to arm with the throttle up).
 
+Pad (``controls.pad``): ``local`` creates a ViGEm pad per run; ``server`` drives the one
+long-lived pad of ``drone-fly harness pad`` (:mod:`~drone_fly.harness.liftoff.pad_server`), started
+on demand, so the controller never disconnects between runs (Liftoff re-arms on disconnect).
+
 ``vgamepad`` (and with it the ViGEmBus driver) is imported only in :meth:`arm`; tests inject a
 ``pad_factory`` returning a mock pad (and a ``button_resolver``).
 """
@@ -36,7 +40,7 @@ from typing import Any
 
 import numpy as np
 
-from drone_fly.harness.config import require_bool, require_choice, require_number
+from drone_fly.harness.config import require_bool, require_choice, require_int, require_number
 from drone_fly.harness.errors import HarnessConfigError, lazy_import
 from drone_fly.harness.interfaces import ActionSink
 from drone_fly.harness.types import ContractCommand
@@ -221,6 +225,26 @@ class VgamepadActionSink(ActionSink):
 
     @classmethod
     def from_config(cls, cfg: dict[str, Any], ctx: Any) -> VgamepadActionSink:
+        pad_mode = require_choice(cfg.get("pad", "local"), "controls.pad", ("local", "server"))
+        pad_kw: dict[str, Any] = {}
+        if pad_mode == "server":
+            from drone_fly.harness.liftoff.pad_server import RemotePad, ensure_pad_server
+
+            port = require_int(cfg.get("pad_port", 9200), "controls.pad_port", min_value=1024)
+            timeout = float(
+                require_number(
+                    cfg.get("pad_timeout_s", 0.5),
+                    "controls.pad_timeout_s",
+                    min_value=0.0,
+                    min_exclusive=True,
+                )
+            )
+
+            def remote_pad() -> Any:
+                ensure_pad_server(port, timeout)
+                return RemotePad(port)
+
+            pad_kw = {"pad_factory": remote_pad, "button_resolver": str}
         rates = cfg.get("rates") or {}
         profiles = {}
         for axis in ("roll", "pitch", "yaw"):
@@ -285,9 +309,9 @@ class VgamepadActionSink(ActionSink):
                     min_exclusive=True,
                 )
             ),
-            keep_pad_connected=require_bool(
-                cfg.get("keep_pad_connected", False), "controls.keep_pad_connected"
-            ),
+            keep_pad_connected=pad_mode == "local"
+            and require_bool(cfg.get("keep_pad_connected", False), "controls.keep_pad_connected"),
+            **pad_kw,
         )
 
     def sticks_for(self, command: ContractCommand) -> dict[str, float]:
@@ -426,4 +450,8 @@ class VgamepadActionSink(ActionSink):
             finally:
                 if self.keep_pad_connected:
                     KEPT_PADS.append(self.pad)  # neutral + disarmed; dropping it re-arms Liftoff
+                else:
+                    closer = getattr(self.pad, "close", None)  # RemotePad: the server stays up
+                    if callable(closer):
+                        closer()
                 self.pad = None

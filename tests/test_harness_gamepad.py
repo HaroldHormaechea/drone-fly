@@ -397,15 +397,13 @@ def test_keep_pad_connected_holds_the_pad_neutral_and_disarmed_after_close():
     assert gamepad.kept_pads() == []  # default: the pad disconnects on close
 
 
-def test_preset_keeps_the_pad_connected():
+def test_keep_pad_connected_applies_to_local_pads_only():
     from drone_fly.harness.config import load_config
 
     ctx = SimpleNamespace(contract=SimpleNamespace(HOVER_THR=0.4))
-    assert (
-        VgamepadActionSink.from_config(
-            load_config("liftoff").section("controls"), ctx
-        ).keep_pad_connected
-        is False
-    )
-    preset = load_config("liftoff", preset="liftoff").section("controls")
-    assert VgamepadActionSink.from_config(preset, ctx).keep_pad_connected is True
+    cfg = load_config("liftoff").section("controls")
+    assert VgamepadActionSink.from_config(cfg, ctx).keep_pad_connected is False
+    local = {**cfg, "keep_pad_connected": True}
+    assert VgamepadActionSink.from_config(local, ctx).keep_pad_connected is True
+    server = {**local, "pad": "server"}  # the long-lived pad server stays connected anyway
+    assert VgamepadActionSink.from_config(server, ctx).keep_pad_connected is False

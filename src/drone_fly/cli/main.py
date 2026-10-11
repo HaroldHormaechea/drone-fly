@@ -287,6 +287,12 @@ def _cmd_depth_fit(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_pad_server(args: argparse.Namespace) -> int:
+    from drone_fly.harness.liftoff.pad_server import run_pad_server
+
+    return run_pad_server(args.port, args.timeout)
+
+
 def _cmd_pad_check(args: argparse.Namespace) -> int:
     from drone_fly.harness.liftoff.pad_check import PadCheckSettings, run_pad_check
 
@@ -466,6 +472,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_depth.add_argument("--lag-ms", type=float, default=0.0, help="frame -> telemetry lag")
     p_depth.add_argument("--device", choices=("auto", "cpu", "cuda"), help="depth model device")
     p_depth.set_defaults(func=_cmd_depth_fit)
+
+    p_srv = hsub.add_parser(
+        "pad", help="hold one virtual Xbox pad for the whole session (runs drive it)"
+    )
+    p_srv.add_argument(
+        "--port", type=int, default=9200, help="localhost UDP port (controls.pad_port)"
+    )
+    p_srv.add_argument(
+        "--timeout", type=float, default=0.5, help="neutral after this long without commands (s)"
+    )
+    p_srv.set_defaults(func=_cmd_pad_server)
 
     p_pad = hsub.add_parser("pad-check", help="live stick-direction check (Liftoff focused)")
     _common(p_pad)

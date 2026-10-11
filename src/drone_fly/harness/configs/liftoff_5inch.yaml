@@ -184,6 +184,9 @@ controls:
   disarm_press_s: 0.3       # Disarm pulse length (a 0.15 s press was missed by Liftoff)
   disarm_confirm_s: 2.0     # after a stop: re-press Disarm every 0.5 s until motor RPM is 0
   keep_pad_connected: false # true: after a stop keep the pad plugged in (neutral, disarmed) until Ctrl+C
+  pad: local                # local: one ViGEm pad per run | server: drive the long-lived `harness pad`
+  pad_port: 9200            # server mode: localhost UDP port of `drone-fly harness pad`
+  pad_timeout_s: 0.5        # server watchdog: neutral + throttle minimum after this long without input
 
 # Offline evaluation only (`drone-fly harness eval`): how track/race XML items map to geometry.
 # Never used at runtime. CALIBRATE the item table to your track's itemIDs.

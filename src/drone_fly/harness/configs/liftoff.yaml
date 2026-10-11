@@ -48,8 +48,9 @@ controls:
   arm_button: A
   disarm_button: B
   # MEASURED: when the virtual pad disconnects, Liftoff re-arms and spins the motors to ~8500 RPM
-  # (centred sticks = mid throttle). Keep it connected, neutral and disarmed, until Ctrl+C.
-  keep_pad_connected: true
+  # (centred sticks = mid throttle). One long-lived pad (`drone-fly harness pad`, started on
+  # demand in its own window) stays connected for the whole session instead.
+  pad: server
 
 scaling:
   # PROVISIONAL: arch trigger aperture 6.18 m vs. training gates 0.45-1.5 m -> ~4x.
