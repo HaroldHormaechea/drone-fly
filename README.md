@@ -27,7 +27,10 @@ deployed via **`gpu_prototype/inference.py`**.
 | `gpu_prototype/` | **the active lineage** — reservoir models, GPU PPO training, envs, audits, `inference.py` |
 | `training/NN-<slug>/` | committed flight models (`model_readout.pt`) + viewer recordings, numbered by creation |
 | `src/drone_fly/` | shared library used by the reservoir path: `connectome` (loads K1), `controller.actor` (the frozen sparse body), `env.config` (course dataclasses), `record.recorder` (viewer recordings) |
-| `artifacts/pruned/k1/` | the frozen K1 connectome (neuron ids, edges, signs) — shared by every model |
+| **`src/drone_fly/harness/`** | **live harnesses** (Liftoff, sim-loopback): runner, game parts (`liftoff/`), presets (`configs/`), offline label/train/eval tools (`offline/`) |
+| **`src/drone_fly/overlay/`** | **live brain + debug overlay** (`drone-fly harness overlay`) |
+| **`docs/harness/`** | **how to fly a live session**, step by step ([liftoff-live-session.md](docs/harness/liftoff-live-session.md)); design records in `docs/adr/` |
+| `artifacts/` | local, **gitignored**: `pruned/k1/` (the frozen K1 connectome), Liftoff captures, track data, trained gate models (`harness/liftoff/models/`), run folders |
 | `viz/` | the browser playback viewer (`viewer.html` + `viewer.js`) |
 | `docs/` | explainers, the inference contract, flight-model index |
 
