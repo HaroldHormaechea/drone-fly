@@ -173,7 +173,7 @@ Liftoff outputs live under `artifacts/harness/liftoff/` (gitignored), organised 
 | Folder | Contents |
 |---|---|
 | `labels/<capture>/` | `labels.jsonl` and `labels_meta.json` |
-| `models/` | `liftoff-gates.pt` and `training_log.json` |
+| `models/` | weights (`liftoff-gates.pt`, `liftoff-gates-deploy.pt`), each with its `<weights>.training_log.json` |
 | `reports/{masks,label-preview,gate-eval,depth-fit,pad-check}/` | offline reports |
 | `runs/` | live runs (`--output-root artifacts/harness/liftoff/runs`) |
 
@@ -265,6 +265,10 @@ The deploy model is trained for 30 epochs so that the keypoint offsets converge.
 `purpose: deploy`, and `eval --capture` refuses it, because no frame of it is held out. It
 memorises Infinity Loop by design. Its numbers are in-sample and cannot stand in for the AC6
 measurement.
+
+The evaluation model's per-epoch log was overwritten by the deploy run, because the log name was
+shared at the time. Its curve survives in the run messages: validation loss 2.42 / 2.35 / 2.34 at
+epochs 1–3, then rising to 3.55 by epoch 13.
 
 ## Offline evaluation and its caveats
 

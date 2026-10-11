@@ -28,7 +28,8 @@
   ``eval --capture`` refuses them.
 * AdamW + cosine schedule, mixed precision on CUDA. By default (``--select best-val``) the epoch
   with the lowest validation loss is kept, with early stopping after ``patience`` (10) epochs
-  without improvement; ``--select last`` keeps the final epoch. ``training_log.json`` (per-epoch
+  without improvement; ``--select last`` keeps the final epoch. ``<weights>.training_log.json``
+  (per-epoch
   train and validation losses, chosen epoch) is written beside the weights.
   (Plan amendment during UC-64: the first run overfit the single capture, so model selection got
   its own validation slice rather than reusing the held-out evaluation frames.)
@@ -361,6 +362,11 @@ def train_gates(
     train_idx, val_idx = np.flatnonzero(~val_arr), np.flatnonzero(val_arr)
     if len(train_idx) == 0:
         raise HarnessConfigError("no training frames left after the time split")
+    if select == "best-val" and len(val_idx) == 0:
+        raise HarnessConfigError(
+            "--select best-val needs validation frames, but the validation slice is empty "
+            "(increase --val-frac or use --select last)"
+        )
     log.info(
         "loaded %d frames (%d train / %d validation; held-out frames not loaded) in %.0fs at %dx%d",
         len(images),
@@ -539,7 +545,7 @@ def train_gates(
         for k, v in net.state_dict().items()
     }
     torch.save({"state_dict": state, "meta": meta}, out_path)
-    log_path = out_path.parent / "training_log.json"
+    log_path = out_path.with_name(f"{out_path.stem}.training_log.json")
     log_path.write_text(
         json.dumps({"meta": meta, "chosen_epoch": chosen_epoch, "history": history}, indent=2),
         encoding="utf-8",

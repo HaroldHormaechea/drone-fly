@@ -340,9 +340,13 @@ def load_track_course(
     obstacles = []
     for it in items:
         is_route_gate = it.instance_id is not None and it.instance_id in route_ids
-        geom = None if is_route_gate else _gate_geometry(it, table, item_table)
-        if is_route_gate or (table is not None and table.classify(it.item_id) is not None):
-            continue  # gates are not obstacles
+        if is_route_gate:
+            continue  # gates are not obstacles (the route lists them below)
+        if table is not None and table.classify(it.item_id) is not None:
+            # A gate-type item is never an obstacle; without a route it is a gate, in track order.
+            gates_raw.append((it, _gate_geometry(it, table, item_table)))
+            continue
+        geom = _gate_geometry(it, table, item_table)
         entry = _classify(it.item_id, item_table)
         if entry is None or entry.get("kind") == "ignore":
             continue
