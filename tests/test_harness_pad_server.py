@@ -206,3 +206,54 @@ def test_local_mode_is_the_default_and_validates():
         VgamepadActionSink.from_config({**cfg, "pad": "bluetooth"}, ctx)
     with pytest.raises(HarnessConfigError, match="pad_port"):
         VgamepadActionSink.from_config({**cfg, "pad": "server", "pad_port": 80}, ctx)
+
+
+def test_idle_parks_the_pad_menu_safe_and_quiets_the_watchdog():
+    srv, pad, _, clock = _server(timeout_s=0.5)
+    srv.handle(_state_msg({**NEUTRAL, "left_y": 0.6}, ["A"]), None)
+    srv.handle(json.dumps({"v": 1, "idle": True}).encode(), None)
+    assert pad.sticks == pad_server.IDLE and pad.buttons == set() and srv.idles == 1
+    clock.t = 10.0
+    assert srv.check_watchdog() is False  # parked on purpose: no throttle-min override
+    assert pad.sticks["left_y"] == 0.0  # centred: does not scroll Liftoff's menus
+
+
+def test_remote_pad_close_sends_idle_only_when_asked():
+    sock = FakeSock()
+    RemotePad(9300, sock=sock).close()
+    assert sock.sent == []
+    RemotePad(9300, sock=sock).close(idle=True)
+    assert sock.sent == [({"v": 1, "idle": True}, ("127.0.0.1", 9300))]
+
+
+class _RecordingPad(MockPad):
+    def __init__(self):
+        super().__init__()
+        self.closed_with = None
+
+    def close(self, idle=False):
+        self.closed_with = idle
+
+
+def test_sink_parks_the_shared_pad_idle_unless_the_disarm_was_unconfirmed():
+    def sink():
+        pad = _RecordingPad()
+        s = VgamepadActionSink(
+            {
+                ax: __import__("drone_fly.harness.liftoff.gamepad", fromlist=["x"]).RateProfile()
+                for ax in ("roll", "pitch", "yaw")
+            },
+            __import__("drone_fly.harness.liftoff.gamepad", fromlist=["x"]).ThrottleMap(0.4, -0.4),
+            pad_factory=lambda: pad,
+        )
+        return s, pad
+
+    ok, ok_pad = sink()
+    ok.arm()
+    ok.close()
+    assert ok_pad.closed_with is True
+    held, held_pad = sink()
+    held.arm()
+    held.hold_throttle_min()
+    held.close()
+    assert held_pad.closed_with is False

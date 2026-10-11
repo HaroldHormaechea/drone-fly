@@ -29,6 +29,7 @@ deployed via **`gpu_prototype/inference.py`**.
 | `src/drone_fly/` | shared library used by the reservoir path: `connectome` (loads K1), `controller.actor` (the frozen sparse body), `env.config` (course dataclasses), `record.recorder` (viewer recordings) |
 | **`src/drone_fly/harness/`** | **live harnesses** (Liftoff, sim-loopback): runner, game parts (`liftoff/`), presets (`configs/`), offline label/train/eval tools (`offline/`) |
 | **`src/drone_fly/overlay/`** | **live brain + debug overlay** (`drone-fly harness overlay`) |
+| **`scripts/liftoff/`** | **unattended Liftoff episodes** (launch / last session / N attempts with reset + recordings / quit), `.ps1` |
 | **`docs/harness/`** | **how to fly a live session**, step by step ([liftoff-live-session.md](docs/harness/liftoff-live-session.md)); design records in `docs/adr/` |
 | `artifacts/` | local, **gitignored**: `pruned/k1/` (the frozen K1 connectome), Liftoff captures, track data, trained gate models (`harness/liftoff/models/`), run folders |
 | `viz/` | the browser playback viewer (`viewer.html` + `viewer.js`) |

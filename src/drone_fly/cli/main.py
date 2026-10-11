@@ -86,6 +86,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         overlay_launch=(args.overlay or args.overlay_launch or args.recordable)
         and not args.no_overlay_launch,
         recordable=True if args.recordable else None,
+        save_recording=args.save_recording,
     )
     r = session.result
     print(
@@ -287,6 +288,21 @@ def _cmd_depth_fit(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_ui(args: argparse.Namespace) -> int:
+    from drone_fly.harness.liftoff import ui_driver
+
+    if args.action == "shot":
+        print(f"saved {ui_driver.shot(args.out)} (half size: x2 = screen pixels)")
+    elif args.action == "save-recording":
+        if not args.name:
+            raise HarnessConfigError("ui save-recording needs --name")
+        print(f"save-recording: {ui_driver.save_recording(args.name)}")
+    else:
+        ui_driver.ACTIONS[args.action]()
+        print(f"{args.action}: ok")
+    return EXIT_OK
+
+
 def _cmd_pad_server(args: argparse.Namespace) -> int:
     from drone_fly.harness.liftoff.pad_server import run_pad_server
 
@@ -390,6 +406,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="same as --overlay (kept for compatibility)",
     )
     p_run.add_argument(
+        "--save-recording",
+        metavar="NAME",
+        help="Liftoff: right after the stop, save the in-game recording of this attempt as NAME",
+    )
+    p_run.add_argument(
         "--recordable",
         action="store_true",
         help="overlay visible to screen recorders; mask its panels out of the capture "
@@ -472,6 +493,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_depth.add_argument("--lag-ms", type=float, default=0.0, help="frame -> telemetry lag")
     p_depth.add_argument("--device", choices=("auto", "cpu", "cuda"), help="depth model device")
     p_depth.set_defaults(func=_cmd_depth_fit)
+
+    p_ui = hsub.add_parser(
+        "ui",
+        help="drive Liftoff's menus: launch | last-session | reset | save-recording | quit | shot",
+    )
+    p_ui.add_argument(
+        "action", choices=("launch", "last-session", "reset", "save-recording", "quit", "shot")
+    )
+    p_ui.add_argument("--out", default="liftoff-screen.png", help="shot: PNG path (half size)")
+    p_ui.add_argument("--name", help="save-recording: recording name (no extension)")
+    p_ui.set_defaults(func=_cmd_ui)
 
     p_srv = hsub.add_parser(
         "pad", help="hold one virtual Xbox pad for the whole session (runs drive it)"

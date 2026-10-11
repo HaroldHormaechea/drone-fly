@@ -126,12 +126,27 @@ def _win32_activator() -> Activator:
         if not found:
             return False
         hwnd = found[0]
-        if user32.IsIconic(hwnd):
-            user32.ShowWindow(hwnd, sw_restore)
-        user32.keybd_event(vk_menu, 0, 0, 0)
-        user32.keybd_event(vk_menu, 0, keyup, 0)
-        user32.SetForegroundWindow(hwnd)
-        user32.BringWindowToTop(hwnd)
+        user32.ShowWindow(hwnd, sw_restore if user32.IsIconic(hwnd) else 5)  # 5 = SW_SHOW
+        # Windows only lets the foreground thread change the foreground window: attach to its
+        # input queue while switching (plus the Alt-tap unlock), then fall back to
+        # SwitchToThisWindow if the switch still did not take.
+        fg = user32.GetForegroundWindow()
+        fg_thread = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+        me = kernel32.GetCurrentThreadId()
+        attached = bool(
+            fg_thread and fg_thread != me and user32.AttachThreadInput(me, fg_thread, True)
+        )
+        try:
+            user32.keybd_event(vk_menu, 0, 0, 0)
+            user32.keybd_event(vk_menu, 0, keyup, 0)
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            user32.SetActiveWindow(hwnd)
+        finally:
+            if attached:
+                user32.AttachThreadInput(me, fg_thread, False)
+        if user32.GetForegroundWindow() != hwnd:
+            user32.SwitchToThisWindow(hwnd, True)
         return True
 
     return activate

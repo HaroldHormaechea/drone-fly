@@ -213,3 +213,20 @@ Record the results:
 | 70-dim run refuses to start | `parts.free_space_estimator: depth` is missing |
 | Overlay not visible over the game | Liftoff is in exclusive fullscreen; switch to borderless |
 | Exit code 3 | A missing extra: install it into `.venv-cuda` with `uv pip` (step 0.1) |
+
+## Unattended episodes (scripts)
+
+For repeated attempts (evaluation, data collection, training) the menus are driven by scripts — no
+manual clicking. See also the project skill `.claude/skills/liftoff-episodes/SKILL.md`.
+
+```powershell
+.\scripts\liftoff\Start-LiftoffSession.ps1                 # launch Liftoff if needed + Last Session
+.\scripts\liftoff\Invoke-LiftoffAttempts.ps1 -Attempts 100 -RecordEvery 50 -Quit
+.\scripts\liftoff\Reset-LiftoffMap.ps1                     # Esc -> Reset
+.\scripts\liftoff\Stop-LiftoffSession.ps1                  # quit Liftoff, disconnect the pad
+```
+
+Every `-RecordEvery` attempts, the run saves Liftoff's recording of that attempt right after the stop
+as `<map>-model-<model>-attempt-<n>` (`...\LocalLow\LuGus Studios\Liftoff\Recordings\Race\`). The
+single steps are `drone-fly harness ui launch | last-session | reset | save-recording --name N |
+quit | shot` and `harness run ... --save-recording NAME`. Keep hands off the PC while it runs.

@@ -202,6 +202,7 @@ def run_harness(
     overlay_launch: bool = False,
     launcher: OverlayLauncher | None = None,
     recordable: bool | None = None,
+    save_recording: str | None = None,
 ) -> SessionResult:
     """Run ``harness`` with ``checkpoint``; CLI-style arguments override the YAML config.
 
@@ -210,6 +211,8 @@ def run_harness(
     overlay process before the loop — ``launcher`` replaces :func:`default_overlay_launcher`.
     ``recordable`` overrides ``overlay.recordable``: the overlay stays visible to screen recorders
     and the run masks the overlay's panels out of its own frame capture.
+    ``save_recording`` (Liftoff): right after the stop, save the game's recording of this attempt
+    under that name (pause menu -> Save recording), before Liftoff can auto-restart the course.
     """
     extra_dim = validate_extra_dim(extra_dim)
     if overlay_launch and overlay is None:
@@ -334,6 +337,15 @@ def run_harness(
             )
         )
     launched: list[Any] = []
+    if save_recording:
+        from drone_fly.harness.liftoff.ui_driver import save_recording as _save
+
+        def on_stop(result: RunResult) -> None:
+            path = _save(save_recording)
+            result.events.append(f"recording_saved:{path}")
+            log.info("saved the flight recording: %s", path)
+
+        runner.on_stop = on_stop
 
     def on_launched(process: Any) -> None:
         launched.append(process)

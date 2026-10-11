@@ -12,6 +12,10 @@ Protocol (JSON datagrams to ``127.0.0.1:<controls.pad_port>``):
 * ``{"v": 1, "state": {"left_x", "left_y", "right_x", "right_y"}, "buttons": [names]}`` — the
   full pad state, sent on every ``update()``; applied as-is (stick floats in [-1, 1]).
 * ``{"v": 1, "ping": <id>}`` — answered with ``{"v": 1, "pong": <id>}`` to the sender.
+* ``{"v": 1, "idle": true}`` — a run ended with a confirmed disarm: go *menu-safe idle* (all sticks
+  centred, no buttons). Holding the throttle stick down would scroll Liftoff's menus (left stick
+  down = "move down") and fight mouse clicks; a disarmed drone needs throttle-down to arm, so
+  centred sticks are safe.
 
 Watchdog: when a client has been driving the pad and nothing arrives for ``timeout_s``
 (the run crashed or was killed), the server centres the sticks, sets the throttle to minimum and
@@ -36,6 +40,8 @@ DEFAULT_PORT = 9200
 STICKS = ("left_x", "left_y", "right_x", "right_y")
 #: Neutral pad: sticks centred, throttle (mode 2: left stick Y) at minimum.
 NEUTRAL = {"left_x": 0.0, "left_y": -1.0, "right_x": 0.0, "right_y": 0.0}
+#: Menu-safe idle after a confirmed disarm: every stick centred (no menu scrolling).
+IDLE = {"left_x": 0.0, "left_y": 0.0, "right_x": 0.0, "right_y": 0.0}
 
 
 def _clip(v: Any) -> float:
@@ -65,6 +71,7 @@ class PadServer:
         self.last_rx: float | None = None  # last state datagram (None = idle, already neutral)
         self.states = 0
         self.watchdog_trips = 0
+        self.idles = 0
         self.apply(self.neutral, [])
 
     def apply(self, sticks: dict[str, float], buttons: list[str]) -> None:
@@ -88,6 +95,11 @@ class PadServer:
             return
         if "ping" in msg:
             self.sock.sendto(json.dumps({"v": PROTOCOL, "pong": msg["ping"]}).encode(), addr)
+            return
+        if msg.get("idle") is True:
+            self.apply(IDLE, [])
+            self.last_rx = None  # no client driving: the watchdog stays quiet
+            self.idles += 1
             return
         state = msg.get("state")
         if not isinstance(state, dict):
@@ -193,8 +205,12 @@ class RemotePad:
         except OSError:
             log.warning("pad server unreachable on port %d", self.addr[1])
 
-    def close(self) -> None:
+    def close(self, idle: bool = False) -> None:
+        """Stop driving the pad; ``idle=True`` (disarm confirmed) parks it menu-safe (centred)."""
         try:
+            if idle:
+                msg = {"v": PROTOCOL, "idle": True}
+                self.sock.sendto(json.dumps(msg).encode("utf-8"), self.addr)
             self.sock.close()
         except OSError:
             pass

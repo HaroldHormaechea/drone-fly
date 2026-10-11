@@ -212,6 +212,8 @@ class VgamepadActionSink(ActionSink):
         self.arm_settle_s = arm_settle_s
         self.disarm_press_s = disarm_press_s
         self.keep_pad_connected = keep_pad_connected
+        #: Set when the disarm could not be confirmed: never park the pad at centred sticks.
+        self.hold_throttle = False
         self._settle_until: float | None = None
         self.button_resolver = button_resolver
         self.clock = clock
@@ -422,6 +424,10 @@ class VgamepadActionSink(ActionSink):
         self.armed = False
         self._release_at = None
 
+    def hold_throttle_min(self) -> None:
+        """The runner could not confirm the disarm: keep the throttle at minimum after close."""
+        self.hold_throttle = True
+
     def disarm(self) -> bool:
         """Press Disarm again (throttle at minimum); the runner retries until the motors stop.
 
@@ -453,5 +459,10 @@ class VgamepadActionSink(ActionSink):
                 else:
                     closer = getattr(self.pad, "close", None)  # RemotePad: the server stays up
                     if callable(closer):
-                        closer()
+                        try:
+                            # Disarm done: park the shared pad menu-safe (centred sticks), unless
+                            # the disarm could not be confirmed (then the throttle stays down).
+                            closer(idle=not self.hold_throttle)
+                        except TypeError:
+                            closer()
                 self.pad = None

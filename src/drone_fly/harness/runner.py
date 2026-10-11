@@ -228,6 +228,9 @@ class HarnessRunner:
         self._last_disc = 0
         self._last_sample: Any = None  # newest raw telemetry sample (overlay extras)
         self._arm_deadline: float | None = None  # pending arm confirmation (motor RPM)
+        #: Called right after the sink's fail-safe, before the disarm confirmation (e.g. saving
+        #: the game's flight recording while it still holds this attempt). Never raises out.
+        self.on_stop: Any = None
         self._focus: bool | None = None  # this tick's focus-probe result (None = no probe)
         self._last_overlay_s: float | None = None
         self._fs_required = any(
@@ -309,6 +312,12 @@ class HarnessRunner:
                 result.failsafe_output = (
                     {"sticks": neutral()} if callable(neutral) else {"failsafe": True}
                 )
+                if self.on_stop is not None:
+                    try:
+                        self.on_stop(result)
+                    except Exception:  # noqa: BLE001 - never mask the stop
+                        log.exception("on_stop hook failed")
+                        result.events.append("on_stop_failed")
                 self._confirm_disarmed(result)
                 return
             except Exception:  # noqa: BLE001
@@ -345,6 +354,9 @@ class HarnessRunner:
         except Exception:  # noqa: BLE001 - never mask the stop reason
             log.exception("confirming the disarm failed")
         result.events.append("disarm_unconfirmed")
+        hold = getattr(sink, "hold_throttle_min", None)
+        if callable(hold):
+            hold()  # never park the pad at centred sticks while the drone may be armed
         log.error("could not confirm the drone disarmed (motor RPM still > 0 or no telemetry)")
 
     def run(self, *, prepared: bool = False) -> RunResult:
