@@ -280,3 +280,32 @@ def test_parity_on_tunnel_course(harness_contract, harness_checkpoint_70, harnes
     assert len(course.obstacles) >= 5
     steps = _reference_loop(harness_contract, harness_checkpoint_70, course, 100)
     assert _compare(steps, _harness_ticks(session.run_dir)) <= 1e-6
+
+
+def test_inline_course_gen_dict_with_numpy_values_records(
+    harness_contract, harness_checkpoint_70, harness_k1_dir, tmp_path
+):
+    """A course_gen dict passed straight through (numpy scalars inside) records a valid run."""
+    import yaml
+
+    raw = harness_contract.import_reference("course_gen").sample_course(
+        2, with_tunnels=True, **TRACTABLE_KW
+    )
+    raw["start"] = np.asarray(raw["start"], np.float64)  # force numpy values into the config
+    raw["gates"][0]["aperture"] = np.float32(raw["gates"][0]["aperture"])
+    session = _run(
+        harness_contract,
+        harness_checkpoint_70,
+        harness_k1_dir,
+        tmp_path,
+        {"course": {"source": "inline", "inline": raw}},
+        0.2,
+    )
+    assert session.result.reason == "completed" and session.result.ticks == 10
+    cfg = yaml.safe_load((session.run_dir / "config.yaml").read_text(encoding="utf-8"))
+    inline = cfg["course"]["inline"]
+    assert isinstance(inline["start"], list) and all(isinstance(v, float) for v in inline["start"])
+    assert isinstance(inline["gates"][0]["aperture"], float)
+    meta = json.loads((session.run_dir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["stop_reason"] == "completed"
+    assert len(_harness_ticks(session.run_dir)) == 10

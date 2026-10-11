@@ -84,33 +84,39 @@ def run_harness(
         RunnerSettings.from_config(cfg),
         clock=h.clock,
     )
+    recorder = None
     try:
-        runner.prepare()
+        # Everything that can refuse the run happens before the sink is armed: coverage, model
+        # load, and the recording root / run folder. Any failure up to and including arming
+        # shuts the harness down (sink closed), so a refused run never leaves the device armed.
+        runner.prepare(arm=False)
+        if cfg.recording.enabled:
+            recorder = RunRecorder(
+                cfg.recording.output_root,
+                cfg.harness,
+                cfg.data,
+                {
+                    "checkpoint": str(Path(checkpoint).resolve()),
+                    "checkpoint_sha256": policy.sha256,
+                    "extra_dim": extra_dim,
+                    "device": contract.device,
+                    "contract_dir": str(contract.gpu_prototype_dir),
+                    "k1_path": None if contract.k1_path is None else str(contract.k1_path),
+                    "dry_run": dry_run,
+                    "provided_blocks": sorted(h.provided_blocks()),
+                    "harness_info": h.info,
+                },
+                queue_size=cfg.recording.queue_size,
+                repo_root=find_repo_root(),
+            )
+            runner.recorder = recorder
+        runner.arm()
     except BaseException:
         runner.shutdown()
+        if recorder is not None:
+            recorder.close(stop_reason="refused")
         raise
 
-    recorder = None
-    if cfg.recording.enabled:
-        recorder = RunRecorder(
-            cfg.recording.output_root,
-            cfg.harness,
-            cfg.data,
-            {
-                "checkpoint": str(Path(checkpoint).resolve()),
-                "checkpoint_sha256": policy.sha256,
-                "extra_dim": extra_dim,
-                "device": contract.device,
-                "contract_dir": str(contract.gpu_prototype_dir),
-                "k1_path": None if contract.k1_path is None else str(contract.k1_path),
-                "dry_run": dry_run,
-                "provided_blocks": sorted(h.provided_blocks()),
-                "harness_info": h.info,
-            },
-            queue_size=cfg.recording.queue_size,
-            repo_root=find_repo_root(),
-        )
-        runner.recorder = recorder
     result: RunResult | None = None
     try:
         result = runner.run(prepared=True)

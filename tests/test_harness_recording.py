@@ -271,3 +271,62 @@ def test_refused_output_root_never_leaves_the_sink_armed(
     assert not bad_root.exists()
     (sink,) = sinks
     assert (not sink.armed) or sink.closed >= 1, "sink armed and never closed after the refusal"
+
+
+def test_to_plain_converts_numpy_tuples_and_paths():
+    from drone_fly.harness.recording import to_plain
+
+    out = to_plain(
+        {
+            "a": np.float32(1.5),
+            "b": np.arange(3),
+            "c": (1, np.int64(2)),
+            "d": Path("x") / "y",
+            3: [np.bool_(True), None, "s"],
+        }
+    )
+    assert out == {
+        "a": 1.5,
+        "b": [0, 1, 2],
+        "c": [1, 2],
+        "d": str(Path("x") / "y"),
+        "3": [True, None, "s"],
+    }
+    yaml.safe_dump(out)
+    json.dumps(out)
+
+
+def test_refused_run_arms_nothing_and_writes_nothing(
+    harness_contract, harness_checkpoint_70, harness_k1_dir, tmp_path
+):
+    """Coverage refusal also happens before arming; no run folder is created."""
+    from drone_fly.harness import registry
+    from drone_fly.harness.errors import PerceptionCoverageError
+    from drone_fly.harness.session import run_harness
+    from tests.harness_support import FakeSink
+
+    sinks: list[FakeSink] = []
+
+    class TrackedSink(FakeSink):
+        @classmethod
+        def from_config(cls, cfg, ctx):
+            sinks.append(cls())
+            return sinks[-1]
+
+    registry.register("action_sink", "uc62-tracked2", TrackedSink)
+    try:
+        with pytest.raises(PerceptionCoverageError):
+            run_harness(
+                "sim-loopback",
+                harness_checkpoint_70,
+                70,
+                config={"parts": {"action_sink": "uc62-tracked2", "free_space_estimator": "none"}},
+                k1_path=str(harness_k1_dir),
+                device="cpu",
+                output_root=str(tmp_path / "out"),
+            )
+    finally:
+        registry.unregister("action_sink", "uc62-tracked2")
+    (sink,) = sinks
+    assert not sink.armed and sink.closed >= 1
+    assert not (tmp_path / "out").exists()

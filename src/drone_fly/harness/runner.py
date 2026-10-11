@@ -181,10 +181,15 @@ class HarnessRunner:
 
     # -- lifecycle --
 
-    def prepare(self) -> None:
-        """Coverage check -> model load -> arm the sink (in that order)."""
+    def prepare(self, *, arm: bool = True) -> None:
+        """Coverage check -> model load -> (optionally) arm the sink, in that order."""
         self.assembler.check_coverage(self.extra_dim, self.harness.provided_blocks())
         self.policy.load()
+        if arm:
+            self.arm()
+
+    def arm(self) -> None:
+        """Acquire the output device (call only once nothing else can refuse the run)."""
         self.harness.action_sink.arm()
 
     def _start_parts(self) -> None:

@@ -87,6 +87,21 @@ def resolve_output_root(output_root: str | Path | None, repo_root: Path | None =
     return real
 
 
+def to_plain(value: Any) -> Any:
+    """Recursively convert NumPy scalars/arrays (and tuples) to plain YAML/JSON-safe Python."""
+    if isinstance(value, np.ndarray):
+        return [to_plain(v) for v in value.tolist()]
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(k): to_plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [to_plain(v) for v in value]
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
 def git_head(repo_root: Path | None) -> str | None:
     if repo_root is None:
         return None
@@ -133,6 +148,10 @@ class RunRecorder:
         repo_root: Path | None = None,
     ) -> None:
         root = resolve_output_root(output_root, repo_root)
+        try:  # serialise first, so a bad config fails before the run folder exists
+            config_text = yaml.safe_dump(to_plain(config), sort_keys=False)
+        except yaml.YAMLError as exc:
+            raise HarnessConfigError(f"run config is not YAML-serialisable: {exc}") from exc
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
         self.run_dir = root / f"{harness}-{stamp}"
         self.run_dir.mkdir(parents=True, exist_ok=False)
@@ -143,9 +162,7 @@ class RunRecorder:
         self.meta.setdefault("git_head", git_head(repo_root or find_repo_root()))
         self.dropped = 0
         self._q: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=queue_size)
-        (self.run_dir / "config.yaml").write_text(
-            yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
-        )
+        (self.run_dir / "config.yaml").write_text(config_text, encoding="utf-8")
         self._write_meta()
         self._ticks = open(self.run_dir / "ticks.jsonl", "w", encoding="utf-8")  # noqa: SIM115
         self._tele_fh = open(self.run_dir / "telemetry.csv", "w", newline="", encoding="utf-8")  # noqa: SIM115
@@ -217,7 +234,7 @@ class RunRecorder:
     def _write_meta(self) -> None:
         self.meta["dropped_records"] = self.dropped
         (self.run_dir / "meta.json").write_text(
-            json.dumps(self.meta, indent=2, default=str), encoding="utf-8"
+            json.dumps(to_plain(self.meta), indent=2, default=str), encoding="utf-8"
         )
 
     def close(self, **final_meta: Any) -> Path:
