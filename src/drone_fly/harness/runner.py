@@ -70,6 +70,7 @@ STOP_SINK_ERROR = "sink_error"
 STOP_ABORT = "user_abort"
 STOP_FOCUS_LOST = "focus_lost"
 STOP_INTERRUPT = "keyboard_interrupt"
+STOP_NOT_ARMED = "not_armed"  # an arm button is configured but the motors never spun up
 NORMAL_STOPS = frozenset({STOP_COMPLETED, STOP_COURSE_FINISHED})
 
 
@@ -116,11 +117,20 @@ class RunnerSettings:
     max_duration_s: float | None = None
     max_ticks: int | None = None
     frame_every_n: int = 0  # recording: save every Nth frame image (0 = metadata only)
+    #: With an arm button configured: fail safe if telemetry shows no motor RPM this long after
+    #: the first command (the Arm press did not arm). 0 = no check.
+    arm_confirm_s: float = 0.0
 
     @classmethod
     def from_config(cls, cfg: Any) -> RunnerSettings:
         r = cfg.runner
         focus = cfg.get("focus") or {}
+        controls = cfg.get("controls") or {}
+        arm_confirm = float(
+            require_number(
+                controls.get("arm_confirm_s", 3.0), "controls.arm_confirm_s", min_value=0.0
+            )
+        )
         return cls(
             rate_hz=r.rate_hz,
             stale_after_s=r.stale_after_s,
@@ -134,6 +144,7 @@ class RunnerSettings:
             max_duration_s=r.max_duration_s,
             max_ticks=r.max_ticks,
             frame_every_n=cfg.recording.frame_every_n,
+            arm_confirm_s=arm_confirm if controls.get("arm_button") else 0.0,
         )
 
 
@@ -206,6 +217,7 @@ class HarnessRunner:
         self._failsafe_latched = False
         self._last_disc = 0
         self._last_sample: Any = None  # newest raw telemetry sample (overlay extras)
+        self._arm_deadline: float | None = None  # pending arm confirmation (motor RPM)
         self._focus: bool | None = None  # this tick's focus-probe result (None = no probe)
         self._last_overlay_s: float | None = None
         self._fs_required = any(
@@ -357,12 +369,36 @@ class HarnessRunner:
                 )
             self.clock.sleep_until(self.clock.now() + 0.05)
 
+    def _check_armed(self, record: TickRecord, now: float) -> None:
+        """Clear the pending arm check once telemetry shows motor RPM; fail safe at the deadline.
+
+        A stream without RPM cannot confirm arming, so the check is dropped (logged once).
+        """
+        sample = self._last_sample
+        rpm = None if sample is None else getattr(sample, "rpm", None)
+        if sample is not None and rpm is None:
+            log.warning("telemetry has no MotorRPM block; cannot confirm arming")
+            self._arm_deadline = None
+            return
+        if rpm is not None and float(np.max(np.abs(rpm))) > 0.0:
+            self._arm_deadline = None
+            record.events.append("armed")
+            return
+        if self._arm_deadline is not None and now >= self._arm_deadline:
+            self._finish(
+                record,
+                STOP_NOT_ARMED,
+                "motors never spun up after the Arm press: check Liftoff's Arm binding "
+                "(controls.arm_button) or restart Liftoff",
+            )
+
     def _loop(self, result: RunResult) -> None:
         s = self.settings
         period = 1.0 / s.rate_hz
         self._wait_for_state()
         self._wait_for_focus()
         start = self.clock.now()
+        self._arm_deadline = start + s.arm_confirm_s if s.arm_confirm_s > 0 else None
         k = 0
         executed = 0
         while True:
@@ -405,12 +441,18 @@ class HarnessRunner:
         state = h.state_source.latest()
         age = h.state_source.age(t0)
         record.ages_s["telemetry"] = float(age)
-        if self.recorder is not None or self.publisher is not None:
+        if (
+            self.recorder is not None
+            or self.publisher is not None
+            or self._arm_deadline is not None
+        ):
             samples = h.state_source.drain_raw()
             if samples:
                 self._last_sample = samples[-1]
             if self.recorder is not None:
                 self.recorder.record_telemetry(samples)
+        if self._arm_deadline is not None:
+            self._check_armed(record, t0)
         if state is None or age > s.stale_after_s:
             self._finish(record, STOP_STALE_TELEMETRY, f"telemetry age {age:.3f}s")
         record.state = state.as_state_dict()
