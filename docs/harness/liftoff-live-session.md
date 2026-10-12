@@ -8,7 +8,8 @@ with the debug overlay on top. The commands and design behind it are in the READ
 The game is **Liftoff** (the main FPV simulator), not *Liftoff: Micro Drones*. The reference setup
 is Liftoff's "Liftoff Arena" track, race "04 - Infinity Loop", flying a small custom quad ("Test
 small drone": FT Gremlin frame, FX805 cam) at 2560x1080. The preset `liftoff` holds that
-calibration (telemetry convention, camera, HUD masks, rates, gate types, depth calibration). Other
+calibration (telemetry convention, camera, HUD masks, the drone profile, gate types, depth
+calibration). Other
 tracks, drones or resolutions need their own calibration (ADR 0003).
 
 ## 0. One-time setup
@@ -51,6 +52,28 @@ tracks, drones or resolutions need their own calibration (ADR 0003).
    ```
    Relative paths resolve against the repo root of the checkout you run from. In a git worktree,
    which has no `artifacts/`, use absolute paths into the main checkout.
+
+## The airframe: the `drone` key (UC67)
+
+The harness config names the airframe it flies with a top-level `drone: <id>`. The id is a profile
+under `drones/<id>/drone.yaml`, identified with `drone-fly sysid` (see "Measure a new drone"
+below). The `liftoff` preset sets `drone: liftoff-gremlin-micro`; the 5-inch default sets
+`drone: liftoff-5inch-vortex-pro-250`, whose fit quality is poor.
+
+With a drone, the virtual pad maps the policy's command through the **profile**:
+
+- **Throttle.** The command's `collective_g` (body-z specific force in g; 1.0 = hover) goes
+  through the inverse thrust curve: `stick = 2 * throttle_for_g(collective_g) - 1`. On the micro,
+  hover is stick -0.058.
+- **Rates.** Body rates go through the profile's measured Betaflight rates.
+- **Pad settings.** `controls.rate_scale` and `controls.stick_signs` remain pad settings.
+
+`controls.rates` and `controls.hover_stick` must then be null; setting either together with `drone`
+is a config error. To fly an airframe without a profile, set `drone: null` and fill both.
+
+The checkpoint's action contract comes from its sidecar `model_readout.contract.json` (no sidecar
+= the pre-UC67 v1 contract). Both versions fly. The run log and `meta.json` say which one was
+decoded. See `docs/INFERENCE_CONTRACT.md` §0 and ADR 0006.
 
 ## 1. Before every session
 

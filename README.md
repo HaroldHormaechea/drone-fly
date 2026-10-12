@@ -24,7 +24,8 @@ deployed via **`gpu_prototype/inference.py`**.
 
 | path | what |
 |------|------|
-| `gpu_prototype/` | **the active lineage** — reservoir models, GPU PPO training, envs, audits, `inference.py` |
+| **`src/drone_fly/sim/`, `src/drone_fly/training/`** | **the batched simulator and trainer** (UC67): a `drones/<id>` profile-driven plant with dynamics + timing randomization and ground starts, the procedural course env, action contract v2; `drone-fly train run / eval / bench`, `drone-fly sim replay-sysid` ([ADR 0006](docs/adr/0006-profile-driven-batched-sim.md)) |
+| `gpu_prototype/` | frozen history of the reservoir lineage (the original GPU sim, envs, audits); `inference.py` is still the v1 inference-contract reference |
 | `training/NN-<slug>/` | committed flight models (`model_readout.pt`) + viewer recordings, numbered by creation |
 | `src/drone_fly/` | shared library used by the reservoir path: `connectome` (loads K1), `controller.actor` (the frozen sparse body), `env.config` (course dataclasses), `record.recorder` (viewer recordings) |
 | **`src/drone_fly/harness/`** | **live harnesses** (Liftoff, sim-loopback): runner, game parts (`liftoff/`), presets (`configs/`), offline label/train/eval tools (`offline/`) |
@@ -186,6 +187,19 @@ drone-fly harness overlay --replay artifacts/harness/<run>   # drive it from a r
   `drone-fly harness latency-report <run>`. To check it, compare `missed_deadline_rate` and the
   overlay p99 (target ≤ 1 ms) against the same config run without `--overlay`.
 - Without the extra, `harness overlay` exits with code 3 and the install command.
+
+## Train / evaluate on the batched simulator
+
+```
+drone-fly train run proc-course-dr --k1-path artifacts/pruned/k1          # writes artifacts/training/<drone>/<run-id>/
+drone-fly train eval training/07-proc-course-flight/model_readout.pt --config meteor75-legacy --legacy-v1 --compare-prototype
+drone-fly train bench --n-envs 8192                                        # env-steps/s vs gpu_prototype (idle GPU only)
+drone-fly sim replay-sysid artifacts/sysid/<id>/<session> --drone <id> --write-report
+```
+
+Configs are packaged (`src/drone_fly/training/configs/`: `meteor75-legacy`, `proc-course-dr`) or any
+YAML that `extends:` one. A trained checkpoint ships with `model_readout.contract.json` (action contract
+v2, see `docs/INFERENCE_CONTRACT.md` §0); keep the two files together.
 
 ## Audit a model (honesty-gated)
 
