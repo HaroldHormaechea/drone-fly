@@ -1,0 +1,191 @@
+# Drone profile liftoff-5inch-vortex-pro-250: identified by `drone-fly sysid fit` from session vortex-full.
+# fit_quality: poor. Report: sysid.md. Do not hand-edit measured values; re-run the fit instead.
+schema_version: 1
+id: liftoff-5inch-vortex-pro-250
+name: Liftoff Vortex Pro 250 (stock 5-inch)
+source: liftoff-sysid
+fit_quality: poor
+notes: Identified by drone-fly sysid from session vortex-full. See sysid.md.
+liftoff:
+  drone_name: Vortex Pro 250
+  map: Liftoff Arena (free flight, no track)
+  preset: liftoff
+nominal:
+  hover_throttle:
+    value: 0.331069
+    session: vortex-full
+    residual: 0.146427
+    sigma: 0.000920687
+  thrust_curve:
+    throttle:
+    - 0.0
+    - 0.15
+    - 0.3
+    - 0.45
+    - 0.6
+    - 0.8
+    - 1.0
+    accel_g:
+    - 0.0
+    - 0.140529
+    - 0.795345
+    - 1.7834
+    - 2.8757
+    - 4.7408
+    - 7.71736
+    session: vortex-full
+    residual: 0.146427
+    sigma:
+    - 0.0
+    - 0.00334313
+    - 0.00229602
+    - 0.00561318
+    - 0.0153595
+    - 0.0215617
+    - 0.0227623
+  rates:
+    roll:
+      rc_rate:
+        value: 0.971276
+        session: vortex-full
+        residual: 1.65497
+        sigma: 0.0405113
+      super_rate:
+        value: 0.823253
+        session: vortex-full
+        residual: 1.65497
+        sigma: 0.0090191
+      expo:
+        value: 0.0
+        session: vortex-full
+        residual: 1.65497
+      tau_s:
+        value: 0.0116763
+        session: vortex-full
+        residual: 1.65497
+        sigma: 0.000769446
+      delay_s:
+        value: 0.00343934
+        session: vortex-full
+        residual: 1.65497
+        sigma: 0.000422483
+    pitch:
+      rc_rate:
+        value: 0.928984
+        session: vortex-full
+        residual: 1.36922
+        sigma: 0.0338737
+      super_rate:
+        value: 0.824065
+        session: vortex-full
+        residual: 1.36922
+        sigma: 0.00774728
+      expo:
+        value: 0.0
+        session: vortex-full
+        residual: 1.36922
+      tau_s:
+        value: 0.0137872
+        session: vortex-full
+        residual: 1.36922
+        sigma: 0.000858227
+      delay_s:
+        value: 4.71089e-16
+        session: vortex-full
+        residual: 1.36922
+        sigma: 0.000582714
+    yaw:
+      rc_rate:
+        value: 1.48379
+        session: vortex-full
+        residual: 0.87337
+        sigma: 0.0283772
+      super_rate:
+        value: 0.555736
+        session: vortex-full
+        residual: 0.87337
+        sigma: 0.0100495
+      expo:
+        value: 0.0
+        session: vortex-full
+        residual: 0.87337
+      tau_s:
+        value: 0.004
+        session: vortex-full
+        residual: 0.87337
+        sigma: 0.000314269
+      delay_s:
+        value: 0.00108463
+        session: vortex-full
+        residual: 0.87337
+        sigma: 0.000153938
+  drag:
+    linear_per_s:
+      value: 0.0581401
+      session: vortex-full
+      residual: 0.0242067
+      sigma: 0.00259521
+    quadratic_per_m:
+      value: 0.0118631
+      session: vortex-full
+      residual: 0.0242067
+      sigma: 0.000507814
+  motor_lag_s:
+    value: 0.0
+    session: vortex-full
+    residual: 0.146427
+  latency:
+    input_s:
+      value: 0.009
+      session: vortex-full
+      residual: 0.0236002
+      sigma: 1.18074e-05
+    control_to_gyro_s:
+      value: 0.010508
+      session: vortex-full
+      residual: 0.00143566
+      sigma: 0.000386559
+  camera: null
+randomization:
+  thrust_scale:
+    min: 0.9
+    max: 1.1
+  rates.roll.rate_scale:
+    min: 0.874872
+    max: 1.12513
+  rates.roll.tau_s:
+    min: 0.00936796
+    max: 0.0139846
+  rates.roll.delay_s:
+    min: 0.00217189
+    max: 0.00470679
+  rates.pitch.rate_scale:
+    min: 0.890611
+    max: 1.10939
+  rates.pitch.tau_s:
+    min: 0.0112125
+    max: 0.0163619
+  rates.pitch.delay_s:
+    min: 0.0
+    max: 0.00174814
+  rates.yaw.rate_scale:
+    min: 0.9
+    max: 1.1
+  rates.yaw.tau_s:
+    min: 0.00305719
+    max: 0.00494281
+  rates.yaw.delay_s:
+    min: 0.000622821
+    max: 0.00154645
+  drag.linear_per_s:
+    min: 0.0503545
+    max: 0.0659257
+  drag.quadratic_per_m:
+    min: 0.0103397
+    max: 0.0133865
+  motor_lag_s:
+    min: 0.0
+    max: 0.0
+  latency.control_to_gyro_s:
+    min: 0.00934831
+    max: 0.0116677

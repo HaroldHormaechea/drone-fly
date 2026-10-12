@@ -1,0 +1,195 @@
+# Drone profile liftoff-gremlin-micro: identified by `drone-fly sysid fit` from session micro-full.
+# fit_quality: good. Report: sysid.md. Do not hand-edit measured values; re-run the fit instead.
+schema_version: 1
+id: liftoff-gremlin-micro
+name: Liftoff Test small drone (FT Gremlin micro)
+source: liftoff-sysid
+fit_quality: good
+notes: Identified by drone-fly sysid from session micro-full. See sysid.md.
+liftoff:
+  drone_name: Test small drone
+  map: Liftoff Arena (free flight, no track)
+  preset: liftoff
+nominal:
+  hover_throttle:
+    value: 0.470841
+    session: micro-full
+    residual: 0.0674293
+    sigma: 0.000718831
+  thrust_curve:
+    throttle:
+    - 0.0
+    - 0.15
+    - 0.3
+    - 0.45
+    - 0.6
+    - 0.8
+    - 1.0
+    accel_g:
+    - 0.0
+    - 0.001
+    - 0.303178
+    - 0.897748
+    - 1.63368
+    - 2.85356
+    - 4.22576
+    session: micro-full
+    residual: 0.0674293
+    sigma:
+    - 0.0
+    - 0.00550209
+    - 0.0043282
+    - 0.000919499
+    - 0.00340476
+    - 0.00538422
+    - 0.00732461
+  rates:
+    roll:
+      rc_rate:
+        value: 0.854721
+        session: micro-full
+        residual: 0.69778
+        sigma: 0.0242401
+      super_rate:
+        value: 0.707361
+        session: micro-full
+        residual: 0.69778
+        sigma: 0.0105598
+      expo:
+        value: 0.0
+        session: micro-full
+        residual: 0.69778
+      tau_s:
+        value: 0.00710121
+        session: micro-full
+        residual: 0.69778
+        sigma: 0.000377772
+      delay_s:
+        value: 0.00838266
+        session: micro-full
+        residual: 0.69778
+        sigma: 0.000166611
+    pitch:
+      rc_rate:
+        value: 0.819118
+        session: micro-full
+        residual: 0.729294
+        sigma: 0.0260996
+      super_rate:
+        value: 0.710627
+        session: micro-full
+        residual: 0.729294
+        sigma: 0.0120333
+      expo:
+        value: 0.0
+        session: micro-full
+        residual: 0.729294
+      tau_s:
+        value: 0.0120934
+        session: micro-full
+        residual: 0.729294
+        sigma: 0.000723745
+      delay_s:
+        value: 0.00546195
+        session: micro-full
+        residual: 0.729294
+        sigma: 0.000470296
+    yaw:
+      rc_rate:
+        value: 0.908411
+        session: micro-full
+        residual: 0.537104
+        sigma: 0.0124205
+      super_rate:
+        value: 0.695797
+        session: micro-full
+        residual: 0.537104
+        sigma: 0.00479733
+      expo:
+        value: 0.0
+        session: micro-full
+        residual: 0.537104
+      tau_s:
+        value: 0.004
+        session: micro-full
+        residual: 0.537104
+        sigma: 0.000242392
+      delay_s:
+        value: 0.00673818
+        session: micro-full
+        residual: 0.537104
+        sigma: 0.00010898
+  drag:
+    linear_per_s:
+      value: 0.0578
+      session: micro-full
+      residual: 0.035033
+      sigma: 0.00453564
+    quadratic_per_m:
+      value: 0.0250882
+      session: micro-full
+      residual: 0.035033
+      sigma: 0.000973082
+  motor_lag_s:
+    value: 0.00321674
+    session: micro-full
+    residual: 0.0674293
+    sigma: 0.000141961
+  latency:
+    input_s:
+      value: 0.003
+      session: micro-full
+      residual: 0.0244075
+      sigma: 1.21241e-05
+    control_to_gyro_s:
+      value: 0.00986093
+      session: micro-full
+      residual: 0.00119553
+      sigma: 0.000248925
+  camera:
+    hfov_deg: 120.0
+    uptilt_deg: 20.0
+    ref: harness preset 'liftoff' camera (verified in UC-64)
+randomization:
+  thrust_scale:
+    min: 0.9
+    max: 1.1
+  rates.roll.rate_scale:
+    min: 0.9
+    max: 1.1
+  rates.roll.tau_s:
+    min: 0.00596789
+    max: 0.00823452
+  rates.roll.delay_s:
+    min: 0.00754439
+    max: 0.00922093
+  rates.pitch.rate_scale:
+    min: 0.9
+    max: 1.1
+  rates.pitch.tau_s:
+    min: 0.00992216
+    max: 0.0142646
+  rates.pitch.delay_s:
+    min: 0.00405106
+    max: 0.00687283
+  rates.yaw.rate_scale:
+    min: 0.9
+    max: 1.1
+  rates.yaw.tau_s:
+    min: 0.00327282
+    max: 0.00472718
+  rates.yaw.delay_s:
+    min: 0.00606436
+    max: 0.00741199
+  drag.linear_per_s:
+    min: 0.0441931
+    max: 0.071407
+  drag.quadratic_per_m:
+    min: 0.0221689
+    max: 0.0280074
+  motor_lag_s:
+    min: 0.00279085
+    max: 0.00364262
+  latency.control_to_gyro_s:
+    min: 0.00887483
+    max: 0.010847

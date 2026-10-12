@@ -15,13 +15,13 @@ Raw measurement data is **not** committed. A sysid session writes telemetry, pad
 ## Ids
 
 `<source>-<class>-<model>`, kebab-case, for example `liftoff-gremlin-micro` or
-`liftoff-5inch-<model>`. The training analog has the short id `meteor75`.
+`liftoff-5inch-vortex-pro-250`. The training analog has the short id `meteor75`.
 
 | id | source | what |
 |----|--------|------|
 | `meteor75` | analog | the plant the policies train on today (`gpu_prototype/hover_gpu.py`), not measured |
 | `liftoff-gremlin-micro` | liftoff-sysid | Liftoff "Test small drone" (FT Gremlin, ZetaFlight Acro), the UC-64 micro |
-| `liftoff-5inch-<model>` | liftoff-sysid | a stock Liftoff 5-inch |
+| `liftoff-5inch-vortex-pro-250` | liftoff-sysid | Liftoff's stock 5-inch "Vortex Pro 250" |
 
 ## Units and conventions
 

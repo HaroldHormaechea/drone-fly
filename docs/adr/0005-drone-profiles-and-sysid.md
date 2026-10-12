@@ -90,8 +90,9 @@ Two guards were added for unattended runs:
 - **Anti-cheat refusal.** No input is sent while League of Legends, the Riot client or Vanguard is
   running: before a live session, before a drone selection and at every level reset.
 - **Airframe guard.** The ground-ramp `h0` must fall inside the expected hover band, taken from
-  `--expect-hover`, the existing profile (±0.15) or `ui_driver.DRONE_SLOTS`. Otherwise the session
-  lands, disarms and stops with `drone_mismatch` before the first experiment. The guard is coarse:
+  `--expect-hover`, the existing profile (its hover ±0.08: the ramp `h0` sits about 0.03 below
+  the fitted hover, and the micro's 0.46 must stay outside the 5-inch's band around 0.33) or
+  `ui_driver.DRONE_SLOTS`. Otherwise the session lands, disarms and stops with `drone_mismatch` before the first experiment. The guard is coarse:
   it catches a micro flown instead of a 5-inch, not two similar 5-inch builds.
 
 ### Fitting with a time split
@@ -138,5 +139,25 @@ as a dry run.
 - Battery sag: voltage is recorded, the level is reset between passes, and the report gives the
   thrust sensitivity per volt. Thrust is not parameterised by voltage.
 - Selecting a drone through the menus is automated, but it depends on screen positions measured on
-  Liftoff's current UI (`ui_driver.DRONE_LIST`, `DRONE_MENU_PATH`). The selection is verified by
-  pixels and, in flight, by the airframe guard.
+  Liftoff's current UI (1.7.6: `ui_driver.DRONE_LIST`, `DRONE_MENU_PATH`, `QUICK_SETUP_LEVELS`).
+
+### Live findings (2026-10-12)
+
+- **Selection path.** The only drone choice that sticks is Single Player -> Quick Play -> Quick
+  Setup. That dialog sets mode, environment, track and drone together, applies them only on Play,
+  and Play also becomes the Last Session. So selecting a drone means loading a level with it.
+  Liftoff Arena is row 5 of the environment list. The drone list is only reliable from its end,
+  where the custom drones follow the stock ones.
+- **Verification.** Three independent signals, none of them a screenshot read:
+  1. the target row must light up under the cursor (pixels); a mismatch cancels the dialog;
+  2. after loading, `Player.log` must name the requested drone ("=== Calculating <name> ...");
+  3. the drone must sit at the level's spawn (telemetry).
+
+  The Infinity Loop spawn matches the UC-64 harness runs exactly.
+- **Map.** Liftoff Arena in free flight, track None: the flat, empty stadium pitch. The spawn is at
+  one end (Unity z -48), so the session transits 45 m to mid-pitch (`--home-forward`) and centres a
+  25 m geofence there.
+- **Airframes.** The UC-64 micro "Test small drone" and the stock 5-inch "Vortex Pro 250". The micro
+  hovers at stick -0.058, matching UC-64's hand-flown -0.06. Liftoff's yaw gyro responds as a pure
+  delayed step (`tau_s` at its 4 ms floor); roll and pitch are first order with 7-12 ms time
+  constants. The per-drone numbers are in `drones/*/sysid.md`.

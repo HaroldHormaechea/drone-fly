@@ -427,19 +427,21 @@ DRONE_MENU_PATH: tuple[str, ...] = ("single_player", "quick_play", "quick_setup"
 DRONE_SLOTS: dict[str, dict[str, Any]] = {
     # The UC64 micro (FT Gremlin): hand-flown hover at stick -0.06 (throttle 0.47).
     "Test small drone": {"slot": 3, "hover_band": (0.40, 0.56)},
-    # Stock 5-inch race quad (ImmersionRC Vortex 250 Pro). Band: see drones/liftoff-5inch-*.
-    "Vortex Pro 250": {"slot": 0, "hover_band": (0.10, 0.40)},
+    # Stock 5-inch race quad (ImmersionRC Vortex 250 Pro). UC-66 ground ramp: h0 0.298-0.299
+    # (fitted hover 0.331); the micro ramps to 0.46, outside this band.
+    "Vortex Pro 250": {"slot": 0, "hover_band": (0.20, 0.40)},
 }
 #: Levels the Quick Play Setup can load: the row index in each full list (mode, environment,
-#: track / race) and the drone's spawn position (Unity metres, telemetry), which verifies the load.
+#: track / race) and the drone's spawn position (Unity metres, telemetry; MEASURED 2026-10-12, the
+#: Infinity Loop one equals the UC-64 harness runs' start), which verifies the load.
 #: Environments (1.7.6): 0 Straw Bale, 1 Pine Valley, 2 Minus Two, 3 Autumn Fields, 4 Hangar C03,
 #: 5 Liftoff Arena, 6 Dubai Legends, 7 Hannover, ...; modes: 0 Freeflight, 1 Freestyle, 2 Race,
 #: 3 Infinite Race.
 QUICK_SETUP_LEVELS: dict[str, dict[str, Any]] = {
     # Liftoff Arena, free flight, no track: the empty stadium pitch (the sysid map).
-    "arena-freeflight": {"mode": 0, "environment": 5, "track": 0, "spawn": None},
+    "arena-freeflight": {"mode": 0, "environment": 5, "track": 0, "spawn": (0.0, 0.11, -47.94)},
     # Liftoff Arena, race "04 - Infinity Loop" (the reference harness level).
-    "infinity-loop": {"mode": 2, "environment": 5, "track": 3, "spawn": None},
+    "infinity-loop": {"mode": 2, "environment": 5, "track": 3, "spawn": (-37.70, 0.87, -0.01)},
 }
 SPAWN_TOLERANCE_M = 3.0
 #: Liftoff's log; every drone it builds (main menu, level load) logs "=== Calculating <name> ...".

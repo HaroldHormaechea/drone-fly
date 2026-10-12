@@ -83,13 +83,16 @@ Produces the drone profile `drones/<id>/drone.yaml` + `sysid.md` (UC-66; details
 
 1. `tasklist`: no League of Legends / Riot client / Vanguard (`vgc`, `vgtray`). The commands also
    refuse on their own (exit 2), but check first.
-2. Select the drone + load a large flat open map:
-   `drone-fly harness ui select-drone --name "<exact Liftoff name>"` (pixel-verified; names and slots
-   in `ui_driver.DRONE_SLOTS`), then `harness ui last-session`.
-3. `drone-fly sysid liftoff --drone <id> --liftoff-name "<name>" --map "<map>"` (~10 min; exit 5 =
-   fail-safe / crash / `drone_mismatch`, resumable with `--session <name> --resume`).
+2. Select the drone + load the sysid map (Liftoff Arena, free flight, no track):
+   `drone-fly harness ui select-drone --name "<exact Liftoff name>" --level arena-freeflight`
+   (Quick Play → Quick Setup; verified by a pixel row check, `Player.log` and the spawn position;
+   names / rows in `ui_driver.DRONE_SLOTS`, levels in `ui_driver.QUICK_SETUP_LEVELS`).
+3. `drone-fly sysid liftoff --drone <id> --liftoff-name "<name>" --map "<map>" --home-forward 45
+   --radius 25` (~10 min; exit 5 = fail-safe / crash / `drone_mismatch`, resumable with
+   `--session <name> --resume`).
 4. `drone-fly sysid fit artifacts\sysid\<id>\<session> --drone <id>` → check `fit_quality`.
-5. Commit only `drones/<id>/` (never `artifacts/`). Restore the usual drone + map as Last Session.
+5. Commit only `drones/<id>/` (never `artifacts/`). Restore the reference Last Session:
+   `harness ui select-drone --name "Test small drone" --level infinity-loop`.
 
 Dry run without the game: `sysid liftoff --drone <id> --plant synthetic`.
 

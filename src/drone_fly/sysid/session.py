@@ -894,7 +894,7 @@ def expected_band(
     explicit: tuple[float, float] | None,
     *,
     root: Any = None,
-    halfwidth: float = 0.15,
+    halfwidth: float = 0.08,
 ) -> tuple[tuple[float, float] | None, str | None]:
     """The airframe guard's hover band: ``--expect-hover`` > existing profile > ``DRONE_SLOTS``."""
     if explicit is not None:
