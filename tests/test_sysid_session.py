@@ -237,7 +237,7 @@ def test_expected_band_precedence(tmp_path, monkeypatch):
     band, src = expected_band("liftoff-test-micro", "Test small drone", (0.1, 0.2), root=root)
     assert band == (0.1, 0.2) and src == "--expect-hover"
     band, src = expected_band("liftoff-test-micro", "Test small drone", None, root=root)
-    assert band == pytest.approx((0.32, 0.62)) and "drone.yaml" in src
+    assert band == pytest.approx((0.39, 0.55))  # profile hover 0.47 +- 0.08 and "drone.yaml" in src
     band, src = expected_band("liftoff-new-micro", "Test small drone", None, root=root)
     assert band == (0.40, 0.56) and "DRONE_SLOTS" in src
     assert expected_band("liftoff-new-micro", "Unknown", None, root=root) == (None, None)
