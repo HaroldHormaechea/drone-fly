@@ -7,7 +7,7 @@ source: liftoff-xml
 root: artifacts/harness/trackdata
 scenes_root: null
 world_scale: 1.0
-conversion_version: 1
+conversion_version: 2
 scanned: '2026-10-12'
 split:
   method: 'map-hash-greedy: held-out, then val, to round(ratio*N) tracks + 2 maps'
@@ -783,20 +783,19 @@ entries:
     harness_list: 166
     harness_overflow: 0
     harness_candidates: 166
-    primitives: 4935
+    primitives: 4956
     cells: 11244
-    cell_overflow: 5032
+    cell_overflow: 5046
     sheared: 0
     mesh_flagged: 23
     unknown_items: 0
-    solid_in_opening: 7
+    solid_in_opening: 0
     spawn: real
     spawn_support_offset_m: -0.002
     time_limit_s: 240.0
   flags:
   - branching
   - no-terrain
-  - solid-in-opening
 - id: bando-city-05
   source: liftoff-xml
   track: BandoCityTrack05_0001.xml
@@ -894,20 +893,19 @@ entries:
     harness_list: 19
     harness_overflow: 0
     harness_candidates: 19
-    primitives: 66
+    primitives: 69
     cells: 1172
     cell_overflow: 207
     sheared: 0
     mesh_flagged: 5
     unknown_items: 0
-    solid_in_opening: 1
+    solid_in_opening: 0
     spawn: unsupported
     spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
   - outlier-aperture
-  - solid-in-opening
   - spawn-unsupported
 - id: bardwells-yard-02
   source: liftoff-xml
@@ -952,19 +950,18 @@ entries:
     harness_list: 32
     harness_overflow: 0
     harness_candidates: 32
-    primitives: 161
+    primitives: 167
     cells: 2600
-    cell_overflow: 330
+    cell_overflow: 378
     sheared: 0
     mesh_flagged: 2
     unknown_items: 0
-    solid_in_opening: 2
+    solid_in_opening: 0
     spawn: unsupported
     spawn_support_offset_m: null
     time_limit_s: 209.73
   flags:
   - no-scene
-  - solid-in-opening
   - spawn-unsupported
 - id: bardwells-yard-03
   source: liftoff-xml
@@ -1058,19 +1055,18 @@ entries:
     harness_list: 68
     harness_overflow: 0
     harness_candidates: 68
-    primitives: 151
+    primitives: 157
     cells: 4191
     cell_overflow: 168
     sheared: 0
     mesh_flagged: 8
     unknown_items: 0
-    solid_in_opening: 2
+    solid_in_opening: 0
     spawn: unsupported
     spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
-  - solid-in-opening
   - spawn-unsupported
 - id: bardwells-yard-05
   source: liftoff-xml
@@ -1855,18 +1851,17 @@ entries:
     harness_list: 270
     harness_overflow: 0
     harness_candidates: 270
-    primitives: 4154
+    primitives: 4211
     cells: 40721
-    cell_overflow: 10924
+    cell_overflow: 11176
     sheared: 0
     mesh_flagged: 88
     unknown_items: 0
-    solid_in_opening: 19
+    solid_in_opening: 0
     spawn: real
     spawn_support_offset_m: 0.0
     time_limit_s: 240.0
-  flags:
-  - solid-in-opening
+  flags: []
 - id: liftoff-arena-01
   source: liftoff-xml
   track: LiftoffArenaTrack01_0001.xml
@@ -2107,18 +2102,17 @@ entries:
     harness_list: 48
     harness_overflow: 0
     harness_candidates: 48
-    primitives: 8139
+    primitives: 8160
     cells: 9181
-    cell_overflow: 6271
+    cell_overflow: 6309
     sheared: 0
     mesh_flagged: 20
     unknown_items: 0
-    solid_in_opening: 7
+    solid_in_opening: 0
     spawn: real
     spawn_support_offset_m: 0.0
     time_limit_s: 240.0
   flags:
-  - solid-in-opening
   - stale-build
 - id: liftoff-arena-06
   source: liftoff-xml
@@ -2162,18 +2156,17 @@ entries:
     harness_list: 76
     harness_overflow: 0
     harness_candidates: 76
-    primitives: 9263
+    primitives: 9281
     cells: 11637
-    cell_overflow: 8625
+    cell_overflow: 8697
     sheared: 0
     mesh_flagged: 22
     unknown_items: 0
-    solid_in_opening: 6
+    solid_in_opening: 0
     spawn: real
     spawn_support_offset_m: 0.0
     time_limit_s: 240.0
   flags:
-  - solid-in-opening
   - stale-build
 - id: liftoff-arena-07
   source: liftoff-xml
@@ -2542,19 +2535,18 @@ entries:
     harness_list: 146
     harness_overflow: 0
     harness_candidates: 146
-    primitives: 509
+    primitives: 566
     cells: 4202
-    cell_overflow: 1731
+    cell_overflow: 2050
     sheared: 0
     mesh_flagged: 0
     unknown_items: 0
-    solid_in_opening: 19
+    solid_in_opening: 0
     spawn: synthetic
     spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
-  - solid-in-opening
   - spawn-unsupported
   - synthetic-spawn
 - id: minus-two-02
@@ -2701,20 +2693,19 @@ entries:
     harness_list: 144
     harness_overflow: 0
     harness_candidates: 144
-    primitives: 260
+    primitives: 263
     cells: 5748
     cell_overflow: 541
     sheared: 0
     mesh_flagged: 0
     unknown_items: 0
-    solid_in_opening: 1
+    solid_in_opening: 0
     spawn: unsupported
     spawn_support_offset_m: null
     time_limit_s: 230.09
   flags:
   - no-scene
   - outlier-aperture
-  - solid-in-opening
   - spawn-unsupported
 - id: minus-two-05
   source: liftoff-xml
@@ -4041,20 +4032,19 @@ entries:
     harness_list: 139
     harness_overflow: 0
     harness_candidates: 139
-    primitives: 1214
+    primitives: 1217
     cells: 6008
-    cell_overflow: 3277
+    cell_overflow: 3289
     sheared: 0
     mesh_flagged: 34
     unknown_items: 0
-    solid_in_opening: 1
+    solid_in_opening: 0
     spawn: unsupported
     spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
   - outlier-spacing
-  - solid-in-opening
   - spawn-unsupported
 - id: straw-bale-04
   source: liftoff-xml

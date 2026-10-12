@@ -75,7 +75,7 @@ from drone_fly.sim.pool import (
 from drone_fly.tracks.catalogue import TrackDataError, sha256_file
 from drone_fly.tracks.liftoff_extract.props import box_corners, hull, opening
 
-CONVERSION_VERSION = 1
+CONVERSION_VERSION = 2  # v2: mesh / approx gate frames become rings (ADR 0007 D4)
 _M = np.asarray(UNITY_TO_CONTRACT, np.float64)
 SOURCE_SCENE, SOURCE_ITEM, SOURCE_TABLE, SOURCE_PROCEDURAL = 0, 1, 2, 3
 NONSOLID_TYPES = ("TrackBlueprintAction", "TrackBlueprintSpawnpoint", "TrackBlueprintRibbon")
@@ -355,24 +355,82 @@ def item_primitives(
         counts["unknown"] = 1
         return Primitives.empty(), counts
     parts = []
-    for c in item.get("colliders") or []:
+    colliders = item.get("colliders") or []
+    openings = [o for o in (_trig_box(c) for c in colliders if c.get("trig")) if o is not None]
+    for c in colliders:
         if c.get("trig"):
             continue
         t = c["t"]
-        if t == "box":
-            parts.append(placer.box(c["p"], c.get("q", (0, 0, 0, 1)), c["s"]))
+        q = c.get("q", (0, 0, 0, 1))
+        bounds = None  # prefab-frame AABB of a solid that only approximates the real shape
+        if t == "mesh" and c.get("v"):
+            v = np.asarray(c["v"], np.float64)
+            bounds = (v.min(axis=0), v.max(axis=0))
+            counts["mesh_flagged"] += 1
+        elif t == "box" and c.get("approx") and _axis_aligned(c):
+            p, s = np.asarray(c["p"], np.float64), np.asarray(c["s"], np.float64)
+            bounds = (p - s, p + s)
+        if bounds is not None:
+            for center, half in _frame_ring(bounds, openings):
+                parts.append(placer.box(center, (0.0, 0.0, 0.0, 1.0), half))
+        elif t == "box":
+            parts.append(placer.box(c["p"], q, c["s"]))
         elif t == "cap":
-            parts.append(placer.capsule(c["p"], c.get("q", (0, 0, 0, 1)), c["r"], c["h"], c["a"]))
+            parts.append(placer.capsule(c["p"], q, c["r"], c["h"], c["a"]))
         elif t == "sph":
             parts.append(placer.sphere(c["p"], c["r"]))
-        elif t == "mesh" and c.get("v"):
-            v = np.asarray(c["v"], np.float64)
-            lo, hi = v.min(axis=0), v.max(axis=0)
-            half = np.maximum((hi - lo) / 2.0, 0.01)
-            parts.append(placer.box((hi + lo) / 2.0, (0.0, 0.0, 0.0, 1.0), half))
-            counts["mesh_flagged"] += 1
     counts["sheared"] = placer.sheared
     return Primitives.concat(parts), counts
+
+
+def _axis_aligned(c: dict[str, Any]) -> bool:
+    return _is_identity_rot(_quat_xyzw_to_matrix(np.asarray(c.get("q", (0, 0, 0, 1))))[0])
+
+
+def _trig_box(c: dict[str, Any]) -> tuple[np.ndarray, np.ndarray] | None:
+    """Prefab-frame AABB ``(lo, hi)`` of a trigger collider (the gate opening), if box-like."""
+    if c["t"] == "mesh" and c.get("v"):
+        v = np.asarray(c["v"], np.float64)
+        return v.min(axis=0), v.max(axis=0)
+    if c["t"] == "box" and _axis_aligned(c):
+        p, s = np.asarray(c["p"], np.float64), np.asarray(c["s"], np.float64)
+        return p - s, p + s
+    return None
+
+
+def _frame_ring(
+    bounds: tuple[np.ndarray, np.ndarray], openings: Sequence[tuple[np.ndarray, np.ndarray]]
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """``(centre, half)`` boxes for an approximate solid (mesh / ``approx`` box AABB).
+
+    A gate prop whose frame collider is a mesh (or a whole-gate ``approx`` box) would otherwise
+    become ONE box filling its own opening, making the gate impassable. When the AABB contains a
+    trigger opening's centre, it becomes a ring of up to 4 bars around the opening rectangle
+    (the solid's own extent and thickness); otherwise it stays one box.
+    """
+    lo, hi = bounds
+    for olo, ohi in openings:
+        oc = (olo + ohi) / 2.0
+        if not ((lo < oc) & (oc < hi)).all():
+            continue
+        t = int(np.argmin(ohi - olo))  # the opening's thin axis (its normal)
+        a, b = [i for i in range(3) if i != t]
+        olo_c, ohi_c = np.clip(olo, lo, hi), np.clip(ohi, lo, hi)
+        bars = []
+        # full-height posts left / right of the opening, then beams below / above it
+        for amin, amax, bmin, bmax in (
+            (lo[a], olo_c[a], lo[b], hi[b]),
+            (ohi_c[a], hi[a], lo[b], hi[b]),
+            (olo_c[a], ohi_c[a], lo[b], olo_c[b]),
+            (olo_c[a], ohi_c[a], ohi_c[b], hi[b]),
+        ):
+            if amax - amin < 1e-3 or bmax - bmin < 1e-3:
+                continue
+            blo, bhi = lo.copy(), hi.copy()
+            blo[a], bhi[a], blo[b], bhi[b] = amin, amax, bmin, bmax
+            bars.append(((blo + bhi) / 2.0, np.maximum((bhi - blo) / 2.0, 0.01)))
+        return bars
+    return [((lo + hi) / 2.0, np.maximum((hi - lo) / 2.0, 0.01))]
 
 
 def is_nonsolid_item(it: PlacedItem) -> bool:

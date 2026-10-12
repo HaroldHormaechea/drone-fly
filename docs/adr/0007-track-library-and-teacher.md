@@ -89,6 +89,23 @@ Primitives are oriented boxes, capsules and spheres. Trigger colliders, checkpoi
 spawn/action blueprints are never solid. Prop meshes become flagged OBBs. Scene mesh colliders are
 counted, not emitted.
 
+**Gate frames that only approximate their shape (conversion v2).** Some gate props have a mesh as
+their frame collider (`LightGate300x220cm*`), or ship a whole-gate `approx` box (`AirgateLiftoff*`,
+`AirgateBig*`). Turned into one OBB, that box fills the gate's own opening: half-extents 1.81 × 1.41
+× 0.27 m with the opening centre 0.27 m inside. This was found after the pilot. 54 passages on 12 of
+the 63 train tracks were impassable, including Arena, Hannover and Bando tracks, which capped
+completion and taught the policy to avoid gates.
+
+Now, when such a solid's prefab-frame AABB contains the prop's own trigger opening, it becomes a
+ring of up to 4 bars around the opening rectangle. The bars use the solid's own extent and
+thickness, so the frame stays solid while the opening is clear. `CONVERSION_VERSION` went to 2,
+which invalidates the conversion caches, and the catalogue was re-scanned with its splits
+unchanged.
+
+After the fix, 9 train passages still have a solid within 0.12 m of their centre. Eight are
+checkpoint volumes with a real object inside, and a volume counts on entry anywhere, so they still
+pass. The ninth is the centre divider of a double gate.
+
 **Two obstacle lists:**
 - The **full geometry** feeds contact and the `obstacles` block. Per course, it is indexed by a
   corridor-only cell table: spawn and route ±25 m, 4 m cells, up to 32 nearest primitives per cell.
@@ -184,6 +201,13 @@ policy. Any later change is driven by val only.
 - progress: 1.0 per metre toward the target passage;
 - gate +10, finish +50, crash −10;
 - dense terms, × dt / 0.02: upright, low spin, and action rate −0.01·‖Δa‖².
+
+**Procedural obstacle sizes (fixed after the pilot).** `course_gen` obstacles are sized for its
+0.45–1.5 m gates. Multiplying their sizes by the course `scale` (6–25) produced 35–66 m blocks, and
+procedural episodes ended in collision 93.5 % of the time. Now positions and vertical sizes scale with
+`scale`, and horizontal sizes scale with the course's mean aperture ratio (mapped / original), so
+obstacles keep their size relative to the gates. The blocking obstacle that `course_gen` puts on the
+straightest leg is intended: the policy must fly around it.
 
 **Pre-pilot rebalance of the dense terms.** The approved plan had upright 0.3 and spin 0.2. These
 were changed to **0.005 / 0.005** before any training run, so this is not val tuning.

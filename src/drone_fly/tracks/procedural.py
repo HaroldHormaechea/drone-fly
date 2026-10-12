@@ -1,12 +1,14 @@
 """Procedural courses as :class:`~drone_fly.sim.pool.SimCourse` (UC68 AC3).
 
-``sim.course_gen.sample_course(seed_base + i, ...)`` is used verbatim; then every length (gate
-centres, the start, obstacle centres and sizes) is multiplied by a per-course ``scale`` drawn
-uniformly from ``spec.scale`` with ``numpy.random.default_rng(seed)`` (deterministic), and each
-aperture is mapped linearly from course_gen's ``[APERTURE_MIN, APERTURE_MAX]`` onto
-``spec.aperture_m``. Gates become square ``opening`` passages facing their (already travel-
-oriented) yaw; pillars become vertical capsules (half-length = the pillar half-height, a
-conservative cap) and boxes axis-aligned boxes; every obstacle is also on the harness list (the
+``sim.course_gen.sample_course(seed_base + i, ...)`` is used verbatim; then every position (gate
+centres, the start, obstacle centres) is multiplied by a per-course ``scale`` drawn uniformly
+from ``spec.scale`` with ``numpy.random.default_rng(seed)`` (deterministic), and each aperture is
+mapped linearly from course_gen's ``[APERTURE_MIN, APERTURE_MAX]`` onto ``spec.aperture_m``.
+Obstacle HORIZONTAL sizes are multiplied by the course's mean aperture ratio (mapped / original)
+so they keep their size relative to the gates (scaling them by ``scale`` made 35-66 m blocks);
+vertical sizes follow ``scale`` like the heights. Gates become square ``opening`` passages facing
+their (already travel-oriented) yaw; pillars become vertical capsules (half-length = the pillar
+half-height, a conservative cap) and boxes axis-aligned boxes; every obstacle is also on the harness list (the
 max-half-extent rule applies). The start is on the ground: the support is the floor plane z = 0.
 
 The ``spec`` keys (``tracks/procedural.yaml``): ``seed_base``, ``pool_size``, ``ng: [lo, hi)``,
@@ -99,17 +101,23 @@ def sample_scaled(spec: dict[str, Any], seed: int) -> dict[str, Any]:
          "aperture": map_aperture(g["aperture"], spec)}
         for g in c["gates"]
     ]  # fmt: skip
+    ratios = [g["aperture"] / o["aperture"] for g, o in zip(gates, c["gates"], strict=True)]
+    k = float(np.mean(ratios))
     obs = []
     if not spec["no_obs"]:
         for o in c["obstacles"]:
             o2 = dict(o)
             o2["center"] = [v * s for v in o["center"]]
+            # horizontal sizes follow the gates (k); vertical ones the layout (s), so pillars still
+            # stand on the floor and fly-over / fly-under blocks keep their gap to the gates
             if o["kind"] == "cylinder":
-                o2["radius"], o2["half_h"] = o["radius"] * s, o["half_h"] * s
+                o2["radius"], o2["half_h"] = o["radius"] * k, o["half_h"] * s
             else:
-                o2["half"] = [v * s for v in o["half"]]
+                hx, hy, hz = o["half"]
+                o2["half"] = [hx * k, hy * k, hz * s]
             obs.append(o2)
-    return {**c, "gates": gates, "obstacles": obs, "start": [v * s for v in c["start"]], "scale": s}
+    return {**c, "gates": gates, "obstacles": obs, "start": [v * s for v in c["start"]], "scale": s,
+            "size_scale": k}  # fmt: skip
 
 
 def convert_procedural(

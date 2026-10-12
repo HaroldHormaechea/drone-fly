@@ -97,7 +97,8 @@ gitignored.
 `unsupported`), `spawn_support_offset_m` (support top minus XML spawn z), `time_limit_s`.
 
 `spec` (procedural): `seed_base`, `pool_size` (courses in the pool, `seed_base + i`), `ng` (gate
-count range), `laps`, `tier`, `tunnels`, `variety`, `no_obs`, `scale` (multiplies every length),
+count range), `laps`, `tier`, `tunnels`, `variety`, `no_obs`, `scale` (multiplies every position and vertical size; horizontal obstacle sizes follow the
+aperture mapping instead),
 `aperture_m` (opening size range). The `scale` and `aperture_m` ranges come from
 `tracks stats --split train`.
 
