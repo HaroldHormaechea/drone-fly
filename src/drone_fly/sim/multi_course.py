@@ -118,8 +118,8 @@ class RewardConfig:
     gate: float = 10.0
     finish: float = 50.0
     crash: float = 10.0
-    upright: float = 0.3
-    spin: float = 0.2
+    upright: float = 0.005  # pre-pilot rebalance (ADR 0007): hover must earn << flying
+    spin: float = 0.005
     action_rate: float = 0.01
 
     @classmethod

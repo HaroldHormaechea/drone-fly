@@ -41,8 +41,8 @@ env:
     gate: 10.0
     finish: 50.0
     crash: 10.0
-    upright: 0.3
-    spin: 0.2
+    upright: 0.005    # pre-pilot a-priori rebalance from 0.3 (ADR 0007): hover 25/s -> 0.5/s
+    spin: 0.005       # from 0.2
     action_rate: 0.01
 slack:
   init_m: 0.5
