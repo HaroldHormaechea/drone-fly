@@ -76,6 +76,8 @@ EPISODE_TAIL = ("return", "length_s", "steps", "completed", "outcome", "crossing
 EPISODE_COLUMNS = EPISODE_HEADER + EPISODE_TAIL
 #: Width of :meth:`MultiCourseEnv.critic_extra`: dynamics, timing, t / limit, progress.
 CRITIC_EXTRA_DIM = len(LOG_COLUMNS) + len(TIMING_LOG_COLUMNS) + 2
+#: Minimum clearance (m, beyond ``drone_radius_m`` / above the floor) of a route start.
+ROUTE_START_CLEARANCE_M = 0.3
 
 
 @dataclass(frozen=True)
@@ -343,7 +345,7 @@ def gate_crossed_torch(
     s0 = ((prev - center) * n).sum(-1)
     s1 = ((pos - center) * n).sum(-1)
     plane = (s0 < 0) & (s1 >= 0)
-    t = s0 / (s0 - s1).clamp(min=1e-12)
+    t = -s0 / (s1 - s0).clamp(min=1e-12)  # s0 < 0 <= s1 on a crossing
     x = prev + t.unsqueeze(-1) * disp - center
     u = (x * rot[:, :, 0]).sum(-1)
     v = (x * rot[:, :, 1]).sum(-1)
@@ -641,12 +643,20 @@ class MultiCourseEnv:
         npass = self.npass()
         # route start: k0 uniform in [0, total - 1)
         k0 = (self._rand(n) * (total - 1).clamp(min=1).to(dt)).long().clamp(max=total - 1)
-        k0 = torch.where(route, k0, torch.zeros_like(k0))
         j = k0 % npass
         pc = self.P["pass_center"][self.cid, j]
         pn = self.P["pass_rot"][self.cid, j][:, :, 2]
         back = sc.route_back_m[0] + (sc.route_back_m[1] - sc.route_back_m[0]) * self._rand(n)
         rpos = pc - pn * back.unsqueeze(-1)
+        # a route start inside or against geometry would crash on its first tick: fall back to
+        # an air start at the spawn (signed distances are negative inside a solid)
+        d, _, _, valid, _ = self.surfaces(rpos)
+        clear = torch.where(valid, d, torch.full_like(d, math.inf)).amin(dim=1)
+        ok = (clear > self.cfg.drone_radius_m + ROUTE_START_CLEARANCE_M) & (
+            rpos[:, 2] - self.floor_height(rpos) > ROUTE_START_CLEARANCE_M
+        )
+        route = route & ok
+        k0 = torch.where(route, k0, torch.zeros_like(k0))
         ryaw = torch.atan2(pn[:, 1], pn[:, 0])
         air_z = sc.air_z_m[0] + (sc.air_z_m[1] - sc.air_z_m[0]) * self._rand(n)
         noise = sc.spawn_noise_m * self._randn(n, 3)
