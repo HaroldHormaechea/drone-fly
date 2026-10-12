@@ -428,6 +428,19 @@ class VgamepadActionSink(ActionSink):
         """The runner could not confirm the disarm: keep the throttle at minimum after close."""
         self.hold_throttle = True
 
+    def rearm(self) -> None:
+        """Allow a new arm cycle on this sink (``sysid``: land, reset, fly again).
+
+        Call after :meth:`close`; the next :meth:`arm` reconnects the pad and the next command
+        presses Arm again.
+        """
+        self.armed = False
+        self._disarm_done = False
+        self.hold_throttle = False
+        self._settle_until = None
+        self._release_at = None
+        self._pressed = None
+
     def disarm(self) -> bool:
         """Press Disarm again (throttle at minimum); the runner retries until the motors stop.
 

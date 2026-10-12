@@ -106,6 +106,25 @@ def unity_to_contract_quat(q_xyzw: np.ndarray) -> np.ndarray:
     return q.astype(_F)
 
 
+def contract_to_unity_position(p_contract: np.ndarray) -> np.ndarray:
+    """Inverse of :func:`unity_to_contract_position` (x_u = -Y, y_u = Z, z_u = X)."""
+    return (UNITY_TO_CONTRACT.T @ np.asarray(p_contract, _F).reshape(3)).astype(_F)
+
+
+def contract_to_unity_quat(q_wxyz: np.ndarray) -> np.ndarray:
+    """Inverse of :func:`unity_to_contract_quat`: contract ``[w,x,y,z]`` -> Unity ``[x,y,z,w]``.
+
+    Round-trips up to the quaternion sign (``q`` and ``-q`` are the same rotation).
+    """
+    w, x, y, z = (float(c) for c in np.asarray(q_wxyz, np.float64).reshape(4))
+    vec = -(UNITY_TO_CONTRACT.astype(np.float64).T @ np.array([x, y, z]))
+    q = np.array([*vec, w], dtype=np.float64)
+    n = np.linalg.norm(q)
+    if n < 1e-9:
+        raise ValueError("degenerate quaternion")
+    return (q / n).astype(_F)
+
+
 # ----------------------------------------------------------------------------- camera
 
 

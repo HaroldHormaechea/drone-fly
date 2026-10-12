@@ -240,6 +240,15 @@ class GyroMap:
             dtype=np.float32,
         )
 
+    def invert(self, omega: np.ndarray) -> np.ndarray:
+        """Inverse of :meth:`apply`: contract body rates (rad/s) -> raw ``[pitch, roll, yaw]``."""
+        w = np.asarray(omega, np.float64).reshape(3)
+        unit = np.pi / 180.0 if self.units == "deg_s" else 1.0
+        raw = np.zeros(3, np.float64)
+        for value, src, s in zip(w, self.sources, self.signs, strict=True):
+            raw[GYRO_FIELDS.index(src)] = s * value / unit
+        return raw.astype(np.float32)
+
 
 @dataclass(frozen=True)
 class LiftoffConverter:

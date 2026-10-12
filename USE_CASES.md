@@ -75,7 +75,7 @@ Statuses:
 | 63 | [use-cases/63-tie-desktop-app-to-reservoir-runs.md](use-cases/63-tie-desktop-app-to-reservoir-runs.md) | Repoint the desktop app at the reservoir pipeline (launch / monitor / audit / view gpu_prototype runs) | done | 2026-10-11 |
 | 64 | [use-cases/64-liftoff-real-calibration-and-gates.md](use-cases/64-liftoff-real-calibration-and-gates.md) | Calibrate and connect the live harness to real Liftoff (Arena / Infinity Loop, micro drone) | done | 2026-10-11 |
 | 65 | [use-cases/65-live-brain-debug-overlay.md](use-cases/65-live-brain-debug-overlay.md) | Live brain + debug overlay on top of Liftoff (Windows, click-through, capture-excluded) | done | 2026-10-11 |
-| 66 | [use-cases/66-drone-profiles-and-liftoff-sysid.md](use-cases/66-drone-profiles-and-liftoff-sysid.md) | Drone profiles + system identification of Liftoff drones (micro + 5-inch) | pending | 2026-10-12 |
+| 66 | [use-cases/66-drone-profiles-and-liftoff-sysid.md](use-cases/66-drone-profiles-and-liftoff-sysid.md) | Drone profiles + system identification of Liftoff drones (micro + 5-inch) | in-progress | 2026-10-12 |
 | 67 | [use-cases/67-profile-driven-batched-sim.md](use-cases/67-profile-driven-batched-sim.md) | Profile-driven batched sim with dynamics/latency randomization, hover-relative throttle, ground starts | pending | 2026-10-12 |
 | 68 | [use-cases/68-track-library-multi-track-teacher.md](use-cases/68-track-library-multi-track-teacher.md) | Track library + multi-track privileged teacher | pending | 2026-10-12 |
 | 69 | [use-cases/69-student-distillation-detector-noise.md](use-cases/69-student-distillation-detector-noise.md) | Deployable student distilled under a measured detector-noise model | pending | 2026-10-12 |
