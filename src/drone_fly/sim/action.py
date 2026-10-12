@@ -24,7 +24,10 @@ a v1 readout can warm-start a v2 one (UC68).
     {"contract_version": 2, "action": {"collective_scale_g", "max_rate_rad_s", "max_g"},
      "extra_dim": 30, "actor": "k1-reservoir-aug", "drone": "<id>", "run_id": "..."}
 
-A checkpoint without a sidecar is v1. Move the two files together.
+A checkpoint without a sidecar is v1. Move the two files together. A UC68 teacher sidecar also
+carries ``obs_schema`` (``teacher-obs`` v1, :mod:`drone_fly.sim.teacher_obs`), ``world_scale``
+and ``course_conversion`` (the conversion version, rules, parameters and per-map scene hashes);
+evaluation refuses a checkpoint whose schema or conversion it does not know.
 
 The torch decoders (sim) and the NumPy decoders (harness) are parity-tested.
 """
@@ -237,8 +240,11 @@ def write_sidecar(
     actor: str,
     drone: str | None,
     run_id: str | None,
+    obs_schema: dict[str, Any] | None = None,
+    world_scale: float | None = None,
+    course_conversion: dict[str, Any] | None = None,
 ) -> Path:
-    data = {
+    data: dict[str, Any] = {
         "contract_version": spec.version,
         "action": {k: v for k, v in spec.as_dict().items() if k != "version"},
         "extra_dim": extra_dim,
@@ -246,6 +252,14 @@ def write_sidecar(
         "drone": drone,
         "run_id": run_id,
     }
+    # UC68 teacher keys (absent from legacy sidecars)
+    for key, value in (
+        ("obs_schema", obs_schema),
+        ("world_scale", world_scale),
+        ("course_conversion", course_conversion),
+    ):
+        if value is not None:
+            data[key] = value
     path = sidecar_path(checkpoint)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return path

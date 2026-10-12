@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -45,6 +46,7 @@ from drone_fly.tracks.scenes import (
 
 log = logging.getLogger(__name__)
 
+HARNESS_CAP_MIN = 64
 OUTLIER_THRESHOLDS = {
     "spacing_max_m": 100.0,
     "altitude_span_m": 50.0,
@@ -215,6 +217,12 @@ def scan_liftoff(
         e["split"] = splits[e["map"]]
     for mp in maps:
         maps[mp] = {"split": splits[mp], **maps[mp]}
+    harness_cap = harness_cap_from_train(entries)
+    for e in entries:
+        st = e.get("stats")
+        if st and "harness_candidates" in st:
+            st["harness_list"] = min(st["harness_candidates"], harness_cap["value"])
+            st["harness_overflow"] = max(0, st["harness_candidates"] - harness_cap["value"])
     entries.sort(key=lambda e: e["id"])
     header = {
         "schema_version": cat.SCHEMA_VERSION,
@@ -238,6 +246,7 @@ def scan_liftoff(
             },
             "props.json": {"sha256": props.sha256, "build_id": props.build_id},
         },  # fmt: skip
+        "harness_cap": harness_cap,
         "outlier_thresholds": dict(OUTLIER_THRESHOLDS),
     }
     catalogue = cat.Catalogue(out_path, header, entries)
@@ -252,6 +261,22 @@ def scan_liftoff(
         ),
     )
     return catalogue
+
+
+def harness_cap_from_train(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """``O_h = max(64, ceil(p99))`` of the TRAIN entries' uncapped harness-list sizes."""
+    sizes = [
+        e["stats"]["harness_candidates"]
+        for e in entries
+        if e["split"] == "train" and e["status"] == cat.STATUS_OK and "stats" in e
+    ]
+    p99 = float(np.percentile(sizes, 99)) if sizes else 0.0
+    return {
+        "value": int(max(HARNESS_CAP_MIN, math.ceil(p99))),
+        "p99": round(p99, 2),
+        "tracks": len(sizes),
+        "source": "train stats: max(64, ceil(p99 of the train tracks' harness-list sizes))",
+    }
 
 
 def aggregate_stats(
@@ -275,5 +300,12 @@ def aggregate_stats(
         a = np.asarray(v)
         return {f"p{q}": round(float(np.percentile(a, q)), 3) for q in (10, 25, 50, 75, 90)}
 
-    return {"tracks": len({e["id"] for e in entries}), "legs": len(legs),
+    sizes = [e["stats"]["harness_candidates"] for e in entries if "harness_candidates" in
+             (e.get("stats") or {})]  # fmt: skip
+    hl = (
+        {"harness_list": pct(sizes) | {"p99": round(float(np.percentile(sizes, 99)), 2)}}
+        if sizes
+        else {}
+    )
+    return {**hl, "tracks": len({e["id"] for e in entries}), "legs": len(legs),
             "spacing_m": pct(legs), "aperture_m": pct(aps)}  # fmt: skip

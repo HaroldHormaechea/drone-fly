@@ -28,7 +28,9 @@ colliders are only counted.
 **Two obstacle lists.** The full geometry (contact + the teacher ``obstacles`` block) and the
 harness list: placed non-route-gate items only (never scene colliders, never route-gate frames),
 as AABBs, max half-extent <= :attr:`ConversionConfig.harness_obstacle_max_half_m`, inside the
-corridor, capped at :attr:`ConversionConfig.harness_cap` by route distance (overflow counted).
+corridor, capped at ``O_h`` (:attr:`ConversionConfig.harness_cap`) items nearest the route
+(overflow counted). ``O_h = max(64, ceil(p99))`` of the TRAIN tracks' uncapped list sizes is
+set by ``tracks scan`` in the catalogue header; ``None`` = uncapped.
 
 **Spawn support (D3 a).** A ray cast down from the spawn + 0.5 m against the solids: the first top
 face within 1.0 m below is the support and its top is the course origin's z; none -> the XML spawn
@@ -101,7 +103,8 @@ class ConversionConfig:
     cell_capacity: int = 32
     obs_range_m: float = 12.0
     harness_obstacle_max_half_m: float = 3.0
-    harness_cap: int = 256
+    #: ``O_h`` (from the catalogue header, train stats); None = uncapped.
+    harness_cap: int | None = None
     v_ref_mps: float = 4.0
     time_base_s: float = 10.0
     time_max_s: float = 240.0
@@ -720,6 +723,7 @@ def convert_liftoff(
     # ---- polyline, corridor, harness list, cells ----
     poly = route_polyline([spawn_course, *[p.center for p in passages]], geom.circuit)
     harness = HarnessList.empty()
+    n_candidates = 0
     if item_slices:
         cen, half, dist = [], [], []
         for a, b, is_gate in item_slices:
@@ -738,8 +742,10 @@ def convert_liftoff(
             dist = polyline_distance(cen_a, poly)
             keep = np.flatnonzero(dist <= cfg.corridor_m / ws)
             order = keep[np.argsort(dist[keep], kind="stable")]
-            overflow = max(0, len(order) - cfg.harness_cap)
-            order = order[: cfg.harness_cap]
+            n_candidates = len(order)
+            cap = n_candidates if cfg.harness_cap is None else int(cfg.harness_cap)
+            overflow = max(0, len(order) - cap)
+            order = order[:cap]
             harness = HarnessList(cen_a[order], half_a[order], overflow)
     if with_cells:
         cells, used = build_cell_table(
@@ -787,6 +793,7 @@ def convert_liftoff(
         "aperture_m": {"min": round(min(apert), 3), "median": round(float(np.median(apert)), 3)},
         "harness_list": len(harness),
         "harness_overflow": int(harness.overflow),
+        "harness_candidates": int(n_candidates),
         "primitives": len(prims),
         "cells": int(len(cells.keys)),
         "cell_overflow": int(cells.overflow),
@@ -795,6 +802,7 @@ def convert_liftoff(
         "unknown_items": counts["unknown_items"],
         "solid_in_opening": solid_in_opening,
         "spawn": "synthetic" if synthetic else ("real" if supported else "unsupported"),
+        "spawn_support_offset_m": round(float(top - sp[2]), 3) if supported else None,
         "time_limit_s": round(float(time_limit), 2),
     }
     if geom.route.branches:

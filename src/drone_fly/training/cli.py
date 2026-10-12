@@ -1,4 +1,4 @@
-"""``drone-fly train run | eval | bench`` (wired into :mod:`drone_fly.cli.main`).
+"""``drone-fly train run | teacher | eval | bench`` (wired into :mod:`drone_fly.cli.main`).
 
 * ``run <config>``: train a packaged config (by name) or a YAML file; writes
   ``artifacts/training/<drone-id>/<run-id>/``.
@@ -7,6 +7,10 @@
   the same courses (same pool, same course ids, same spawn), the same actor, success definition,
   time limit and episode count in ``gpu_prototype``'s ``BatchedProcCourse`` (loaded through
   ``harness.contract.load_contract``) and reports both rates plus the 07 model's historical 96 %.
+* ``teacher``: train the UC68 multi-track privileged teacher (``configs/teacher-liftoff.yaml``,
+  :func:`drone_fly.training.ppo.train_teacher`); ``--resume <run>`` continues a run.
+* ``eval <run|teacher.pt> --tracks <selector>``: the UC68 per-track report
+  (:mod:`drone_fly.training.evaluate`).
 * ``bench``: env-steps/s of ``gpu_prototype`` vs :class:`~drone_fly.sim.course.CourseEnv` at
   ``--n-envs`` (random actions, ``step`` + ``extra()``), with a plant / timing / course / extra
   breakdown. The only throughput benchmark in the repo.
@@ -24,6 +28,9 @@ from typing import Any
 
 #: The 07 checkpoint's recorded completion (verify_proc.py, AUDIT_SEED 1234, 185/192).
 HISTORICAL_07_COMPLETION = 185 / 192
+#: ``train eval`` defaults (the legacy episode count; the teacher reads 192 as "unset" -> 32).
+LEGACY_EPISODES = 192
+EVAL_SEED = 1234
 #: Collective / rate scale of the random actions used by ``bench``.
 BENCH_ACTION_STD = 0.5
 #: ``bench`` drains the episode log every this many steps (one PPO rollout, ``ppo.roll``).
@@ -61,6 +68,90 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"checkpoint: {res.checkpoint}")
     print(f"steps {res.steps} in {res.iterations} iterations, {res.seconds:.1f} s")
     return 0
+
+
+# ----------------------------------------------------------------------------- teacher
+
+
+def cmd_teacher(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    import yaml
+
+    from drone_fly.training.config import load_raw, teacher_from_mapping
+    from drone_fly.training.ppo import train_teacher
+
+    overrides: dict[str, Any] = {}
+    for key in ("n_envs", "seed", "device"):
+        if getattr(args, key, None) is not None:
+            overrides[key] = getattr(args, key)
+    if args.budget is not None:
+        overrides["budget"] = float(args.budget)
+    if args.drone:
+        overrides["drone"] = args.drone
+    if args.scenes_root:
+        overrides["tracks"] = {"scenes_root": args.scenes_root}
+    if args.resume:
+        raw = yaml.safe_load((Path(args.resume) / "config.yaml").read_text(encoding="utf-8"))
+        raw = teacher_raw_from_snapshot(raw)
+        for k in ("n_envs", "device"):  # may change on resume
+            if k in overrides:
+                raw[k] = overrides[k]
+        cfg = teacher_from_mapping(raw)
+    else:
+        data = load_raw(args.config, overrides)
+        if args.tracks or args.procedural is not None:
+            data = teacher_mix(data, args.tracks, args.procedural)
+        cfg = teacher_from_mapping(data)
+    res = train_teacher(
+        cfg,
+        _profile(cfg.drone),
+        run_root=args.output_root,
+        resume=args.resume,
+        max_iterations=args.max_iterations,
+        k1_path=args.k1_path,
+    )
+    print(f"run: {res.run.path}")
+    print(f"checkpoint: {res.checkpoint}")
+    print(f"steps {res.steps} in {res.iterations} iterations, {res.seconds:.1f} s")
+    return 0
+
+
+def teacher_mix(data: dict[str, Any], tracks: str | None, procedural: float | None) -> dict:
+    """``--tracks S --procedural F``: mix = [S (1 - F, the config's scene_weight), proc (F)]."""
+    data = dict(data)
+    t = dict(data.get("tracks") or {})
+    old = list(t.get("mix") or [])
+    lift = next((g for g in old if not str(g["select"]).startswith("procedural:")), {})
+    proc = next((g for g in old if str(g["select"]).startswith("procedural:")), None)
+    share = procedural if procedural is not None else (proc or {}).get("weight", 0.0)
+    mix = [
+        {
+            "select": tracks or lift.get("select", "liftoff:train"),
+            "weight": 1.0 - float(share),
+            "scene_weight": lift.get("scene_weight", 1.0),
+        }
+    ]
+    if share > 0:
+        sel = (proc or {}).get("select", "procedural:proc-liftoff")
+        mix.append({"select": sel, "weight": float(share)})
+    t["mix"] = mix
+    data["tracks"] = t
+    return data
+
+
+def teacher_raw_from_snapshot(snap: dict[str, Any]) -> dict[str, Any]:
+    """A run's ``config.yaml`` (the resolved snapshot) back into a teacher config mapping."""
+    raw = dict(snap)
+    for k in ("run_id", "contract_version", "kind"):
+        raw.pop(k, None)
+    action = dict(raw.get("action") or {})
+    action["version"] = snap.get("contract_version", action.get("version", 2))
+    raw["action"] = action
+    tracks = dict(raw.get("tracks") or {})
+    tracks["mix"] = list(tracks.get("mix") or [])
+    raw["tracks"] = tracks
+    return raw
 
 
 # ----------------------------------------------------------------------------- eval
@@ -205,6 +296,14 @@ def evaluate(
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
+    if args.tracks or args.select_val:
+        from drone_fly.training.evaluate import cmd_teacher_eval
+
+        return cmd_teacher_eval(args)
+    if not args.config:
+        from drone_fly.harness.errors import HarnessConfigError
+
+        raise HarnessConfigError("train eval: --config (legacy) or --tracks (teacher) is required")
     res = evaluate(
         args.checkpoint,
         args.config,
@@ -341,7 +440,100 @@ def bench(
     return out
 
 
+def bench_teacher(
+    *,
+    config: str,
+    n_envs: int,
+    steps: int = 100,
+    warmup: int = 10,
+    device: str | None = None,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """UC68: env-steps/s of :class:`~drone_fly.sim.multi_course.MultiCourseEnv` (step +
+    ``teacher_obs`` + ``critic_extra``, random actions), with a per-part breakdown and the pool
+    memory (largest per-track footprint, the whole packed pool, peak GPU memory)."""
+    import numpy as np
+    import torch
+
+    from drone_fly.sim.pool import pack_courses
+    from drone_fly.training.config import load_teacher_config
+    from drone_fly.training.ppo import build_teacher_env, build_teacher_pool, resolve_device
+
+    cfg = load_teacher_config(config)
+    dev = resolve_device(device or cfg.device)
+    sync = torch.cuda.synchronize if dev.type == "cuda" else (lambda: None)
+    if dev.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(dev)
+    profile = _profile(cfg.drone)
+    t0 = time.time()
+    pool = build_teacher_pool(cfg, "train")
+    t_pool = time.time() - t0
+    per_track = []
+    for c in pool.courses:
+        one = pack_courses([c])
+        per_track.append((sum(v.nbytes for v in one.values() if hasattr(v, "nbytes")), c.id))
+    per_track.sort(reverse=True)
+    env = build_teacher_env(cfg, profile, dev, pool, n_envs=n_envs, seed=seed)
+    gen = torch.Generator(device=dev).manual_seed(seed)
+
+    def actions() -> torch.Tensor:
+        return BENCH_ACTION_STD * torch.randn(n_envs, 4, generator=gen, device=dev)
+
+    count = [0]
+
+    def full() -> None:
+        env.step(actions())
+        env.teacher_obs()
+        env.critic_extra()
+        count[0] += 1
+        if count[0] % 64 == 0:
+            env.episode_rows()
+
+    row = {
+        "full_step_s": _timeit(full, steps, warmup, sync),
+        "env_step_s": _timeit(lambda: env.step(actions()), steps, warmup, sync),
+        "teacher_obs_s": _timeit(env.teacher_obs, steps, warmup, sync),
+    }
+    row["env_steps_per_s"] = n_envs / row["full_step_s"]
+    pack = pack_courses(pool.courses)
+    return {
+        "config": cfg.name,
+        "drone": profile.id,
+        "n_envs": n_envs,
+        "device": str(dev),
+        "gpu": torch.cuda.get_device_name(dev) if dev.type == "cuda" else None,
+        "courses": len(pool.courses),
+        "pool_build_s": round(t_pool, 1),
+        "pool_mb": round(sum(v.nbytes for v in pack.values() if hasattr(v, "nbytes")) / 1e6, 1),
+        "largest_tracks_mb": [(cid, round(b / 1e6, 2)) for b, cid in per_track[:5]],
+        "harness_list_max": int(pack["H"]),
+        "peak_gpu_mb": round(torch.cuda.max_memory_allocated(dev) / 1e6, 1)
+        if dev.type == "cuda"
+        else None,
+        "multi_course": row,
+        "rows_check": int(np.asarray(env.episode_rows()).shape[0]),
+    }
+
+
 def cmd_bench(args: argparse.Namespace) -> int:
+    from drone_fly.training.config import load_raw
+
+    raw = load_raw(args.config)
+    if raw.get("tracks") is not None:
+        res = bench_teacher(config=args.config, n_envs=args.n_envs, steps=args.steps,
+                            device=args.device)  # fmt: skip
+        r = res["multi_course"]
+        print(
+            f"MultiCourseEnv ({res['courses']} courses, {res['n_envs']} envs, {res['gpu']}): "
+            f"{r['env_steps_per_s']:,.0f} env-steps/s (step + teacher_obs + critic_extra); "
+            f"per step: env {1e3 * r['env_step_s']:.2f} ms, teacher_obs "
+            f"{1e3 * r['teacher_obs_s']:.2f} ms"
+        )
+        print(f"pool {res['pool_mb']} MB, largest tracks {res['largest_tracks_mb']}, "
+              f"peak GPU {res['peak_gpu_mb']} MB")  # fmt: skip
+        if args.json:
+            print(json.dumps(res, indent=2))
+        return 0
     res = bench(
         config=args.config,
         n_envs=args.n_envs,
@@ -382,11 +574,36 @@ def add_parser(sub: Any) -> None:
     p_run.add_argument("--max-iterations", type=int, help="stop after this many PPO iterations")
     p_run.add_argument("--output-root", help="run folders root (default artifacts/training)")
     p_run.set_defaults(func=cmd_run)
-    p_ev = tsub.add_parser("eval", help="deterministic completion rate of a checkpoint")
-    p_ev.add_argument("checkpoint", help="model_readout.pt (its .contract.json sidecar = v2)")
-    p_ev.add_argument("--config", required=True, help="training config of the eval env")
-    p_ev.add_argument("--episodes", type=int, default=192)
-    p_ev.add_argument("--seed", type=int, default=1234)
+    p_t = tsub.add_parser("teacher", help="train the UC68 multi-track privileged teacher")
+    p_t.add_argument("--drone", help="drone profile id (default: the config's)")
+    p_t.add_argument("--tracks", help="train selector, e.g. liftoff:train (default: config mix)")
+    p_t.add_argument("--procedural", type=float, help="procedural share of the mix, e.g. 0.4")
+    p_t.add_argument("--config", default="teacher-liftoff", help="teacher config (name or path)")
+    p_t.add_argument("--resume", help="run folder to resume (keeps its config.yaml)")
+    p_t.add_argument("--budget", type=float)
+    p_t.add_argument("--n-envs", type=int, dest="n_envs")
+    p_t.add_argument("--device", help="auto | cpu | cuda")
+    p_t.add_argument("--seed", type=int)
+    p_t.add_argument("--max-iterations", type=int)
+    p_t.add_argument("--scenes-root", help="scene caches (default $DRONE_FLY_SCENES)")
+    p_t.add_argument("--output-root", help="run folders root (default artifacts/training)")
+    p_t.add_argument("--k1-path", help="K1 connectome (actor.kind k1-reservoir-aug ablations)")
+    p_t.set_defaults(func=cmd_teacher)
+    p_ev = tsub.add_parser("eval", help="evaluate a checkpoint (legacy) or a teacher run (UC68)")
+    p_ev.add_argument("checkpoint", help="model_readout.pt, or a teacher run folder / teacher.pt")
+    p_ev.add_argument("--config", help="legacy: training config of the eval env")
+    p_ev.add_argument("--tracks", action="append", help="teacher: e.g. liftoff:held-out")
+    p_ev.add_argument("--mode", choices=("nominal", "randomized", "both"), default="both")
+    p_ev.add_argument(
+        "--select-val",
+        action="store_true",
+        help="teacher: pick the checkpoint with the best val macro completion (randomized)",
+    )
+    p_ev.add_argument("--n-envs", type=int, dest="n_envs", help="teacher: envs per batch")
+    p_ev.add_argument(
+        "--episodes", type=int, default=LEGACY_EPISODES, help="legacy 192; teacher: 32 per track"
+    )
+    p_ev.add_argument("--seed", type=int, default=EVAL_SEED, help="1234 (val selection: 4321)")
     p_ev.add_argument("--legacy-v1", action="store_true", help="decode as contract v1")
     p_ev.add_argument("--compare-prototype", action="store_true", help="paired gpu_prototype run")
     p_ev.add_argument("--k1-path", help="K1 connectome")

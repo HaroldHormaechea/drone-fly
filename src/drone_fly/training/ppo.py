@@ -289,3 +289,446 @@ def _train(
         log.warning("episode log overflowed: %d rows dropped", env.log.dropped)
     log.info("saved %s", last_ckpt)
     return TrainResult(run, last_ckpt, steps, it, time.time() - t0)
+
+
+# ----------------------------------------------------------------------------- UC68 teacher
+
+
+class K1TeacherAdapter(nn.Module):
+    """``actor.kind: k1-reservoir-aug`` on the teacher observation (ablations only).
+
+    The frozen K1 brain sees the observation's first 12 values (the contract ``obs``, the head of
+    ``harness30``); the readout sees the whole 148-value observation, and so does the critic.
+    """
+
+    kind = "k1-reservoir-aug"
+
+    def __init__(self, obs_dim: int, k1_path: str | None, logstd_init: float) -> None:
+        super().__init__()
+        self.k1 = K1ReservoirAug(obs_dim, k1_path, collective_bias=0.0)
+        self.obs_dim = obs_dim
+        with torch.no_grad():
+            self.k1.log_std.fill_(logstd_init)
+        self.feat_dim = self.k1.feat_dim
+        self.log_std = self.k1.log_std
+
+    def features(self, obs: torch.Tensor) -> torch.Tensor:
+        return self.k1.features(obs[:, :12])
+
+    def act(self, features: torch.Tensor, extra: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.k1.act(features, extra)
+
+    def value(self, critic_input: torch.Tensor) -> torch.Tensor:
+        return self.k1.value(critic_input[:, : self.obs_dim])
+
+    def readout_state_dict(self) -> dict[str, torch.Tensor]:
+        return self.k1.readout_state_dict()
+
+
+def teacher_conversion(cfg: Any) -> Any:
+    from drone_fly.tracks.liftoff import ConversionConfig
+
+    return ConversionConfig.from_dict(cfg.tracks.conversion_dict())
+
+
+def build_teacher_pool(cfg: Any, purpose: str = "train", mix: Any = None) -> Any:
+    """The course pool of a teacher config (``purpose="train"``: leakage guarded, AC9)."""
+    from drone_fly.tracks.loader import build_pool
+
+    return build_pool(
+        list(mix if mix is not None else cfg.tracks.mix),
+        purpose,
+        conversion=teacher_conversion(cfg),
+        root=cfg.tracks.root,
+        scenes_root=cfg.tracks.scenes_root,
+    )
+
+
+def build_teacher_env(
+    cfg: Any,
+    profile: Any,
+    device: torch.device,
+    pool: Any,
+    *,
+    n_envs: int | None = None,
+    seed: int | None = None,
+    randomization_scale: float | None = None,
+    timing: Any = None,
+    env_config: Any = None,
+    episode_log: bool = True,
+) -> Any:
+    import numpy as np
+
+    from drone_fly.sim.multi_course import MultiCourseEnv
+    from drone_fly.sim.pool import pack_courses
+    from drone_fly.tracks.scenes import USABLE
+
+    usable = np.array([c.meta.get("scene") in USABLE for c in pool.courses])
+    return MultiCourseEnv(
+        profile,
+        n_envs or cfg.n_envs,
+        pack_courses(pool.courses),
+        pool.groups,
+        scene_usable=usable,
+        device=device,
+        seed=cfg.seed if seed is None else seed,
+        config=env_config or cfg.env,
+        plant_config=cfg.plant,
+        timing=timing or cfg.timing,
+        randomization_scale=(
+            cfg.randomization_scale if randomization_scale is None else randomization_scale
+        ),
+        action_spec=cfg.action,
+        log_capacity=cfg.episode_log_capacity if episode_log else None,
+    )
+
+
+def build_teacher_actor(cfg: Any, device: torch.device, *, k1_path: str | None = None) -> nn.Module:
+    from drone_fly.controller.mlp_teacher import MLPTeacher
+    from drone_fly.sim.multi_course import CRITIC_EXTRA_DIM
+    from drone_fly.sim.teacher_obs import DIM, input_scale
+
+    logstd = cfg.actor.logstd_init if cfg.actor.logstd_init is not None else cfg.ppo.logstd_init
+    if cfg.actor.kind == "k1-reservoir-aug":
+        actor: nn.Module = K1TeacherAdapter(DIM, k1_path, logstd)
+    else:
+        actor = MLPTeacher(DIM, CRITIC_EXTRA_DIM, input_scale(), logstd_init=logstd)
+    return actor.to(device)
+
+
+def group_metrics(rows: Any, groups: Any) -> dict[str, Any]:
+    """Episode statistics overall, per pool group and per start mode."""
+    import numpy as np
+
+    from drone_fly.sim.multi_course import EPISODE_COLUMNS, OUTCOMES
+
+    col = EPISODE_COLUMNS.index
+    out: dict[str, Any] = {}
+    if not len(rows):
+        return out
+    comp = rows[:, col("completed")]
+    frac = rows[:, col("crossings")] / np.maximum(rows[:, col("total_crossings")], 1)
+    oc = rows[:, col("outcome")].astype(int)
+    out["episodes"] = int(len(rows))
+    out["episode_completion"] = float(comp.mean())
+    out["episode_return"] = float(rows[:, col("return")].mean())
+    out["episode_length_s"] = float(rows[:, col("length_s")].mean())
+    out["route_fraction"] = float(frac.mean())
+    out["outcomes"] = {
+        o: float((oc == i).mean()) for i, o in enumerate(OUTCOMES) if (oc == i).any()
+    }
+    grp = rows[:, col("group")].astype(int)
+    out["groups"] = {}
+    for gi, g in enumerate(groups):
+        m = grp == gi
+        out["groups"][g.name] = {
+            "episodes": int(m.sum()),
+            "completion": float(comp[m].mean()) if m.any() else None,
+            "route_fraction": float(frac[m].mean()) if m.any() else None,
+        }
+    sm = rows[:, col("start_mode")].astype(int)
+    out["start_modes"] = {
+        name: float(comp[sm == code].mean())
+        for name, code in (("ground", 1), ("air", 2), ("route", 3))
+        if (sm == code).any()
+    }
+    return out
+
+
+def train_teacher(
+    cfg: Any,
+    profile: Any,
+    *,
+    run_root: str | Path | None = None,
+    run_id: str | None = None,
+    resume: str | Path | None = None,
+    device: str | None = None,
+    max_iterations: int | None = None,
+    k1_path: str | None = None,
+) -> TrainResult:
+    """Train the UC68 teacher (``drone-fly train teacher``); see ADR 0007."""
+    dev = resolve_device(device or cfg.device)
+    torch.manual_seed(cfg.seed)
+    if resume is not None:
+        run = RunDir.reopen(resume, cfg, profile)
+        stop = run.path / "STOP"
+        if stop.exists():
+            stop.unlink()
+    else:
+        run = RunDir(cfg, profile, root=run_root, run_id=run_id)
+    log.addHandler(run.log_handler)
+    log.setLevel(logging.INFO)
+    try:
+        return _train_teacher(cfg, profile, run, dev, max_iterations, k1_path, resume is not None)
+    finally:
+        log.removeHandler(run.log_handler)
+        run.log_handler.close()
+
+
+class _TeacherCheckpoints:
+    """The teacher's checkpoint / resume writers (atomic, via :class:`RunDir`)."""
+
+    def __init__(self, run: RunDir, cfg: Any, ac: nn.Module, opt: Any, env: Any, sidecar: dict):
+        self.run, self.cfg, self.ac, self.opt, self.env, self.sidecar = (
+            run,
+            cfg,
+            ac,
+            opt,
+            env,
+            sidecar,
+        )
+
+    def teacher(self, it_tag: int | None) -> Path:
+        from drone_fly.sim.teacher_obs import DIM
+
+        return self.run.save_teacher(
+            self.ac.readout_state_dict(), self.cfg.action, it=it_tag, obs_dim=DIM,
+            sidecar=self.sidecar,
+        )  # fmt: skip
+
+    def resume(self, steps: int, it: int, elapsed_s: float) -> None:
+        cuda = torch.cuda.get_rng_state() if self.env.device.type == "cuda" else None
+        self.run.save_resume(
+            {
+                "actor": self.ac.state_dict(),
+                "optimizer": self.opt.state_dict(),
+                "steps": steps,
+                "it": it,
+                "elapsed_s": elapsed_s,
+                "torch_rng": torch.get_rng_state(),
+                "cuda_rng": cuda,
+                "env_rng": self.env.gen.get_state(),
+                "slack": float(self.env.slack),
+            }
+        )
+
+
+def _train_teacher(
+    cfg: Any,
+    profile: Any,
+    run: RunDir,
+    dev: torch.device,
+    max_iterations: int | None,
+    k1_path: str | None,
+    resuming: bool,
+) -> TrainResult:
+    import json
+
+    import numpy as np
+
+    from drone_fly.sim.multi_course import CRITIC_EXTRA_DIM, EPISODE_COLUMNS
+    from drone_fly.sim.teacher_obs import DIM, schema
+    from drone_fly.tracks.loader import conversion_record
+
+    p = cfg.ppo
+    t_build = time.time()
+    pool = build_teacher_pool(cfg, "train")
+    sidecar = {
+        "obs_schema": schema(),
+        "world_scale": float(cfg.tracks.world_scale),
+        "course_conversion": conversion_record(pool, teacher_conversion(cfg)),
+    }
+    run.write_tracks_snapshot(pool)
+    env = build_teacher_env(cfg, profile, dev, pool)
+    ac = build_teacher_actor(cfg, dev, k1_path=k1_path)
+    anneal = p.logstd_final is not None
+    named = [(k, v) for k, v in ac.named_parameters() if v.requires_grad]
+    params = [v for k, v in named if not (anneal and k.endswith("log_std"))]
+    vf_params = [v for k, v in named if k.startswith("vf.")]
+    vf_ids = {id(v) for v in vf_params}
+    pi_params = [v for v in params if id(v) not in vf_ids]
+    opt = torch.optim.Adam(params, lr=p.lr)
+    ck = _TeacherCheckpoints(run, cfg, ac, opt, env, sidecar)
+    steps, it, elapsed0 = 0, 0, 0.0
+    if resuming and run.resume_path.is_file():
+        st = torch.load(run.resume_path, map_location="cpu", weights_only=False)
+        ac.load_state_dict(st["actor"])
+        opt.load_state_dict(st["optimizer"])
+        steps, it, elapsed0 = int(st["steps"]), int(st["it"]), float(st.get("elapsed_s", 0.0))
+        torch.set_rng_state(st["torch_rng"])
+        try:
+            if dev.type == "cuda" and st.get("cuda_rng") is not None:
+                torch.cuda.set_rng_state(st["cuda_rng"])
+            env.gen.set_state(st["env_rng"])
+        except (RuntimeError, TypeError):  # another device: the envs are reset anyway
+            log.warning("RNG state not fully restored (device changed)")
+        log.info("resumed %s at it %d, %.3g steps", run.run_id, it, steps)
+    n, roll = env.n, p.roll
+    feat_dim = int(getattr(ac, "feat_dim", 0))
+    log.info(
+        "teacher run %s: drone %s, %d envs, %d courses (%s), budget %.3g, device %s, "
+        "params %.1fk, pool built in %.0f s",
+        run.run_id, profile.id, n, env.n_courses,
+        ", ".join(f"{g.name} {len(g.courses)} x {g.weight}" for g in pool.groups),
+        cfg.budget, dev, sum(x.numel() for x in params) / 1e3, time.time() - t_build,
+    )  # fmt: skip
+    tb = None
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+
+        tb = SummaryWriter(str(run.logs / "tb"))
+    except Exception:  # TensorBoard is optional; CSV / JSONL are always written
+        tb = None
+    obs, ce = env.teacher_obs().float(), env.critic_extra().float()
+    t0 = time.time()
+    last_ckpt_t = time.time()
+    steps0 = steps
+    ep_rows: list[Any] = []
+    interrupted = False
+    try:
+        while True:
+            it += 1
+            frac = steps / cfg.budget
+            env.slack = cfg.slack.init_m * max(0.0, 1.0 - frac / max(cfg.slack.frac, 1e-9))
+            if anneal:
+                a = max(0.0, (frac - p.anneal_start) / max(1e-6, 1.0 - p.anneal_start))
+                with torch.no_grad():
+                    ac.log_std.fill_(p.logstd_init + (p.logstd_final - p.logstd_init) * min(1.0, a))
+            feat_b = torch.zeros(roll, n, feat_dim, device=dev) if feat_dim else None
+            obs_b = torch.zeros(roll, n, DIM, device=dev)
+            ce_b = torch.zeros(roll, n, CRITIC_EXTRA_DIM, device=dev)
+            act_b = torch.zeros(roll, n, 4, device=dev)
+            logp_b = torch.zeros(roll, n, device=dev)
+            rew_b = torch.zeros(roll, n, device=dev)
+            val_b = torch.zeros(roll, n, device=dev)
+            done_b = torch.zeros(roll, n, device=dev)
+            with torch.no_grad():
+                for s in range(roll):
+                    feats = ac.features(obs)
+                    mean, std = ac.act(feats, obs)
+                    val = ac.value(torch.cat([obs, ce], -1))
+                    dist = torch.distributions.Normal(mean, std)
+                    act = dist.sample()
+                    rew, done = env.step(act)
+                    if feat_b is not None:
+                        feat_b[s] = feats
+                    obs_b[s], ce_b[s], act_b[s] = obs, ce, act
+                    logp_b[s] = dist.log_prob(act).sum(-1)
+                    rew_b[s], val_b[s], done_b[s] = rew.float(), val, done.float()
+                    obs, ce = env.teacher_obs().float(), env.critic_extra().float()
+                last_val = ac.value(torch.cat([obs, ce], -1))
+            adv = torch.zeros(roll, n, device=dev)
+            lastgae = torch.zeros(n, device=dev)
+            for s in reversed(range(roll)):
+                nextval = last_val if s == roll - 1 else val_b[s + 1]
+                nonterm = 1.0 - done_b[s]
+                delta = rew_b[s] + p.gamma * nextval * nonterm - val_b[s]
+                lastgae = delta + p.gamma * p.lam * nonterm * lastgae
+                adv[s] = lastgae
+            ret = (adv + val_b).reshape(-1)
+            bo, bc = obs_b.reshape(-1, DIM), ce_b.reshape(-1, CRITIC_EXTRA_DIM)
+            bf = feat_b.reshape(-1, feat_dim) if feat_b is not None else None
+            ba, bl = act_b.reshape(-1, 4), logp_b.reshape(-1)
+            badv = adv.reshape(-1)
+            badv = (badv - badv.mean()) / (badv.std() + 1e-8)
+            idx_all = torch.randperm(bo.shape[0], device=dev)
+            stats = {"pi_loss": 0.0, "v_loss": 0.0, "entropy": 0.0, "approx_kl": 0.0}
+            nmb = 0
+            for _ in range(p.epochs):
+                for mbi in idx_all.chunk(p.minibatches):
+                    f = bf[mbi] if bf is not None else bo.new_zeros(len(mbi), 0)
+                    mean, std = ac.act(f, bo[mbi])
+                    val = ac.value(torch.cat([bo[mbi], bc[mbi]], -1))
+                    dist = torch.distributions.Normal(mean, std)
+                    logp = dist.log_prob(ba[mbi]).sum(-1)
+                    ratio = (logp - bl[mbi]).exp()
+                    clipped = torch.clamp(ratio, 1 - p.clip, 1 + p.clip) * badv[mbi]
+                    surr = torch.min(ratio * badv[mbi], clipped)
+                    v_loss = 0.5 * (val - ret[mbi]).pow(2).mean()
+                    ent = dist.entropy().sum(-1).mean()
+                    loss = -surr.mean() + 0.5 * v_loss - p.ent_coef * ent
+                    opt.zero_grad()
+                    loss.backward()
+                    # actor and critic are clipped separately: the value scale must not
+                    # throttle the policy gradient
+                    nn.utils.clip_grad_norm_(pi_params, p.max_grad_norm)
+                    if vf_params:
+                        nn.utils.clip_grad_norm_(vf_params, p.max_grad_norm)
+                    opt.step()
+                    stats["pi_loss"] += float(-surr.mean().detach())
+                    stats["v_loss"] += float(v_loss.detach())
+                    stats["entropy"] += float(ent.detach())
+                    stats["approx_kl"] += float((bl[mbi] - logp).mean().detach())
+                    nmb += 1
+            steps += roll * n
+            rows = env.episode_rows()
+            if len(rows):
+                run.episodes(EPISODE_COLUMNS, rows)
+                ep_rows.append(rows)
+            stop_file = (run.path / "STOP").exists()
+            finished = steps >= cfg.budget or (max_iterations is not None and it >= max_iterations)
+            wall = time.time() - t0
+            fps = (steps - steps0) / max(wall, 1e-9)
+            if it % cfg.log_every_iters == 0 or finished or stop_file:
+                eps = np.concatenate(ep_rows) if ep_rows else np.zeros((0, len(EPISODE_COLUMNS)))
+                ep_rows = []
+                row = {
+                    "it": it,
+                    "steps": steps,
+                    "fps": fps,
+                    "slack_m": float(env.slack),
+                    "reward_per_step": float(rew_b.mean()),
+                    "completion_ema": float(env.comp_rate),
+                    "log_std": [round(float(x), 4) for x in ac.log_std.detach().cpu()],
+                    **{k: v / max(nmb, 1) for k, v in stats.items()},
+                    **group_metrics(eps, pool.groups),
+                }
+                run.metrics(row)
+                eta = (cfg.budget - steps) / max(fps, 1e-9)
+                run.progress(
+                    {
+                        "run_id": run.run_id,
+                        "it": it,
+                        "steps": steps,
+                        "budget": cfg.budget,
+                        "fps": round(fps),
+                        "elapsed_s": round(elapsed0 + wall, 1),
+                        "eta_s": round(eta, 1),
+                        "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "episode_completion": row.get("episode_completion"),
+                        "route_fraction": row.get("route_fraction"),
+                        "groups": row.get("groups"),
+                        "outcomes": row.get("outcomes"),
+                    }
+                )
+                if tb is not None:
+                    for k in ("reward_per_step", "episode_completion", "route_fraction",
+                              "episode_return", "v_loss", "entropy", "fps"):  # fmt: skip
+                        if row.get(k) is not None:
+                            tb.add_scalar(k, row[k], steps)
+                    for gname, g in (row.get("groups") or {}).items():
+                        if g.get("completion") is not None:
+                            tb.add_scalar(f"completion/{gname}", g["completion"], steps)
+                groups = {
+                    k: (None if v["completion"] is None else round(v["completion"], 3))
+                    for k, v in (row.get("groups") or {}).items()
+                }
+                log.info(
+                    "it %d steps %.1fM fps %.0f rew/step %.3f compl %s route %.3f eps %d %s",
+                    it, steps / 1e6, fps, row["reward_per_step"], json.dumps(groups),
+                    row.get("route_fraction") or 0.0, row.get("episodes", 0),
+                    json.dumps({k: round(v, 3) for k, v in (row.get("outcomes") or {}).items()}),
+                )  # fmt: skip
+            if it % cfg.checkpoint_every_iters == 0 and not finished:
+                ck.teacher(it)
+                ck.resume(steps, it, elapsed0 + time.time() - t0)
+            if time.time() - last_ckpt_t >= cfg.checkpoint_every_s and not finished:
+                ck.teacher(None)
+                ck.resume(steps, it, elapsed0 + time.time() - t0)
+                last_ckpt_t = time.time()
+            if finished or stop_file:
+                if stop_file:
+                    log.info("STOP file found: saving and exiting")
+                    interrupted = True
+                break
+    except KeyboardInterrupt:
+        log.info("interrupted: saving and exiting")
+        interrupted = True
+    last_ckpt = ck.teacher(None)
+    ck.resume(steps, it, elapsed0 + time.time() - t0)
+    if env.log is not None and env.log.dropped:
+        log.warning("episode log overflowed: %d rows dropped", env.log.dropped)
+    if tb is not None:
+        tb.close()
+    log.info("saved %s (%s)", last_ckpt, "interrupted" if interrupted else "done")
+    return TrainResult(run, last_ckpt, steps, it, time.time() - t0)

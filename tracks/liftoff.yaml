@@ -34,7 +34,23 @@ maps:
   BandoCity:
     split: train
     scene:
-      status: missing
+      status: ok
+      bundle: 0e7d2575c5e7f01b49154e1c378cf52d.bundle
+      build_id: '25599583'
+      sha256: 0b2d5cd5584919b293b3dd6e9aaf051ad24f6177ed917919c5548477e66d1095
+      counts:
+        box: 43358
+        capsule: 6420
+        sphere: 170
+        mesh: 720
+        terrain: 2
+        trigger: 191
+      flags:
+      - no-terrain
+      validation:
+        near: 0.9677
+        inside: 0.0
+        valid: true
   BardwellsYard:
     split: train
     scene:
@@ -42,7 +58,22 @@ maps:
   DubaiLegends:
     split: val
     scene:
-      status: missing
+      status: ok
+      bundle: cbc195b4792663ecc5640a06d2e58b56.bundle
+      build_id: '25599583'
+      sha256: 98c78a637ece596ed7067a9ce083d98287790089d8f80a6746c9ede2ddcdf0d8
+      counts:
+        box: 13880
+        capsule: 135
+        sphere: 596
+        mesh: 139
+        terrain: 1
+        trigger: 599
+      flags: []
+      validation:
+        near: 1.0
+        inside: 0.0
+        valid: true
   Hall26:
     split: train
     scene:
@@ -70,7 +101,22 @@ maps:
   Hannover:
     split: train
     scene:
-      status: missing
+      status: ok
+      bundle: d2293f6bde5f139066be793985cb5188.bundle
+      build_id: '25599583'
+      sha256: 3c00ce6fd03ff8443da0e480250a44c8ce321de91216fb46f171de04349456b2
+      counts:
+        box: 10725
+        capsule: 1944
+        sphere: 244
+        mesh: 835
+        terrain: 1
+        trigger: 319
+      flags: []
+      validation:
+        near: 0.9847
+        inside: 0.0
+        valid: true
   LiftoffArena:
     split: train
     scene:
@@ -102,7 +148,22 @@ maps:
   ParisDroneFestival:
     split: train
     scene:
-      status: missing
+      status: ok
+      bundle: 94f4f5e66a7597243d36d84a054437f9.bundle
+      build_id: '25599583'
+      sha256: 08446b27d1a71b5310fd2160bb4512c33ade4705a43800d6437bc0d8146817cf
+      counts:
+        box: 4752
+        capsule: 4106
+        sphere: 144
+        mesh: 141
+        terrain: 1
+        trigger: 2633
+      flags: []
+      validation:
+        near: 1.0
+        inside: 0.0
+        valid: true
   Permafrost:
     split: train
     scene:
@@ -152,7 +213,22 @@ maps:
   ShortCircuit:
     split: train
     scene:
-      status: missing
+      status: ok
+      bundle: a3037136f59d0228c9025a06b6a3d005.bundle
+      build_id: '25599583'
+      sha256: 784bf54bcf52505d4f6696ce5d6ac89f98dcced1020ae6f069788c49e4881166
+      counts:
+        box: 36630
+        capsule: 6867
+        sphere: 62
+        mesh: 2161
+        terrain: 1
+        trigger: 164
+      flags: []
+      validation:
+        near: 1.0
+        inside: 0.0
+        valid: true
   StrawBale:
     split: train
     scene:
@@ -180,6 +256,11 @@ root_files:
   props.json:
     sha256: c6da71e1cb8a555a3bb292c6a396ef1f09215ad6cc18567449ab72895ab788f1
     build_id: '25599583'
+harness_cap:
+  value: 722
+  p99: 721.88
+  tracks: 63
+  source: 'train stats: max(64, ceil(p99 of the train tracks'' harness-list sizes))'
 outlier_thresholds:
   spacing_max_m: 100.0
   altitude_span_m: 50.0
@@ -225,6 +306,7 @@ entries:
       median: 5.011
     harness_list: 103
     harness_overflow: 0
+    harness_candidates: 103
     primitives: 262
     cells: 5139
     cell_overflow: 31
@@ -233,6 +315,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: synthetic
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -279,6 +362,7 @@ entries:
       median: 1.852
     harness_list: 74
     harness_overflow: 0
+    harness_candidates: 74
     primitives: 335
     cells: 7188
     cell_overflow: 827
@@ -287,6 +371,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -326,8 +411,9 @@ entries:
     aperture_m:
       min: 3.69
       median: 3.69
-    harness_list: 256
-    harness_overflow: 115
+    harness_list: 371
+    harness_overflow: 0
+    harness_candidates: 371
     primitives: 468
     cells: 9177
     cell_overflow: 298
@@ -336,6 +422,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.002
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -375,8 +462,9 @@ entries:
     aperture_m:
       min: 3.69
       median: 3.69
-    harness_list: 256
-    harness_overflow: 154
+    harness_list: 410
+    harness_overflow: 0
+    harness_candidates: 410
     primitives: 503
     cells: 9675
     cell_overflow: 596
@@ -385,6 +473,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.002
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -433,6 +522,7 @@ entries:
       median: 5.119
     harness_list: 103
     harness_overflow: 0
+    harness_candidates: 103
     primitives: 293
     cells: 4432
     cell_overflow: 769
@@ -441,6 +531,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: 0.139
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -481,6 +572,7 @@ entries:
       median: 5.048
     harness_list: 62
     harness_overflow: 0
+    harness_candidates: 62
     primitives: 204
     cells: 2455
     cell_overflow: 671
@@ -489,6 +581,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: 0.14
     time_limit_s: 156.95
   flags:
   - no-scene
@@ -529,20 +622,22 @@ entries:
     aperture_m:
       min: 1.386
       median: 3.695
-    harness_list: 256
-    harness_overflow: 359
-    primitives: 1645
-    cells: 10585
-    cell_overflow: 4120
+    harness_list: 615
+    harness_overflow: 0
+    harness_candidates: 615
+    primitives: 15532
+    cells: 24297
+    cell_overflow: 14776
     sheared: 0
     mesh_flagged: 592
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 229.77
   flags:
   - branching
-  - no-scene
+  - no-terrain
   - spawn-unsupported
 - id: bando-city-02
   source: liftoff-xml
@@ -582,18 +677,19 @@ entries:
       median: 4.503
     harness_list: 12
     harness_overflow: 0
-    primitives: 48
-    cells: 1449
-    cell_overflow: 0
+    harness_candidates: 12
+    primitives: 16266
+    cells: 9247
+    cell_overflow: 8519
     sheared: 0
     mesh_flagged: 0
     unknown_items: 0
     solid_in_opening: 0
-    spawn: unsupported
+    spawn: real
+    spawn_support_offset_m: -0.0
     time_limit_s: 240.0
   flags:
-  - no-scene
-  - spawn-unsupported
+  - no-terrain
 - id: bando-city-03
   source: liftoff-xml
   track: BandoCityTrack03_0001.xml
@@ -633,18 +729,20 @@ entries:
       median: 2.474
     harness_list: 38
     harness_overflow: 0
-    primitives: 99
-    cells: 3240
-    cell_overflow: 151
+    harness_candidates: 38
+    primitives: 2670
+    cells: 7230
+    cell_overflow: 4725
     sheared: 0
     mesh_flagged: 4
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: 0.0
     time_limit_s: 240.0
   flags:
   - branching
-  - no-scene
+  - no-terrain
 - id: bando-city-04
   source: liftoff-xml
   track: BandoCityTrack04_0001.xml
@@ -684,18 +782,20 @@ entries:
       median: 2.9
     harness_list: 166
     harness_overflow: 0
-    primitives: 492
-    cells: 6318
-    cell_overflow: 1108
+    harness_candidates: 166
+    primitives: 4935
+    cells: 11244
+    cell_overflow: 5032
     sheared: 0
     mesh_flagged: 23
     unknown_items: 0
     solid_in_opening: 7
     spawn: real
+    spawn_support_offset_m: -0.002
     time_limit_s: 240.0
   flags:
   - branching
-  - no-scene
+  - no-terrain
   - solid-in-opening
 - id: bando-city-05
   source: liftoff-xml
@@ -735,18 +835,20 @@ entries:
       median: 5.194
     harness_list: 54
     harness_overflow: 0
-    primitives: 186
-    cells: 3636
-    cell_overflow: 77
+    harness_candidates: 54
+    primitives: 7967
+    cells: 13098
+    cell_overflow: 8511
     sheared: 0
     mesh_flagged: 6
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: 0.139
     time_limit_s: 240.0
   flags:
   - branching
-  - no-scene
+  - no-terrain
 - id: bardwells-yard-01
   source: liftoff-xml
   track: BardwellsYardTrack01_0001.xml
@@ -791,6 +893,7 @@ entries:
       median: 5.095
     harness_list: 19
     harness_overflow: 0
+    harness_candidates: 19
     primitives: 66
     cells: 1172
     cell_overflow: 207
@@ -799,6 +902,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 1
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -847,6 +951,7 @@ entries:
       median: 2.238
     harness_list: 32
     harness_overflow: 0
+    harness_candidates: 32
     primitives: 161
     cells: 2600
     cell_overflow: 330
@@ -855,6 +960,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 2
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 209.73
   flags:
   - no-scene
@@ -897,6 +1003,7 @@ entries:
       median: 3.69
     harness_list: 165
     harness_overflow: 0
+    harness_candidates: 165
     primitives: 228
     cells: 4853
     cell_overflow: 123
@@ -905,6 +1012,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.002
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -949,6 +1057,7 @@ entries:
       median: 3.69
     harness_list: 68
     harness_overflow: 0
+    harness_candidates: 68
     primitives: 151
     cells: 4191
     cell_overflow: 168
@@ -957,6 +1066,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 2
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -1001,6 +1111,7 @@ entries:
       median: 5.206
     harness_list: 71
     harness_overflow: 0
+    harness_candidates: 71
     primitives: 138
     cells: 2970
     cell_overflow: 256
@@ -1009,6 +1120,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 187.77
   flags:
   - no-scene
@@ -1051,6 +1163,7 @@ entries:
       median: 4.0
     harness_list: 40
     harness_overflow: 0
+    harness_candidates: 40
     primitives: 149
     cells: 3219
     cell_overflow: 262
@@ -1059,6 +1172,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.0
     time_limit_s: 230.82
   flags:
   - no-scene
@@ -1088,7 +1202,7 @@ entries:
     circuit: false
     openings: 0
     volumes: 15
-    route_length_m: 529.33
+    route_length_m: 529.34
     spacing_m:
       min: 17.03
       median: 35.12
@@ -1100,18 +1214,18 @@ entries:
       median: 4.0
     harness_list: 4
     harness_overflow: 0
-    primitives: 32
-    cells: 497
-    cell_overflow: 0
+    harness_candidates: 4
+    primitives: 12505
+    cells: 9775
+    cell_overflow: 6467
     sheared: 0
     mesh_flagged: 0
     unknown_items: 0
     solid_in_opening: 0
-    spawn: unsupported
-    time_limit_s: 142.33
-  flags:
-  - no-scene
-  - spawn-unsupported
+    spawn: real
+    spawn_support_offset_m: -0.14
+    time_limit_s: 142.34
+  flags: []
 - id: hall26-01
   source: liftoff-xml
   track: Hall26Track01_0001.xml
@@ -1151,6 +1265,7 @@ entries:
       median: 2.246
     harness_list: 147
     harness_overflow: 0
+    harness_candidates: 147
     primitives: 426
     cells: 5757
     cell_overflow: 1035
@@ -1159,6 +1274,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -1200,6 +1316,7 @@ entries:
       median: 2.16
     harness_list: 41
     harness_overflow: 0
+    harness_candidates: 41
     primitives: 463
     cells: 4857
     cell_overflow: 891
@@ -1208,6 +1325,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -1247,8 +1365,9 @@ entries:
     aperture_m:
       min: 3.69
       median: 3.69
-    harness_list: 256
-    harness_overflow: 220
+    harness_list: 476
+    harness_overflow: 0
+    harness_candidates: 476
     primitives: 635
     cells: 9435
     cell_overflow: 1287
@@ -1257,6 +1376,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.002
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -1295,8 +1415,9 @@ entries:
     aperture_m:
       min: 3.69
       median: 3.69
-    harness_list: 256
-    harness_overflow: 63
+    harness_list: 319
+    harness_overflow: 0
+    harness_candidates: 319
     primitives: 387
     cells: 8360
     cell_overflow: 54
@@ -1305,6 +1426,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.002
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -1352,6 +1474,7 @@ entries:
       median: 5.661
     harness_list: 80
     harness_overflow: 0
+    harness_candidates: 80
     primitives: 185
     cells: 9427
     cell_overflow: 175
@@ -1360,6 +1483,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -1403,6 +1527,7 @@ entries:
       median: 5.0
     harness_list: 136
     harness_overflow: 0
+    harness_candidates: 136
     primitives: 1685
     cells: 10970
     cell_overflow: 5884
@@ -1411,6 +1536,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.0
     time_limit_s: 240.0
   flags:
   - stale-build
@@ -1454,6 +1580,7 @@ entries:
       median: 1.946
     harness_list: 67
     harness_overflow: 0
+    harness_candidates: 67
     primitives: 3372
     cells: 14701
     cell_overflow: 8322
@@ -1462,6 +1589,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - outlier-spacing
@@ -1496,7 +1624,7 @@ entries:
     circuit: true
     openings: 0
     volumes: 23
-    route_length_m: 6208.08
+    route_length_m: 6208.09
     spacing_m:
       min: 40.83
       median: 84.83
@@ -1508,21 +1636,21 @@ entries:
       median: 10.064
     harness_list: 138
     harness_overflow: 0
-    primitives: 406
-    cells: 8125
-    cell_overflow: 404
+    harness_candidates: 138
+    primitives: 3169
+    cells: 49293
+    cell_overflow: 6151
     sheared: 0
     mesh_flagged: 2
     unknown_items: 0
     solid_in_opening: 0
-    spawn: unsupported
+    spawn: real
+    spawn_support_offset_m: -0.016
     time_limit_s: 240.0
   flags:
-  - no-scene
   - outlier-altitude
   - outlier-extent
   - outlier-spacing
-  - spawn-unsupported
 - id: hannover-02
   source: liftoff-xml
   track: HannoverTrack02_0001.xml
@@ -1565,18 +1693,18 @@ entries:
       median: 2.238
     harness_list: 97
     harness_overflow: 0
-    primitives: 1111
-    cells: 7653
-    cell_overflow: 2954
+    harness_candidates: 97
+    primitives: 2038
+    cells: 13973
+    cell_overflow: 5418
     sheared: 0
     mesh_flagged: 34
     unknown_items: 0
     solid_in_opening: 0
-    spawn: unsupported
+    spawn: real
+    spawn_support_offset_m: 0.0
     time_limit_s: 240.0
-  flags:
-  - no-scene
-  - spawn-unsupported
+  flags: []
 - id: hannover-03
   source: liftoff-xml
   track: HannoverTrack03_0001.xml
@@ -1612,19 +1740,20 @@ entries:
     aperture_m:
       min: 3.69
       median: 3.69
-    harness_list: 256
-    harness_overflow: 482
-    primitives: 1111
-    cells: 16209
-    cell_overflow: 1886
+    harness_list: 722
+    harness_overflow: 16
+    harness_candidates: 738
+    primitives: 2483
+    cells: 26960
+    cell_overflow: 8274
     sheared: 0
     mesh_flagged: 32
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.002
     time_limit_s: 240.0
-  flags:
-  - no-scene
+  flags: []
 - id: hannover-04
   source: liftoff-xml
   track: HannoverTrack04_0001.xml
@@ -1667,17 +1796,18 @@ entries:
       median: 3.69
     harness_list: 234
     harness_overflow: 0
-    primitives: 727
-    cells: 12620
-    cell_overflow: 1503
+    harness_candidates: 234
+    primitives: 1305
+    cells: 21176
+    cell_overflow: 3256
     sheared: 0
     mesh_flagged: 31
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.001
     time_limit_s: 240.0
-  flags:
-  - no-scene
+  flags: []
 - id: hannover-05
   source: liftoff-xml
   track: HannoverTrack05_0001.xml
@@ -1722,21 +1852,21 @@ entries:
     aperture_m:
       min: 2.3
       median: 2.447
-    harness_list: 256
-    harness_overflow: 14
-    primitives: 2125
-    cells: 20393
-    cell_overflow: 5382
+    harness_list: 270
+    harness_overflow: 0
+    harness_candidates: 270
+    primitives: 4154
+    cells: 40721
+    cell_overflow: 10924
     sheared: 0
     mesh_flagged: 88
     unknown_items: 0
     solid_in_opening: 19
-    spawn: unsupported
+    spawn: real
+    spawn_support_offset_m: 0.0
     time_limit_s: 240.0
   flags:
-  - no-scene
   - solid-in-opening
-  - spawn-unsupported
 - id: liftoff-arena-01
   source: liftoff-xml
   track: LiftoffArenaTrack01_0001.xml
@@ -1772,8 +1902,9 @@ entries:
     aperture_m:
       min: 3.69
       median: 3.69
-    harness_list: 256
-    harness_overflow: 40
+    harness_list: 296
+    harness_overflow: 0
+    harness_candidates: 296
     primitives: 10998
     cells: 12319
     cell_overflow: 9340
@@ -1782,6 +1913,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.002
     time_limit_s: 240.0
   flags:
   - stale-build
@@ -1820,8 +1952,9 @@ entries:
     aperture_m:
       min: 3.69
       median: 3.69
-    harness_list: 256
-    harness_overflow: 31
+    harness_list: 287
+    harness_overflow: 0
+    harness_candidates: 287
     primitives: 8748
     cells: 9613
     cell_overflow: 7398
@@ -1830,6 +1963,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.002
     time_limit_s: 240.0
   flags:
   - stale-build
@@ -1870,6 +2004,7 @@ entries:
       median: 3.69
     harness_list: 242
     harness_overflow: 0
+    harness_candidates: 242
     primitives: 7334
     cells: 8789
     cell_overflow: 6263
@@ -1878,6 +2013,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.002
     time_limit_s: 240.0
   flags:
   - stale-build
@@ -1918,6 +2054,7 @@ entries:
       median: 3.69
     harness_list: 247
     harness_overflow: 0
+    harness_candidates: 247
     primitives: 6113
     cells: 7876
     cell_overflow: 5282
@@ -1926,6 +2063,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.002
     time_limit_s: 240.0
   flags:
   - stale-build
@@ -1968,6 +2106,7 @@ entries:
       median: 2.454
     harness_list: 48
     harness_overflow: 0
+    harness_candidates: 48
     primitives: 8139
     cells: 9181
     cell_overflow: 6271
@@ -1976,6 +2115,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 7
     spawn: real
+    spawn_support_offset_m: 0.0
     time_limit_s: 240.0
   flags:
   - solid-in-opening
@@ -2021,6 +2161,7 @@ entries:
       median: 2.3
     harness_list: 76
     harness_overflow: 0
+    harness_candidates: 76
     primitives: 9263
     cells: 11637
     cell_overflow: 8625
@@ -2029,6 +2170,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 6
     spawn: real
+    spawn_support_offset_m: 0.0
     time_limit_s: 240.0
   flags:
   - solid-in-opening
@@ -2072,6 +2214,7 @@ entries:
       median: 5.025
     harness_list: 41
     harness_overflow: 0
+    harness_candidates: 41
     primitives: 13664
     cells: 16146
     cell_overflow: 13039
@@ -2080,6 +2223,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.004
     time_limit_s: 230.26
   flags:
   - branching
@@ -2123,6 +2267,7 @@ entries:
       median: 7.522
     harness_list: 29
     harness_overflow: 0
+    harness_candidates: 29
     primitives: 48
     cells: 4819
     cell_overflow: 0
@@ -2131,6 +2276,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -2176,6 +2322,7 @@ entries:
       median: 25.0
     harness_list: 9
     harness_overflow: 0
+    harness_candidates: 9
     primitives: 9
     cells: 2331
     cell_overflow: 0
@@ -2184,6 +2331,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -2229,6 +2377,7 @@ entries:
       median: 3.69
     harness_list: 35
     harness_overflow: 0
+    harness_candidates: 35
     primitives: 135
     cells: 7833
     cell_overflow: 0
@@ -2237,6 +2386,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - branching
@@ -2281,6 +2431,7 @@ entries:
       median: 3.5
     harness_list: 2
     harness_overflow: 0
+    harness_candidates: 2
     primitives: 4
     cells: 320
     cell_overflow: 0
@@ -2289,6 +2440,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - branching
@@ -2337,6 +2489,7 @@ entries:
       median: 3.69
     harness_list: 14
     harness_overflow: 0
+    harness_candidates: 14
     primitives: 167
     cells: 7552
     cell_overflow: 65
@@ -2345,6 +2498,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -2387,6 +2541,7 @@ entries:
       median: 1.32
     harness_list: 146
     harness_overflow: 0
+    harness_candidates: 146
     primitives: 509
     cells: 4202
     cell_overflow: 1731
@@ -2395,6 +2550,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 19
     spawn: synthetic
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -2441,6 +2597,7 @@ entries:
       median: 2.426
     harness_list: 95
     harness_overflow: 0
+    harness_candidates: 95
     primitives: 201
     cells: 2660
     cell_overflow: 489
@@ -2449,6 +2606,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 184.18
   flags:
   - no-scene
@@ -2488,8 +2646,9 @@ entries:
     aperture_m:
       min: 5.0
       median: 5.006
-    harness_list: 256
-    harness_overflow: 145
+    harness_list: 401
+    harness_overflow: 0
+    harness_candidates: 401
     primitives: 905
     cells: 5005
     cell_overflow: 2679
@@ -2498,6 +2657,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.002
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -2540,6 +2700,7 @@ entries:
       median: 3.015
     harness_list: 144
     harness_overflow: 0
+    harness_candidates: 144
     primitives: 260
     cells: 5748
     cell_overflow: 541
@@ -2548,6 +2709,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 1
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 230.09
   flags:
   - no-scene
@@ -2591,6 +2753,7 @@ entries:
       median: 3.0
     harness_list: 87
     harness_overflow: 0
+    harness_candidates: 87
     primitives: 117
     cells: 3863
     cell_overflow: 160
@@ -2599,6 +2762,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 179.94
   flags:
   - no-scene
@@ -2648,18 +2812,18 @@ entries:
       median: 5.023
     harness_list: 246
     harness_overflow: 0
-    primitives: 295
-    cells: 6854
-    cell_overflow: 51
+    harness_candidates: 246
+    primitives: 4132
+    cells: 15415
+    cell_overflow: 9568
     sheared: 0
     mesh_flagged: 15
     unknown_items: 0
     solid_in_opening: 0
-    spawn: unsupported
+    spawn: real
+    spawn_support_offset_m: -0.001
     time_limit_s: 240.0
-  flags:
-  - no-scene
-  - spawn-unsupported
+  flags: []
 - id: paris-drone-festival-02
   source: liftoff-xml
   track: ParisDroneFestivalTrack02_0001.xml
@@ -2702,18 +2866,18 @@ entries:
       median: 3.69
     harness_list: 172
     harness_overflow: 0
-    primitives: 765
-    cells: 5705
-    cell_overflow: 2443
+    harness_candidates: 172
+    primitives: 4317
+    cells: 12310
+    cell_overflow: 9538
     sheared: 0
     mesh_flagged: 49
     unknown_items: 0
     solid_in_opening: 0
-    spawn: unsupported
+    spawn: real
+    spawn_support_offset_m: -0.0
     time_limit_s: 240.0
-  flags:
-  - no-scene
-  - spawn-unsupported
+  flags: []
 - id: paris-drone-festival-03
   source: liftoff-xml
   track: ParisDroneFestivalTrack03_0001.xml
@@ -2750,19 +2914,20 @@ entries:
     aperture_m:
       min: 1.39
       median: 3.69
-    harness_list: 256
-    harness_overflow: 122
-    primitives: 450
-    cells: 11034
-    cell_overflow: 124
+    harness_list: 378
+    harness_overflow: 0
+    harness_candidates: 378
+    primitives: 5115
+    cells: 19822
+    cell_overflow: 13571
     sheared: 0
     mesh_flagged: 5
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.002
     time_limit_s: 240.0
   flags:
-  - no-scene
   - outlier-spacing
 - id: paris-drone-festival-04
   source: liftoff-xml
@@ -2805,18 +2970,18 @@ entries:
       median: 2.2
     harness_list: 84
     harness_overflow: 0
-    primitives: 536
-    cells: 6467
-    cell_overflow: 1741
+    harness_candidates: 84
+    primitives: 4617
+    cells: 14393
+    cell_overflow: 10638
     sheared: 0
     mesh_flagged: 13
     unknown_items: 0
     solid_in_opening: 0
-    spawn: unsupported
+    spawn: real
+    spawn_support_offset_m: -0.047
     time_limit_s: 240.0
-  flags:
-  - no-scene
-  - spawn-unsupported
+  flags: []
 - id: paris-drone-festival-05
   source: liftoff-xml
   track: ParisDroneFestivalTrack05_0001.xml
@@ -2856,18 +3021,19 @@ entries:
       median: 2.2
     harness_list: 129
     harness_overflow: 0
-    primitives: 537
-    cells: 2312
-    cell_overflow: 1280
+    harness_candidates: 129
+    primitives: 1925
+    cells: 4188
+    cell_overflow: 3279
     sheared: 0
     mesh_flagged: 6
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: 0.0
     time_limit_s: 180.68
   flags:
   - branching
-  - no-scene
 - id: permafrost-01
   source: liftoff-xml
   track: PermafrostTrack01_0001.xml
@@ -2909,6 +3075,7 @@ entries:
       median: 4.544
     harness_list: 90
     harness_overflow: 0
+    harness_candidates: 90
     primitives: 258
     cells: 4172
     cell_overflow: 602
@@ -2917,6 +3084,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -2961,6 +3129,7 @@ entries:
       median: 6.566
     harness_list: 21
     harness_overflow: 0
+    harness_candidates: 21
     primitives: 38
     cells: 1021
     cell_overflow: 0
@@ -2969,6 +3138,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -3011,6 +3181,7 @@ entries:
       median: 4.035
     harness_list: 34
     harness_overflow: 0
+    harness_candidates: 34
     primitives: 73
     cells: 1659
     cell_overflow: 207
@@ -3019,6 +3190,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -3061,6 +3233,7 @@ entries:
       median: 15.758
     harness_list: 6
     harness_overflow: 0
+    harness_candidates: 6
     primitives: 7
     cells: 1488
     cell_overflow: 0
@@ -3069,6 +3242,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: 0.129
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -3111,6 +3285,7 @@ entries:
       median: 7.457
     harness_list: 1
     harness_overflow: 0
+    harness_candidates: 1
     primitives: 1
     cells: 268
     cell_overflow: 0
@@ -3119,6 +3294,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - branching
@@ -3169,6 +3345,7 @@ entries:
       median: 5.155
     harness_list: 34
     harness_overflow: 0
+    harness_candidates: 34
     primitives: 8249
     cells: 15500
     cell_overflow: 6127
@@ -3177,6 +3354,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: synthetic
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-terrain
@@ -3223,6 +3401,7 @@ entries:
       median: 9.824
     harness_list: 86
     harness_overflow: 0
+    harness_candidates: 86
     primitives: 5392
     cells: 17903
     cell_overflow: 3930
@@ -3231,6 +3410,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-terrain
@@ -3271,8 +3451,9 @@ entries:
     aperture_m:
       min: 3.69
       median: 3.69
-    harness_list: 256
-    harness_overflow: 146
+    harness_list: 402
+    harness_overflow: 0
+    harness_candidates: 402
     primitives: 7463
     cells: 11770
     cell_overflow: 6228
@@ -3281,6 +3462,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.002
     time_limit_s: 240.0
   flags:
   - no-terrain
@@ -3324,6 +3506,7 @@ entries:
       median: 5.095
     harness_list: 58
     harness_overflow: 0
+    harness_candidates: 58
     primitives: 7263
     cells: 10430
     cell_overflow: 4737
@@ -3332,6 +3515,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-terrain
@@ -3382,6 +3566,7 @@ entries:
       median: 2.477
     harness_list: 175
     harness_overflow: 0
+    harness_candidates: 175
     primitives: 5939
     cells: 11642
     cell_overflow: 4913
@@ -3390,6 +3575,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 126.83
   flags:
   - no-terrain
@@ -3432,6 +3618,7 @@ entries:
       median: 7.876
     harness_list: 75
     harness_overflow: 0
+    harness_candidates: 75
     primitives: 30339
     cells: 27739
     cell_overflow: 22919
@@ -3440,6 +3627,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: 0.121
     time_limit_s: 240.0
   flags:
   - branching
@@ -3483,6 +3671,7 @@ entries:
       median: 3.739
     harness_list: 39
     harness_overflow: 0
+    harness_candidates: 39
     primitives: 20693
     cells: 9490
     cell_overflow: 8094
@@ -3491,6 +3680,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 221.63
   flags:
   - no-terrain
@@ -3534,6 +3724,7 @@ entries:
       median: 2.0
     harness_list: 62
     harness_overflow: 0
+    harness_candidates: 62
     primitives: 22895
     cells: 20781
     cell_overflow: 16994
@@ -3542,6 +3733,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.0
     time_limit_s: 240.0
   flags:
   - no-terrain
@@ -3583,20 +3775,20 @@ entries:
       median: 7.035
     harness_list: 86
     harness_overflow: 0
-    primitives: 130
-    cells: 13393
-    cell_overflow: 0
+    harness_candidates: 86
+    primitives: 26411
+    cells: 42518
+    cell_overflow: 29835
     sheared: 0
     mesh_flagged: 58
     unknown_items: 0
     solid_in_opening: 0
-    spawn: unsupported
+    spawn: real
+    spawn_support_offset_m: -0.004
     time_limit_s: 240.0
   flags:
-  - no-scene
   - outlier-extent
   - outlier-spacing
-  - spawn-unsupported
 - id: short-circuit-02
   source: liftoff-xml
   track: ShortCircuitTrack02_0001.xml
@@ -3635,18 +3827,18 @@ entries:
       median: 5.001
     harness_list: 59
     harness_overflow: 0
-    primitives: 112
-    cells: 3700
-    cell_overflow: 128
+    harness_candidates: 59
+    primitives: 2079
+    cells: 5773
+    cell_overflow: 2201
     sheared: 0
     mesh_flagged: 30
     unknown_items: 0
     solid_in_opening: 0
-    spawn: unsupported
+    spawn: real
+    spawn_support_offset_m: 0.002
     time_limit_s: 148.71
-  flags:
-  - no-scene
-  - spawn-unsupported
+  flags: []
 - id: short-circuit-03
   source: liftoff-xml
   track: ShortCircuitTrack03_0001.xml
@@ -3682,20 +3874,20 @@ entries:
     aperture_m:
       min: 1.945
       median: 5.097
-    harness_list: 256
-    harness_overflow: 88
-    primitives: 781
-    cells: 15093
-    cell_overflow: 856
+    harness_list: 344
+    harness_overflow: 0
+    harness_candidates: 344
+    primitives: 11721
+    cells: 25355
+    cell_overflow: 16314
     sheared: 0
     mesh_flagged: 49
     unknown_items: 0
     solid_in_opening: 0
-    spawn: unsupported
+    spawn: real
+    spawn_support_offset_m: -0.013
     time_limit_s: 240.0
-  flags:
-  - no-scene
-  - spawn-unsupported
+  flags: []
 - id: straw-bale-01
   source: liftoff-xml
   track: StrawBaleTrack01_0001.xml
@@ -3735,6 +3927,7 @@ entries:
       median: 2.238
     harness_list: 202
     harness_overflow: 0
+    harness_candidates: 202
     primitives: 471
     cells: 8468
     cell_overflow: 939
@@ -3743,6 +3936,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: synthetic
+    spawn_support_offset_m: null
     time_limit_s: 141.01
   flags:
   - no-scene
@@ -3787,8 +3981,9 @@ entries:
     aperture_m:
       min: 1.87
       median: 2.238
-    harness_list: 256
-    harness_overflow: 68
+    harness_list: 324
+    harness_overflow: 0
+    harness_candidates: 324
     primitives: 599
     cells: 8103
     cell_overflow: 864
@@ -3797,6 +3992,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -3844,6 +4040,7 @@ entries:
       median: 5.168
     harness_list: 139
     harness_overflow: 0
+    harness_candidates: 139
     primitives: 1214
     cells: 6008
     cell_overflow: 3277
@@ -3852,6 +4049,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 1
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -3895,8 +4093,9 @@ entries:
     aperture_m:
       min: 1.921
       median: 3.69
-    harness_list: 256
-    harness_overflow: 292
+    harness_list: 548
+    harness_overflow: 0
+    harness_candidates: 548
     primitives: 715
     cells: 10656
     cell_overflow: 1267
@@ -3905,6 +4104,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.002
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -3947,6 +4147,7 @@ entries:
       median: 5.05
     harness_list: 123
     harness_overflow: 0
+    harness_candidates: 123
     primitives: 205
     cells: 7721
     cell_overflow: 214
@@ -3955,6 +4156,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -3997,6 +4199,7 @@ entries:
       median: 5.015
     harness_list: 43
     harness_overflow: 0
+    harness_candidates: 43
     primitives: 194
     cells: 5428
     cell_overflow: 148
@@ -4005,6 +4208,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -4048,6 +4252,7 @@ entries:
       median: 2.238
     harness_list: 108
     harness_overflow: 0
+    harness_candidates: 108
     primitives: 490
     cells: 20711
     cell_overflow: 215
@@ -4056,6 +4261,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -4101,6 +4307,7 @@ entries:
       median: 10.0
     harness_list: 43
     harness_overflow: 0
+    harness_candidates: 43
     primitives: 97
     cells: 4601
     cell_overflow: 208
@@ -4109,6 +4316,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -4153,6 +4361,7 @@ entries:
       median: 4.047
     harness_list: 70
     harness_overflow: 0
+    harness_candidates: 70
     primitives: 139
     cells: 4866
     cell_overflow: 270
@@ -4161,6 +4370,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - branching
@@ -4205,6 +4415,7 @@ entries:
       median: 4.067
     harness_list: 18
     harness_overflow: 0
+    harness_candidates: 18
     primitives: 20
     cells: 3409
     cell_overflow: 0
@@ -4213,6 +4424,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -4259,6 +4471,7 @@ entries:
       median: 2.2
     harness_list: 167
     harness_overflow: 0
+    harness_candidates: 167
     primitives: 678
     cells: 8207
     cell_overflow: 1239
@@ -4267,6 +4480,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -4307,8 +4521,9 @@ entries:
     aperture_m:
       min: 3.69
       median: 3.69
-    harness_list: 256
-    harness_overflow: 243
+    harness_list: 499
+    harness_overflow: 0
+    harness_candidates: 499
     primitives: 624
     cells: 10699
     cell_overflow: 1106
@@ -4317,6 +4532,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.0
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -4355,8 +4571,9 @@ entries:
     aperture_m:
       min: 3.69
       median: 3.69
-    harness_list: 256
-    harness_overflow: 90
+    harness_list: 346
+    harness_overflow: 0
+    harness_candidates: 346
     primitives: 478
     cells: 7503
     cell_overflow: 967
@@ -4365,6 +4582,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.0
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -4403,8 +4621,9 @@ entries:
     aperture_m:
       min: 3.69
       median: 3.69
-    harness_list: 256
-    harness_overflow: 129
+    harness_list: 385
+    harness_overflow: 0
+    harness_candidates: 385
     primitives: 486
     cells: 10752
     cell_overflow: 216
@@ -4413,6 +4632,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.002
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -4456,6 +4676,7 @@ entries:
       median: 8.774
     harness_list: 25
     harness_overflow: 0
+    harness_candidates: 25
     primitives: 73
     cells: 5836
     cell_overflow: 0
@@ -4464,6 +4685,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -4504,8 +4726,9 @@ entries:
     aperture_m:
       min: 2.19
       median: 3.69
-    harness_list: 256
-    harness_overflow: 456
+    harness_list: 712
+    harness_overflow: 0
+    harness_candidates: 712
     primitives: 1022
     cells: 10405
     cell_overflow: 3792
@@ -4514,6 +4737,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.01
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -4559,6 +4783,7 @@ entries:
       median: 8.277
     harness_list: 159
     harness_overflow: 0
+    harness_candidates: 159
     primitives: 353
     cells: 8426
     cell_overflow: 531
@@ -4567,6 +4792,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -4609,8 +4835,9 @@ entries:
     aperture_m:
       min: 3.69
       median: 3.69
-    harness_list: 256
-    harness_overflow: 286
+    harness_list: 542
+    harness_overflow: 0
+    harness_candidates: 542
     primitives: 730
     cells: 18428
     cell_overflow: 467
@@ -4619,6 +4846,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.002
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -4660,8 +4888,9 @@ entries:
     aperture_m:
       min: 3.69
       median: 3.69
-    harness_list: 256
-    harness_overflow: 208
+    harness_list: 464
+    harness_overflow: 0
+    harness_candidates: 464
     primitives: 567
     cells: 12137
     cell_overflow: 537
@@ -4670,6 +4899,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.002
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -4709,8 +4939,9 @@ entries:
     aperture_m:
       min: 3.69
       median: 3.69
-    harness_list: 256
-    harness_overflow: 194
+    harness_list: 450
+    harness_overflow: 0
+    harness_candidates: 450
     primitives: 581
     cells: 14582
     cell_overflow: 456
@@ -4719,6 +4950,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: -0.002
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -4764,6 +4996,7 @@ entries:
       median: 3.536
     harness_list: 85
     harness_overflow: 0
+    harness_candidates: 85
     primitives: 230
     cells: 13093
     cell_overflow: 115
@@ -4772,6 +5005,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -4817,6 +5051,7 @@ entries:
       median: 3.288
     harness_list: 24
     harness_overflow: 0
+    harness_candidates: 24
     primitives: 134
     cells: 4229
     cell_overflow: 196
@@ -4825,6 +5060,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: real
+    spawn_support_offset_m: 0.131
     time_limit_s: 240.0
   flags:
   - branching
@@ -4867,6 +5103,7 @@ entries:
       median: 8.047
     harness_list: 51
     harness_overflow: 0
+    harness_candidates: 51
     primitives: 85
     cells: 3227
     cell_overflow: 0
@@ -4875,6 +5112,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene
@@ -4920,6 +5158,7 @@ entries:
       median: 2.246
     harness_list: 128
     harness_overflow: 0
+    harness_candidates: 128
     primitives: 375
     cells: 4987
     cell_overflow: 626
@@ -4928,6 +5167,7 @@ entries:
     unknown_items: 0
     solid_in_opening: 0
     spawn: unsupported
+    spawn_support_offset_m: null
     time_limit_s: 240.0
   flags:
   - no-scene

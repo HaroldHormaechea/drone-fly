@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -31,6 +31,11 @@ NEED_FRACTION = 0.7
 MAX_PATH_INSIDE = 0.005
 #: Two candidates whose gate-proximity scores are this close make a map ambiguous.
 AMBIGUITY_MARGIN = 0.05
+#: drone-fly's synthetic identification (no real flight): props must touch the scenery.
+CONTACT_TOL_M = 0.3
+CONTACT_NEED = 0.4
+SUPPORT_WEIGHT = 0.25
+SELECT_MARGIN = 0.15
 
 
 def need_unitypy(unity_version: str) -> Any:
@@ -293,6 +298,10 @@ class MapCloud:
 
     gates: np.ndarray
     witness: np.ndarray
+    #: Spawn positions (Unity); a right scene supports them (see ``tracks.extract``).
+    spawns: np.ndarray = field(default_factory=lambda: np.zeros((0, 3)))
+    #: Placed solid track items' origins (Unity): props stand ON the right scene's surfaces.
+    items: np.ndarray = field(default_factory=lambda: np.zeros((0, 3)))
 
 
 def score(cols: ColliderArrays, cloud: MapCloud) -> tuple[float, float]:
@@ -301,11 +310,13 @@ def score(cols: ColliderArrays, cloud: MapCloud) -> tuple[float, float]:
 
 
 def assign(
-    scores: dict[str, dict[str, tuple[float, float]]], margin: float = AMBIGUITY_MARGIN
+    scores: dict[str, dict[str, tuple[float, float]]],
+    margin: float = AMBIGUITY_MARGIN,
+    need: float = NEED_FRACTION,
 ) -> dict[str, dict[str, Any]]:
     """Unique bundle -> map assignment from ``scores[map][bundle] = (near, inside)``.
 
-    A candidate passes when ``near >= NEED_FRACTION`` and ``inside <= MAX_PATH_INSIDE``. Maps
+    A candidate passes when ``near >= need`` and ``inside <= MAX_PATH_INSIDE``. Maps
     are resolved best-score first; a bundle is used at most once. A map whose two best passing
     candidates are within ``margin`` is ``ambiguous``; one with none is ``missing``.
     """
@@ -314,7 +325,7 @@ def assign(
             (
                 (near, b)
                 for b, (near, inside) in per.items()
-                if near >= NEED_FRACTION and inside <= MAX_PATH_INSIDE
+                if near >= need and inside <= MAX_PATH_INSIDE
             ),
             reverse=True,
         )  # fmt: skip
@@ -384,3 +395,85 @@ def write_cache(
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(scene, separators=(",", ":")), encoding="utf-8")
     return target
+
+
+def surface_min_distance(cols: ColliderArrays, pts: np.ndarray, chunk: int = 128) -> np.ndarray:
+    """Signed distance from each point to the nearest collider surface (``inf``: none near)."""
+    pts = np.asarray(pts, np.float64).reshape(-1, 3)
+    out = np.full(len(pts), np.inf)
+    if not len(cols):
+        return out
+    for a in range(0, len(pts), chunk):
+        sub = pts[a : a + chunk]
+        d = sub[:, None, :] - cols.p[None]
+        near = (d * d).sum(-1) <= (cols.reach[None] + 1.0) ** 2
+        ii, jj = np.nonzero(near)
+        if not len(ii):
+            continue
+        local = np.einsum("nji,nj->ni", cols.rot[jj], d[ii, jj])
+        t, sz = cols.t[jj], cols.s[jj]
+        dist = np.full(len(ii), np.inf)
+        b = t == 0
+        q = np.abs(local[b]) - sz[b]
+        dist[b] = np.linalg.norm(np.maximum(q, 0.0), axis=1) + np.minimum(q.max(axis=1), 0.0)
+        sp = t == 2
+        dist[sp] = np.linalg.norm(local[sp], axis=1) - sz[sp, 0]
+        cp = np.flatnonzero(t == 1)
+        if len(cp):
+            ax = sz[cp, 2].astype(np.int64)
+            half = np.maximum(sz[cp, 1] / 2.0 - sz[cp, 0], 0.0)
+            lc = local[cp].copy()
+            al = lc[np.arange(len(cp)), ax]
+            lc[np.arange(len(cp)), ax] = al - np.clip(al, -half, half)
+            dist[cp] = np.linalg.norm(lc, axis=1) - sz[cp, 0]
+        res = np.full(len(sub), np.inf)
+        np.minimum.at(res, ii, dist)
+        out[a : a + chunk] = res
+    return out
+
+
+def item_contact(cols: ColliderArrays, items: np.ndarray) -> float:
+    """Share of placed items whose origin lies within :data:`CONTACT_TOL_M` of a surface."""
+    if not len(items):
+        return 0.0
+    return float((np.abs(surface_min_distance(cols, items)) <= CONTACT_TOL_M).mean())
+
+
+def assign_conservative(
+    scores: dict[str, dict[str, tuple[float, bool]]],
+    reserved: dict[str, str],
+    margin: float = SELECT_MARGIN,
+) -> dict[str, dict[str, Any]]:
+    """Bundle -> map for the maps in ``scores`` without a usable cache, abstaining when unsure.
+
+    ``scores[map][bundle] = (score, passes)``; ``reserved`` maps known (validated) maps to their
+    cache's bundle, which no other map may take. A map gets its best passing candidate only when
+    it beats the map's next passing candidate by ``margin`` AND no other map passes on that
+    bundle within ``margin`` of it; otherwise ``ambiguous`` (or ``missing`` without candidates).
+    """
+    taken = set(reserved.values())
+    out: dict[str, dict[str, Any]] = {}
+    for m, per in scores.items():
+        if m in reserved:
+            continue
+        cands = sorted(((sc, b) for b, (sc, ok) in per.items() if ok and b not in taken),
+                       reverse=True)  # fmt: skip
+        if not cands:
+            out[m] = {"status": "missing"}
+            continue
+        best, bundle = cands[0]
+        rivals = [
+            (om, per2[bundle][0])
+            for om, per2 in scores.items()
+            if om != m and bundle in per2 and per2[bundle][1] and per2[bundle][0] >= best - margin
+        ]
+        if len(cands) > 1 and best - cands[1][0] < margin or rivals:
+            out[m] = {
+                "status": "ambiguous",
+                "candidates": [b for _, b in cands[:3]],
+                "scores": [round(x, 3) for x, _ in cands[:3]],
+                "rivals": [om for om, _ in rivals],
+            }
+            continue
+        out[m] = {"status": "ok", "bundle": bundle, "score": round(best, 3)}
+    return out

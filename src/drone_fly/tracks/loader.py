@@ -17,7 +17,7 @@ import hashlib
 import logging
 import pickle
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -124,6 +124,9 @@ def load_course(
     cdir = (cache_dir or cache_root()) if use_cache else None
     base_meta = {"id": entry["id"], "source": entry["source"], "split": entry["split"],
                  "map": entry["map"], "flags": list(entry.get("flags") or [])}  # fmt: skip
+    cap = (catalogue.header.get("harness_cap") or {}).get("value")
+    if conv.harness_cap is None and cap is not None:
+        conv = replace(conv, harness_cap=int(cap))
     if entry["status"] != cat.STATUS_OK:
         raise TrackDataError(f"{entry['id']} is {entry['status']}")
     if entry["source"] == "procedural":
@@ -250,3 +253,38 @@ def build_pool(
         groups.append(PoolGroup(str(g["select"]), idx, float(g.get("weight", 1.0)),
                                 float(g.get("scene_weight", 1.0))))  # fmt: skip
     return Pool(courses, groups, purpose, cats, record)
+
+
+def conversion_record(pool: Pool, conversion: ConversionConfig) -> dict[str, Any]:
+    """The sidecar's ``course_conversion``: version, rules, parameters and the scene hashes.
+
+    ``parameters.harness_cap`` is the effective ``O_h`` (the Liftoff catalogue header's, from
+    the train stats). Evaluation rebuilds courses with exactly these parameters and refuses a
+    different conversion version or fingerprint.
+    """
+    from drone_fly.tracks.liftoff import RULES
+
+    conv = conversion
+    lift = pool.catalogues.get("liftoff")
+    cap = ((lift.header.get("harness_cap") or {}).get("value")) if lift is not None else None
+    if conv.harness_cap is None and cap is not None:
+        conv = replace(conv, harness_cap=int(cap))
+    scenes, props = {}, {}
+    for _, info in pool.record.files.items():
+        if info["kind"] == "scene":
+            scenes[info["map"]] = {
+                k: info.get(k) for k in ("sha256", "bundle", "build_id", "status")
+            }
+        elif info["kind"] == "props":
+            props = {"sha256": info.get("sha256"), "build_id": info.get("build_id")}
+    return {
+        "version": CONVERSION_VERSION,
+        "fingerprint": conv.fingerprint(),
+        "parameters": conv.numbers(),
+        "rules": dict(RULES),
+        "scenes": dict(sorted(scenes.items())),
+        "props": props,
+        "catalogues": {
+            n: sha256_file(c.path) for n, c in pool.catalogues.items() if c.path is not None
+        },
+    }

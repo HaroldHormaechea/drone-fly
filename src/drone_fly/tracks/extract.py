@@ -20,18 +20,26 @@ from typing import Any
 import numpy as np
 
 from drone_fly.harness.errors import HarnessConfigError
+from drone_fly.harness.geometry import UNITY_TO_CONTRACT
 from drone_fly.harness.offline.track_xml import load_track_geometry
+from drone_fly.sim.pool import support_top
 from drone_fly.tracks import catalogue as cat
 from drone_fly.tracks.liftoff import (
     ConversionConfig,
     PropsTable,
     UnconvertibleError,
     convert_liftoff,
+    heightfield_contract,
+    is_nonsolid_item,
     passage_witness,
+    scene_primitives,
 )
 from drone_fly.tracks.scenes import USABLE, synthetic_witness
 
 log = logging.getLogger(__name__)
+
+#: Placed items sampled per map for the contact score.
+MAX_ITEMS = 600
 
 
 def map_clouds(root: Path, maps: list[str] | None = None) -> dict[str, Any]:
@@ -43,6 +51,7 @@ def map_clouds(root: Path, maps: list[str] | None = None) -> dict[str, Any]:
     conv = ConversionConfig.from_dict(None)
     ops: dict[str, list] = defaultdict(list)
     spawns: dict[str, list] = defaultdict(list)
+    items: dict[str, list] = defaultdict(list)
     for p in pair_files(root):
         if maps and p["map"] not in maps:
             continue
@@ -54,11 +63,53 @@ def map_clouds(root: Path, maps: list[str] | None = None) -> dict[str, Any]:
         o, sp = passage_witness(course)
         ops[p["map"]] += o
         spawns[p["map"]].append(sp)
+        route = set(geom.route.checkpoint_ids) if geom.route else set()
+        items[p["map"]] += [
+            it.position
+            for it in geom.items
+            if not is_nonsolid_item(it) and it.instance_id not in route
+        ]
     out = {}
+    inv = np.asarray(UNITY_TO_CONTRACT, np.float64).T
     for m in ops:
         g, w = synthetic_witness(ops[m], spawns[m])
-        out[m] = MapCloud(g, w)
+        pts = np.asarray(items[m], np.float64).reshape(-1, 3)
+        if len(pts) > MAX_ITEMS:
+            pts = pts[np.random.default_rng(0).choice(len(pts), MAX_ITEMS, replace=False)]
+        out[m] = MapCloud(g, w, np.array([inv @ s for s in spawns[m]]).reshape(-1, 3), pts)
     return out
+
+
+def support_geometry(cols: list[dict[str, Any]], hfs: list[Any]) -> tuple[Any, ...]:
+    prims = scene_primitives(cols)
+    lo, hi = prims.aabb() if len(prims) else (np.zeros((0, 3)), np.zeros((0, 3)))
+    return prims, heightfield_contract(hfs), lo, hi
+
+
+def spawn_support(geo: tuple[Any, ...], spawns_unity: np.ndarray) -> float:
+    """Share of spawns with a solid top (or terrain) within 1 m below (``geo``: support_geometry).
+
+    Spawn pads sit on the scenery; in the wrong scene they float or are buried. This
+    complements the gate-proximity score, which big scenes satisfy for almost any map.
+    """
+    if not len(spawns_unity):
+        return 0.0
+    prims, hf, lo, hi = geo
+    m = np.asarray(UNITY_TO_CONTRACT, np.float64)
+    ok = 0
+    for su in spawns_unity:
+        s = m @ su
+        near = np.flatnonzero(
+            (lo[:, 0] <= s[0]) & (hi[:, 0] >= s[0]) & (lo[:, 1] <= s[1]) & (hi[:, 1] >= s[1])
+        )
+        top = None
+        if len(near):
+            top = support_top(prims.subset(near), s[0], s[1], s[2] + 0.5, s[2] - 1.0)
+        if top is None and hf is not None:
+            hz = float(hf.sample(s[0], s[1]))
+            top = hz if s[2] - 1.0 <= hz <= s[2] + 0.5 else None
+        ok += top is not None
+    return ok / len(spawns_unity)
 
 
 def extract_scenes(
@@ -84,7 +135,7 @@ def extract_scenes(
         known = c.maps()
     r = cat.resolve_root(root, header)
     sroot = cat.resolve_scenes_root(scenes_root, header, r)
-    clouds = map_clouds(r, maps)
+    clouds = map_clouds(r, None)  # every map competes, so assignments stay unique
     todo = sorted(
         m for m in clouds
         if force or ((known.get(m) or {}).get("scene") or {}).get("status") not in USABLE
@@ -94,7 +145,8 @@ def extract_scenes(
     for m, wpath in (witnesses or {}).items():
         if m in clouds:
             pts = np.asarray(json.loads(Path(wpath).read_text(encoding="utf-8")), np.float64)
-            clouds[m] = ex.MapCloud(clouds[m].gates, pts.reshape(-1, 3))
+            c = clouds[m]
+            clouds[m] = ex.MapCloud(c.gates, pts.reshape(-1, 3), c.spawns, c.items)
     inst = game.find_game(game_dir)
     if inst is None:
         raise cat.TrackDataError("Liftoff install not found (pass --game-dir or set LIFTOFF_DIR)")
@@ -109,8 +161,9 @@ def extract_scenes(
     candidates = [p for p in ex.scene_bundles(bdir)]
     if max_mb:
         candidates = [p for p in candidates if p.stat().st_size <= max_mb * 1024 * 1024]
-    scores: dict[str, dict[str, tuple[float, float]]] = {m: {} for m in todo if m not in fixed}
+    scores: dict[str, dict[str, tuple[float, float]]] = {m: {} for m in clouds if m not in fixed}
     keep: dict[str, tuple[list, dict, list]] = {}
+    detail: dict[str, dict[str, tuple[float, float, float, float]]] = {}
     started = time.time()
     for cand in candidates:
         t0 = time.time()
@@ -126,23 +179,40 @@ def extract_scenes(
             continue
         arr = ex.ColliderArrays.from_colliders(cols)
         passing = False
+        geo = support_geometry(cols, hfs)
         for m in scores:
             near, inside = ex.score(arr, clouds[m])
-            scores[m][cand.name] = (near, inside)
-            passing |= near >= ex.NEED_FRACTION and inside <= ex.MAX_PATH_INSIDE
+            ok = near >= ex.NEED_FRACTION and inside <= ex.MAX_PATH_INSIDE
+            contact = ex.item_contact(arr, clouds[m].items) if ok else 0.0
+            sup = spawn_support(geo, clouds[m].spawns) if ok else 0.0
+            ok = ok and contact >= ex.CONTACT_NEED
+            scores[m][cand.name] = (contact + ex.SUPPORT_WEIGHT * sup, ok)
+            detail.setdefault(m, {})[cand.name] = (near, inside, sup, contact)
+            passing |= ok
         if passing or cand.name in fixed.values():
             keep[cand.name] = (cols, counts, hfs)
         log.info("%s: %d colliders (%.1f s)", cand.name, len(cols), time.time() - t0)
-    assigned = ex.assign(scores)
+    reserved = {
+        m: str(((known.get(m) or {}).get("scene") or {}).get("bundle"))
+        for m in clouds
+        if m not in todo and ((known.get(m) or {}).get("scene") or {}).get("bundle")
+    }
+    assigned = ex.assign_conservative(scores, reserved)
     for m, b in fixed.items():
-        assigned[m] = {"status": "ok", "bundle": b, "near": None, "inside": None, "given": True}
+        assigned[m] = {"status": "ok", "bundle": b, "given": True}
     for m in todo:
         res = assigned.get(m, {"status": "missing"})
         if res["status"] == "ok" and res["bundle"] in keep:
             cols, counts, hfs = keep[res["bundle"]]
-            how = ("bundle given" if res.get("given") else
-                   f"{100 * res['near']:.0f}% gates near, {100 * res['inside']:.2f}% of the "
-                   f"{'real' if m in (witnesses or {}) else 'synthetic'} witness in")  # fmt: skip
+            how = "bundle given"
+            if not res.get("given"):
+                near, inside, sup, contact = detail[m][res["bundle"]]
+                kind = "real" if m in (witnesses or {}) else "synthetic"
+                how = (
+                    f"{100 * contact:.0f}% props on scenery, {100 * near:.0f}% gates near, "
+                    f"{100 * sup:.0f}% spawns supported, {100 * inside:.2f}% of the {kind} "
+                    "witness inside"
+                )
             out = ex.write_cache(
                 sroot, m, bdir / res["bundle"], cols, counts, hfs, build_id=bid,
                 unity_version=uv, identified_by=how, witness=(witnesses or {}).get(m),
@@ -151,7 +221,12 @@ def extract_scenes(
                    "heightfields": len(hfs)}  # fmt: skip
         elif res["status"] == "ok":
             res = {**res, "status": "missing", "note": "assigned bundle was not kept"}
+        if res.get("bundle") in detail.get(m, {}):
+            near, inside, sup, contact = detail[m][res["bundle"]]
+            res = {**res, "gates_near": round(near, 3), "witness_inside": round(inside, 4),
+                   "spawn_support": round(sup, 3), "item_contact": round(contact, 3)}  # fmt: skip
         report["results"][m] = res
+    report["reserved"] = reserved
     report["seconds"] = round(time.time() - started, 1)
     report["candidates"] = len(candidates)
     return report
