@@ -62,6 +62,7 @@ STOP_NO_LIFTOFF = "no_liftoff"
 STOP_MISMATCH = "drone_mismatch"
 STOP_RESTABILIZE = "restabilize_failed"
 STOP_TAKEOFF = "takeoff_timeout"
+STOP_TRANSIT = "transit_failed"
 STOP_ANTICHEAT = "anticheat"
 STOP_ERROR = "error"
 
@@ -96,7 +97,9 @@ class SessionSettings:
     takeoff_timeout_s: float = 12.0
     climb_m_s: float = 1.2
     settle_hold_s: float = 0.5
-    settle_timeout_s: float = 8.0
+    settle_timeout_s: float = 12.0
+    #: Settled = also within this horizontal distance of the hold point (after a coast).
+    settle_radius_m: float = 2.0
     restabilize_s: float = 6.0
     recover_s: float = 1.2
     land_m_s: float = 0.7
@@ -359,8 +362,10 @@ class SysidSession:
         z_ref = self.ground_z + self.s.hold_alt_m
 
         def until(state: Any, t: float) -> bool:
+            off = np.asarray(state.pos, np.float64)[:2] - np.asarray(self.home, np.float64)[:2]
             ok = (
-                abs(float(state.pos[2]) - z_ref) < 0.5
+                float(np.linalg.norm(off)) < self.s.settle_radius_m
+                and abs(float(state.pos[2]) - z_ref) < 0.5
                 and float(np.linalg.norm(state.vel)) < 0.7
                 and tilt_deg(state.quat) < 10.0
                 and float(np.linalg.norm(state.omega)) < 0.6
@@ -535,17 +540,46 @@ class SysidSession:
         start = self.home.copy()
         heading = np.array([math.cos(self.yaw_ref), math.sin(self.yaw_ref), 0.0])
         goal = start + dist * heading
-        target = self._target()
-        duration = dist / self.s.transit_m_s
+        for _attempt in (1, 2):
+            pos = np.asarray(self.src.latest().pos, np.float64)
+            start = np.array([pos[0], pos[1], start[2]])
+            left = float(np.linalg.norm((goal - start)[:2]))
+            target = self._target()
+            duration = left / self.s.transit_m_s
 
-        def fn(state: Any, t: float, dt: float) -> dict[str, float]:
-            target.pos = start + min(t / duration, 1.0) * dist * heading
-            self.home = target.pos  # the geofence moves with the hold point
-            return self._hold(target)(state, t, dt)
+            def fn(
+                state: Any, t: float, dt: float, start=start, target=target, duration=duration
+            ) -> dict[str, float]:
+                frac = min(t / duration, 1.0) if duration > 0 else 1.0
+                target.pos = start + frac * (goal - start)
+                self.home = target.pos  # the geofence moves with the hold point
+                return self._hold(target)(state, t, dt)
 
-        self._loop("transit", fn, duration=duration + 1.0, envelope="hard")
-        self.home = goal
-        self._event(f"transit {dist:.0f} m to the experiment hold point")
+            def arrived(state: Any, t: float) -> bool:
+                off = np.asarray(state.pos, np.float64)[:2] - goal[:2]
+                return float(np.linalg.norm(off)) < 1.0 and float(np.linalg.norm(state.vel)) < 0.7
+
+            try:
+                self._loop(
+                    "transit",
+                    fn,
+                    until=arrived,
+                    duration=duration + self.s.settle_timeout_s,
+                    envelope="hard",
+                )
+            except _Abort as a:
+                self._violation(a.violation, "transit")
+                self._restabilize("transit")  # lands, disarms and stops if that fails
+                continue
+            self.home = goal
+            if arrived(self.src.latest(), 0.0):
+                self._event(f"transit {dist:.0f} m to the experiment hold point")
+                return
+            break
+        self._event("transit failed: landing")
+        self._land()
+        self._disarm()
+        raise _Stop(STOP_TRANSIT, "did not reach the experiment hold point")
 
     def _land(self) -> None:
         state = self.src.latest()
