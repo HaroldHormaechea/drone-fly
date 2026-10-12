@@ -246,6 +246,13 @@ def test_reduced_schedule_still_validates(tmp_path):
         assert abs(fit.params.rates[a].delay_s - MICRO_LIKE.rates[a].delay_s) <= TICK
         if any("expo ill-conditioned" in n and n.startswith(a) for n in fit.notes):
             assert fit.params.rates[a].expo == 0.0
+        # fewer than 5 doublet amplitudes: the Betaflight parameters are flagged as unreliable
+        assert any(n.startswith(f"WARNING {a}: only 3 doublet amplitudes") for n in fit.notes)
+
+
+def test_default_schedule_has_no_amplitude_warning(case):
+    _, _, fit = case
+    assert not any("doublet amplitudes" in n for n in fit.notes), fit.notes
 
 
 def test_not_a_session_folder(tmp_path):

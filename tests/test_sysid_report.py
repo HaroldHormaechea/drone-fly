@@ -162,6 +162,17 @@ def test_markdown_sections(fit, written):
     assert "Voltage" in text and "Session stop reason: completed" in text
 
 
+def test_reduced_schedule_warning_is_shown_under_the_verdict(fit, written):
+    """The fixture flies 3 amplitudes: each axis's WARNING note is quoted right after the verdict,
+    before the fitted values."""
+    text = written[3].read_text(encoding="utf-8")
+    verdict = text.index("**fit_quality:")
+    values = text.index("## Fitted values")
+    for a in AXES:
+        line = f"> **WARNING {a}: only 3 doublet amplitudes"
+        assert line in text and verdict < text.index(line) < values, a
+
+
 def test_micro_report_compares_with_uc64(fit, written):
     text = written[3].read_text(encoding="utf-8")
     hov = fit.params.hover_throttle

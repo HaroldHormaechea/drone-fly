@@ -137,3 +137,21 @@ def test_synthetic_session_then_fit_end_to_end(roots, capsys):
     # an existing profile is not overwritten without --force
     assert main(["sysid", "fit", str(sdir), "--drone", "liftoff-test-micro"]) == 2
     assert "--force" in capsys.readouterr().err
+
+
+def test_fit_prints_the_warnings(roots, tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    fake = SimpleNamespace(
+        meta={"liftoff_name": "Test small drone"}, fit_quality="good", verdict="AC8 met: ok.",
+        notes=["roll: expo ill-conditioned", "WARNING roll: only 3 doublet amplitudes [...]"],
+    )  # fmt: skip
+    monkeypatch.setattr("drone_fly.sysid.fit.fit_session", lambda *a, **kw: fake)
+    monkeypatch.setattr(
+        "drone_fly.sysid.report.write_report",
+        lambda *a, **kw: (tmp_path / "drone.yaml", tmp_path / "sysid.md"),
+    )
+    assert main(["sysid", "fit", str(tmp_path), "--drone", "x-y", "--out", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "WARNING roll: only 3 doublet amplitudes" in out
+    assert "expo ill-conditioned" not in out  # only WARNING notes are printed
