@@ -1,5 +1,8 @@
 """Write a fit as ``drones/<id>/drone.yaml`` + ``sysid.md`` + residual PNGs.
 
+Regenerating ``sysid.md`` keeps an existing ``Plant replay (UC67)`` section (written between its
+HTML comment markers by ``drone-fly sim replay-sysid --write-report``).
+
 Every measured leaf carries ``{value, session, residual, sigma}``. Default randomization ranges are
 ``nominal +- max(3 sigma, 10 %)`` clamped at 0; the multipliers (``thrust_scale``,
 ``rates.<axis>.rate_scale``) are ``1 +- max(3 sigma_rel, 10 %)``.
@@ -377,5 +380,14 @@ def write_report(
     yaml_path = store.dump(data, out / store.PROFILE_FILE, header=header)
     plots = write_plots(fit, out)
     md = out / store.REPORT_FILE
-    md.write_text(sysid_markdown(fit, data, plots, micro=micro), encoding="utf-8")
+    text = sysid_markdown(fit, data, plots, micro=micro)
+    # keep the generated "Plant replay (UC67)" section of `drone-fly sim replay-sysid` (it is
+    # produced from the profile, not from the fit; re-run the replay after a refit)
+    if md.is_file():
+        from drone_fly.sim.replay import extract_report_section
+
+        block = extract_report_section(md.read_text(encoding="utf-8"))
+        if block:
+            text = text.rstrip("\n") + "\n\n" + block + "\n"
+    md.write_text(text, encoding="utf-8")
     return yaml_path, md

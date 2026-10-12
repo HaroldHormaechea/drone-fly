@@ -15,5 +15,5 @@ def test_package_imports():
 def test_subpackages_import():
     import importlib
 
-    for name in ("connectome", "controller", "env", "train", "evaluate", "cli"):
+    for name in ("connectome", "controller", "env", "sim", "training", "cli"):
         importlib.import_module(f"drone_fly.{name}")

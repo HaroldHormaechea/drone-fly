@@ -30,6 +30,12 @@
                           [--plant liftoff|synthetic|synthetic-5inch]
     drone-fly sysid fit <session dir> --drone <id> [--out <dir>] [--force] [--name] [--map]
                           [--camera-from-preset <preset>] [--micro]
+    drone-fly train run <config> [--k1-path] [--device] [--n-envs] [--budget] [--seed]
+                          [--max-iterations] [--output-root]
+    drone-fly train eval <checkpoint> --config <config> [--episodes] [--seed] [--legacy-v1]
+                          [--compare-prototype] [--k1-path] [--device] [--json]
+    drone-fly train bench [--config] [--n-envs] [--steps] [--substeps ...] [--no-prototype]
+    drone-fly sim replay-sysid <session dir> --drone <id> [--write-report] [--gate|--no-gate]
 
 Exit codes: 0 ok, 2 config/usage error (also: anti-cheat software running), 3 missing optional
 dependency, 4 perception coverage refusal, 5 fail-safe stop (sysid: fail-safe, crash or drone
@@ -399,6 +405,24 @@ def _cmd_sysid_fit(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_sim_replay(args: argparse.Namespace) -> int:
+    from drone_fly import drones
+    from drone_fly.sim.replay import replay_session, write_report_section
+
+    profile = drones.load(args.drone)
+    result = replay_session(args.session_dir, profile, gated=args.gate)
+    print(result.verdict)
+    for h in (1.0, 2.0):
+        print(
+            f"  {h:g} s: median attitude {result.median('att_deg', h):.3f} deg, velocity "
+            f"{result.median('vel_m_s', h):.3f} m/s over {result.counts(h)} windows"
+        )
+    if args.write_report:
+        md = drones.profile_path(args.drone).with_name("sysid.md")
+        print(f"report: {write_report_section(md, result)}")
+    return 1 if result.gated and not result.passed else EXIT_OK
+
+
 def _cmd_pad_server(args: argparse.Namespace) -> int:
     from drone_fly.harness.liftoff.pad_server import run_pad_server
 
@@ -723,6 +747,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--micro", action="store_true", help="compare the hover with UC64's -0.06 stick"
     )
     p_sf.set_defaults(func=_cmd_sysid_fit)
+
+    from drone_fly.training.cli import add_parser as add_train_parser  # light: no torch import
+
+    add_train_parser(sub)
+
+    sim = sub.add_parser("sim", help="the batched simulator (drone_fly.sim)")
+    simsub = sim.add_subparsers(dest="sim_command", required=True)
+    p_rp = simsub.add_parser(
+        "replay-sysid", help="replay a sysid session's held-out sticks through the plant (AC8)"
+    )
+    p_rp.add_argument("session_dir", help="artifacts/sysid/<id>/<session>")
+    p_rp.add_argument("--drone", required=True, help="profile id (drones/<id>/drone.yaml)")
+    p_rp.add_argument(
+        "--write-report", action="store_true", help="write the section into drones/<id>/sysid.md"
+    )
+    p_rp.add_argument(
+        "--gate",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="apply the AC8 gate (default: only when the profile's fit_quality is good)",
+    )
+    p_rp.set_defaults(func=_cmd_sim_replay)
     return parser
 
 

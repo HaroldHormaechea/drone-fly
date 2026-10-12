@@ -4,7 +4,8 @@
 [--min-alt 0.5] [--max-alt 6] [--out ...]``
 
 With Liftoff focused and telemetry streaming, the check arms the virtual pad, climbs, then holds
-altitude with a P+D throttle loop around ``controls.hover_stick`` (from telemetry height). Per
+altitude with a P+D throttle loop around the hover stick (the ``drone`` profile's, else
+``controls.hover_stick``; from telemetry height). Per
 axis (roll, pitch, yaw) it sends alternating short +/- stick pulses of ``magnitude`` and measures
 the mean body rate (``FlightState.omega``, gyro map applied) over the second half of each pulse,
 against the rate the configured Betaflight curve predicts for that stick
@@ -337,13 +338,12 @@ def run_pad_check(
             "wait_for_focus_s": focus_wait,
         }
     )
-    controls = cfg.section("controls")
     check = PadCheck(
         src,
         sink,
         sink.profiles,
         sink.signs,
-        float(controls.get("hover_stick", -0.4)),
+        sink.hover_stick,  # the drone profile's (UC67) or controls.hover_stick
         s,
         abort=abort,
         focus=focus,

@@ -63,13 +63,33 @@ def test_preset_name_may_carry_the_yaml_suffix():
 
 def test_chain_order_user_config_then_overrides_win(tmp_path, cfg):
     user = tmp_path / "user.yaml"
-    user.write_text("scaling:\n  world_scale: 3.0\ncontrols:\n  hover_stick: -0.1\n")
-    merged = load_config("liftoff", user, overrides={"controls.hover_stick": -0.2}, preset=PRESET)
+    user.write_text("scaling:\n  world_scale: 3.0\ncontrols:\n  rate_scale: 1.1\n")
+    merged = load_config("liftoff", user, overrides={"controls.rate_scale": 1.2}, preset=PRESET)
     assert merged.world_scale == 3.0  # user beats preset (4.0)
-    assert merged.section("controls")["hover_stick"] == -0.2  # override beats user
+    assert merged.section("controls")["rate_scale"] == 1.2  # override beats user
     # untouched preset values survive the user overlay
     assert merged.section("camera")["hfov_deg"] == 120.0
     assert merged.section("telemetry")["rpm_count_prefix"] is True
+
+
+@pytest.mark.parametrize(
+    "overlay",
+    ["controls:\n  hover_stick: -0.1\n", "controls:\n  rates:\n    roll: {rc_rate: 1.0}\n"],
+)
+def test_drone_and_hand_set_controls_conflict(tmp_path, overlay):
+    """UC67 AC6: the preset names its drone; duplicating its rates / hover stick is an error."""
+    user = tmp_path / "user.yaml"
+    user.write_text(overlay)
+    with pytest.raises(HarnessConfigError, match="conflict"):
+        load_config("liftoff", user, preset=PRESET)
+
+
+def test_drone_null_restores_the_hand_set_controls(tmp_path):
+    user = tmp_path / "user.yaml"
+    user.write_text("drone: null\ncontrols:\n  hover_stick: -0.1\n")
+    merged = load_config("liftoff", user, preset=PRESET)
+    assert merged.data["drone"] is None
+    assert merged.section("controls")["hover_stick"] == -0.1
 
 
 def test_user_config_still_rejects_unknown_keys_on_top_of_a_preset(tmp_path):
@@ -101,10 +121,10 @@ def test_preset_values(cfg):
     cam = cfg.section("camera")
     assert cam["resolution"] == [2560, 1080]
     assert cam["hfov_deg"] == 120.0 and cam["uptilt_deg"] == 20.0
+    # UC67: the airframe comes from its drone profile, not from hand-set controls
+    assert cfg.data["drone"] == "liftoff-gremlin-micro"
     c = cfg.section("controls")
-    assert c["hover_stick"] == -0.06
-    for axis in ("roll", "pitch", "yaw"):
-        assert c["rates"][axis] == {"rc_rate": 1.0, "super_rate": 0.7, "expo": 0.0}
+    assert c.get("hover_stick") is None and c.get("rates") is None
     assert cfg.world_scale == 4.0
     assert cfg.parts.gate_estimator == "learned"
     assert cfg.section("gates")["learned"]["weights"] == (
@@ -153,8 +173,10 @@ def test_five_inch_default_has_the_liftoff_fixes_but_keeps_its_airframe():
     t = five.section("telemetry")
     assert t["rpm_count_prefix"] is True and t["gyro_units"] == "deg_s"
     assert GyroMap.from_config(t) == GyroMap(("roll", "pitch", "yaw"), (-1.0, 1.0, -1.0))
-    # airframe values unchanged from UC-62
-    assert five.section("controls")["hover_stick"] == -0.4
+    # UC67: the airframe is the identified 5-inch profile; the CALIBRATE placeholders are gone
+    assert five.data["drone"] == "liftoff-5inch-vortex-pro-250"
+    assert five.section("controls")["hover_stick"] is None
+    assert five.section("controls")["rates"] is None
     assert five.section("camera")["uptilt_deg"] == 25.0
     assert five.world_scale == 2.0
     assert five.parts.gate_estimator == "opencv"

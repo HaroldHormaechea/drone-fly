@@ -1,0 +1,45 @@
+# Template for profile-driven, domain-randomized procedural-course training (UC67; UC68 extends
+# it with `extends: proc-course-dr` and its own drone / budget / warm start).
+#  - dynamics: every randomizable key of the drone profile, at the profile's full range (scale 1)
+#  - timing: the drone_fly.sim.timing defaults (20-50 Hz, 0-60 ms delay + 5 ms jitter, up to 35 %
+#    skipped ticks), which cover the live harness latency measured in
+#    artifacts/harness/liftoff/runs/liftoff-20261011T233116352187Z/latency_summary.json
+#  - starts: half on the ground at rest (0.5 s arm delay, the gamepad's max(arm_settle_s,
+#    arm_press_s)), half in the air
+#  - action: contract v2 (hover-relative collective); 1.0 g per unit of a0 and 4.0 rad/s rates,
+#    i.e. the legacy semantics on meteor75, so the v1 07 readout warm-starts affinely
+drone: meteor75
+n_envs: 512
+budget: 30.0e6
+randomization_scale: 1.0
+plant:
+  integrator: exact
+  substeps: 1               # chosen by the UC67 throughput measurement (ADR 0006)
+timing:
+  mode: random
+course:
+  reward_reference_dt_s: 0.02   # dense rewards are per 20 ms of flight
+  tier: tractable
+  no_obs: true
+  start:
+    mode: mixed
+    ground_fraction: 0.5
+    air_z_m: [0.8, 1.5]
+    arm_delay_s: 0.5
+action:
+  version: 2
+  collective_scale_g: 1.0
+  max_rate_rad_s: 4.0
+actor:
+  kind: k1-reservoir-aug
+  extra_dim: 30
+ppo:
+  logstd_init: -1.5         # warm-started: mild exploration (train_aug_course.py)
+  logstd_final: -2.0
+  anneal_start: 0.4
+curriculum:
+  difficulty_frac: 0.6
+warm_start:
+  checkpoint: training/07-proc-course-flight/model_readout.pt   # relative to the repo root
+  src_extra_dim: 30
+  legacy_v1: true

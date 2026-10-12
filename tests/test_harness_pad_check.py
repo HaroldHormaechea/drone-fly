@@ -418,7 +418,12 @@ def test_run_pad_check_end_to_end_writes_the_report(tmp_path, monkeypatch):
     assert set(report["axes"]) == {"roll", "pitch", "yaw"}
     assert report["suggested"] == {"controls": {"stick_signs": {"roll": 1, "pitch": 1, "yaw": -1}}}
     assert report["settings"]["wait_for_focus_s"] == 15.0
-    assert report["rates"]["roll"] == {"rc_rate": 1.0, "super_rate": 0.7, "expo": 0.0}
+    # UC67: the preset's drone profile gives the rates (and the hover stick the loop holds)
+    from drone_fly import drones
+
+    micro = drones.load("liftoff-gremlin-micro")
+    assert report["rates"]["roll"] == micro.rate_profile("roll").__dict__
+    assert holder["sink"].hover_stick == pytest.approx(-0.058, abs=0.002)
     assert report["neutral_output"] == {
         "left_x": 0.0,
         "left_y": -1.0,

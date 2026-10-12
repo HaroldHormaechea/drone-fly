@@ -21,3 +21,6 @@ commands:
   # PSScriptAnalyzer where installed (developer gate + QA's setup-windows-doc check, which
   # skips if absent — no Windows/pwsh runner in the Linux CI).
   - pwsh
+  # UC-67: `drone-fly train bench` (AC10 throughput) is only valid on an idle GPU; nvidia-smi
+  # (read-only query) checks the utilisation before a measurement.
+  - nvidia-smi

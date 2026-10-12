@@ -5,6 +5,11 @@ It proves the harness reproduces the reference inference path (AC4): ground-trut
 reads the plant, and a sink that applies ``plant_step`` to the policy's **raw** action. It runs on
 a :class:`~drone_fly.harness.runner.SimClock` with no frame source.
 
+A contract-v1 checkpoint is stepped by ``plant_step`` on its raw action (bit-exact). A v2
+checkpoint (UC67: hover-relative ``collective_g``) is stepped by a single-env
+:class:`drone_fly.sim.Plant` on the decoded command — the config's ``drone`` profile, else the
+reference ``drones/meteor75`` — with the ``euler-legacy`` integrator at the contract ``DT``.
+
 Tick order equals the training env's ``step()``: ``plant_step`` at the end of tick ``k``; tick
 ``k+1`` reads that state, applies the pass rule / advance (wrap + lap), then assembles — so the
 target the policy sees is never one step behind.
@@ -50,9 +55,13 @@ START_MIN_Z = 0.12  # the env clamps the spawn onto the ground
 class LoopbackPlant:
     """Holds the contract state dict; :class:`PlantActionSink` advances it with ``plant_step``."""
 
-    def __init__(self, contract: Any, start: np.ndarray, clock: Any = None) -> None:
+    def __init__(
+        self, contract: Any, start: np.ndarray, clock: Any = None, drone: Any = None
+    ) -> None:
         self.contract = contract
         self.clock = clock
+        self.drone = drone  # DroneProfile for v2 commands (None = drones/meteor75)
+        self._sim: Any = None
         self.start = np.asarray(start, np.float32).copy()
         self.start[2] = max(float(self.start[2]), START_MIN_Z)
         self.state = contract.init_state(pos=tuple(float(x) for x in self.start))
@@ -61,6 +70,39 @@ class LoopbackPlant:
 
     def step(self, raw_action: np.ndarray) -> None:
         self.state = self.contract.plant_step(self.state, raw_action)
+        self.steps += 1
+
+    def step_command(self, command: ContractCommand) -> None:
+        """v1: ``plant_step`` on the raw action; v2: the sim plant on the decoded command."""
+        if command.contract_version < 2 or command.collective_g is None:
+            self.step(command.raw)
+            return
+        import torch
+
+        from drone_fly.sim import Plant, PlantConfig
+
+        if self._sim is None:
+            profile = self.drone
+            if profile is None:
+                from drone_fly import drones
+                from drone_fly.sim.action import REFERENCE_DRONE
+
+                profile = drones.load(REFERENCE_DRONE)
+            cfg = PlantConfig(integrator="euler-legacy", dtype="float64")
+            self._sim = Plant(profile, 1, "cpu", 0, cfg, 0.0)
+            self._sim.reset(torch.ones(1, dtype=torch.bool), motor_g=1.0)
+        p = self._sim
+        for key in ("pos", "vel", "quat", "omega"):
+            setattr(p, key, torch.as_tensor(self.state[key], dtype=torch.float64).reshape(1, -1))
+        p.step(
+            torch.tensor([float(command.collective_g)], dtype=torch.float64),
+            torch.as_tensor(command.rates, dtype=torch.float64).reshape(1, 3),
+            float(self.contract.DT),
+        )
+        self.state = {
+            key: getattr(p, key)[0].numpy().astype(np.float32)
+            for key in ("pos", "vel", "quat", "omega")
+        }
         self.steps += 1
 
 
@@ -79,7 +121,8 @@ class PlantStateSource(StateSource):
 
 
 class PlantActionSink(ActionSink):
-    """Applies the contract ``plant_step`` to the raw action (bit-exact with the reference)."""
+    """Steps the loopback plant: ``plant_step`` on a v1 raw action (bit-exact with the
+    reference), the sim plant on a v2 command."""
 
     def __init__(self, plant: LoopbackPlant) -> None:
         self.plant = plant
@@ -87,7 +130,7 @@ class PlantActionSink(ActionSink):
     def send(self, command: ContractCommand) -> dict[str, Any]:
         if self.plant.in_failsafe:
             return {"stepped": False}
-        self.plant.step(command.raw)
+        self.plant.step_command(command)
         return {"stepped": True, "plant_step": self.plant.steps}
 
     def failsafe(self) -> None:
@@ -182,7 +225,9 @@ def build_loopback_harness(config: Any, ctx: BuildContext) -> Harness:
         )
     course = load_course(config.section("course"), contract, WorldScale(config.world_scale))
     clock = SimClock()
-    plant = LoopbackPlant(contract, course.start, clock)
+    from drone_fly.harness.config import load_drone_profile
+
+    plant = LoopbackPlant(contract, course.start, clock, load_drone_profile(config.data))
     parts = config.parts
     builtin_parts = {
         ("state_source", "plant"): lambda: PlantStateSource(plant),

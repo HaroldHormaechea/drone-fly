@@ -13,6 +13,14 @@
 # estimator (parts.free_space_estimator: depth).
 harness: liftoff
 
+# The airframe flown (UC67): drones/<id>/drone.yaml. Its Betaflight rates and its inverse thrust
+# curve map the policy's command (collective_g, body rates) to sticks, replacing the old CALIBRATE
+# placeholders controls.rates / controls.hover_stick (which must then stay null). This profile was
+# identified in Liftoff by `drone-fly sysid` (UC66) with fit_quality: poor (rate fit errors above
+# the 15 % limit; see drones/liftoff-5inch-vortex-pro-250/sysid.md). Set `drone: null` and fill
+# controls.rates / controls.hover_stick to fly an airframe without a profile.
+drone: liftoff-5inch-vortex-pro-250
+
 contract:
   gpu_prototype_dir: null   # null -> $DRONE_FLY_GPU_PROTOTYPE -> <repo>/gpu_prototype
   k1_path: null             # null -> $DRONE_FLY_K1_PATH -> <repo>/artifacts/pruned/k1
@@ -163,13 +171,13 @@ depth:
   warmup_timeout_s: 60.0    # wait for the first depth map (model load) before the loop starts
 
 controls:
-  # Liftoff rate profile per axis (Betaflight rates; rc_rate 1.0 = 100). CALIBRATE to yours.
-  rates:
-    roll: {rc_rate: 1.0, super_rate: 0.7, expo: 0.0}
-    pitch: {rc_rate: 1.0, super_rate: 0.7, expo: 0.0}
-    yaw: {rc_rate: 1.0, super_rate: 0.7, expo: 0.0}
+  # Only with `drone: null`: the Liftoff rate profile per axis (Betaflight rates; rc_rate 1.0 =
+  # 100), e.g. {roll: {rc_rate: 1.0, super_rate: 0.7, expo: 0.0}, pitch: ..., yaw: ...}, and the
+  # stick position [-1, 1] that hovers the airframe (the reference-plant collective map is
+  # anchored there). null with a drone (its profile gives both).
+  rates: null
+  hover_stick: null
   rate_scale: 1.0           # multiplies commanded body rates before the inverse rate curve
-  hover_stick: -0.4         # stick position [-1, 1] that hovers this airframe. CALIBRATE
   axis_map: {throttle: left_y, yaw: left_x, pitch: right_y, roll: right_x}   # mode 2
   # stick = sign * inverse_rate(body rate): +wx roll right, +wy pitch forward (nose down),
   # +wz is counter-clockwise, i.e. yaw stick LEFT. Flip a sign if Liftoff's binding inverts an axis.

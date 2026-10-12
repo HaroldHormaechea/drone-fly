@@ -11,6 +11,47 @@ can integrate flight without importing the training env.
 
 ---
 
+## 0. Contract version (UC67)
+
+The **action** contract has two versions. The observation (§1), the extra senses (§4) and the file
+format (§5) are the same in both.
+
+| version | raw action `a` means | used by |
+|---|---|---|
+| **1** (legacy) | `a0` -> the collective **fraction** `clip((a0+1)/2, 0, 1)` of the reference plant (`drones/meteor75`, §2-3); `tanh(a1:4) * MAX_BODY_RATE` rad/s | every checkpoint trained before UC67 (`training/01`-`12`, `gpu_prototype`) |
+| **2** | `collective_g = clamp(1 + collective_scale_g * a0, 0, max_g)`: body-z specific force in **g**, 1.0 = hover on ANY airframe; `rates = tanh(a1:4) * max_rate_rad_s` | checkpoints trained with `drone-fly train` on `drone_fly.sim` |
+
+The canonical (decoded) action of both versions is `[collective_g, roll_rate, pitch_rate,
+yaw_rate]`. A v1 action decodes to it through the reference profile:
+`collective_g = thrust_g(fraction)`, i.e. `2.5 * fraction` on meteor75. On meteor75, v1 and v2
+are related by `collective_g = 1.25 * a0 + 1.25`, an affine map in `a0`.
+
+**The version lives in a sidecar** beside the checkpoint, `<stem>.contract.json`:
+
+```json
+{"contract_version": 2,
+ "action": {"collective_scale_g": 1.0, "max_rate_rad_s": 4.0, "max_g": 2.5},
+ "extra_dim": 30, "actor": "k1-reservoir-aug", "drone": "meteor75", "run_id": "..."}
+```
+
+- A checkpoint **without a sidecar is v1**. Always move the `.pt` and its `.contract.json` together;
+  a v2 model read as v1 flies wrong.
+- `collective_scale_g` and `max_rate_rad_s` come from the training config (no defaults);
+  `max_g` is the training drone's envelope.
+- A v2 readout's collective bias starts at 0, which commands hover.
+
+**Deploying v2.** Command `collective_g` and the rates to the target airframe. Its inverse thrust
+curve gives the throttle: `stick = 2 * throttle_for_g(collective_g) - 1`. Its Betaflight rates give
+the stick deflection for each body rate. The live harness does this with the `drone: <id>` config
+key (`drones/<id>/drone.yaml`).
+
+The harness reads the sidecar (`ContractPolicyRunner.load`), logs the decoded version and records
+it in the run's `meta.json`. Its decoders are
+`drone_fly.sim.action.decode_numpy` (harness) and `decode_torch` (training), which are
+parity-tested. The v1 decoding is bit-identical to §2. `gpu_prototype/inference.py` (`plant_step`)
+remains the v1 reference plant; the v2 reference plant is `drone_fly.sim.Plant` with the
+checkpoint's drone profile. See [ADR 0006](adr/0006-profile-driven-batched-sim.md).
+
 ## 1. Observation (the core 12-dim vector — shared by ALL models)
 
 `obs` is a **float32[12]**, built by `BaseEnv.obs()` / `BatchedProcCourse.obs()` as the concatenation:
@@ -25,7 +66,7 @@ can integrate flight without importing the training env.
 This 12-vector is the **only** input the frozen connectome brain sees (via `input_projection`). Everything
 else is read by the *readout*, not the brain (§4).
 
-## 2. Action (4-dim) and its exact mapping to the plant
+## 2. Action (4-dim) and its exact mapping to the plant (contract v1)
 
 The model outputs a **float32[4]** raw action, nominally in `[−1, 1]`, laid out `[collective, wx, wy, wz]`.
 The simulator (`hover_gpu.Base.step`) maps it as:

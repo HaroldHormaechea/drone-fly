@@ -1,5 +1,14 @@
 # GPU-parallel batched simulator + PPO (research prototype)
 
+> **Frozen history (UC67).** This directory is no longer developed. The simulator, the course env,
+> the course generator, the reservoir actor and PPO now live in the tested package:
+> `src/drone_fly/sim/` (profile-driven `Plant`, `CourseEnv`, `course_gen`, randomization, timing,
+> action contract v2), `src/drone_fly/controller/reservoir.py` (`K1ReservoirAug`) and
+> `src/drone_fly/training/` (`drone-fly train run | eval | bench`). The plant is parameterised by a
+> drone profile (`drones/<id>/drone.yaml`) instead of the constants below. `inference.py` remains
+> the reference of the v1 inference contract used by the harness. See
+> [ADR 0006](../docs/adr/0006-profile-driven-batched-sim.md).
+
 A custom **batched quadcopter simulator** that runs thousands of environments as a single GPU batch,
 with dynamics *and* policy on-GPU (no CPU transfer). This is ~1000–4000× faster than the pybullet
 training path (~1.1M env-steps/s vs ~300–600/s) and is what finally made the acro-stabilization +

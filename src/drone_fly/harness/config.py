@@ -400,11 +400,52 @@ class HarnessConfig:
         return self.data.get(key, default)
 
 
+def check_drone(data: dict[str, Any]) -> str | None:
+    """Validate the top-level ``drone: <id>`` key (UC67) and return it.
+
+    With a drone, the airframe's Betaflight rates and its inverse thrust curve come from
+    ``drones/<id>/drone.yaml``; duplicating them as ``controls.rates`` / ``controls.hover_stick``
+    is an error (set ``drone: null`` to use the legacy controls instead).
+    """
+    drone = data.get("drone")
+    if drone is None:
+        return None
+    if not isinstance(drone, str) or not drone:
+        raise HarnessConfigError(
+            f"config 'drone' must be a drone profile id or null, got {drone!r}"
+        )
+    controls = data.get("controls")
+    if isinstance(controls, dict):
+        for key in ("rates", "hover_stick"):
+            if controls.get(key) is not None:
+                raise HarnessConfigError(
+                    f"config 'drone: {drone}' and 'controls.{key}' conflict: the drone profile "
+                    f"already gives the rates and the hover throttle (set controls.{key}: null, "
+                    "or drone: null to use the controls)"
+                )
+    return drone
+
+
+def load_drone_profile(data: dict[str, Any]) -> Any:
+    """The :class:`~drone_fly.drones.DroneProfile` named by ``drone`` (None when unset)."""
+    drone = check_drone(data)
+    if drone is None:
+        return None
+    from drone_fly import drones
+    from drone_fly.drones import DroneProfileError
+
+    try:
+        return drones.load(drone)
+    except DroneProfileError as exc:
+        raise HarnessConfigError(f"config 'drone': {exc}") from exc
+
+
 def validate(harness: str, data: dict[str, Any]) -> HarnessConfig:
     if data.get("harness") != harness:
         raise HarnessConfigError(
             f"config is for harness {data.get('harness')!r}, but {harness!r} was requested"
         )
+    check_drone(data)
     scaling = section(data, "scaling")
     return HarnessConfig(
         harness=harness,

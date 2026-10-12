@@ -1,6 +1,8 @@
 # BetaFPV Meteor75 Pro ANALOG: the plant the policies are trained on today (UC-56), ported
 # value-for-value from gpu_prototype/hover_gpu.py (BatchedDrone) and src/drone_fly/adapter/meteor75.py.
-# Not identified: nothing here was measured. The training code does not read this file yet (UC67).
+# Not identified: nothing here was measured. drone_fly.sim (UC67) reads it: it is the plant of the
+# meteor75-legacy / proc-course-dr training configs and the reference plant of action contract v1
+# (old checkpoints' collective fraction -> g goes through this thrust curve).
 # tests/test_drones_meteor75.py asserts it agrees with those two sources.
 schema_version: 1
 id: meteor75
@@ -28,8 +30,8 @@ nominal:
   # super rate or expo is exactly linear (rc_rate < 2: no high-rate boost branch). hover_gpu maps the
   # action through tanh first; the stick here is the post-tanh value.
   # tau_s = 1/RATE_KP. hover_gpu's rate loop is a DISCRETE Euler step omega += KP * (cmd - omega) * DT
-  # (KP * DT = 0.36 per 50 Hz step); tau is its continuous-time equivalent. UC67 must keep the
-  # Euler form to reproduce BatchedDrone exactly.
+  # (KP * DT = 0.36 per 50 Hz step); tau is its continuous-time equivalent. The sim's
+  # euler-legacy integrator keeps that Euler form and reproduces BatchedDrone exactly.
   rates:
     ref: "hover_gpu.py MAX_BODY_RATE = 4.0, RATE_KP = 18.0; no rate delay"
     roll: {rc_rate: 1.1459155902616465, super_rate: 0.0, expo: 0.0, tau_s: 0.05555555555555555, delay_s: 0.0}
@@ -51,7 +53,7 @@ randomization:
   # LAG_TAU (0.02, 0.08); the lower bound is widened to 0 so the range contains the nominal 0.
   motor_lag_s: {min: 0.0, max: 0.08}
   # LAT 0..2 action steps of DT = 0.02 s. gates_dr delays ALL FOUR channels, throttle included:
-  # UC67 must apply this delay to the throttle too.
+  # drone_fly.sim applies this delay to the throttle too (a common-mode offset).
   latency.control_to_gyro_s: {min: 0.0, max: 0.04}
   # DRAG (0, 0.08) is a quadratic FORCE coefficient divided by the randomized mass: as an
   # acceleration it spans 0 .. DRAG_max / MASS_min = 0.08 / 0.025 = 3.2 per metre.

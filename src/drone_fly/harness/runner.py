@@ -588,7 +588,7 @@ class HarnessRunner:
                 raw, brain = self.policy.act_with_brain(obs, extra)
             else:
                 raw = self.policy.act(obs, extra)
-            command = decode_action(raw, self.contract)
+            command = decode_action(raw, self.contract, getattr(self.policy, "action_spec", None))
         except Exception as exc:  # noqa: BLE001
             log.exception("policy failed")
             self._finish(record, STOP_POLICY_ERROR, repr(exc))
