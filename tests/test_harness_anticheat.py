@@ -104,15 +104,25 @@ def test_missing_tasklist_is_a_config_error(monkeypatch):
         anticheat.running_process_names()
 
 
+@pytest.fixture(autouse=True)
+def _block_real_input(monkeypatch):
+    """Any ui_driver game access (cursor, wheel, keys, screen, telemetry port, log) fails."""
+    from drone_fly.harness.liftoff import ui_driver
+
+    for fn in (
+        "_user32", "_focused", "click", "click_ref", "_click_xy", "_scroll", "_hover",
+        "_grab_screen", "press_escape", "to_main_menu", "telemetry_streaming",
+        "telemetry_position", "_log_size", "_log_since", "focus_liftoff",
+    ):  # fmt: skip
+        if hasattr(ui_driver, fn):
+            monkeypatch.setattr(
+                ui_driver, fn, lambda *a, _fn=fn, **kw: pytest.fail(f"touched the game: {_fn}")
+            )
+
+
 def test_select_drone_refuses_before_any_game_access(monkeypatch):
     from drone_fly.harness.liftoff import ui_driver
 
-    def touched(*a, **kw):
-        pytest.fail("must not touch the game while anti-cheat runs")
-
-    for fn in ("_focused", "click", "_click_xy", "_grab_screen"):
-        monkeypatch.setattr(ui_driver, fn, touched)
-    monkeypatch.setattr(ui_driver, "DRONE_MENU_PATH", ("single_player",))
     with pytest.raises(AntiCheatRunningError):
         ui_driver.select_drone(
             "Test small drone", anticheat=lambda: require_no_anticheat(lambda: ["vgc.exe"])

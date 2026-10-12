@@ -155,3 +155,22 @@ def test_fit_prints_the_warnings(roots, tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "WARNING roll: only 3 doublet amplitudes" in out
     assert "expo ill-conditioned" not in out  # only WARNING notes are printed
+
+
+def test_level_and_home_forward_reach_run_sysid_liftoff(monkeypatch, capsys):
+    from drone_fly.sysid import session as session_mod
+    from drone_fly.sysid.session import SysidResult
+
+    seen = {}
+
+    def fake(drone, **kw):
+        seen.update(kw)
+        return SysidResult(session_dir="x")
+
+    monkeypatch.setattr(session_mod, "run_sysid_liftoff", fake)
+    argv = ["sysid", "liftoff", "--drone", "liftoff-test-micro", "--select", "--liftoff-name",
+            "Test small drone", "--level", "arena-freeflight", "--home-forward", "25"]  # fmt: skip
+    assert main(argv) == 0
+    assert seen["level"] == "arena-freeflight" and seen["home_forward"] == 25.0
+    assert seen["select"] and seen["liftoff_name"] == "Test small drone"
+    assert build_parser().parse_args(["sysid", "liftoff", "--drone", "x"]).home_forward == 0.0

@@ -12,6 +12,7 @@ import csv
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from drone_fly.harness.liftoff.anticheat import AntiCheatRunningError, require_no_anticheat
@@ -481,3 +482,100 @@ def test_anticheat_error_is_a_config_error():
     from drone_fly.harness.errors import HarnessConfigError
 
     assert issubclass(AntiCheatRunningError, HarnessConfigError)
+
+
+# ----------------------------------------------------------------------------- transit + level
+
+
+def test_home_forward_transit_moves_the_hold_point_and_the_geofence(tmp_path):
+    """``--home-forward 8``: after take-off the drone flies 8 m along the spawn heading; the
+    experiments run there and the (6 m) geofence is centred on the new hold point."""
+    parts = Parts()
+    sched = [e for e in build_schedule(0, SMALL) if e.kind == "throttle_step"]  # 2 per pass
+    settings = SessionSettings(home_forward_m=8.0, limits=SafetyLimits(radius_m=6.0))
+    session = parts.session(tmp_path / "s", schedule=sched, settings=settings)
+    seen = []
+    original = session._run_experiment
+
+    def spy(exp):
+        st = parts.source.latest()
+        seen.append((exp.pass_index, session.home.copy(), np.asarray(st.pos, float).copy()))
+        return original(exp)
+
+    session._run_experiment = spy
+    result = session.run()
+    assert result.completed and result.done == len(sched) and not result.violations
+    events = [e["event"] for e in meta_of(tmp_path / "s")["events"]]
+    assert events.count("transit 8 m to the experiment hold point") == 2  # once per fly-up
+    first_of_pass = {}
+    for i, (p, home, pos) in enumerate(seen):
+        first_of_pass.setdefault(p, i)
+        # spawn yaw is 0 in the synthetic world: "forward" is +x (contract frame)
+        assert home[0] == pytest.approx(8.0, abs=0.05) and abs(home[1]) < 0.05
+        assert pos[0] > 2.0  # the drone left the spawn
+        if i != first_of_pass[p]:
+            # by the next experiment the drone holds the new point
+            assert np.linalg.norm(pos[:2] - home[:2]) < 1.0
+    cmd = rows(tmp_path / "s" / COMMANDS_FILE)
+    assert "transit" in {r[COMMAND_HEADER.index("phase")] for r in cmd[1:]}
+
+
+def test_no_transit_by_default(tmp_path):
+    parts = Parts()
+    sched = build_schedule(0, SMALL)[:1]
+    result = parts.session(tmp_path / "s", schedule=sched).run()
+    assert result.completed
+    events = [e["event"] for e in meta_of(tmp_path / "s")["events"]]
+    assert not any(e.startswith("transit") for e in events)
+
+
+def test_level_is_recorded_and_passed_to_select_drone(monkeypatch, tmp_path):
+    from drone_fly.harness.liftoff import anticheat, ui_driver
+    from drone_fly.sysid.session import run_sysid_liftoff
+
+    kw = {"plant": "synthetic", "out_root": tmp_path, "expect_hover": (0.15, 0.30)}
+    run_sysid_liftoff(
+        "synthetic-test-micro", session="a", level="arena-freeflight", home_forward=5.0,
+        amplitudes=(0.5,), passes=2, **kw,
+    )  # fmt: skip
+    meta = meta_of(tmp_path / "synthetic-test-micro" / "a")
+    assert meta["level"] == "arena-freeflight" and meta["map"] == "arena-freeflight"
+    assert meta["settings"]["home_forward_m"] == 5.0
+    run_sysid_liftoff(
+        "synthetic-test-micro", session="b", level="arena-freeflight", map_name="Liftoff Arena",
+        amplitudes=(0.5,), passes=2, **kw,
+    )  # fmt: skip
+    assert meta_of(tmp_path / "synthetic-test-micro" / "b")["map"] == "Liftoff Arena"
+
+    # live plant + --select: select_drone gets the level (stopped right there; no game access)
+    class Stop(Exception):
+        pass
+
+    seen = {}
+
+    def fake_select(name, slot=None, *, level=None, **k):
+        seen.update(name=name, level=level)
+        raise Stop
+
+    monkeypatch.setattr(anticheat, "running_process_names", lambda: ["Liftoff.exe"])
+    monkeypatch.setattr(ui_driver, "select_drone", fake_select)
+    with pytest.raises(Stop):
+        run_sysid_liftoff(
+            "liftoff-test-micro", session="c", plant="liftoff", select=True,
+            liftoff_name="Test small drone", level="arena-freeflight", out_root=tmp_path,
+        )  # fmt: skip
+    assert seen == {"name": "Test small drone", "level": "arena-freeflight"}
+
+
+def test_violation_during_transit_is_recorded_not_an_error(tmp_path):
+    """AC6: a violation outside an experiment window (here the geofence during the transit, the
+    drone trailing the moving hold point) is recorded by name and handled; it must never end
+    the run as an unhandled ``error``."""
+    parts = Parts()
+    sched = [e for e in build_schedule(0, SMALL) if e.kind == "throttle_step"]
+    settings = SessionSettings(home_forward_m=8.0, limits=SafetyLimits(radius_m=3.0))
+    result = parts.session(tmp_path / "s", schedule=sched, settings=settings).run()
+    meta = meta_of(tmp_path / "s")
+    assert result.stop_reason != "error", result.error
+    assert any(v["name"] == "geofence" for v in meta["violations"])
+    assert not parts.world.armed
