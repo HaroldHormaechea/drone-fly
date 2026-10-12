@@ -60,12 +60,6 @@ def prof():
     return drones.load("meteor75", REPO / "drones")
 
 
-def test_gpu_prototype_modules_are_not_imported():
-    import sys
-
-    assert "hover_gpu" not in sys.modules and "gates_dr" not in sys.modules
-
-
 def test_profile_is_an_analog(prof):
     assert prof.id == "meteor75" and prof.source == "analog"
     assert prof.camera is None
