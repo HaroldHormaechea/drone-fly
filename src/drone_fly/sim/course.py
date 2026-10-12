@@ -1,0 +1,806 @@
+"""The procedural random-course env: a port of ``gpu_prototype/gates_proc_env.BatchedProcCourse``.
+
+Every env flies a different random course drawn from a pre-generated pool (sorted easy -> hard
+for the curriculum), re-drawn at each reset. Observations (``obs()`` 12 dims, ``extra()`` 30 or
+70 dims), the gate-pass rule, the obstacle contact nudge, the occlusion-aware lookahead, the
+raycast and every reward term are the prototype's. What changed:
+
+* **Dynamics** are a profile-driven :class:`~drone_fly.sim.plant.Plant` (dynamics
+  randomization, motor lag, drag, delay line, ground contact) stepped with the per-env
+  :class:`~drone_fly.sim.timing.ControlTiming` (control period, action delay + jitter, skipped
+  ticks). The raw policy action is decoded by the checkpoint's
+  :class:`~drone_fly.sim.action.ActionSpec` (v1 legacy fraction or v2 hover-relative g).
+* **Flags** are :class:`CourseConfig` fields instead of ``PROC_*`` environment variables.
+* **Rate invariance.** The dense per-step terms (upright, low-spin, obstacle contact, gap
+  steering) are multiplied by ``dt / reward_reference_dt_s``; potential-difference terms
+  (progress, clearance and floor shaping) and events (gate pass, completion, crash) are not.
+  ``reward_reference_dt_s`` has no default (the configs set 0.02 s). Episode length and the
+  floor-kill grace are times (the prototype's 1400 and 20 steps of 20 ms).
+* **Starts** (:class:`StartConfig`): ``legacy`` reproduces the prototype (spawn at the course
+  start, z >= 0.12, no contact model, floor kill after the grace); ``mixed`` draws a ground start
+  (at rest on the floor, level, motors idle for ``arm_delay_s`` whatever the policy outputs —
+  the policy still observes) with probability ``ground_fraction``, else an air start (level,
+  motor state 1 g, z from ``air_z_m``). A ground start's floor contact is non-terminal until its
+  first lift-off; after it the floor crash applies.
+* **No host synchronisation in step()**: respawn and contact are masked tensor ops; the
+  completion metric is an on-device running average.
+* **Per-episode log** (:class:`EpisodeLog`): every dynamics and timing sample and the start mode
+  at reset, the return / length / outcome at the end, buffered on the device and drained once
+  per PPO iteration.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field, replace
+from typing import Any
+
+import numpy as np
+import torch
+
+from drone_fly.sim.action import ActionSpec, decode_torch
+from drone_fly.sim.course_gen import sample_course
+from drone_fly.sim.plant import Plant, PlantConfig
+from drone_fly.sim.quat import gravity_body
+from drone_fly.sim.randomization import LOG_COLUMNS
+from drone_fly.sim.timing import TIMING_LOG_COLUMNS, ControlTiming, TimingConfig
+
+NG_MAX = 20  # pad gate lists to this
+MO = 10  # max obstacles per course
+NVIS = 2  # nearest obstacles the readout sees
+MARGIN = 0.12  # drone half-extent for obstacle contact
+BOUNCE = 0.6  # outward impulse on obstacle contact (recoverable nudge)
+CONTACT_PEN = 0.5
+ARENA = 16.0  # xy crash bound (courses are centred on origin, radius <~9)
+CEIL = 3.5
+FLOOR_KILL_Z = 0.08
+SPAWN_MIN_Z = 0.12  # the prototype clamps a legacy spawn onto the ground at this height
+SPAWN_NOISE_M = 0.05
+PASS_SLACK = 0.6  # precision curriculum: extra pass radius at difficulty 0, -> 0 at difficulty 1
+PARK = 3.0  # position curriculum: metres an obstacle is parked off-path at obs_pos_curr = 0
+SHAPE_BETA = 4.0  # potential-based clearance shaping weight
+GAP_BETA = 0.4  # gap-steering reward weight
+FLOOR_BETA = 3.0  # floor-margin shaping weight
+FLOOR_CAP = 0.5  # only shape altitude within this many metres of the floor
+CLEAR_CAP = 1.5  # only shape clearance within this many metres of an obstacle surface
+N_RAYS = 40  # forward-cone raycasts
+CONE_HALF_DEG = 45.0  # 90-degree total cone
+RAY_RANGE = 4.0  # max sensing distance (m)
+BASE_EXTRA_DIM = 12 + 3 + 7 + NVIS * 4  # obs + curr gate + next lookahead + obstacle vision
+#: ``TRACTABLE`` tier (the 07 model's): 1 lap, 5-10 gates, apertures 0.75-1.5 m.
+TRACTABLE_KW = {"ng_hi": 11, "laps_lo": 1, "laps_hi": 2, "ap_lo": 0.75}
+START_MODES = ("legacy", "mixed")
+#: Start-mode codes in the episode log.
+START_LEGACY, START_GROUND, START_AIR = 0, 1, 2
+#: Crash-cause codes in the episode log.
+OUTCOMES = ("none", "floor", "ceiling", "arena", "obstacle", "timeout", "completed")
+
+
+@dataclass(frozen=True)
+class StartConfig:
+    mode: str = "mixed"
+    #: ``mixed``: probability of a ground start (else an air start).
+    ground_fraction: float = 0.5
+    #: Air-start height range (m).
+    air_z_m: tuple[float, float] = (0.8, 1.5)
+    #: Motors idle this long after a ground start (Liftoff: arm press, then the 0.5 s settle).
+    arm_delay_s: float = 0.5
+
+    def __post_init__(self) -> None:
+        if self.mode not in START_MODES:
+            raise ValueError(f"start.mode must be one of {START_MODES}, got {self.mode!r}")
+        if not 0.0 <= self.ground_fraction <= 1.0:
+            raise ValueError("start.ground_fraction must be in [0, 1]")
+        lo, hi = self.air_z_m
+        if not 0 < lo <= hi:
+            raise ValueError("start.air_z_m needs 0 < lo <= hi")
+        if self.arm_delay_s < 0:
+            raise ValueError("start.arm_delay_s must be >= 0")
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> StartConfig:
+        d = dict(d or {})
+        if "air_z_m" in d:
+            d["air_z_m"] = tuple(float(x) for x in d["air_z_m"])
+        unknown = set(d) - set(cls.__dataclass_fields__)
+        if unknown:
+            raise ValueError(f"unknown start keys {sorted(unknown)}")
+        return cls(**d)
+
+
+@dataclass(frozen=True)
+class CourseConfig:
+    """The prototype's ``PROC_*`` flags as fields (see the module docstring)."""
+
+    #: Dense rewards are scaled by ``dt / reward_reference_dt_s`` (required: no sim default).
+    reward_reference_dt_s: float
+    tier: str = "tractable"  # tractable | full
+    tunnels: bool = False
+    multilap: bool = False
+    variety: bool = False
+    no_obs: bool = False
+    obs_terminal: bool = False
+    shaping: bool = False
+    gap: bool = False
+    floor: bool = False
+    raycast: bool = False
+    pool_size: int = 1024
+    pool_base: int = 0
+    episode_s: float = 28.0  # the prototype's 1400 steps of 20 ms
+    floor_grace_s: float = 0.4  # the prototype's 20 steps of 20 ms
+    start: StartConfig = field(default_factory=StartConfig)
+
+    def __post_init__(self) -> None:
+        if not self.reward_reference_dt_s or self.reward_reference_dt_s <= 0:
+            raise ValueError("course.reward_reference_dt_s must be positive")
+        if self.tier not in ("tractable", "full"):
+            raise ValueError("course.tier must be tractable or full")
+
+    @property
+    def pool_kwargs(self) -> dict[str, Any]:
+        kw: dict[str, Any] = dict(TRACTABLE_KW) if self.tier == "tractable" else {}
+        if self.tunnels:
+            kw["with_tunnels"] = True
+        if self.multilap:
+            kw.update(laps_lo=2, laps_hi=5)
+        if self.variety:
+            kw["with_variety"] = True
+        return kw
+
+    @property
+    def extra_dim(self) -> int:
+        return BASE_EXTRA_DIM + (N_RAYS if self.raycast else 0)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> CourseConfig:
+        d = dict(d)
+        start = StartConfig.from_dict(d.pop("start", None))
+        unknown = set(d) - set(cls.__dataclass_fields__)
+        if unknown:
+            raise ValueError(f"unknown course keys {sorted(unknown)}")
+        if "reward_reference_dt_s" not in d:
+            raise ValueError("course.reward_reference_dt_s is required")
+        return cls(start=start, **d)
+
+    @classmethod
+    def from_flags(cls, flags: dict[str, Any], **kw: Any) -> CourseConfig:
+        """From a ``gates_proc_env`` module's flag globals (``NO_OBS``, ``RAYCAST``, ...)."""
+        pool_kw = flags.get("POOL_KW") or {}
+        return cls(
+            tier="tractable" if pool_kw.get("ng_hi") == TRACTABLE_KW["ng_hi"] else "full",
+            tunnels=bool(pool_kw.get("with_tunnels")),
+            multilap=pool_kw.get("laps_lo") == 2 and pool_kw.get("laps_hi") == 5,
+            variety=bool(pool_kw.get("with_variety")),
+            no_obs=bool(flags.get("NO_OBS")),
+            obs_terminal=bool(flags.get("OBS_TERMINAL")),
+            shaping=bool(flags.get("SHAPING")),
+            gap=bool(flags.get("GAP")),
+            floor=bool(flags.get("FLOOR")),
+            raycast=bool(flags.get("RAYCAST")),
+            **kw,
+        )
+
+
+# ----------------------------------------------------------------------------- course pool
+
+_POOLS: dict[tuple, dict[str, np.ndarray]] = {}
+
+
+def build_pool(
+    size: int = 1024, base: int = 0, no_obs: bool = False, **ckw: Any
+) -> dict[str, np.ndarray]:
+    """``size`` courses packed into padded arrays, sorted easy -> hard (prototype ``build_pool``).
+
+    Cached per argument set (NumPy only; tensors are made per env instance).
+    """
+    key = (size, base, no_obs, tuple(sorted(ckw.items())))
+    if key in _POOLS:
+        return _POOLS[key]
+    P = size
+    cen = np.zeros((P, NG_MAX, 3), np.float32)
+    yaw = np.zeros((P, NG_MAX), np.float32)
+    ap = np.ones((P, NG_MAX), np.float32)
+    gmask = np.zeros((P, NG_MAX), bool)
+    start = np.zeros((P, 3), np.float32)
+    ng = np.zeros(P, np.int64)
+    laps = np.zeros(P, np.int64)
+    oc = np.zeros((P, MO, 3), np.float32)
+    odim = np.ones((P, MO, 3), np.float32)
+    ovec = np.zeros((P, MO, 3), np.float32)
+    otype = np.zeros((P, MO), np.int64)
+    omask = np.zeros((P, MO), bool)
+    for p in range(P):
+        c = sample_course(base + p, **ckw)
+        n = c["n_gates"]
+        ng[p] = n
+        laps[p] = c["laps"]
+        for i, g in enumerate(c["gates"]):
+            cen[p, i] = g["center"]
+            yaw[p, i] = g["yaw"]
+            ap[p, i] = g["aperture"]
+            gmask[p, i] = True
+        start[p] = c["start"]
+        for j, o in enumerate(c["obstacles"][:MO]):
+            oc[p, j] = o["center"]
+            omask[p, j] = True
+            ovec[p, j] = o.get("ovec", [0.0, 0.0, 0.0])
+            if o["kind"] == "cylinder":
+                otype[p, j] = 0
+                odim[p, j] = [o["radius"], o["radius"], o["half_h"]]
+            else:
+                otype[p, j] = 1
+                odim[p, j] = o["half"]
+    # difficulty (low = easy): more gates, obstacles, laps and tighter apertures = harder
+    mean_ap = np.nanmean(np.where(gmask, ap, np.nan), axis=1)
+    nobs = omask.sum(axis=1)
+    score = ng + 2.0 * nobs + 4.0 / mean_ap + 3.0 * (laps - 2)
+    order = np.argsort(score)
+    pool = {
+        "cen": cen[order],
+        "yaw": yaw[order],
+        "ap": ap[order],
+        "gmask": gmask[order],
+        "start": start[order],
+        "ng": ng[order],
+        "laps": laps[order],
+        "oc": oc[order],
+        "odim": odim[order],
+        "ovec": ovec[order],
+        "otype": otype[order],
+        "omask": omask[order],
+    }
+    if no_obs:
+        pool["omask"] = np.zeros_like(pool["omask"])  # obstacle-free tier
+    _POOLS[key] = pool
+    return pool
+
+
+def ray_cone(n_rays: int = N_RAYS, half_deg: float = CONE_HALF_DEG) -> np.ndarray:
+    """Canonical ray directions in a cone around +z (Fibonacci spiral), ``(n_rays, 3)``."""
+    ga = math.pi * (3 - math.sqrt(5))
+    cz_min = math.cos(math.radians(half_deg))
+    out = []
+    for i in range(n_rays):
+        cz = 1.0 - (i / max(1, n_rays - 1)) * (1 - cz_min)
+        st = math.sqrt(max(0.0, 1 - cz * cz))
+        phi = i * ga
+        out.append((st * math.cos(phi), st * math.sin(phi), cz))
+    return np.asarray(out, np.float32)
+
+
+# ----------------------------------------------------------------------------- episode log
+
+EPISODE_HEADER = (
+    "env",
+    "episode",
+    "start_mode",
+    "course_id",
+    "n_gates",
+    "laps",
+    *LOG_COLUMNS,
+    *TIMING_LOG_COLUMNS,
+)
+EPISODE_TAIL = ("return", "length_s", "steps", "completed", "outcome")
+EPISODE_COLUMNS = EPISODE_HEADER + EPISODE_TAIL
+
+
+class EpisodeLog:
+    """Device-side buffer of finished-episode rows (:data:`EPISODE_COLUMNS`), no host sync.
+
+    Rows are scattered to ``count + cumsum(done) - 1``; rows past ``capacity`` are dropped and
+    counted. :meth:`drain` (one sync) returns the rows and empties the buffer.
+    """
+
+    def __init__(self, capacity: int, device: torch.device) -> None:
+        self.capacity = int(capacity)
+        self.buf = torch.zeros(self.capacity + 1, len(EPISODE_COLUMNS), device=device)
+        self.count = torch.zeros((), dtype=torch.long, device=device)
+        self.dropped = 0
+
+    def add(self, done: torch.Tensor, rows: torch.Tensor) -> None:
+        pos = self.count + torch.cumsum(done.long(), 0) - 1
+        pos = torch.where(done & (pos < self.capacity), pos, self.capacity)
+        self.buf.index_copy_(0, pos, rows.to(self.buf.dtype))
+        self.count = self.count + done.long().sum()
+
+    def drain(self) -> np.ndarray:
+        n = int(self.count)
+        kept = min(n, self.capacity)
+        self.dropped += n - kept
+        rows = self.buf[:kept].cpu().numpy().copy()
+        self.count.zero_()
+        return rows
+
+
+# ----------------------------------------------------------------------------- the env
+
+
+class CourseEnv:
+    """Batched procedural gate course on a profile-driven plant; see the module docstring."""
+
+    def __init__(
+        self,
+        profile: Any,
+        n_envs: int,
+        device: str | torch.device = "cpu",
+        seed: int = 0,
+        config: CourseConfig | None = None,
+        plant_config: PlantConfig | None = None,
+        timing: TimingConfig | None = None,
+        randomization_scale: float = 0.0,
+        *,
+        action_spec: ActionSpec,
+        log_capacity: int | None = None,
+    ) -> None:
+        if config is None:
+            raise ValueError("CourseEnv needs a CourseConfig (reward_reference_dt_s is required)")
+        self.cfg = config
+        self.n = n = int(n_envs)
+        self.device = dev = torch.device(device)
+        self.action_spec = action_spec
+        self.timing_config = timing or TimingConfig()
+        pc = plant_config or PlantConfig()
+        # delay-line slots: the longest delay over the shortest step, plus margin
+        p_delay = profile.latency.input_s + max(r.delay_s for r in profile.rates.values())
+        rnd = profile.randomization
+        p_delay += max(
+            [rnd[k].max for k in rnd if k.endswith("delay_s") or k.startswith("latency")] or [0.0]
+        )
+        min_dt = 1.0 / (
+            max(self.timing_config.control_hz_set or self.timing_config.control_hz)
+            if self.timing_config.mode == "random"
+            else self.timing_config.fixed_hz
+        )
+        need = math.ceil((self.timing_config.max_delay_s + p_delay) / min_dt) + 3
+        if need > pc.delay_slots:
+            pc = replace(pc, delay_slots=need)
+        self.plant = Plant(profile, n, dev, seed, pc, randomization_scale)
+        self.dtype = self.plant.dtype
+        self.gen = self.plant.generator
+        self.timing = ControlTiming(self.timing_config, n, dev, self.gen)
+        pool = build_pool(config.pool_size, config.pool_base, config.no_obs, **config.pool_kwargs)
+        self.P = {
+            k: torch.as_tensor(v, device=dev).to(self.dtype)
+            if v.dtype == np.float32
+            else torch.as_tensor(v, device=dev)
+            for k, v in pool.items()
+        }
+        self.cone = torch.as_tensor(ray_cone(), device=dev, dtype=self.dtype)
+        self.ngates = NG_MAX
+        self.extra_dim = config.extra_dim
+        self.difficulty = 1.0  # curriculum: fraction of the sorted pool that can be drawn
+        self.obs_pos_curr = 1.0  # 0 = obstacles parked PARK m off-path, 1 = on-path
+        self.obs_count_curr = 1.0  # 0 = at most 1 obstacle active, 1 = all active
+        self._ar_n = torch.arange(n, device=dev)
+        z = torch.zeros(n, device=dev, dtype=torch.long)
+        self.tgt = z.clone()
+        self.lap = z.clone()
+        self.cid = z.clone()
+        self.steps = z.clone()
+        self.episode = z.clone()
+        self.start_mode = z.clone()
+        self.arm_until = torch.zeros(n, dtype=torch.float64, device=dev)
+        zf = torch.zeros(n, dtype=self.dtype, device=dev)
+        self.prev_clear = torch.full_like(zf, CLEAR_CAP)
+        self.prev_floor = torch.full_like(zf, FLOOR_CAP)
+        self.ep_return = zf.clone()
+        self.comp_rate = torch.zeros((), dtype=self.dtype, device=dev)
+        self.last_completed = torch.zeros(n, dtype=torch.bool, device=dev)
+        self.last_crashed = torch.zeros_like(self.last_completed)
+        self.last_any_hit = torch.zeros_like(self.last_completed)
+        self.last_dt = torch.zeros(n, dtype=torch.float64, device=dev)
+        self.last_skipped = torch.zeros_like(self.last_completed)
+        self.header = torch.zeros(n, len(EPISODE_HEADER), device=dev)
+        self.log = EpisodeLog(log_capacity, dev) if log_capacity else None
+        self._episode_counter = 0
+        self.reset_all()
+
+    # ---- state views (the plant owns the state) ----
+    @property
+    def pos(self) -> torch.Tensor:
+        return self.plant.pos
+
+    @pos.setter
+    def pos(self, v: torch.Tensor) -> None:
+        self.plant.pos = v
+
+    @property
+    def vel(self) -> torch.Tensor:
+        return self.plant.vel
+
+    @vel.setter
+    def vel(self, v: torch.Tensor) -> None:
+        self.plant.vel = v
+
+    @property
+    def quat(self) -> torch.Tensor:
+        return self.plant.quat
+
+    @quat.setter
+    def quat(self, v: torch.Tensor) -> None:
+        self.plant.quat = v
+
+    @property
+    def omega(self) -> torch.Tensor:
+        return self.plant.omega
+
+    @omega.setter
+    def omega(self, v: torch.Tensor) -> None:
+        self.plant.omega = v
+
+    @property
+    def t(self) -> torch.Tensor:
+        """Episode time (s)."""
+        return self.plant.t
+
+    # ---- per-env course accessors ----
+    def _gate(self, idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return (
+            self.P["cen"][self.cid, idx],
+            self.P["yaw"][self.cid, idx],
+            self.P["ap"][self.cid, idx],
+        )
+
+    def _ng(self) -> torch.Tensor:
+        return self.P["ng"][self.cid]
+
+    def _odim(self) -> torch.Tensor:
+        # OBSTACLE-SIZE curriculum: obstacles grow from 0 (difficulty 0) to full (difficulty 1)
+        return self.P["odim"][self.cid] * max(float(self.difficulty), 0.0)
+
+    def _omask(self) -> torch.Tensor:
+        # OBSTACLE-COUNT curriculum: at most K active obstacles per course, K growing 1 -> all
+        om = self.P["omask"][self.cid]
+        if float(self.obs_count_curr) >= 1.0:
+            return om
+        nobs = om.sum(dim=1)
+        k = (1 + torch.round(float(self.obs_count_curr) * (nobs - 1).clamp(min=0))).long()
+        rank = om.cumsum(dim=1)
+        return om & (rank <= k.unsqueeze(1))
+
+    def _ocen(self) -> torch.Tensor:
+        # OBSTACLE-POSITION curriculum: parked PARK m off to the side, sliding onto the path
+        off = PARK * (1.0 - max(0.0, min(1.0, float(self.obs_pos_curr))))
+        return self.P["oc"][self.cid] + self.P["ovec"][self.cid] * off
+
+    def _target_pos(self) -> torch.Tensor:
+        return self._gate(self.tgt)[0]
+
+    # ---- reset ----
+    def reset_all(self) -> None:
+        self._spawn(torch.ones(self.n, dtype=torch.bool, device=self.device))
+
+    def _randn(self, *shape: int) -> torch.Tensor:
+        return torch.randn(*shape, generator=self.gen, device=self.device, dtype=self.dtype)
+
+    def _rand(self, *shape: int) -> torch.Tensor:
+        return torch.rand(*shape, generator=self.gen, device=self.device, dtype=self.dtype)
+
+    def _spawn(self, mask: torch.Tensor) -> None:
+        """Respawn the envs in ``mask`` on fresh courses (masked, no host sync)."""
+        n, dev = self.n, self.device
+        m1 = mask[:, None]
+        lim = max(16, int(self.difficulty * self.P["cen"].shape[0]))
+        cid = torch.randint(0, lim, (n,), generator=self.gen, device=dev)
+        self.cid = torch.where(mask, cid, self.cid)
+        self.tgt = torch.where(mask, torch.zeros_like(self.tgt), self.tgt)
+        self.lap = torch.where(mask, torch.zeros_like(self.lap), self.lap)
+        self.steps = torch.where(mask, torch.zeros_like(self.steps), self.steps)
+        start = self.P["start"][self.cid]
+        pos = start + SPAWN_NOISE_M * self._randn(n, 3)
+        sc = self.cfg.start
+        rest_z = self.plant.rest_z
+        if sc.mode == "legacy":
+            pos[:, 2] = start[:, 2].clamp(min=SPAWN_MIN_Z)
+            mode = torch.full((n,), START_LEGACY, dtype=torch.long, device=dev)
+        else:
+            ground = self._rand(n) < sc.ground_fraction
+            air_z = sc.air_z_m[0] + (sc.air_z_m[1] - sc.air_z_m[0]) * self._rand(n)
+            pos[:, 2] = torch.where(ground, torch.full_like(air_z, rest_z), air_z)
+            mode = torch.where(ground, START_GROUND, START_AIR)
+        ground = mode == START_GROUND
+        motor = torch.where(ground, 0.0, 1.0).to(self.dtype)
+        command = torch.zeros(n, 4, dtype=self.dtype, device=dev)
+        command[:, 0] = motor
+        self.plant.reset(mask, pos=pos, motor_g=motor, grounded=ground, command=command)
+        self.timing.resample(mask)
+        self.start_mode = torch.where(mask, mode, self.start_mode)
+        arm = torch.where(ground, sc.arm_delay_s, 0.0).to(torch.float64)
+        self.arm_until = torch.where(mask, arm, self.arm_until)
+        if self.cfg.shaping:
+            self.prev_clear = torch.where(mask, self._clearance(), self.prev_clear)
+        if self.cfg.floor:
+            fl = (self.pos[:, 2] - FLOOR_KILL_Z).clamp(0.0, FLOOR_CAP)
+            self.prev_floor = torch.where(mask, fl, self.prev_floor)
+        self.ep_return = torch.where(mask, torch.zeros_like(self.ep_return), self.ep_return)
+        ids = self._episode_counter * n + self._ar_n
+        self._episode_counter += 1
+        self.episode = torch.where(mask, ids, self.episode)
+        header = torch.cat(
+            [
+                torch.stack(
+                    [
+                        self._ar_n.float(),
+                        self.episode.float(),
+                        self.start_mode.float(),
+                        self.cid.float(),
+                        self._ng().float(),
+                        self.P["laps"][self.cid].float(),
+                    ],
+                    1,
+                ),
+                self.plant.params.columns().float(),
+                self.timing.columns().float(),
+            ],
+            1,
+        )
+        self.header = torch.where(m1, header, self.header)
+
+    def _clearance(self) -> torch.Tensor:
+        """Clamped distance to the nearest in-path obstacle surface (``CLEAR_CAP`` when far)."""
+        oc, od, om = self._ocen(), self._odim(), self._omask()
+        cen_d = (oc - self.pos.unsqueeze(1)).norm(dim=-1)
+        orad = od[:, :, :2].max(dim=-1).values
+        clear = torch.where(om, cen_d - orad, torch.full_like(cen_d, 1e4))
+        return clear.min(dim=1).values.clamp(0.0, CLEAR_CAP)
+
+    # ---- observations ----
+    def obs(self) -> torch.Tensor:
+        rel = self._target_pos() - self.pos
+        return torch.cat([rel, gravity_body(self.quat), self.vel, self.omega], dim=-1)
+
+    def _obstacle_vision(self) -> torch.Tensor:
+        """Nearest-NVIS obstacles: rel (dx, dy, dz) + size proxy, masked to real obstacles."""
+        oc, od, om = self._ocen(), self._odim(), self._omask()
+        rel = oc - self.pos.unsqueeze(1)
+        dist = torch.where(om, rel.norm(dim=-1), torch.full_like(rel[..., 0], 1e4))
+        near = torch.topk(-dist, min(NVIS, MO), dim=1).indices
+        ar = self._ar_n.unsqueeze(1)
+        rsel = rel[ar, near]
+        size = od[ar, near].max(dim=-1).values.unsqueeze(-1)
+        valid = om[ar, near].to(self.dtype).unsqueeze(-1)
+        return (torch.cat([rsel, size], dim=-1) * valid).reshape(self.n, -1)
+
+    def _next_lookahead(self) -> torch.Tensor:
+        """Occlusion-aware next-gate features: bearing(3), orient(2), dist(1), vis(1)."""
+        nxt = (self.tgt + 1) % self._ng()
+        nc, ny, _ = self._gate(nxt)
+        d = nc - self.pos
+        dist = d.norm(dim=-1, keepdim=True).clamp(min=1e-3)
+        bearing = d / dist
+        orient = torch.stack([torch.cos(ny), torch.sin(ny)], -1)
+        oc, od, om = self._ocen(), self._odim(), self._omask()
+        seg = nc - self.pos
+        seglen2 = (seg * seg).sum(-1, keepdim=True) + 1e-6
+        to_o = oc - self.pos.unsqueeze(1)
+        tt = ((to_o * seg.unsqueeze(1)).sum(-1) / seglen2).clamp(0, 1)
+        closest = self.pos.unsqueeze(1) + tt.unsqueeze(-1) * seg.unsqueeze(1)
+        dseg = (oc - closest).norm(dim=-1)
+        size = od.max(dim=-1).values + 0.15
+        blocked = (dseg < size) & om & (tt > 0.02) & (tt < 0.98)
+        occ = blocked.any(dim=1, keepdim=True)
+        vis = (~occ).to(self.dtype)
+        bearing = torch.where(occ, bearing + 0.15 * self._randn(self.n, 3), bearing)
+        bearing = bearing / bearing.norm(dim=-1, keepdim=True).clamp(min=1e-3)
+        orient = torch.where(occ, torch.zeros_like(orient), orient)
+        distn = torch.where(occ, torch.zeros_like(dist), (dist / 10.0).clamp(max=1.0))
+        return torch.cat([bearing, orient, distn, vis], dim=-1)
+
+    def _ray_basis(self) -> torch.Tensor:
+        """World ray directions ``(n, R, 3)``: the cone around the heading (velocity, or the
+        target direction below 0.3 m/s)."""
+        R = N_RAYS
+        v = self.vel
+        sp = v.norm(dim=-1, keepdim=True)
+        tdir = self._target_pos() - self.pos
+        fwd = torch.where(
+            sp > 0.3, v / (sp + 1e-6), tdir / (tdir.norm(dim=-1, keepdim=True) + 1e-6)
+        )
+        wup = torch.zeros_like(fwd)
+        wup[:, 2] = 1.0
+        right = torch.cross(fwd, wup, dim=-1)
+        rn = right.norm(dim=-1, keepdim=True)
+        ex = torch.zeros_like(fwd)
+        ex[:, 0] = 1.0
+        right = torch.where(rn < 1e-3, ex, right / (rn + 1e-6))
+        up = torch.cross(right, fwd, dim=-1)
+        c = self.cone
+        cx, cy, cz = c[:, 0].view(1, R, 1), c[:, 1].view(1, R, 1), c[:, 2].view(1, R, 1)
+        return cx * right.unsqueeze(1) + cy * up.unsqueeze(1) + cz * fwd.unsqueeze(1)
+
+    def _cast(self, rays: torch.Tensor) -> torch.Tensor:
+        """Normalised free-space distance in [0, 1] per ray (1 = clear to RAY_RANGE)."""
+        n, R = self.n, N_RAYS
+        oc, od, om = self._ocen(), self._odim(), self._omask()
+        ot = self.P["otype"][self.cid]
+        o_e = self.pos.view(n, 1, 1, 3)
+        r_e = rays.view(n, R, 1, 3)
+        oc_e = oc.view(n, 1, MO, 3)
+        od_e = od.view(n, 1, MO, 3)
+        om_e = om.view(n, 1, MO)
+        ot_e = ot.view(n, 1, MO)
+        INF = torch.full((n, R, MO), 1e4, device=self.device, dtype=self.dtype)
+        # cylinder (vertical): quadratic in xy + z-slab
+        dxy = r_e[..., :2]
+        fxy = (o_e - oc_e)[..., :2]
+        a = (dxy * dxy).sum(-1)
+        b = 2 * (dxy * fxy).sum(-1)
+        cc = (fxy * fxy).sum(-1) - od_e[..., 0] ** 2
+        disc = b * b - 4 * a * cc
+        tcyl = (-b - torch.sqrt(disc.clamp(min=0))) / (2 * a + 1e-9)
+        zhit = o_e[..., 2] + tcyl * r_e[..., 2]
+        cok = (
+            (disc > 0)
+            & (tcyl > 1e-3)
+            & (zhit > oc_e[..., 2] - od_e[..., 2])
+            & (zhit < oc_e[..., 2] + od_e[..., 2])
+        )
+        tcyl = torch.where(cok, tcyl, INF)
+        # box (AABB): slab method
+        dsafe = torch.where(r_e.abs() < 1e-6, torch.full_like(r_e, 1e-6), r_e)
+        t1 = (oc_e - od_e - o_e) / dsafe
+        t2 = (oc_e + od_e - o_e) / dsafe
+        tmn = torch.minimum(t1, t2).max(-1).values
+        tmx = torch.maximum(t1, t2).min(-1).values
+        bhit = torch.where(tmn > 1e-3, tmn, tmx)
+        bok = (tmx >= tmn.clamp(min=0)) & (tmx > 1e-3)
+        tbox = torch.where(bok, bhit, INF)
+        t = torch.where(ot_e == 0, tcyl, tbox)
+        t = torch.where(om_e & (t > 0) & (t < RAY_RANGE), t, INF)
+        return t.min(dim=2).values.clamp(max=RAY_RANGE) / RAY_RANGE
+
+    def _raycast(self) -> torch.Tensor:
+        return self._cast(self._ray_basis())
+
+    def _gap_reward(self) -> torch.Tensor:
+        """Reward flying along the clearest gate-ward cone direction (gap steering)."""
+        rays = self._ray_basis()
+        free = self._cast(rays)
+        tdir = self._target_pos() - self.pos
+        gdir = tdir / (tdir.norm(dim=-1, keepdim=True) + 1e-6)
+        align = (rays * gdir.unsqueeze(1)).sum(-1).clamp(min=0.0)
+        score = free * (0.5 + 0.5 * align)
+        best = score.argmax(dim=1)
+        best_dir = rays[self._ar_n, best]
+        v = self.vel
+        sp = v.norm(dim=-1, keepdim=True)
+        follow = ((v / (sp + 1e-6)) * best_dir).sum(-1).clamp(min=0.0)
+        return follow * sp.squeeze(-1).clamp(max=3.0) / 3.0
+
+    def extra(self) -> torch.Tensor:
+        _, cy, cap = self._gate(self.tgt)
+        curr = torch.stack([torch.cos(cy), torch.sin(cy), cap], -1)
+        feats = [self.obs(), curr, self._next_lookahead(), self._obstacle_vision()]
+        if self.cfg.raycast:
+            feats.append(self._raycast())
+        return torch.cat(feats, dim=-1)
+
+    def metric(self) -> str:
+        return f"compl {float(self.comp_rate) * 100:4.1f}% lap {float(self.lap.float().mean()):.1f}"
+
+    # ---- step ----
+    def step(self, action: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        """Raw policy action ``(n, 4)`` -> ``(obs, reward, done, tilt)`` (auto-respawn)."""
+        cg, rates = decode_torch(action.to(self.dtype), self.action_spec, max_g=self.plant.max_g)
+        return self.step_command(cg, rates)
+
+    def step_command(
+        self, collective_g: torch.Tensor, rates: torch.Tensor
+    ) -> tuple[torch.Tensor, ...]:
+        """Like :meth:`step`, from a decoded ``collective_g`` (n,) + body ``rates`` (n, 3)."""
+        cfg = self.cfg
+        arming = self.plant.t < self.arm_until  # ground start: motors idle until armed
+        cg = torch.where(arming, torch.zeros_like(collective_g), collective_g)
+        rates = torch.where(arming[:, None], torch.zeros_like(rates), rates)
+        dt, delay, skipped = self.timing.tick()
+        self.last_dt, self.last_skipped = dt, skipped
+        rscale = (dt / cfg.reward_reference_dt_s).to(self.dtype)
+
+        prev_dist = (self._target_pos() - self.pos).norm(dim=-1)
+        self.plant.step(cg, rates, dt, delay)
+        self.steps = self.steps + 1
+
+        g_body = gravity_body(self.quat)
+        cos_tilt = -g_body[:, 2]
+        tilt = torch.arccos(torch.clamp(cos_tilt, -1, 1))
+
+        cc, _, cap = self._gate(self.tgt)
+        passed = (self.pos - cc).norm(dim=-1) < (cap / 2 + PASS_SLACK * (1.0 - self.difficulty))
+        self.tgt = torch.where(passed, self.tgt + 1, self.tgt)
+        wrap = self.tgt >= self._ng()
+        self.lap = torch.where(wrap, self.lap + 1, self.lap)
+        self.tgt = torch.where(wrap, torch.zeros_like(self.tgt), self.tgt)
+
+        curr_dist = (self._target_pos() - self.pos).norm(dim=-1)
+        r_prog = 6.0 * (prev_dist - curr_dist)
+        r_up = torch.clamp(cos_tilt, 0, 1) * 0.3
+        r_spin = torch.exp(-0.5 * self.omega.norm(dim=-1)) * 0.2
+        reward = r_prog + (r_up + r_spin) * rscale + 20.0 * passed.to(self.dtype)
+
+        completed = self.lap >= self.P["laps"][self.cid]
+        reward = reward + 300.0 * completed.to(self.dtype)
+
+        # obstacle contact -> non-terminal nudge away from the NEAREST touched obstacle
+        oc, od, om = self._ocen(), self._odim(), self._omask()
+        otype = self.P["otype"][self.cid]
+        rel = self.pos.unsqueeze(1) - oc
+        dxy = rel[:, :, :2].norm(dim=-1)
+        cyl_hit = (dxy < od[:, :, 0] + MARGIN) & (rel[:, :, 2].abs() < od[:, :, 2] + MARGIN)
+        box_hit = (rel.abs() < od + MARGIN).all(dim=-1)
+        hit = torch.where(otype == 0, cyl_hit, box_hit) & om
+        any_hit = hit.any(dim=1)
+        dcen = torch.where(
+            hit, (oc - self.pos.unsqueeze(1)).norm(dim=-1), torch.full_like(dxy, 1e4)
+        )
+        ni = dcen.min(dim=1).indices
+        away = self.pos[:, :2] - oc[self._ar_n, ni, :2]
+        away = away / (away.norm(dim=-1, keepdim=True) + 1e-6)
+        vel = self.plant.vel.clone()
+        vel[:, :2] = vel[:, :2] + any_hit.to(self.dtype).unsqueeze(-1) * away * BOUNCE
+        self.plant.vel = vel
+        reward = reward - CONTACT_PEN * any_hit.to(self.dtype) * rscale
+
+        if cfg.shaping:
+            clear_now = self._clearance()
+            reward = reward + SHAPE_BETA * (clear_now - self.prev_clear)
+            self.prev_clear = clear_now
+        if cfg.gap:
+            reward = reward + GAP_BETA * self._gap_reward() * rscale
+        if cfg.floor:
+            floor_now = (self.pos[:, 2] - FLOOR_KILL_Z).clamp(0.0, FLOOR_CAP)
+            reward = reward + FLOOR_BETA * (floor_now - self.prev_floor)
+            self.prev_floor = floor_now
+
+        t = self.plant.t
+        xy_off = self.pos[:, :2].norm(dim=-1)
+        grace = t > cfg.floor_grace_s + 1e-6
+        ground_start = self.start_mode == START_GROUND
+        floor_live = torch.where(ground_start, self.plant.lifted, grace)
+        hit_floor = (self.pos[:, 2] < FLOOR_KILL_Z) & floor_live
+        hit_ceil = (self.pos[:, 2] > CEIL) & grace
+        hit_arena = (xy_off > ARENA) & grace
+        crashed = hit_floor | hit_ceil | hit_arena
+        if cfg.obs_terminal:
+            crashed = crashed | any_hit
+        reward = reward - 5.0 * crashed.to(self.dtype)
+        timeout = t >= cfg.episode_s - 1e-6
+        done = completed | crashed | timeout
+        self.last_completed = completed
+        self.last_crashed = crashed
+        self.last_crash_tilt = tilt
+        self.cause_floor = hit_floor
+        self.cause_ceil = hit_ceil
+        self.cause_arena = hit_arena
+        self.cause_obstacle = any_hit if cfg.obs_terminal else torch.zeros_like(crashed)
+        self.last_any_hit = any_hit
+        self.ep_return = self.ep_return + reward
+
+        # on-device completion EMA over finished episodes (the prototype's metric, no sync)
+        nd = done.sum()
+        frac = (completed & done).sum().to(self.dtype) / nd.clamp(min=1).to(self.dtype)
+        self.comp_rate = torch.where(nd > 0, 0.98 * self.comp_rate + 0.02 * frac, self.comp_rate)
+
+        if self.log is not None:
+            outcome = torch.full_like(self.steps, OUTCOMES.index("timeout"))
+            for name, flag in (
+                ("obstacle", self.cause_obstacle),
+                ("arena", hit_arena),
+                ("ceiling", hit_ceil),
+                ("floor", hit_floor),
+                ("completed", completed),
+            ):
+                outcome = torch.where(flag, OUTCOMES.index(name), outcome)
+            tail = torch.stack(
+                [
+                    self.ep_return.float(),
+                    t.float(),
+                    self.steps.float(),
+                    completed.float(),
+                    outcome.float(),
+                ],
+                1,
+            )
+            self.log.add(done, torch.cat([self.header, tail], 1))
+
+        self._spawn(done)
+        return self.obs(), reward, done, tilt
