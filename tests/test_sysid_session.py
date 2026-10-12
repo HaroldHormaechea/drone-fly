@@ -31,6 +31,7 @@ from drone_fly.sysid.session import (
     STOP_ANTICHEAT,
     STOP_COMPLETED,
     STOP_MISMATCH,
+    STOP_TRANSIT,
     SessionSettings,
     SysidPreflightError,
     SysidSession,
@@ -579,3 +580,114 @@ def test_violation_during_transit_is_recorded_not_an_error(tmp_path):
     assert result.stop_reason != "error", result.error
     assert any(v["name"] == "geofence" for v in meta["violations"])
     assert not parts.world.armed
+
+
+def test_repeated_transit_violation_lands_with_transit_failed(tmp_path):
+    """Both transit attempts trip the 3 m geofence: each violation is recorded against
+    ``transit``, then the drone lands and disarms with the named stop ``transit_failed``
+    (resumable from the first experiment)."""
+    parts = Parts()
+    sched = [e for e in build_schedule(0, SMALL) if e.kind == "throttle_step"]
+    settings = SessionSettings(home_forward_m=8.0, limits=SafetyLimits(radius_m=3.0))
+    result = parts.session(tmp_path / "s", schedule=sched, settings=settings).run()
+    assert result.stop_reason == STOP_TRANSIT and "hold point" in result.error
+    meta = meta_of(tmp_path / "s")
+    transit_v = [v for v in meta["violations"] if v["experiment"] == "transit"]
+    assert [v["name"] for v in transit_v] == ["geofence", "geofence"]  # one per attempt
+    assert all(v["action"] == "abort_experiment" for v in transit_v)
+    events = [e["event"] for e in meta["events"]]
+    assert "transit failed: landing" in events and events[-1] == "disarmed"
+    assert set(statuses(meta).values()) == {"pending"}  # no experiment flown
+    assert result.resumable and result.next_experiment == sched[0].id
+    assert meta["stop_reason"] == STOP_TRANSIT
+    assert not parts.world.armed and parts.world.crashes == 0
+
+
+def test_transit_timeout_without_arrival_is_transit_failed(tmp_path):
+    """No violation, but the drone cannot arrive within the time limit (a 0.1 s settle timeout
+    at 100 m/s): no retry, a clean ``transit_failed`` landing."""
+    parts = Parts()
+    sched = [e for e in build_schedule(0, SMALL) if e.kind == "throttle_step"]
+    settings = SessionSettings(home_forward_m=8.0, transit_m_s=100.0, settle_timeout_s=0.1)
+    result = parts.session(tmp_path / "s", schedule=sched, settings=settings).run()
+    assert result.stop_reason == STOP_TRANSIT
+    meta = meta_of(tmp_path / "s")
+    assert not [v for v in meta["violations"] if v["experiment"] == "transit"]
+    assert result.done == 0 and not parts.world.armed
+
+
+def test_transit_ends_on_arrival(tmp_path):
+    """The transit event is logged only once the drone is within 1 m of the goal and slower
+    than 0.7 m/s; the hold point is then exactly the goal."""
+    parts = Parts()
+    sched = [e for e in build_schedule(0, SMALL) if e.kind == "throttle_step"][:1]
+    settings = SessionSettings(home_forward_m=8.0)
+    session = parts.session(tmp_path / "s", schedule=sched, settings=settings)
+    at_event = []
+    original = session._event
+
+    def spy(text):
+        if text.startswith("transit "):
+            st = parts.source.latest()
+            at_event.append(
+                (np.asarray(st.pos, float).copy(), np.asarray(st.vel, float).copy(),
+                 session.home.copy())
+            )  # fmt: skip
+        return original(text)
+
+    session._event = spy
+    assert session.run().completed
+    ((pos, vel, home),) = at_event
+    assert home[0] == pytest.approx(8.0, abs=0.05)
+    assert np.linalg.norm(pos[:2] - home[:2]) < 1.0 and np.linalg.norm(vel) < 0.7
+
+
+def _hover_state(xy, z=5.0):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        pos=np.array([xy[0], xy[1], z]), vel=np.zeros(3), quat=np.array([1.0, 0, 0, 0]),
+        omega=np.zeros(3),
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("offset", "settled"), [((0.0, 0.0), True), ((1.9, 0.0), True), ((1.5, 1.5), False),
+                            ((2.5, 0.0), False)],
+)  # fmt: skip
+def test_settled_requires_the_settle_radius(tmp_path, offset, settled):
+    parts = Parts()
+    session = parts.session(tmp_path / "s")
+    assert session.s.settle_radius_m == 2.0 and session.s.settle_timeout_s == 12.0
+    session.home = np.array([10.0, -4.0, 0.0])
+    session.ground_z = 0.0
+    until = session._settled(0.5)
+    st = _hover_state((10.0 + offset[0], -4.0 + offset[1]))
+    assert until(st, 0.0) is False  # the hold time has not passed yet
+    assert until(st, 0.6) is settled
+    # a custom radius
+    wide = parts.session(tmp_path / "w", settings=SessionSettings(settle_radius_m=5.0))
+    wide.home, wide.ground_z = session.home, 0.0
+    u = wide._settled(0.0)
+    assert u(_hover_state((12.5, -4.0)), 0.0) is True
+
+
+def test_coast_drift_is_settled_back_before_the_next_experiment(tmp_path):
+    """After a coast the next experiment's settle phase brings the drone back within the settle
+    radius of home before its open-loop window (spy at the window start)."""
+    parts = Parts()
+    pass0 = [e for e in build_schedule(0, SMALL) if e.pass_index == 0]
+    sched = [next(e for e in pass0 if e.kind == "coast"),
+             next(e for e in pass0 if e.kind == "throttle_step")]  # fmt: skip
+    session = parts.session(tmp_path / "s", schedule=sched)
+    starts = []
+    original = session._window_fn
+
+    def spy(exp, h):
+        st = parts.source.latest()
+        starts.append(float(np.linalg.norm(np.asarray(st.pos, float)[:2] - session.home[:2])))
+        return original(exp, h)
+
+    session._window_fn = spy
+    assert session.run().completed
+    assert len(starts) == 2 and all(d < session.s.settle_radius_m for d in starts)

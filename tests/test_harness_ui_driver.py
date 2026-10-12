@@ -472,9 +472,11 @@ def test_select_drone_wrong_loaded_drone_is_a_named_error(monkeypatch, built):
 
 
 def test_select_drone_with_a_level_sets_the_three_dropdowns(monkeypatch):
-    game = FakeGame(monkeypatch, lit_before=[], lit_after=[SLOT], built=BUILT)
-    ui_driver.select_drone("Test small drone", level="arena-freeflight", anticheat=_no_anticheat)
     rows = ui_driver.QUICK_SETUP_LEVELS["arena-freeflight"]
+    game = FakeGame(
+        monkeypatch, lit_before=[], lit_after=[SLOT], built=BUILT, position=rows["spawn"]
+    )
+    ui_driver.select_drone("Test small drone", level="arena-freeflight", anticheat=_no_anticheat)
     refs = game.of("click_ref")
     assert [(c[1], c[2]) for c in refs] == [
         ui_driver.QUICK_SETUP_FIELDS[f] for f in ("mode", "environment", "track")
@@ -506,6 +508,22 @@ def test_select_drone_checks_the_spawn_when_known(monkeypatch):
         FakeGame(monkeypatch, lit_before=[], lit_after=[SLOT], built=BUILT, position=pos)
         with pytest.raises(ui_driver.DroneSelectionError, match="spawn"):
             ui_driver.select_drone("Test small drone", level="test-level", anticheat=_no_anticheat)
+
+
+def test_level_without_a_measured_spawn_skips_the_telemetry_check(monkeypatch):
+    monkeypatch.setitem(
+        ui_driver.QUICK_SETUP_LEVELS,
+        "unmeasured",
+        {"mode": 0, "environment": 0, "track": 0, "spawn": None},
+    )
+    FakeGame(monkeypatch, lit_before=[], lit_after=[SLOT], built=BUILT)
+    monkeypatch.setattr(
+        ui_driver, "telemetry_position", lambda *a, **kw: pytest.fail("no spawn to check")
+    )
+    assert (
+        ui_driver.select_drone("Test small drone", level="unmeasured", anticheat=_no_anticheat)
+        == SLOT
+    )
 
 
 def test_select_drone_runs_the_anticheat_check_first(monkeypatch):
