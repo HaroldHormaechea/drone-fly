@@ -35,6 +35,13 @@
     drone-fly train eval <checkpoint> --config <config> [--episodes] [--seed] [--legacy-v1]
                           [--compare-prototype] [--k1-path] [--device] [--json]
     drone-fly train bench [--config] [--n-envs] [--steps] [--substeps ...] [--no-prototype]
+    drone-fly train teacher --drone <id> --tracks <selector> [--procedural F] [--config]
+                          [--resume <run>] [--budget] [--n-envs] [--device] [--max-iterations]
+    drone-fly train eval <run|teacher.pt> --tracks <selector> [--episodes] [--mode] [--seed]
+    drone-fly tracks list [--split S] [--source S] | check [--root] [--scenes-root]
+                          [--require-scenes] | scan --source liftoff [--root] [--scenes-root]
+                          [--seed] | stats --split S | extract-scenes [--map M] [--bundle M=B]
+                          [--witness M=F] [--force] | extract-props [--force]
     drone-fly sim replay-sysid <session dir> --drone <id> [--write-report] [--gate|--no-gate]
 
 Exit codes: 0 ok, 2 config/usage error (also: anti-cheat software running), 3 missing optional
@@ -751,6 +758,10 @@ def build_parser() -> argparse.ArgumentParser:
     from drone_fly.training.cli import add_parser as add_train_parser  # light: no torch import
 
     add_train_parser(sub)
+
+    from drone_fly.tracks.cli import add_parser as add_tracks_parser  # light: argparse only
+
+    add_tracks_parser(sub)
 
     sim = sub.add_parser("sim", help="the batched simulator (drone_fly.sim)")
     simsub = sim.add_subparsers(dest="sim_command", required=True)
