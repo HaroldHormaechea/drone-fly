@@ -17,13 +17,15 @@
     drone-fly harness pad-check [--preset] [--config] [--magnitude] [--pulse-s] [--min-alt]
                           [--max-alt] [--out]
     drone-fly harness ui launch|last-session|reset|save-recording --name N|select-drone --name N
-                          [--slot S]|quit|shot [--out]
+                          [--slot S] [--level L]|quit|shot [--out]
     drone-fly harness latency-report <run dir> [--recompute]
     drone-fly harness overlay [--port N] [--monitor M] [--layout default|mask_confined]
                           [--replay <run dir>] [--fps F] [--k1-path] [--preset] [--config]
                           [--harness]
-    drone-fly sysid liftoff --drone <id> [--session NAME] [--resume] [--select] [--liftoff-name]
-                          [--map] [--seed] [--passes] [--hold-alt] [--ceiling] [--radius]
+    drone-fly sysid liftoff --drone <id> [--session NAME] [--resume] [--select [--level L]]
+                          [--liftoff-name]
+                          [--map] [--seed] [--passes] [--hold-alt] [--home-forward]
+                          [--ceiling] [--radius]
                           [--expect-hover lo:hi] [--preset liftoff] [--config]
                           [--plant liftoff|synthetic|synthetic-5inch]
     drone-fly sysid fit <session dir> --drone <id> [--out <dir>] [--force] [--name] [--map]
@@ -305,7 +307,7 @@ def _cmd_ui(args: argparse.Namespace) -> int:
     elif args.action == "select-drone":
         if not args.name:
             raise HarnessConfigError("ui select-drone needs --name (the exact Liftoff drone name)")
-        slot = ui_driver.select_drone(args.name, args.slot)
+        slot = ui_driver.select_drone(args.name, args.slot, level=args.level)
         print(f"select-drone: {args.name!r} (slot {slot})")
     elif args.action == "save-recording":
         if not args.name:
@@ -330,6 +332,7 @@ def _cmd_sysid_liftoff(args: argparse.Namespace) -> int:
         seed=args.seed,
         passes=args.passes,
         hold_alt=args.hold_alt,
+        home_forward=args.home_forward,
         ceiling=args.ceiling,
         radius=args.radius,
         expect_hover=band,
@@ -337,6 +340,7 @@ def _cmd_sysid_liftoff(args: argparse.Namespace) -> int:
         config=args.config,
         plant=args.plant,
         map_name=args.map,
+        level=args.level,
     )
     print(
         f"stop: {result.stop_reason}  done: {result.done}  aborted: {result.aborted}"
@@ -609,6 +613,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="save-recording: recording name (no extension); select-drone: exact drone name",
     )
     p_ui.add_argument("--slot", type=int, help="select-drone: list row (default: DRONE_SLOTS)")
+    p_ui.add_argument(
+        "--level", help="select-drone: also load this level (ui_driver.QUICK_SETUP_LEVELS)"
+    )
     p_ui.set_defaults(func=_cmd_ui)
 
     p_srv = hsub.add_parser(
@@ -678,9 +685,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sl.add_argument("--liftoff-name", help="exact Liftoff drone name (recorded; --select)")
     p_sl.add_argument("--map", help="Liftoff map / level flown (recorded)")
+    p_sl.add_argument(
+        "--level", help="with --select: load this level (ui_driver.QUICK_SETUP_LEVELS)"
+    )
     p_sl.add_argument("--seed", type=int, default=0, help="schedule seed")
     p_sl.add_argument("--passes", type=int, default=3, help="passes (>= 2; the last is held out)")
     p_sl.add_argument("--hold-alt", type=float, default=5.0, help="hover height (m)")
+    p_sl.add_argument(
+        "--home-forward",
+        type=float,
+        default=0.0,
+        help="fly this far forward from the spawn before the experiments (m; geofence centre)",
+    )
     p_sl.add_argument("--ceiling", type=float, default=12.0, help="soft ceiling (m above ground)")
     p_sl.add_argument("--radius", type=float, default=30.0, help="geofence radius (m)")
     p_sl.add_argument("--expect-hover", help="airframe guard: hover throttle band lo:hi")

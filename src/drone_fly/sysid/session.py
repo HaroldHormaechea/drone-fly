@@ -108,6 +108,10 @@ class SessionSettings:
     #: 5-inch at T/W 7 gains 10 m/s in a 0.25 s full-throttle burst). The excess acceleration is
     #: estimated as ``(level / hover - 1) g`` (thrust ~ proportional to throttle).
     max_dv_m_s: float = 4.0
+    #: After take-off, fly this far forward (spawn heading) before the experiments; the
+    #: geofence is centred there (a spawn at the edge of a map, e.g. Liftoff Arena).
+    home_forward_m: float = 0.0
+    transit_m_s: float = 3.0
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -521,6 +525,27 @@ class SysidSession:
         self.loop = AltitudeLoop(h0)
         self._check_airframe(h0)
         self._takeoff()
+        self._transit()
+
+    def _transit(self) -> None:
+        """Move the hold point ``home_forward_m`` ahead along the spawn heading."""
+        dist = self.s.home_forward_m
+        if dist <= 0:
+            return
+        start = self.home.copy()
+        heading = np.array([math.cos(self.yaw_ref), math.sin(self.yaw_ref), 0.0])
+        goal = start + dist * heading
+        target = self._target()
+        duration = dist / self.s.transit_m_s
+
+        def fn(state: Any, t: float, dt: float) -> dict[str, float]:
+            target.pos = start + min(t / duration, 1.0) * dist * heading
+            self.home = target.pos  # the geofence moves with the hold point
+            return self._hold(target)(state, t, dt)
+
+        self._loop("transit", fn, duration=duration + 1.0, envelope="hard")
+        self.home = goal
+        self._event(f"transit {dist:.0f} m to the experiment hold point")
 
     def _land(self) -> None:
         state = self.src.latest()
@@ -867,6 +892,7 @@ def run_sysid_liftoff(
     passes: int = 3,
     amplitudes: tuple[float, ...] | None = None,
     hold_alt: float = 5.0,
+    home_forward: float = 0.0,
     ceiling: float = 12.0,
     radius: float = 30.0,
     expect_hover: tuple[float, float] | None = None,
@@ -875,6 +901,7 @@ def run_sysid_liftoff(
     plant: str = "liftoff",
     out_root: Any = None,
     map_name: str | None = None,
+    level: str | None = None,
 ) -> SysidResult:
     """Build the parts (live Liftoff, or a synthetic plant) and run one :class:`SysidSession`."""
     from pathlib import Path
@@ -919,11 +946,13 @@ def run_sysid_liftoff(
     band, band_source = expected_band(drone_id, liftoff_name, expect_hover)
     settings = SessionSettings(
         hold_alt_m=hold_alt,
+        home_forward_m=home_forward,
         limits=SafetyLimits(ceiling_m=ceiling, radius_m=radius),
     )
     meta_extra: dict[str, Any] = {
         "liftoff_name": liftoff_name,
-        "map": map_name,
+        "map": map_name or level,
+        "level": level,
         "git_head": git_head(repo),
         "seed": seed,
         "preset": preset,
@@ -974,7 +1003,7 @@ def run_sysid_liftoff(
     if select:
         if not liftoff_name:
             raise HarnessConfigError("--select needs --liftoff-name")
-        ui_driver.select_drone(liftoff_name)
+        ui_driver.select_drone(liftoff_name, level=level)
     cfg = load_config("liftoff", config, preset=preset)
     tcfg = cfg.section("telemetry")
     src = LiftoffUdpStateSource(

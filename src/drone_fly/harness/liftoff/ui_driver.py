@@ -23,6 +23,7 @@ from __future__ import annotations
 import ctypes
 import logging
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -390,33 +391,70 @@ def shot(path: str) -> str:
 
 
 # ----------------------------------------------------------------------------- drone selection
+#
+# Liftoff 1.7.6: Single Player -> Quick Play -> Quick Setup opens the "Quick Play Setup" dialog with
+# four dropdowns (game mode, environment, track / race, drone) and Play. Its choices only take
+# effect on Play (Esc / Cancel reverts them), so selecting a drone means loading a level with it;
+# Play also makes it the Last Session. MEASURED 2026-10-12 with `harness ui shot` at 2560x1080.
 
-#: The drone list (2560x1080 reference): row ``i`` is at ``first_row + i * row_pitch``; the
-#: selected row is drawn in ``highlight_rgb`` at ``probe_x``. PROVISIONAL until measured live.
+#: Quick Play Setup dropdown fields (reference pixels). An open dropdown lists 5 rows, the first
+#: at ``field_y + 32``, 30 px apart, at ``field_x - 14``; one mouse-wheel notch scrolls 100 px.
+QUICK_SETUP_FIELDS = {"mode": (1414, 590), "environment": (1414, 640), "track": (1414, 700)}
+DROPDOWN_ROW = {"dx": -14, "first_dy": 32, "pitch": 30, "rows": 5, "notch": 100}
+POINTS.update(
+    {
+        "quick_setup": (1814, 414),
+        "qs_drone": (1414, 750),
+        "qs_play": (1204, 814),
+        "qs_cancel": (1375, 814),
+    }
+)
+#: The drone dropdown scrolled to its END (the custom drones follow the stock ones there): row
+#: ``i`` of the 5 visible rows is at ``first_row + i * row_pitch``. The row under the cursor (and
+#: the current selection, when visible) is drawn in ``highlight_rgb`` at ``probe_x``.
 DRONE_LIST = {
-    "first_row": (330, 300),
-    "row_pitch": 60,
-    "rows_visible": 8,
-    "probe_x": 120,
-    "highlight_rgb": (217, 99, 88),
+    "first_row": (1400, 782),
+    "row_pitch": 30,
+    "rows_visible": 5,
+    "probe_x": 1324,
+    "highlight_rgb": (209, 96, 85),
     "tolerance": 24,
 }
-#: Menu buttons clicked (in order) from the main menu to the drone list. PROVISIONAL.
-DRONE_MENU_PATH: tuple[str, ...] = ()
-#: Saved Liftoff drones the tooling may select: exact Liftoff name -> list slot and the hover
-#: throttle band the sysid airframe guard expects from its ground ramp.
+#: Clicks from the main menu to the open drone dropdown.
+DRONE_MENU_PATH: tuple[str, ...] = ("single_player", "quick_play", "quick_setup", "qs_drone")
+#: Liftoff drones the tooling may select: exact Liftoff name -> visible row of the drone dropdown
+#: scrolled to its end, and the hover throttle band the sysid airframe guard expects.
 DRONE_SLOTS: dict[str, dict[str, Any]] = {
-    # UC64: hand-flown hover at stick -0.06 (throttle 0.47).
-    "Test small drone": {"slot": 0, "hover_band": (0.40, 0.56)},
+    # The UC64 micro (FT Gremlin): hand-flown hover at stick -0.06 (throttle 0.47).
+    "Test small drone": {"slot": 3, "hover_band": (0.40, 0.56)},
+    # Stock 5-inch race quad (ImmersionRC Vortex 250 Pro). Band: see drones/liftoff-5inch-*.
+    "Vortex Pro 250": {"slot": 0, "hover_band": (0.10, 0.40)},
 }
+#: Levels the Quick Play Setup can load: the row index in each full list (mode, environment,
+#: track / race) and the drone's spawn position (Unity metres, telemetry), which verifies the load.
+#: Environments (1.7.6): 0 Straw Bale, 1 Pine Valley, 2 Minus Two, 3 Autumn Fields, 4 Hangar C03,
+#: 5 Liftoff Arena, 6 Dubai Legends, 7 Hannover, ...; modes: 0 Freeflight, 1 Freestyle, 2 Race,
+#: 3 Infinite Race.
+QUICK_SETUP_LEVELS: dict[str, dict[str, Any]] = {
+    # Liftoff Arena, free flight, no track: the empty stadium pitch (the sysid map).
+    "arena-freeflight": {"mode": 0, "environment": 5, "track": 0, "spawn": None},
+    # Liftoff Arena, race "04 - Infinity Loop" (the reference harness level).
+    "infinity-loop": {"mode": 2, "environment": 5, "track": 3, "spawn": None},
+}
+SPAWN_TOLERANCE_M = 3.0
+#: Liftoff's log; every drone it builds (main menu, level load) logs "=== Calculating <name> ...".
+PLAYER_LOG = Path(os.environ.get("USERPROFILE", "~")) / (
+    "AppData/LocalLow/LuGus Studios/Liftoff/Player.log"
+)
+_CALCULATING = re.compile(r"=== Calculating (.+?) \.\.\. ===")
 
 
 class DroneSelectionError(HarnessConfigError):
-    """The drone list did not end up showing the requested drone selected."""
+    """The drone dropdown or the loaded level did not show the requested drone."""
 
 
 def drone_row_xy(index: int, size: tuple[int, int] | None = None) -> tuple[int, int]:
-    """Screen position of drone-list row ``index`` (scaled from the reference). Pure."""
+    """Screen position of visible drone-list row ``index`` (scaled from the reference). Pure."""
     if index < 0 or index >= DRONE_LIST["rows_visible"]:
         raise HarnessConfigError(
             f"drone slot {index} outside the visible list (0..{DRONE_LIST['rows_visible'] - 1})"
@@ -427,11 +465,8 @@ def drone_row_xy(index: int, size: tuple[int, int] | None = None) -> tuple[int, 
     return round(x * w / REFERENCE[0]), round(y * h / REFERENCE[1])
 
 
-def selected_drone_row(img: Any) -> int | None:
-    """Index of the highlighted drone-list row in a full-screen RGB image, or ``None``. Pure.
-
-    ``None`` when no row, or more than one row, shows the highlight colour.
-    """
+def highlighted_drone_rows(img: Any) -> list[int]:
+    """Indices of the drone-list rows drawn in the highlight colour (full-screen RGB). Pure."""
     h, w = img.shape[:2]
     x = round(DRONE_LIST["probe_x"] * w / REFERENCE[0])
     tol = DRONE_LIST["tolerance"]
@@ -441,7 +476,23 @@ def selected_drone_row(img: Any) -> int | None:
         px = img[round(y_ref * h / REFERENCE[1]), x].astype(int)
         if max(abs(int(px[c]) - DRONE_LIST["highlight_rgb"][c]) for c in range(3)) <= tol:
             hits.append(i)
+    return hits
+
+
+def selected_drone_row(img: Any) -> int | None:
+    """The single highlighted drone-list row, or ``None`` (none, or ambiguous). Pure."""
+    hits = highlighted_drone_rows(img)
     return hits[0] if len(hits) == 1 else None
+
+
+def hovered_row(before: Any, after: Any) -> int | None:
+    """The one row that lit up between two screens (the cursor moved onto it), or ``None``. Pure.
+
+    ``before`` is grabbed with the cursor off the list rows (only the current selection, if it is
+    visible, is highlighted), ``after`` with the cursor on the target row.
+    """
+    new = sorted(set(highlighted_drone_rows(after)) - set(highlighted_drone_rows(before)))
+    return new[0] if len(new) == 1 else None
 
 
 def drone_slot(name: str, slot: int | None = None) -> int:
@@ -453,34 +504,202 @@ def drone_slot(name: str, slot: int | None = None) -> int:
     return int(DRONE_SLOTS[name]["slot"] if slot is None else slot)
 
 
-def select_drone(
-    name: str, slot: int | None = None, *, anticheat: Any = None, settle_s: float = 1.0
-) -> int:
-    """Select saved drone ``name`` from the main menu; verify the highlighted row by pixels.
+def dropdown_scroll(index: int) -> tuple[int, int]:
+    """``(wheel notches down from the top, visible row)`` that bring list row ``index`` into
+    view: each notch scrolls ``notch`` px, so the row lands within the first rows. Pure."""
+    if index < 0:
+        raise HarnessConfigError(f"dropdown row {index} must be >= 0")
+    notches = index * DROPDOWN_ROW["pitch"] // DROPDOWN_ROW["notch"]
+    offset = index * DROPDOWN_ROW["pitch"] - notches * DROPDOWN_ROW["notch"]
+    return notches, offset
 
-    Raises :class:`DroneSelectionError` (never enters a level) when the highlighted row is not
-    the requested slot. Returns the slot.
+
+def level_rows(level: str) -> dict[str, Any]:
+    """Validate a :data:`QUICK_SETUP_LEVELS` key (no game access)."""
+    if level not in QUICK_SETUP_LEVELS:
+        raise HarnessConfigError(
+            f"unknown level {level!r}; known (ui_driver.QUICK_SETUP_LEVELS): "
+            f"{sorted(QUICK_SETUP_LEVELS)}"
+        )
+    return QUICK_SETUP_LEVELS[level]
+
+
+def dropdown_row_xy(
+    field: tuple[int, int], offset_px: int, size: tuple[int, int] | None = None
+) -> tuple[int, int]:
+    """The point ``offset_px`` below the first visible row of the dropdown under ``field``. Pure."""
+    span = DROPDOWN_ROW["rows"] * DROPDOWN_ROW["pitch"]
+    if not 0 <= offset_px < span:
+        raise HarnessConfigError(f"dropdown offset {offset_px} outside the visible rows")
+    w, h = size or screen_size()
+    x = field[0] + DROPDOWN_ROW["dx"]
+    y = field[1] + DROPDOWN_ROW["first_dy"] + offset_px
+    return round(x * w / REFERENCE[0]), round(y * h / REFERENCE[1])
+
+
+def spawn_matches(position: Any, spawn: Any, tol: float = SPAWN_TOLERANCE_M) -> bool:
+    """True when a telemetry position (Unity metres) is within ``tol`` of a level's spawn. Pure."""
+    d = sum((float(a) - float(b)) ** 2 for a, b in zip(position, spawn, strict=True)) ** 0.5
+    return d <= tol
+
+
+def telemetry_position(port: int = 9001, wait_s: float = 3.0) -> tuple[float, float, float] | None:
+    """The drone position (Unity metres) from one telemetry datagram (``Timestamp`` first,
+    ``Position`` second, as the harness requires); ``None`` when nothing arrives."""
+    import struct
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.bind(("127.0.0.1", port))
+    except OSError as exc:
+        raise HarnessConfigError(f"telemetry port {port} is busy") from exc
+    s.settimeout(0.2)
+    deadline = time.monotonic() + wait_s
+    try:
+        while time.monotonic() < deadline:
+            try:
+                data, _ = s.recvfrom(2048)
+            except OSError:
+                continue
+            if len(data) >= 16:
+                return struct.unpack_from("<3f", data, 4)
+        return None
+    finally:
+        s.close()
+
+
+def loaded_drone(log_text: str) -> str | None:
+    """The last drone Liftoff built according to (a slice of) its log, or ``None``. Pure."""
+    found = _CALCULATING.findall(log_text)
+    return found[-1] if found else None
+
+
+def click_ref(x: int, y: int, settle_s: float = 1.0) -> None:
+    """Click a reference-screen point (scaled to the monitor)."""
+    w, h = screen_size()
+    _click_xy(round(x * w / REFERENCE[0]), round(y * h / REFERENCE[1]), settle_s)
+
+
+def _scroll(x: int, y: int, notches: int) -> None:
+    """Mouse wheel over reference point (x, y): positive scrolls up."""
+    u = _user32()
+    w, h = screen_size()
+    u.SetCursorPos(round(x * w / REFERENCE[0]), round(y * h / REFERENCE[1]))
+    time.sleep(0.2)
+    for _ in range(abs(notches)):
+        u.mouse_event(0x0800, 0, 0, 120 if notches > 0 else -120, 0)
+        time.sleep(0.1)
+    time.sleep(0.5)
+
+
+def _hover(x: int, y: int) -> None:
+    _user32().SetCursorPos(int(x), int(y))
+    time.sleep(0.4)
+
+
+def _log_size() -> int:
+    try:
+        return PLAYER_LOG.stat().st_size
+    except OSError:
+        return 0
+
+
+def _log_since(offset: int) -> str:
+    try:
+        with PLAYER_LOG.open("rb") as fh:
+            fh.seek(offset)
+            return fh.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def to_main_menu() -> None:
+    """Leave a running level for the main menu (Esc -> Quit -> Confirm); no-op on the menu."""
+    if telemetry_streaming(wait_s=1.5):
+        press_escape()
+        click("pause_quit")
+        click("confirm_main_menu", settle_s=6.0)
+
+
+def select_drone(
+    name: str,
+    slot: int | None = None,
+    *,
+    level: str | None = None,
+    anticheat: Any = None,
+    settle_s: float = 1.0,
+    load_s: float = 40.0,
+) -> int:
+    """Load a level with drone ``name`` through Quick Play -> Quick Setup (see above).
+
+    ``level`` (a :data:`QUICK_SETUP_LEVELS` key) also sets mode / environment / track; without it
+    the dialog's current level is kept. Checks, in order:
+
+    1. the anti-cheat guard, then the name and level (before touching the game);
+    2. pixels: in the drone list scrolled to its end, exactly the target row lights up under the
+       cursor. On a mismatch the dialog is cancelled, so nothing changes and no level loads;
+    3. after Play: Liftoff's log names the requested drone as the one it built.
+
+    Any failure is a :class:`DroneSelectionError`. Returns the slot.
     """
     from drone_fly.harness.liftoff.anticheat import require_no_anticheat
 
     (anticheat or require_no_anticheat)()
     index = drone_slot(name, slot)
+    rows = level_rows(level) if level is not None else None
     if not DRONE_MENU_PATH:
         raise HarnessConfigError(
             "the drone-list menu path is not measured yet (ui_driver.DRONE_MENU_PATH)"
         )
     _focused()
+    to_main_menu()
     click("quit_no", settle_s=0.5)  # dismiss a stray "Quit?" dialog
-    for step in DRONE_MENU_PATH:
+    *path, open_list = DRONE_MENU_PATH
+    for step in path:
         click(step, settle_s=settle_s)
+    if rows is not None:
+        for field in ("mode", "environment", "track"):
+            fx, fy = QUICK_SETUP_FIELDS[field]
+            click_ref(fx, fy, settle_s=0.8)
+            notches, offset = dropdown_scroll(rows[field])
+            _scroll(fx, fy + 90, 30)  # to the top of the list
+            if notches:
+                _scroll(fx, fy + 90, -notches)
+            _click_xy(*dropdown_row_xy((fx, fy), offset), settle_s=0.8)
+    click(open_list, settle_s=settle_s)
+    fx, fy = POINTS[open_list]
+    _scroll(fx, fy + 90, -60)  # to the end of the drone list
+    _hover(*scaled(open_list))  # cursor off the list rows
+    before = _grab_screen()
     x, y = drone_row_xy(index)
-    _click_xy(x, y, settle_s=settle_s)
-    got = selected_drone_row(_grab_screen())
+    _hover(x, y)
+    got = hovered_row(before, _grab_screen())
     if got != index:
+        press_escape(settle_s=0.5)  # close the list
+        press_escape(settle_s=0.5)  # cancel the dialog: nothing changes, no level loads
         raise DroneSelectionError(
-            f"drone list shows row {got} selected, expected {index} ({name!r}); not flying it"
+            f"drone list: row {got} lit up under the cursor, expected {index} ({name!r}); "
+            "not flying it"
         )
-    log.info("selected drone %r (slot %d)", name, index)
+    _click_xy(x, y, settle_s=settle_s)
+    offset = _log_size()
+    click("qs_play", settle_s=3.0)
+    _wait(lambda: telemetry_streaming(wait_s=1.0), load_s, "telemetry (the level loading)")
+    built = loaded_drone(_log_since(offset))
+    if built != name:
+        raise DroneSelectionError(
+            f"Liftoff loaded drone {built!r}, expected {name!r}: do not fly it (did the drone "
+            "list order change? re-measure ui_driver.DRONE_SLOTS)"
+        )
+    if rows is not None and rows.get("spawn") is not None:
+        time.sleep(3.0)  # telemetry starts during the loading screen
+        pos = telemetry_position()
+        if pos is None or not spawn_matches(pos, rows["spawn"]):
+            raise DroneSelectionError(
+                f"level {level!r}: the drone is at {pos}, not at its spawn {rows['spawn']} "
+                "(wrong level loaded? re-measure ui_driver.QUICK_SETUP_LEVELS)"
+            )
+    log.info("loaded drone %r (slot %d)%s", name, index, f" on {level}" if level else "")
     return index
 
 
