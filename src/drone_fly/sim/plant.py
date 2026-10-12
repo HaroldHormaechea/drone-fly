@@ -275,10 +275,16 @@ class Plant:
         self.vel = put(self.vel, zero3 if vel is None else vel, m1)
         self.quat = put(self.quat, level if quat is None else quat, m1)
         self.omega = put(self.omega, zero3 if omega is None else omega, m1)
-        motor = torch.as_tensor(motor_g, dtype=self.dtype, device=self.device).expand(self.n)
+        if isinstance(motor_g, torch.Tensor):
+            motor = motor_g.to(self.dtype).expand(self.n)
+        else:
+            motor = torch.full_like(self.motor_g, float(motor_g))
         self.motor_g = torch.where(mask, motor, self.motor_g)
         self.t = torch.where(mask, torch.zeros_like(self.t), self.t)
-        g = torch.as_tensor(grounded, dtype=torch.bool, device=self.device).expand(self.n)
+        if isinstance(grounded, torch.Tensor):
+            g = grounded.to(torch.bool).expand(self.n)
+        else:
+            g = torch.full_like(self.grounded, bool(grounded))
         self.grounded = torch.where(mask, g, self.grounded)
         self.lifted = torch.where(mask, torch.zeros_like(self.lifted), self.lifted)
         if command is None:
@@ -299,7 +305,10 @@ class Plant:
 
     def push(self, command: torch.Tensor, action_delay_s: Any = 0.0) -> None:
         """Queue a physical command; it takes effect per channel after its delay."""
-        delay = torch.as_tensor(action_delay_s, dtype=torch.float64, device=self.device)
+        if isinstance(action_delay_s, torch.Tensor):
+            delay = action_delay_s.to(torch.float64)
+        else:
+            delay = torch.full_like(self.t, float(action_delay_s))
         if delay.dim() == 1:
             delay = delay[:, None]
         eff = self.t[:, None] + delay + self.channel_delay
@@ -347,9 +356,10 @@ class Plant:
 
     def advance(self, dt: Any) -> None:
         """Integrate ``dt`` seconds (scalar or ``(n,)``) in ``substeps`` substeps."""
-        dt64 = torch.as_tensor(dt, dtype=torch.float64, device=self.device)
-        if dt64.dim() == 0:
-            dt64 = dt64.expand(self.n)
+        if isinstance(dt, torch.Tensor):
+            dt64 = dt.to(torch.float64).expand(self.n)
+        else:
+            dt64 = torch.full_like(self.t, float(dt))
         h64 = dt64 / self.config.substeps
         h = h64.to(self.dtype)[:, None]
         for _ in range(self.config.substeps):

@@ -17,7 +17,6 @@ sample enters the plant only as the common-mode offset ``sample - nominal`` (see
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -41,38 +40,68 @@ def _vec3(v: float | tuple[float, float, float]) -> tuple[float, float, float]:
     return (float(v),) * 3 if not isinstance(v, tuple) else tuple(float(x) for x in v)
 
 
-@dataclass
-class DynamicsSamples:
-    """Per-environment parameter tensors (``n`` rows)."""
+#: (randomization key, component) of every LOG_COLUMNS column, in order.
+_LAYOUT = (
+    ("thrust_scale", 0),
+    *((f"rates.{a}.rate_scale", 0) for a in AXES),
+    *((f"rates.{a}.tau_s", 0) for a in AXES),
+    *((f"rates.{a}.delay_s", 0) for a in AXES),
+    *(("drag.linear_per_s", i) for i in range(3)),
+    *(("drag.quadratic_per_m", i) for i in range(3)),
+    ("motor_lag_s", 0),
+    ("latency.control_to_gyro_s", 0),
+)
 
-    thrust_scale: torch.Tensor  # (n,)
-    rate_scale: torch.Tensor  # (n, 3)
-    tau_s: torch.Tensor  # (n, 3) rate response
-    delay_s: torch.Tensor  # (n, 3) per-axis delay
-    drag_linear: torch.Tensor  # (n, 3) body axes, 1/s
-    drag_quadratic: torch.Tensor  # (n, 3) body axes, 1/m
-    motor_lag_s: torch.Tensor  # (n,)
-    c2g_offset_s: torch.Tensor  # (n,) common-mode delay offset
+
+class DynamicsSamples:
+    """Per-environment parameter tensors: views into one ``(n, len(LOG_COLUMNS))`` table."""
+
+    def __init__(self, table: torch.Tensor) -> None:
+        self.table = table
+
+    @property
+    def thrust_scale(self) -> torch.Tensor:  # (n,)
+        return self.table[:, 0]
+
+    @property
+    def rate_scale(self) -> torch.Tensor:  # (n, 3)
+        return self.table[:, 1:4]
+
+    @property
+    def tau_s(self) -> torch.Tensor:  # (n, 3) rate response
+        return self.table[:, 4:7]
+
+    @property
+    def delay_s(self) -> torch.Tensor:  # (n, 3) per-axis delay
+        return self.table[:, 7:10]
+
+    @property
+    def drag_linear(self) -> torch.Tensor:  # (n, 3) body axes, 1/s
+        return self.table[:, 10:13]
+
+    @property
+    def drag_quadratic(self) -> torch.Tensor:  # (n, 3) body axes, 1/m
+        return self.table[:, 13:16]
+
+    @property
+    def motor_lag_s(self) -> torch.Tensor:  # (n,)
+        return self.table[:, 16]
+
+    @property
+    def c2g_offset_s(self) -> torch.Tensor:  # (n,) common-mode delay offset
+        return self.table[:, 17]
 
     def columns(self) -> torch.Tensor:
         """``(n, len(LOG_COLUMNS))`` in :data:`LOG_COLUMNS` order."""
-        return torch.cat(
-            [
-                self.thrust_scale[:, None],
-                self.rate_scale,
-                self.tau_s,
-                self.delay_s,
-                self.drag_linear,
-                self.drag_quadratic,
-                self.motor_lag_s[:, None],
-                self.c2g_offset_s[:, None],
-            ],
-            dim=1,
-        )
+        return self.table
 
 
 class DynamicsRandomizer:
-    """Samples :class:`DynamicsSamples` for a profile; see the module docstring."""
+    """Samples :class:`DynamicsSamples` for a profile; see the module docstring.
+
+    One uniform draw per sampled scalar (an isotropic drag shares one draw over its three axes),
+    in a single ``rand`` call: no host synchronisation and few kernels per reset.
+    """
 
     def __init__(
         self,
@@ -102,11 +131,25 @@ class DynamicsRandomizer:
             "motor_lag_s": (profile.motor_lag_s,),
             "latency.control_to_gyro_s": (profile.latency.control_to_gyro_s,),
         }
-        self._iso = {
+        iso = {
             "drag.linear_per_s": not isinstance(profile.drag.linear_per_s, tuple),
             "drag.quadratic_per_m": not isinstance(profile.drag.quadratic_per_m, tuple),
         }
         self.randomized = sorted(profile.randomization)
+        lo, hi, src = [], [], []
+        draws: dict[tuple[str, int], int] = {}
+        for key, comp in _LAYOUT:
+            klo, khi = self.bounds(key)
+            # the c2g column holds the common-mode OFFSET (sample - nominal)
+            shift = self.nominal[key][0] if key == "latency.control_to_gyro_s" else 0.0
+            lo.append(klo[comp] - shift)
+            hi.append(khi[comp] - shift)
+            draw_key = (key, 0 if iso.get(key, False) else comp)
+            src.append(draws.setdefault(draw_key, len(draws)))
+        self._lo = torch.tensor(lo, dtype=dtype, device=self.device)
+        self._span = torch.tensor(hi, dtype=dtype, device=self.device) - self._lo
+        self._src = torch.tensor(src, dtype=torch.long, device=self.device)
+        self._n_draws = len(draws)
 
     def bounds(self, key: str) -> tuple[tuple[float, ...], tuple[float, ...]]:
         """Scaled ``(lo', hi')`` per component of ``key`` (equal to the nominal if unlisted)."""
@@ -119,41 +162,17 @@ class DynamicsRandomizer:
         hi = tuple(n + s * (rng.max - n) for n in nom)
         return lo, hi
 
-    def _draw(self, key: str, n: int) -> torch.Tensor:
-        """``(n, k)`` samples of ``key`` (k = number of components)."""
-        lo, hi = self.bounds(key)
-        lo_t = torch.tensor(lo, dtype=self.dtype, device=self.device)
-        hi_t = torch.tensor(hi, dtype=self.dtype, device=self.device)
-        k = 1 if self._iso.get(key, False) else len(lo)
-        u = torch.rand(n, k, generator=self.generator, device=self.device, dtype=self.dtype)
-        return lo_t + (hi_t - lo_t) * u  # isotropic drag: (n, 1) broadcasts over the axes
+    def _table(self, n: int) -> torch.Tensor:
+        u = torch.rand(
+            n, self._n_draws, generator=self.generator, device=self.device, dtype=self.dtype
+        )
+        return self._lo + self._span * u.index_select(1, self._src)
 
     def sample(self, n: int) -> DynamicsSamples:
         """Fresh samples for ``n`` environments (every listed key is drawn)."""
-
-        def axes(name: str) -> torch.Tensor:
-            return torch.cat([self._draw(f"rates.{a}.{name}", n) for a in AXES], dim=1)
-
-        def drag(key: str) -> torch.Tensor:
-            return self._draw(key, n).expand(n, 3).clone()
-
-        c2g = self._draw("latency.control_to_gyro_s", n)[:, 0]
-        return DynamicsSamples(
-            thrust_scale=self._draw("thrust_scale", n)[:, 0],
-            rate_scale=axes("rate_scale"),
-            tau_s=axes("tau_s"),
-            delay_s=axes("delay_s"),
-            drag_linear=drag("drag.linear_per_s"),
-            drag_quadratic=drag("drag.quadratic_per_m"),
-            motor_lag_s=self._draw("motor_lag_s", n)[:, 0],
-            c2g_offset_s=c2g - float(self.nominal["latency.control_to_gyro_s"][0]),
-        )
+        return DynamicsSamples(self._table(n))
 
     def resample(self, current: DynamicsSamples, mask: torch.Tensor) -> None:
         """Redraw ``current`` in place where ``mask`` is set (no host synchronisation)."""
-        fresh = self.sample(mask.shape[0])
-        for name in DynamicsSamples.__dataclass_fields__:
-            cur = getattr(current, name)
-            new = getattr(fresh, name)
-            m = mask.view(-1, *([1] * (cur.dim() - 1)))
-            cur.copy_(torch.where(m, new, cur))
+        fresh = self._table(mask.shape[0])
+        current.table.copy_(torch.where(mask[:, None], fresh, current.table))

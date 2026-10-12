@@ -1,0 +1,32 @@
+# The pre-UC67 training setup on the promoted simulator: what gpu_prototype's 07 model
+# (training/07-proc-course-flight, PROC_TRACTABLE=1 PROC_NO_OBS=1) was trained and audited on.
+# Used by `drone-fly train eval ... --config meteor75-legacy --legacy-v1` (AC3b) and as the
+# equivalence baseline. Nominal plant (no randomization), a fixed 50 Hz control rate with no
+# delay, the prototype's spawn, the prototype's Euler integrator in one substep, v1 actions.
+drone: meteor75
+n_envs: 512
+budget: 15.0e6
+randomization_scale: 0.0
+plant:
+  integrator: euler-legacy
+  substeps: 1
+timing:
+  mode: fixed
+  fixed_hz: 50.0            # the prototype's DT = 0.02 s
+course:
+  reward_reference_dt_s: 0.02   # dense rewards are per 20 ms step (the prototype's)
+  tier: tractable
+  no_obs: true
+  start:
+    mode: legacy
+action:
+  version: 1                # legacy: clip((a0 + 1) / 2) of the meteor75 reference plant
+actor:
+  kind: k1-reservoir-aug
+  extra_dim: 30
+ppo:
+  logstd_init: -0.5
+  logstd_final: -2.0
+  anneal_start: 0.4
+curriculum:
+  difficulty_frac: 0.6      # train_aug_course.py "proc": curriculum_frac 0.6

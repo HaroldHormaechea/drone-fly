@@ -467,8 +467,9 @@ class CourseEnv:
         return self._gate(self.tgt)[0]
 
     # ---- reset ----
-    def reset_all(self) -> None:
-        self._spawn(torch.ones(self.n, dtype=torch.bool, device=self.device))
+    def reset_all(self, course_ids: torch.Tensor | None = None) -> None:
+        """Respawn every env (on ``course_ids`` when given: paired evaluations)."""
+        self._spawn(torch.ones(self.n, dtype=torch.bool, device=self.device), course_ids)
 
     def _randn(self, *shape: int) -> torch.Tensor:
         return torch.randn(*shape, generator=self.gen, device=self.device, dtype=self.dtype)
@@ -476,12 +477,14 @@ class CourseEnv:
     def _rand(self, *shape: int) -> torch.Tensor:
         return torch.rand(*shape, generator=self.gen, device=self.device, dtype=self.dtype)
 
-    def _spawn(self, mask: torch.Tensor) -> None:
+    def _spawn(self, mask: torch.Tensor, course_ids: torch.Tensor | None = None) -> None:
         """Respawn the envs in ``mask`` on fresh courses (masked, no host sync)."""
         n, dev = self.n, self.device
         m1 = mask[:, None]
         lim = max(16, int(self.difficulty * self.P["cen"].shape[0]))
         cid = torch.randint(0, lim, (n,), generator=self.gen, device=dev)
+        if course_ids is not None:
+            cid = torch.as_tensor(course_ids, dtype=torch.long, device=dev)
         self.cid = torch.where(mask, cid, self.cid)
         self.tgt = torch.where(mask, torch.zeros_like(self.tgt), self.tgt)
         self.lap = torch.where(mask, torch.zeros_like(self.lap), self.lap)
