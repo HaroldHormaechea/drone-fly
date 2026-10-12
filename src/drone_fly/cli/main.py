@@ -16,13 +16,22 @@
                           [--every N] [--report <dir>]
     drone-fly harness pad-check [--preset] [--config] [--magnitude] [--pulse-s] [--min-alt]
                           [--max-alt] [--out]
+    drone-fly harness ui launch|last-session|reset|save-recording --name N|select-drone --name N
+                          [--slot S]|quit|shot [--out]
     drone-fly harness latency-report <run dir> [--recompute]
     drone-fly harness overlay [--port N] [--monitor M] [--layout default|mask_confined]
                           [--replay <run dir>] [--fps F] [--k1-path] [--preset] [--config]
                           [--harness]
+    drone-fly sysid liftoff --drone <id> [--session NAME] [--resume] [--select] [--liftoff-name]
+                          [--map] [--seed] [--passes] [--hold-alt] [--ceiling] [--radius]
+                          [--expect-hover lo:hi] [--preset liftoff] [--config]
+                          [--plant liftoff|synthetic|synthetic-5inch]
+    drone-fly sysid fit <session dir> --drone <id> [--out <dir>] [--force] [--name] [--map]
+                          [--camera-from-preset <preset>] [--micro]
 
-Exit codes: 0 ok, 2 config/usage error, 3 missing optional dependency, 4 perception coverage
-refusal, 5 fail-safe stop.
+Exit codes: 0 ok, 2 config/usage error (also: anti-cheat software running), 3 missing optional
+dependency, 4 perception coverage refusal, 5 fail-safe stop (sysid: fail-safe, crash or drone
+mismatch; the session is resumable).
 """
 
 from __future__ import annotations
@@ -293,6 +302,11 @@ def _cmd_ui(args: argparse.Namespace) -> int:
 
     if args.action == "shot":
         print(f"saved {ui_driver.shot(args.out)} (half size: x2 = screen pixels)")
+    elif args.action == "select-drone":
+        if not args.name:
+            raise HarnessConfigError("ui select-drone needs --name (the exact Liftoff drone name)")
+        slot = ui_driver.select_drone(args.name, args.slot)
+        print(f"select-drone: {args.name!r} (slot {slot})")
     elif args.action == "save-recording":
         if not args.name:
             raise HarnessConfigError("ui save-recording needs --name")
@@ -300,6 +314,81 @@ def _cmd_ui(args: argparse.Namespace) -> int:
     else:
         ui_driver.ACTIONS[args.action]()
         print(f"{args.action}: ok")
+    return EXIT_OK
+
+
+def _cmd_sysid_liftoff(args: argparse.Namespace) -> int:
+    from drone_fly.sysid.session import run_sysid_liftoff
+
+    band = _float_pair(args.expect_hover, "--expect-hover") if args.expect_hover else None
+    result = run_sysid_liftoff(
+        args.drone,
+        session=args.session,
+        resume=args.resume,
+        select=args.select,
+        liftoff_name=args.liftoff_name,
+        seed=args.seed,
+        passes=args.passes,
+        hold_alt=args.hold_alt,
+        ceiling=args.ceiling,
+        radius=args.radius,
+        expect_hover=band,
+        preset=args.preset,
+        config=args.config,
+        plant=args.plant,
+        map_name=args.map,
+    )
+    print(
+        f"stop: {result.stop_reason}  done: {result.done}  aborted: {result.aborted}"
+        + (f"  h0: {result.h0:.3f}" if result.h0 is not None else "")
+        + (f"  error: {result.error}" if result.error else "")
+    )
+    print(f"session: {result.session_dir}")
+    if result.resumable:
+        print(f"resume with: --session {Path(result.session_dir).name} --resume")
+    if result.stop_reason == "anticheat":
+        return EXIT_CONFIG
+    return EXIT_OK if result.completed else EXIT_FAILSAFE
+
+
+def _cmd_sysid_fit(args: argparse.Namespace) -> int:
+    from drone_fly.drones.store import drones_root
+    from drone_fly.sysid.fit import fit_session
+    from drone_fly.sysid.report import write_report
+
+    out = Path(args.out) if args.out else drones_root() / args.drone
+    if (out / "drone.yaml").is_file() and not args.force:
+        raise HarnessConfigError(f"{out / 'drone.yaml'} exists: pass --force to overwrite it")
+    fit = fit_session(args.session_dir, args.drone)
+    liftoff = {"drone_name": fit.meta.get("liftoff_name") or args.drone}
+    for key, value in (
+        ("map", args.map or fit.meta.get("map")),
+        ("preset", fit.meta.get("preset")),
+    ):
+        if value:
+            liftoff[key] = value
+    camera = None
+    if args.camera_from_preset:
+        from drone_fly.harness.config import load_config
+
+        cam = load_config("liftoff", None, preset=args.camera_from_preset).section("camera")
+        camera = {
+            "hfov_deg": float(cam["hfov_deg"]),
+            "uptilt_deg": float(cam["uptilt_deg"]),
+            "ref": f"harness preset {args.camera_from_preset!r} camera (verified in UC-64)",
+        }
+    yaml_path, md = write_report(
+        fit,
+        out,
+        drone_id=args.drone,
+        name=args.name,
+        liftoff=liftoff,
+        camera=camera,
+        micro=args.micro,
+    )
+    print(f"fit_quality: {fit.fit_quality}. {fit.verdict}")
+    print(f"profile: {yaml_path}")
+    print(f"report: {md}")
     return EXIT_OK
 
 
@@ -496,13 +585,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ui = hsub.add_parser(
         "ui",
-        help="drive Liftoff's menus: launch | last-session | reset | save-recording | quit | shot",
+        help="drive Liftoff's menus: launch | last-session | reset | save-recording | "
+        "select-drone | quit | shot",
     )
     p_ui.add_argument(
-        "action", choices=("launch", "last-session", "reset", "save-recording", "quit", "shot")
+        "action",
+        choices=(
+            "launch",
+            "last-session",
+            "reset",
+            "save-recording",
+            "select-drone",
+            "quit",
+            "shot",
+        ),
     )
     p_ui.add_argument("--out", default="liftoff-screen.png", help="shot: PNG path (half size)")
-    p_ui.add_argument("--name", help="save-recording: recording name (no extension)")
+    p_ui.add_argument(
+        "--name",
+        help="save-recording: recording name (no extension); select-drone: exact drone name",
+    )
+    p_ui.add_argument("--slot", type=int, help="select-drone: list row (default: DRONE_SLOTS)")
     p_ui.set_defaults(func=_cmd_ui)
 
     p_srv = hsub.add_parser(
@@ -558,6 +661,49 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _common(p_ovl)
     p_ovl.set_defaults(func=_cmd_overlay)
+
+    sysid = sub.add_parser("sysid", help="identify a drone's dynamics (drones/<id>/drone.yaml)")
+    ssub = sysid.add_subparsers(dest="sysid_command", required=True)
+    p_sl = ssub.add_parser("liftoff", help="fly the seeded manoeuvre schedule and record it")
+    p_sl.add_argument("--drone", required=True, help="profile id, e.g. liftoff-gremlin-micro")
+    p_sl.add_argument("--session", help="session name (default: UTC stamp)")
+    p_sl.add_argument(
+        "--resume", action="store_true", help="continue --session from its next experiment"
+    )
+    p_sl.add_argument(
+        "--select", action="store_true", help="select --liftoff-name in Liftoff's menus first"
+    )
+    p_sl.add_argument("--liftoff-name", help="exact Liftoff drone name (recorded; --select)")
+    p_sl.add_argument("--map", help="Liftoff map / level flown (recorded)")
+    p_sl.add_argument("--seed", type=int, default=0, help="schedule seed")
+    p_sl.add_argument("--passes", type=int, default=3, help="passes (>= 2; the last is held out)")
+    p_sl.add_argument("--hold-alt", type=float, default=5.0, help="hover height (m)")
+    p_sl.add_argument("--ceiling", type=float, default=12.0, help="soft ceiling (m above ground)")
+    p_sl.add_argument("--radius", type=float, default=30.0, help="geofence radius (m)")
+    p_sl.add_argument("--expect-hover", help="airframe guard: hover throttle band lo:hi")
+    p_sl.add_argument("--preset", default="liftoff", help="harness preset (telemetry, pad)")
+    p_sl.add_argument("--config", help="YAML overlaid on the harness default")
+    p_sl.add_argument(
+        "--plant",
+        choices=("liftoff", "synthetic", "synthetic-5inch"),
+        default="liftoff",
+        help="synthetic*: a known-parameter simulated plant (dry run, no game)",
+    )
+    p_sl.set_defaults(func=_cmd_sysid_liftoff)
+    p_sf = ssub.add_parser("fit", help="fit a session and write drones/<id>/ (yaml + report)")
+    p_sf.add_argument("session_dir", help="artifacts/sysid/<id>/<session>")
+    p_sf.add_argument("--drone", required=True, help="profile id (output folder name)")
+    p_sf.add_argument("--out", help="output folder (default drones/<id>)")
+    p_sf.add_argument("--force", action="store_true", help="overwrite an existing drone.yaml")
+    p_sf.add_argument("--name", help="human-readable profile name")
+    p_sf.add_argument("--map", help="map flown (default: from the session)")
+    p_sf.add_argument(
+        "--camera-from-preset", help="copy camera hfov/uptilt from this harness preset"
+    )
+    p_sf.add_argument(
+        "--micro", action="store_true", help="compare the hover with UC64's -0.06 stick"
+    )
+    p_sf.set_defaults(func=_cmd_sysid_fit)
     return parser
 
 

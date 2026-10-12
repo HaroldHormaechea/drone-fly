@@ -108,8 +108,6 @@ class SessionSettings:
     #: 5-inch at T/W 7 gains 10 m/s in a 0.25 s full-throttle burst). The excess acceleration is
     #: estimated as ``(level / hover - 1) g`` (thrust ~ proportional to throttle).
     max_dv_m_s: float = 4.0
-    #: Live plant: refuse while League / Riot / Vanguard runs (skipped for the synthetic plant).
-    check_anticheat: bool = True
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -826,3 +824,200 @@ class SysidSession:
             self.meta["segments"][-1]["stop_reason"] = result.stop_reason
             self.rec.write_meta(self.meta)
             self.rec.close()
+
+
+# ----------------------------------------------------------------------------- CLI entry
+
+
+def expected_band(
+    drone_id: str,
+    liftoff_name: str | None,
+    explicit: tuple[float, float] | None,
+    *,
+    root: Any = None,
+    halfwidth: float = 0.15,
+) -> tuple[tuple[float, float] | None, str | None]:
+    """The airframe guard's hover band: ``--expect-hover`` > existing profile > ``DRONE_SLOTS``."""
+    if explicit is not None:
+        return explicit, "--expect-hover"
+    from drone_fly import drones
+
+    if drone_id in drones.list_ids(root):
+        prof = drones.load(drone_id, root)
+        h = prof.hover_throttle
+        return (h - halfwidth, h + halfwidth), f"drones/{drone_id}/drone.yaml hover {h:.3f}"
+    if liftoff_name:
+        from drone_fly.harness.liftoff.ui_driver import DRONE_SLOTS
+
+        slot = DRONE_SLOTS.get(liftoff_name)
+        if slot and slot.get("hover_band"):
+            lo, hi = slot["hover_band"]
+            return (float(lo), float(hi)), f"ui_driver.DRONE_SLOTS[{liftoff_name!r}]"
+    return None, None
+
+
+def run_sysid_liftoff(
+    drone_id: str,
+    *,
+    session: str | None = None,
+    resume: bool = False,
+    select: bool = False,
+    liftoff_name: str | None = None,
+    seed: int = 0,
+    passes: int = 3,
+    amplitudes: tuple[float, ...] | None = None,
+    hold_alt: float = 5.0,
+    ceiling: float = 12.0,
+    radius: float = 30.0,
+    expect_hover: tuple[float, float] | None = None,
+    preset: str | None = "liftoff",
+    config: Any = None,
+    plant: str = "liftoff",
+    out_root: Any = None,
+    map_name: str | None = None,
+) -> SysidResult:
+    """Build the parts (live Liftoff, or a synthetic plant) and run one :class:`SysidSession`."""
+    from pathlib import Path
+
+    from drone_fly.drones.schema import ID_RE
+    from drone_fly.harness.config import find_repo_root
+    from drone_fly.harness.recording import git_head
+    from drone_fly.sysid.recorder import META_FILE, default_session_name
+    from drone_fly.sysid.schedule import ScheduleSettings, build_schedule
+
+    if not ID_RE.match(drone_id):
+        raise HarnessConfigError(
+            f"--drone {drone_id!r} must be kebab-case (<source>-<class>-<model>)"
+        )
+    if plant not in ("liftoff", "synthetic", "synthetic-5inch"):
+        raise HarnessConfigError(f"unknown --plant {plant!r}")
+    live = plant == "liftoff"
+    repo = find_repo_root()
+    root = Path(out_root) if out_root is not None else (repo or Path.cwd()) / "artifacts" / "sysid"
+    name = session or default_session_name()
+    sdir = root / drone_id / name
+    meta_path = sdir / META_FILE
+    if resume:
+        if not meta_path.is_file():
+            raise HarnessConfigError(f"--resume: no session at {sdir} (pass --session NAME)")
+    elif meta_path.is_file():
+        raise HarnessConfigError(f"session {sdir} exists: pass --resume to continue it")
+
+    if live:
+        from drone_fly.harness.liftoff.anticheat import require_no_anticheat
+
+        require_no_anticheat()  # before any input reaches the game
+    recorder = SessionRecorder(sdir)
+    if resume:
+        schedule = [Experiment.from_dict(e) for e in recorder.meta.get("schedule") or []]
+        seed = int(recorder.meta.get("seed", seed))
+    else:
+        sched_kw: dict[str, Any] = {"passes": passes}
+        if amplitudes:
+            sched_kw["amplitudes"] = tuple(amplitudes)
+        schedule = build_schedule(seed, ScheduleSettings(**sched_kw))
+    band, band_source = expected_band(drone_id, liftoff_name, expect_hover)
+    settings = SessionSettings(
+        hold_alt_m=hold_alt,
+        limits=SafetyLimits(ceiling_m=ceiling, radius_m=radius),
+    )
+    meta_extra: dict[str, Any] = {
+        "liftoff_name": liftoff_name,
+        "map": map_name,
+        "git_head": git_head(repo),
+        "seed": seed,
+        "preset": preset,
+        "plant": plant,
+    }
+
+    if not live:
+        from drone_fly.sysid.model import FIVE_INCH_LIKE, MICRO_LIKE
+        from drone_fly.sysid.synthetic import _truth, build_synthetic
+
+        params = FIVE_INCH_LIKE if plant == "synthetic-5inch" else MICRO_LIKE
+        clock, world, source, sink = build_synthetic(params, seed=seed)
+        recorder.clock = clock
+        meta_extra["truth"] = _truth(params)
+        sess = SysidSession(
+            source,
+            sink,
+            settings,
+            drone_id=drone_id,
+            schedule=schedule,
+            recorder=recorder,
+            rates={a: sink.profiles[a] for a in AXES},
+            signs=dict(params.signs),
+            clock=clock,
+            ui_reset=world.reset,
+            expected_hover=band,
+            hover_band_source=band_source,
+            resume=resume,
+            meta_extra=meta_extra,
+        )
+        return sess.run()
+
+    from drone_fly.harness.config import load_config
+    from drone_fly.harness.interfaces import BuildContext
+    from drone_fly.harness.liftoff import ui_driver
+    from drone_fly.harness.liftoff.abort import HotkeyAbortSignal
+    from drone_fly.harness.liftoff.anticheat import require_no_anticheat
+    from drone_fly.harness.liftoff.focus import Win32ForegroundFocusProbe
+    from drone_fly.harness.liftoff.gamepad import VgamepadActionSink
+    from drone_fly.harness.liftoff.telemetry import (
+        GyroMap,
+        LiftoffConverter,
+        LiftoffUdpStateSource,
+        TelemetryFormat,
+    )
+    from drone_fly.harness.scale import WorldScale
+
+    if select:
+        if not liftoff_name:
+            raise HarnessConfigError("--select needs --liftoff-name")
+        ui_driver.select_drone(liftoff_name)
+    cfg = load_config("liftoff", config, preset=preset)
+    tcfg = cfg.section("telemetry")
+    src = LiftoffUdpStateSource(
+        TelemetryFormat.from_config(tcfg),
+        LiftoffConverter(GyroMap.from_config(tcfg), WorldScale(1.0)),  # Liftoff metres
+        host=str(tcfg.get("host", "127.0.0.1")),
+        port=int(tcfg.get("port", 9001)),
+    )
+    ctx = BuildContext(config=cfg, contract=None)
+    sink = VgamepadActionSink.from_config(cfg.section("controls"), ctx)
+    abort = HotkeyAbortSignal.from_config(cfg.section("abort"), ctx)
+    focus = None
+    if cfg.parts.focus_probe is not None:
+        focus = Win32ForegroundFocusProbe.from_config(cfg.get("focus") or {}, ctx)
+    meta_extra["config"] = {"telemetry": tcfg, "controls": cfg.section("controls")}
+    settings = SessionSettings(
+        **{
+            **settings.__dict__,
+            "limits": SafetyLimits(
+                ceiling_m=ceiling, radius_m=radius, stale_after_s=cfg.runner.stale_after_s
+            ),
+            "wait_for_state_s": cfg.runner.wait_for_state_s,
+            "wait_for_focus_s": float(
+                (cfg.get("focus") or {}).get("wait_for_focus_s", settings.wait_for_focus_s)
+            ),
+        }
+    )
+    sess = SysidSession(
+        src,
+        sink,
+        settings,
+        drone_id=drone_id,
+        schedule=schedule,
+        recorder=recorder,
+        rates=sink.profiles,
+        signs=sink.signs,
+        abort=abort,
+        focus=focus,
+        ui_reset=ui_driver.reset,
+        anticheat=require_no_anticheat,
+        expected_hover=band,
+        hover_band_source=band_source,
+        resume=resume,
+        meta_extra=meta_extra,
+    )
+    return sess.run()

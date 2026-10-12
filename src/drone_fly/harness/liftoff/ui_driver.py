@@ -10,6 +10,8 @@ Steps (each verified where the game gives a signal; clicks are positions measure
                    before ``reset`` / the next arm), then Esc back to the flight
 * ``quit``         Esc -> Quit -> Confirm -> Quit -> Yes; wait for the process to exit (falls back
                    to closing the window, then killing it)
+* ``select-drone NAME``  pick a saved drone in Liftoff's drone list (pixel-verified; see
+                   :func:`select_drone`)
 * ``shot``         save a half-size screenshot (for a human / Claude to check the screen)
 
 The menu positions belong to Liftoff's current UI (v1.7.x). If a step's verification fails, take
@@ -385,6 +387,101 @@ def shot(path: str) -> str:
         img = np.array(s.grab(s.monitors[1]))[:, :, :3][:, :, ::-1]
     image.fromarray(img).resize((img.shape[1] // 2, img.shape[0] // 2)).save(path)
     return path
+
+
+# ----------------------------------------------------------------------------- drone selection
+
+#: The drone list (2560x1080 reference): row ``i`` is at ``first_row + i * row_pitch``; the
+#: selected row is drawn in ``highlight_rgb`` at ``probe_x``. PROVISIONAL until measured live.
+DRONE_LIST = {
+    "first_row": (330, 300),
+    "row_pitch": 60,
+    "rows_visible": 8,
+    "probe_x": 120,
+    "highlight_rgb": (217, 99, 88),
+    "tolerance": 24,
+}
+#: Menu buttons clicked (in order) from the main menu to the drone list. PROVISIONAL.
+DRONE_MENU_PATH: tuple[str, ...] = ()
+#: Saved Liftoff drones the tooling may select: exact Liftoff name -> list slot and the hover
+#: throttle band the sysid airframe guard expects from its ground ramp.
+DRONE_SLOTS: dict[str, dict[str, Any]] = {
+    # UC64: hand-flown hover at stick -0.06 (throttle 0.47).
+    "Test small drone": {"slot": 0, "hover_band": (0.40, 0.56)},
+}
+
+
+class DroneSelectionError(HarnessConfigError):
+    """The drone list did not end up showing the requested drone selected."""
+
+
+def drone_row_xy(index: int, size: tuple[int, int] | None = None) -> tuple[int, int]:
+    """Screen position of drone-list row ``index`` (scaled from the reference). Pure."""
+    if index < 0 or index >= DRONE_LIST["rows_visible"]:
+        raise HarnessConfigError(
+            f"drone slot {index} outside the visible list (0..{DRONE_LIST['rows_visible'] - 1})"
+        )
+    w, h = size or screen_size()
+    x, y0 = DRONE_LIST["first_row"]
+    y = y0 + index * DRONE_LIST["row_pitch"]
+    return round(x * w / REFERENCE[0]), round(y * h / REFERENCE[1])
+
+
+def selected_drone_row(img: Any) -> int | None:
+    """Index of the highlighted drone-list row in a full-screen RGB image, or ``None``. Pure.
+
+    ``None`` when no row, or more than one row, shows the highlight colour.
+    """
+    h, w = img.shape[:2]
+    x = round(DRONE_LIST["probe_x"] * w / REFERENCE[0])
+    tol = DRONE_LIST["tolerance"]
+    hits = []
+    for i in range(DRONE_LIST["rows_visible"]):
+        y_ref = DRONE_LIST["first_row"][1] + i * DRONE_LIST["row_pitch"]
+        px = img[round(y_ref * h / REFERENCE[1]), x].astype(int)
+        if max(abs(int(px[c]) - DRONE_LIST["highlight_rgb"][c]) for c in range(3)) <= tol:
+            hits.append(i)
+    return hits[0] if len(hits) == 1 else None
+
+
+def drone_slot(name: str, slot: int | None = None) -> int:
+    """Validate ``name`` against :data:`DRONE_SLOTS` (no game access); its list slot."""
+    if name not in DRONE_SLOTS:
+        raise HarnessConfigError(
+            f"unknown Liftoff drone {name!r}; known (ui_driver.DRONE_SLOTS): {sorted(DRONE_SLOTS)}"
+        )
+    return int(DRONE_SLOTS[name]["slot"] if slot is None else slot)
+
+
+def select_drone(
+    name: str, slot: int | None = None, *, anticheat: Any = None, settle_s: float = 1.0
+) -> int:
+    """Select saved drone ``name`` from the main menu; verify the highlighted row by pixels.
+
+    Raises :class:`DroneSelectionError` (never enters a level) when the highlighted row is not
+    the requested slot. Returns the slot.
+    """
+    from drone_fly.harness.liftoff.anticheat import require_no_anticheat
+
+    (anticheat or require_no_anticheat)()
+    index = drone_slot(name, slot)
+    if not DRONE_MENU_PATH:
+        raise HarnessConfigError(
+            "the drone-list menu path is not measured yet (ui_driver.DRONE_MENU_PATH)"
+        )
+    _focused()
+    click("quit_no", settle_s=0.5)  # dismiss a stray "Quit?" dialog
+    for step in DRONE_MENU_PATH:
+        click(step, settle_s=settle_s)
+    x, y = drone_row_xy(index)
+    _click_xy(x, y, settle_s=settle_s)
+    got = selected_drone_row(_grab_screen())
+    if got != index:
+        raise DroneSelectionError(
+            f"drone list shows row {got} selected, expected {index} ({name!r}); not flying it"
+        )
+    log.info("selected drone %r (slot %d)", name, index)
+    return index
 
 
 ACTIONS = {

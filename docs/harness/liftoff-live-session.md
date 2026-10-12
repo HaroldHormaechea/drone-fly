@@ -230,3 +230,45 @@ Every `-RecordEvery` attempts, the run saves Liftoff's recording of that attempt
 as `<map>-model-<model>-attempt-<n>` (`...\LocalLow\LuGus Studios\Liftoff\Recordings\Race\`). The
 single steps are `drone-fly harness ui launch | last-session | reset | save-recording --name N |
 quit | shot` and `harness run ... --save-recording NAME`. Keep hands off the PC while it runs.
+
+## Measure a new drone
+
+System identification flies scripted manoeuvres with the drone and fits the airframe parameters the
+simulator needs. The result is a committed profile `drones/<id>/` (see [drones/README.md](../../drones/README.md)
+and [ADR 0005](../adr/0005-drone-profiles-and-sysid.md)). It runs unattended for roughly 10 minutes
+per drone.
+
+1. **Close League of Legends, the Riot client and Vanguard.** Check with `tasklist`. The sysid
+   commands refuse to send any input while `LeagueClient*`, `RiotClient*`, `vgc` or `vgtray` runs
+   (exit 2).
+2. Pick a **large, flat, open map**: the session holds 5 m, moves up to about 15 m sideways and
+   needs a clear floor. The session must be loadable through Single Player -> Quick Play -> Last
+   Session.
+3. Select the drone and load the map. Use `drone-fly harness ui select-drone --name "<exact Liftoff
+   name>"` (the names and list slots are in `ui_driver.DRONE_SLOTS`; the selection is checked by pixels
+   and fails with a named error rather than leaving the wrong drone selected), then
+   `harness ui last-session`.
+4. Fly the schedule:
+   ```
+   .venv-cuda\Scripts\drone-fly.exe sysid liftoff --drone <id> --liftoff-name "<name>" --map "<map>"
+   ```
+   It arms (RPM-confirmed), ramps the throttle on the ground to find the hover throttle, checks it
+   against the expected band, takes off to 5 m and runs 3 passes of throttle steps, chirp, bursts,
+   roll/pitch/yaw doublets and coasts. Between passes it lands, disarms and resets the level for a
+   full battery. F12 stops it. The output is `artifacts/sysid/<id>/<session>/` (telemetry, commands,
+   `meta.json`).
+   - Exit 5 means a fail-safe, a crash or `drone_mismatch` (the hover throttle says this is not the
+     requested drone). Continue a stopped session with `--session <name> --resume`.
+   - `--expect-hover lo:hi` sets the expected hover band for a drone without a profile or a
+     `DRONE_SLOTS` entry.
+   - `--plant synthetic` runs the whole pipeline on a simulated drone, without the game.
+5. Fit it:
+   ```
+   .venv-cuda\Scripts\drone-fly.exe sysid fit artifacts\sysid\<id>\<session> --drone <id> [--micro] [--camera-from-preset liftoff]
+   ```
+   This writes `drones/<id>/drone.yaml`, `sysid.md` and the PNGs (`--force` to overwrite).
+6. Check `fit_quality` in `drone.yaml`. `poor` means the held-out prediction missed the limits
+   (15 % of the commanded rate, 0.15 g). `sysid.md` says which signal missed.
+7. Commit **only** `drones/<id>/`. The raw session under `artifacts/` stays local.
+8. Restore your usual drone and map (for the reference setup: "Test small drone" and Infinity Loop)
+   and load them once with `harness ui last-session`, so the Last Session is right for the next run.

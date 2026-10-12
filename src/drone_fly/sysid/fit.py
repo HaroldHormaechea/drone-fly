@@ -368,12 +368,17 @@ class _Window:
     amplitude: float
 
 
-def _rate_windows(data: SessionData, exps: list[Experiment], axis: str) -> list[_Window]:
+def _rate_windows(
+    data: SessionData, exps: list[Experiment], axis: str, horizon: float | None = None
+) -> list[_Window]:
+    """Doublet windows; with ``horizon`` each runs that long from its start (into the recovery,
+    whose recorded sticks are inputs like any other)."""
     out = []
     k = OMEGA_INDEX[axis]
     for e in exps:
         t0, t1 = data.windows[e.id]
-        t1 = min(t1, t0 + max(HORIZON_S, t1 - t0))
+        if horizon is not None:
+            t1 = min(t0 + horizon, data.spans[e.id][1])
         idx = _in(data, t0, t1)
         if len(idx) < 5:
             continue
@@ -462,7 +467,7 @@ def fit_axis(
         notes.append(f"{axis}: expo ill-conditioned (sigma {sig[2]:.2f}); fixed at 0 and refitted")
         delay, sol, d_sigma, n = run(True)
         s3 = _lsq_sigma(sol.jac, sol.fun)
-        sig = np.array([s3[0], s3[1], 0.0, s3[2]])
+        sig = np.array([s3[0], s3[1], np.nan, s3[2]])  # expo fixed, not fitted
     x = sol.x_full
     rms = float(math.sqrt(float(sol.fun @ sol.fun) / n))
     params = AxisParams(float(x[0]), float(x[1]), float(x[2]), float(x[3]), delay)
@@ -675,7 +680,8 @@ def validate(data: SessionData, params: PlantParams) -> dict[str, Any]:
     for axis in AXES:
         r = params.rates[axis]
         x = np.array([r.rc_rate, r.super_rate, r.expo, r.tau_s])
-        wins = _rate_windows(data, _experiments(data, ("rate_doublet",), True, axis), axis)
+        held = _experiments(data, ("rate_doublet",), True, axis)
+        wins = _rate_windows(data, held, axis, HORIZON_S)
         errs_1s, errs_1 = [], []
         for w in wins:
             pred = _simulate_rate(data, w, axis, x, params.signs[axis], params.input_s + r.delay_s)

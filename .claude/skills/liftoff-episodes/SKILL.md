@@ -76,6 +76,23 @@ cd C:\dev\drone-fly
 4. Clean up: `Stop-LiftoffSession.ps1` (quits Liftoff, then stops the pad). If Liftoff hangs,
    it falls back to closing / killing the process.
 
+## Measure a new drone (system identification)
+
+Produces the drone profile `drones/<id>/drone.yaml` + `sysid.md` (UC-66; details in
+`docs/harness/liftoff-live-session.md` § "Measure a new drone").
+
+1. `tasklist`: no League of Legends / Riot client / Vanguard (`vgc`, `vgtray`). The commands also
+   refuse on their own (exit 2), but check first.
+2. Select the drone + load a large flat open map:
+   `drone-fly harness ui select-drone --name "<exact Liftoff name>"` (pixel-verified; names and slots
+   in `ui_driver.DRONE_SLOTS`), then `harness ui last-session`.
+3. `drone-fly sysid liftoff --drone <id> --liftoff-name "<name>" --map "<map>"` (~10 min; exit 5 =
+   fail-safe / crash / `drone_mismatch`, resumable with `--session <name> --resume`).
+4. `drone-fly sysid fit artifacts\sysid\<id>\<session> --drone <id>` → check `fit_quality`.
+5. Commit only `drones/<id>/` (never `artifacts/`). Restore the usual drone + map as Last Session.
+
+Dry run without the game: `sysid liftoff --drone <id> --plant synthetic`.
+
 ## For training / fine-tuning
 
 The loop is the environment interface: each run folder is one episode (obs, extra, actions,
