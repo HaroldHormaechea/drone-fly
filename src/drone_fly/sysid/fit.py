@@ -61,6 +61,8 @@ GRID_DT = 0.001
 RATE_LIMIT_PCT = 15.0
 ACCEL_LIMIT_G = 0.15
 HORIZON_S = 1.0
+#: Fewer distinct doublet amplitudes than this and rc_rate / super_rate / expo are not separable.
+MIN_RATE_AMPLITUDES = 5
 #: Echoed ``inputs`` columns (Liftoff order) and the command column each one echoes.
 ECHO = {"throttle": "in_throttle", "yaw": "in_yaw", "pitch": "in_pitch", "roll": "in_roll"}
 FIT_PHASES = ("settle", "window", "recover")
@@ -361,7 +363,7 @@ def fit_input_delay(
 
 @dataclass
 class _Window:
-    grid: np.ndarray
+    t0: float
     sample_t: np.ndarray
     omega: np.ndarray
     omega0: float
@@ -383,100 +385,137 @@ def _rate_windows(
         if len(idx) < 5:
             continue
         w0 = float(np.interp(t0, data.perf, data.omega[:, k]))
-        out.append(
-            _Window(
-                np.arange(t0, t1 + GRID_DT, GRID_DT),
-                data.perf[idx],
-                data.omega[idx, k],
-                w0,
-                e.amplitude,
-            )
-        )
+        out.append(_Window(t0, data.perf[idx], data.omega[idx, k], w0, e.amplitude))
     return out
 
 
 def _simulate_rate(
     data: SessionData, w: _Window, axis: str, x: np.ndarray, sign: float, delay: float
 ) -> np.ndarray:
+    """Exact first-order response to the (delayed, piecewise-constant) stick commands.
+
+    Event-based, so the delay is continuous: a fractional-millisecond delay (e.g. the
+    clock-alignment offset) is represented exactly instead of being absorbed by the curve.
+    """
     rc, sup, expo, tau = x
-    stick = zoh(data.cmd_t, data.cmd[axis], w.grid - delay)
-    u = sign * betaflight_rate_rad(stick, rc, sup, expo)
-    y = first_order(u, GRID_DT, tau, w.omega0)
-    return np.interp(w.sample_t, w.grid, y)
+    ct = data.cmd_t + delay
+    i0 = int(np.searchsorted(ct, w.t0, side="right"))
+    i1 = int(np.searchsorted(ct, w.sample_t[-1], side="right"))
+    times = np.concatenate([[w.t0], ct[i0:i1]])
+    sticks = data.cmd[axis][max(i0 - 1, 0) : i1]
+    if i0 == 0:  # no command before the window start: hold the first one
+        sticks = np.concatenate([[data.cmd[axis][0]], sticks])
+    u = sign * betaflight_rate_rad(sticks, rc, sup, expo)
+    lag = (times - times[0]) / tau
+    a = np.exp(-np.diff(times) / tau)
+    s = np.concatenate([[0.0], np.cumsum((1.0 - a) * u[:-1] * np.exp(lag[1:]))])
+    om = np.exp(-lag) * (w.omega0 + s)  # omega at each input change
+    k = np.searchsorted(times, w.sample_t, side="right") - 1
+    return u[k] + (om[k] - u[k]) * np.exp(-(w.sample_t - times[k]) / tau)
 
 
 def _rate_residuals(data, wins, axis, x, sign, delay) -> np.ndarray:
     return np.concatenate([_simulate_rate(data, w, axis, x, sign, delay) - w.omega for w in wins])
 
 
+def _curve_correlation(jac: np.ndarray, *, fixed_expo: bool) -> float:
+    """Largest |correlation| among the fitted Betaflight curve parameters (noise-independent)."""
+    k = 2 if fixed_expo else 3  # rc_rate, super_rate[, expo] come first in the free vector
+    try:
+        cov = np.linalg.pinv(jac.T @ jac)[:k, :k]
+    except np.linalg.LinAlgError:
+        return 1.0
+    d = np.sqrt(np.clip(np.diag(cov), 1e-300, None))
+    c = np.abs(cov / np.outer(d, d))
+    np.fill_diagonal(c, 0.0)
+    return float(np.max(c))
+
+
 def fit_axis(
     data: SessionData, axis: str, input_s: float, sign: float
 ) -> tuple[AxisParams, dict[str, Estimate], list[str]]:
+    """Betaflight rates + tau + delay for one axis (see the module docstring).
+
+    A coarse delay scan (4 ms) initialises a joint bounded least-squares fit of
+    ``rc_rate, super_rate, expo, tau_s, delay_s`` with a continuous delay.
+    """
     from scipy.optimize import least_squares
 
     wins = _rate_windows(data, _experiments(data, ("rate_doublet",), False, axis), axis)
     if not wins:
         raise HarnessConfigError(f"no completed {axis} doublets in the fit passes")
     notes: list[str] = []
-    lo = np.array([0.05, 0.0, 0.0, 0.002])
-    hi = np.array([5.0, 0.95, 1.0, 0.5])
+    lo = np.array([0.05, 0.0, 0.0, 0.004, 0.0])
+    hi = np.array([5.0, 0.95, 1.0, 0.5, 0.15])
 
-    def solve(delay: float, x0: np.ndarray, fix_expo: bool) -> Any:
-        if fix_expo:
+    def fit(fix_expo: bool) -> tuple[np.ndarray, np.ndarray, Any]:
+        free = [0, 1, 3, 4] if fix_expo else [0, 1, 2, 3, 4]
 
-            def fun(z: np.ndarray) -> np.ndarray:
-                return _rate_residuals(
-                    data, wins, axis, np.array([z[0], z[1], 0.0, z[2]]), sign, input_s + delay
-                )
-
-            r = least_squares(fun, x0[[0, 1, 3]], bounds=(lo[[0, 1, 3]], hi[[0, 1, 3]]))
-            r.x_full = np.array([r.x[0], r.x[1], 0.0, r.x[2]])
-            return r
+        def full(z: np.ndarray) -> np.ndarray:
+            v = np.zeros(5)
+            v[free] = z
+            return v
 
         def fun(z: np.ndarray) -> np.ndarray:
-            return _rate_residuals(data, wins, axis, z, sign, input_s + delay)
+            v = full(z)
+            return _rate_residuals(data, wins, axis, v[:4], sign, input_s + v[4])
 
-        r = least_squares(fun, x0, bounds=(lo, hi))
-        r.x_full = r.x
-        return r
+        x = np.array([1.0, 0.5, 0.0 if fix_expo else 0.1, 0.04, 0.0])
+        best = None
+        for d in np.arange(0.0, 0.1201, 0.004):  # coarse delay scan (delay held fixed)
+            x[4] = d
+            sub = [i for i in free if i != 4]
 
-    def scan(delays: np.ndarray, fix_expo: bool, x0: np.ndarray) -> tuple[np.ndarray, list]:
-        sse, sols = np.zeros(len(delays)), []
-        x = x0
-        for j, dl in enumerate(delays):
-            r = solve(float(dl), x, fix_expo)
-            sse[j] = float(r.fun @ r.fun)
-            sols.append(r)
-            x = np.clip(r.x_full, lo, hi)
-        return sse, sols
+            def at_delay(z: np.ndarray, d: float = d, sub: list = sub) -> np.ndarray:
+                v = x.copy()
+                v[sub] = z
+                return _rate_residuals(data, wins, axis, v[:4], sign, input_s + d)
 
-    def run(fix_expo: bool) -> tuple[float, Any, float | None, int]:
-        x0 = np.array([1.0, 0.5, 0.0 if fix_expo else 0.1, 0.04])
-        coarse = np.arange(0.0, 0.1201, 0.004)
-        sse, sols = scan(coarse, fix_expo, x0)
-        i = int(np.argmin(sse))
-        fine = np.arange(max(0.0, coarse[i] - 0.004), coarse[i] + 0.0041, GRID_DT)
-        sse_f, sols_f = scan(fine, fix_expo, sols[i].x_full)
-        j = int(np.argmin(sse_f))
-        n = len(sols_f[j].fun)
-        return float(fine[j]), sols_f[j], _grid_sigma(fine, sse_f, n, 5), n
+            r = least_squares(at_delay, x[sub], bounds=(lo[sub], hi[sub]))
+            x[sub] = r.x
+            if best is None or r.cost < best[0]:
+                best = (r.cost, x.copy())
+        start = best[1]
+        r = least_squares(fun, start[free], bounds=(lo[free], hi[free]), x_scale="jac")
+        sig = np.full(5, np.nan)
+        sig[free] = _lsq_sigma(r.jac, r.fun)
+        return full(r.x), sig, r
 
-    delay, sol, d_sigma, n = run(False)
-    sig = _lsq_sigma(sol.jac, sol.fun)
+    x, sig, sol = fit(False)
     if not np.isfinite(sig[2]) or sig[2] > 0.15:
-        notes.append(f"{axis}: expo ill-conditioned (sigma {sig[2]:.2f}); fixed at 0 and refitted")
-        delay, sol, d_sigma, n = run(True)
-        s3 = _lsq_sigma(sol.jac, sol.fun)
-        sig = np.array([s3[0], s3[1], np.nan, s3[2]])  # expo fixed, not fitted
-    x = sol.x_full
+        xf, sigf, solf = fit(True)
+        if float(solf.fun @ solf.fun) <= 1.05 * float(sol.fun @ sol.fun) + 1e-12:
+            notes.append(
+                f"{axis}: expo ill-conditioned (sigma {sig[2]:.2f}); fixed at 0, which fits as well"
+            )
+            x, sig, sol = xf, sigf, solf
+        else:
+            notes.append(
+                f"WARNING {axis}: rc_rate / super_rate / expo are strongly correlated (sigma expo "
+                f"{sig[2]:.2f}). The rate CURVE is well determined, the individual Betaflight "
+                "parameters are not: fly more doublet amplitudes before trusting them."
+            )
+    amps = sorted({round(w.amplitude, 3) for w in wins})
+    if len(amps) < MIN_RATE_AMPLITUDES:
+        corr = _curve_correlation(sol.jac, fixed_expo=bool(np.isnan(sig[2])))
+        notes.append(
+            f"WARNING {axis}: only {len(amps)} doublet amplitudes {amps}: rc_rate / super_rate / "
+            f"expo trade off (correlation {corr:.5f}), so the rate CURVE is fitted but the "
+            f"individual Betaflight parameters may be off. Fly >= {MIN_RATE_AMPLITUDES} amplitudes."
+        )
+    n = len(sol.fun)
     rms = float(math.sqrt(float(sol.fun @ sol.fun) / n))
-    params = AxisParams(float(x[0]), float(x[1]), float(x[2]), float(x[3]), delay)
+    params = AxisParams(float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]))
+
+    def s(i: int) -> float | None:
+        return float(sig[i]) if np.isfinite(sig[i]) else None
+
     est = {
-        "rc_rate": Estimate(params.rc_rate, float(sig[0]), rms),
-        "super_rate": Estimate(params.super_rate, float(sig[1]), rms),
-        "expo": Estimate(params.expo, float(sig[2]), rms),
-        "tau_s": Estimate(params.tau_s, float(sig[3]), rms),
-        "delay_s": Estimate(delay, d_sigma, rms),
+        "rc_rate": Estimate(params.rc_rate, s(0), rms),
+        "super_rate": Estimate(params.super_rate, s(1), rms),
+        "expo": Estimate(params.expo, s(2), rms),
+        "tau_s": Estimate(params.tau_s, s(3), rms),
+        "delay_s": Estimate(params.delay_s, s(4), rms),
     }
     return params, est, notes
 
@@ -643,6 +682,17 @@ def fit_thrust(
     sse_f = scan(fine)
     j = int(np.argmin(sse_f))
     lag = float(fine[j])
+    if 0 < j < len(fine) - 1:  # continuous refinement between the grid neighbours
+        from scipy.optimize import minimize_scalar
+
+        def sse_at(v: float) -> float:
+            return float(np.sum(_solve_knots(_thrust_design(data, spans, float(v)), y)[1] ** 2))
+
+        r = minimize_scalar(
+            sse_at, bounds=(fine[j - 1], fine[j + 1]), method="bounded", options={"xatol": 1e-5}
+        )
+        if r.success and r.fun <= sse_f[j]:
+            lag = float(r.x)
     x = _thrust_design(data, spans, lag)
     kn, resid = _solve_knots(x, y)
     coverage = x.sum(axis=0)

@@ -387,6 +387,9 @@ def _cmd_sysid_fit(args: argparse.Namespace) -> int:
         micro=args.micro,
     )
     print(f"fit_quality: {fit.fit_quality}. {fit.verdict}")
+    for note in fit.notes:
+        if note.startswith("WARNING"):
+            print(note)
     print(f"profile: {yaml_path}")
     print(f"report: {md}")
     return EXIT_OK

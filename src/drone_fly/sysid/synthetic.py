@@ -4,7 +4,8 @@
 quaternion attitude at ``physics_hz`` (default 500 Hz; 1000 available), ground contact and arm
 logic (it refuses to arm with the throttle up; motor RPM is non-zero only while armed). It emits
 :class:`~drone_fly.harness.types.TelemetrySample` records in Liftoff's raw Unity frame at
-``telemetry_hz`` (~100 Hz) with noise, receive jitter and float32 quantisation, so everything
+``telemetry_hz`` (default 98.7 Hz: like the real game, its clock is not phase-locked to the
+100 Hz pad commands) with noise, receive jitter and float32 quantisation, so everything
 downstream (converter, recorder, CSV round trip, fitter) runs exactly as on live data.
 
 Time is a :class:`~drone_fly.harness.runner.SimClock`: the world steps up to ``clock.now()``
@@ -44,7 +45,7 @@ class SyntheticWorld:
         *,
         seed: int = 0,
         physics_hz: float = 500.0,
-        telemetry_hz: float = 100.0,
+        telemetry_hz: float = 98.7,
         gyro_noise_deg_s: float = 0.3,
         pos_noise_m: float = 0.002,
         vel_noise_m_s: float = 0.01,
@@ -98,7 +99,9 @@ class SyntheticWorld:
             del self._hist_t[:200], self._hist_v[:200], self._hist_e[:200]
 
     def _at(self, t: float) -> int:
-        return max(0, bisect.bisect_right(self._hist_t, t) - 1)
+        # +1 ns: a delayed lookup that lands exactly on a pad change must see it (float sums of
+        # the step and the delays are a hair off; missing it would add one physics step of lag)
+        return max(0, bisect.bisect_right(self._hist_t, t + 1e-9) - 1)
 
     def set_pad(self, sticks: dict[str, float], buttons: set[str]) -> None:
         """Apply a pad state (channel sticks in [-1, 1], pressed buttons) at ``clock.now()``."""
@@ -138,12 +141,15 @@ class SyntheticWorld:
         self.events.append(f"reset@{self.t:.3f}")
 
     def advance_to(self, t_target: float) -> None:
-        while self.t + self.dt <= t_target + 1e-12:
-            self._step()
+        """Step to exactly ``t_target`` (a short last step), so a pad change made now acts now."""
+        while t_target - self.t > 1e-9:
+            end = self.t + self.dt
+            self._step(t_target if end > t_target - 1e-9 else end)
 
-    def _step(self) -> None:
-        p, dt = self.p, self.dt
+    def _step(self, t_end: float) -> None:
+        p = self.p
         t = self.t
+        dt = t_end - t
         if self.armed:
             i_thr = self._at(t - p.input_s)
             target = float(np.interp(self._hist_v[i_thr][0], p.knots_throttle, p.knots_g))
@@ -153,13 +159,15 @@ class SyntheticWorld:
             ]
         else:
             target, cmds = 0.0, [0.0, 0.0, 0.0]
-        lag = p.motor_lag_s
-        self.thrust += (target - self.thrust) * (1.0 if lag <= 0 else 1.0 - math.exp(-dt / lag))
+        # Exact first-order steps; the step AVERAGE drives the integration (using the end value
+        # would make thrust and rates lead by half a step, which the fit would see as less lag).
+        thrust_avg, self.thrust = _first_order_step(self.thrust, target, p.motor_lag_s, dt)
+        w_avg = [0.0, 0.0, 0.0]
         for k, a in enumerate(AXES):
-            self.w[k] += (cmds[k] - self.w[k]) * (1.0 - math.exp(-dt / p.rates[a].tau_s))
+            w_avg[k], self.w[k] = _first_order_step(self.w[k], cmds[k], p.rates[a].tau_s, dt)
 
         # attitude: q <- q * exp(w dt / 2)
-        wx, wy, wz = self.w
+        wx, wy, wz = w_avg
         n = math.sqrt(wx * wx + wy * wy + wz * wz)
         if n > 1e-12:
             h = 0.5 * n * dt
@@ -180,7 +188,7 @@ class SyntheticWorld:
         spd = math.sqrt(vx * vx + vy * vy + vz * vz)
         g = p.gravity
         fb = [(-p.drag_linear - p.drag_quadratic * spd) * c for c in vb]
-        fb[2] += self.thrust * g
+        fb[2] += thrust_avg * g
         acc = [r[i][0] * fb[0] + r[i][1] * fb[1] + r[i][2] * fb[2] for i in range(3)]
         acc[2] -= g
         for i in range(3):
@@ -202,8 +210,8 @@ class SyntheticWorld:
                 self.q = [math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)]
         if self.armed:
             self.charge = max(0.0, self.charge - self.thrust * dt / 600.0)
-        self.t = t + dt
-        if self.t >= self._next_emit - 1e-12:
+        self.t = t_end
+        if self.t >= self._next_emit - 1e-9:
             self._emit()
             self._next_emit += self.tel_dt
 
@@ -231,6 +239,14 @@ class SyntheticWorld:
         self.outbox.append(sample)
         while len(self.outbox) > 4096:
             self.outbox.popleft()
+
+
+def _first_order_step(y: float, u: float, tau: float, dt: float) -> tuple[float, float]:
+    """``(average over the step, end value)`` of ``tau * y' = u - y`` with constant ``u``."""
+    if tau <= 0:
+        return u, u
+    a = math.exp(-dt / tau)
+    return u + (y - u) * tau / dt * (1.0 - a), u + (y - u) * a
 
 
 def _matrix(q: list[float]) -> list[list[float]]:

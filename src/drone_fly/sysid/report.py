@@ -239,6 +239,8 @@ def sysid_markdown(fit: FitResult, data: dict[str, Any], plots: list[str], *, mi
         "",
         f"**fit_quality: {fit.fit_quality}.** {fit.verdict}",
         "",
+        *[f"> **{n}**" for n in fit.notes if n.startswith("WARNING")],
+        "",
         "## Fitted values",
         "",
         "| parameter | value | sigma | fit residual |",
