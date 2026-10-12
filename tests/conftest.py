@@ -196,3 +196,12 @@ def harness_checkpoint_30(harness_contract, tmp_path_factory: pytest.TempPathFac
     return _save_fixture_checkpoint(
         harness_contract, 30, tmp_path_factory.mktemp("harness_ckpt30") / "model_readout.pt"
     )
+
+
+# ----------------------------------------------------------------------------- UC-66 markers
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """``slow``: a full default-schedule sysid session (tens of seconds); deselect with
+    ``-m "not slow"``."""
+    config.addinivalue_line("markers", "slow: long end-to-end test (deselect with -m 'not slow')")

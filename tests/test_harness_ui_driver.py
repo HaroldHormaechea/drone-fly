@@ -172,3 +172,406 @@ def test_probes_scale_with_the_screen():
     half = img[::2, ::2]  # 1280x540
     assert ui_driver.dialog_open(half)
     assert len(ui_driver.find_save_rows(half)) == 2
+
+
+# ----------------------------------------------------------------------------- select-drone (UC-66)
+# Pure parts only: row scaling, the highlight / hover probes on synthetic screens, dropdown
+# scrolling, Player.log parsing, the spawn check, and select_drone's control flow with EVERY
+# game-touching function replaced. ``_block_real_input`` (autouse) makes any real cursor, wheel,
+# key or telemetry-socket access fail the test.
+
+from drone_fly.harness.liftoff.anticheat import AntiCheatRunningError  # noqa: E402
+
+#: Every ui_driver function that moves the cursor / wheel, presses keys, clicks, grabs the
+#: screen, binds the telemetry port, or reads Player.log.
+REAL_INPUT = (
+    "_user32", "_focused", "click", "click_ref", "_click_xy", "_scroll", "_hover",
+    "_grab_screen", "press_escape", "to_main_menu", "telemetry_streaming", "telemetry_position",
+    "_log_size", "_log_since", "focus_liftoff",
+)  # fmt: skip
+
+
+@pytest.fixture(autouse=True)
+def _block_real_input(monkeypatch):
+    for fn in REAL_INPUT:
+        if hasattr(ui_driver, fn):
+            monkeypatch.setattr(
+                ui_driver, fn, lambda *a, _fn=fn, **kw: pytest.fail(f"real game access: {_fn}")
+            )
+
+
+def _no_anticheat():
+    return None
+
+
+def _drone_screen(lit, size=(2560, 1080), colour=None):
+    """A screen with drone-list rows ``lit`` drawn in the highlight colour at the probe column."""
+    w, h = size
+    img = np.full((h, w, 3), 30, np.uint8)
+    dl = ui_driver.DRONE_LIST
+    x = round(dl["probe_x"] * w / ui_driver.REFERENCE[0])
+    for i in lit:
+        y = round((dl["first_row"][1] + i * dl["row_pitch"]) * h / ui_driver.REFERENCE[1])
+        img[max(0, y - 3) : y + 4, max(0, x - 3) : x + 4] = colour or dl["highlight_rgb"]
+    return img
+
+
+def test_drone_list_and_slots_shape():
+    dl = ui_driver.DRONE_LIST
+    assert set(dl) >= {"first_row", "row_pitch", "rows_visible", "probe_x", "highlight_rgb"}
+    assert len(dl["highlight_rgb"]) == 3 and dl["rows_visible"] >= 1
+    assert ui_driver.DRONE_MENU_PATH, "measured live (UC-66 stage B)"
+    assert all(step in ui_driver.POINTS for step in ui_driver.DRONE_MENU_PATH)
+    assert ui_driver.DRONE_MENU_PATH[-1] == "qs_drone"  # the last step opens the drone list
+    assert {"Test small drone", "Vortex Pro 250"} <= set(ui_driver.DRONE_SLOTS)
+    slots = [s["slot"] for s in ui_driver.DRONE_SLOTS.values()]
+    assert len(set(slots)) == len(slots)  # distinct rows
+    for name, slot in ui_driver.DRONE_SLOTS.items():
+        assert 0 <= slot["slot"] < dl["rows_visible"], name
+        lo, hi = slot["hover_band"]
+        assert 0.0 < lo < hi < 1.0, name
+    # UC64: the micro hovered at stick -0.06 = throttle 0.47, inside its band
+    micro = ui_driver.DRONE_SLOTS["Test small drone"]["hover_band"]
+    assert micro[0] <= 0.47 <= micro[1]
+    # the airframe guard must tell the two apart: the bands do not overlap
+    five = ui_driver.DRONE_SLOTS["Vortex Pro 250"]["hover_band"]
+    assert five[1] <= micro[0] or micro[1] <= five[0]
+
+
+def test_quick_setup_levels_shape():
+    assert {"arena-freeflight", "infinity-loop"} <= set(ui_driver.QUICK_SETUP_LEVELS)
+    for name, lv in ui_driver.QUICK_SETUP_LEVELS.items():
+        assert {"mode", "environment", "track", "spawn"} <= set(lv), name
+        assert all(isinstance(lv[k], int) and lv[k] >= 0 for k in ("mode", "environment", "track"))
+        assert lv["spawn"] is None or len(lv["spawn"]) == 3
+    assert set(ui_driver.QUICK_SETUP_FIELDS) == {"mode", "environment", "track"}
+    assert {"quick_setup", "qs_drone", "qs_play", "qs_cancel"} <= set(ui_driver.POINTS)
+
+
+def test_drone_rows_scale_from_the_reference_screen():
+    dl = ui_driver.DRONE_LIST
+    x0, y0 = dl["first_row"]
+    assert ui_driver.drone_row_xy(0, (2560, 1080)) == (x0, y0)
+    assert ui_driver.drone_row_xy(2, (2560, 1080)) == (x0, y0 + 2 * dl["row_pitch"])
+    assert ui_driver.drone_row_xy(1, (1280, 540)) == (
+        round(x0 / 2),
+        round((y0 + dl["row_pitch"]) / 2),
+    )
+    assert ui_driver.drone_row_xy(0, (3840, 1620)) == (round(x0 * 1.5), round(y0 * 1.5))
+
+
+@pytest.mark.parametrize("index", [-1, ui_driver.DRONE_LIST["rows_visible"]])
+def test_drone_row_outside_the_list_is_refused(index):
+    with pytest.raises(HarnessConfigError, match="outside the visible list"):
+        ui_driver.drone_row_xy(index, (2560, 1080))
+
+
+@pytest.mark.parametrize("size", [(2560, 1080), (1280, 540), (3840, 1620)])
+def test_highlighted_rows_are_found_at_any_resolution(size):
+    n = ui_driver.DRONE_LIST["rows_visible"]
+    for i in range(n):
+        assert ui_driver.highlighted_drone_rows(_drone_screen([i], size)) == [i]
+        assert ui_driver.selected_drone_row(_drone_screen([i], size)) == i
+    assert ui_driver.highlighted_drone_rows(_drone_screen(range(n), size)) == list(range(n))
+
+
+def test_highlight_tolerance_and_ambiguity():
+    dl = ui_driver.DRONE_LIST
+    tol = dl["tolerance"]
+    near = tuple(min(255, c + tol) for c in dl["highlight_rgb"])
+    far = tuple(min(255, c + tol + 10) for c in dl["highlight_rgb"])
+    assert ui_driver.selected_drone_row(_drone_screen([1], colour=near)) == 1
+    assert ui_driver.selected_drone_row(_drone_screen([1], colour=far)) is None
+    assert ui_driver.selected_drone_row(_drone_screen([])) is None  # nothing highlighted
+    assert ui_driver.selected_drone_row(_drone_screen([0, 2])) is None  # ambiguous
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "expected"),
+    [
+        ([], [3], 3),  # current selection not visible; the hovered row lights up
+        ([1], [1, 3], 3),  # the current selection stays lit; only row 3 is new
+        ([3], [3], None),  # hovering the already-selected row: nothing new
+        ([], [], None),  # nothing lit (the list did not open)
+        ([], [2, 3], None),  # two new rows: ambiguous
+        ([1, 2], [2], None),  # a row went dark, none lit
+    ],
+)
+def test_hovered_row_is_the_single_newly_lit_row(before, after, expected):
+    assert ui_driver.hovered_row(_drone_screen(before), _drone_screen(after)) == expected
+
+
+@pytest.mark.parametrize(
+    ("index", "expected"),
+    [(0, (0, 0)), (1, (0, 30)), (3, (0, 90)), (4, (1, 20)), (5, (1, 50)), (7, (2, 10))],
+)
+def test_dropdown_scroll_lands_the_row_in_view(index, expected):
+    notches, offset = ui_driver.dropdown_scroll(index)
+    assert (notches, offset) == expected
+    d = ui_driver.DROPDOWN_ROW
+    assert notches * d["notch"] + offset == index * d["pitch"]
+    assert 0 <= offset < d["notch"] <= d["rows"] * d["pitch"]
+
+
+def test_dropdown_scroll_refuses_negative_rows():
+    with pytest.raises(HarnessConfigError):
+        ui_driver.dropdown_scroll(-1)
+
+
+def test_dropdown_row_xy_scales_and_bounds():
+    d = ui_driver.DROPDOWN_ROW
+    field = ui_driver.QUICK_SETUP_FIELDS["environment"]
+    x, y = ui_driver.dropdown_row_xy(field, 0, (2560, 1080))
+    assert (x, y) == (field[0] + d["dx"], field[1] + d["first_dy"])
+    assert ui_driver.dropdown_row_xy(field, 60, (1280, 540)) == (
+        round((field[0] + d["dx"]) / 2),
+        round((field[1] + d["first_dy"] + 60) / 2),
+    )
+    for bad in (-1, d["rows"] * d["pitch"]):
+        with pytest.raises(HarnessConfigError, match="outside the visible rows"):
+            ui_driver.dropdown_row_xy(field, bad, (2560, 1080))
+
+
+def test_level_rows_validate_the_name():
+    assert ui_driver.level_rows("arena-freeflight")["environment"] == 5
+    with pytest.raises(HarnessConfigError, match="unknown level") as exc:
+        ui_driver.level_rows("moon-base")
+    assert "arena-freeflight" in str(exc.value)
+
+
+LOG = """\
+Initializing input
+=== Calculating FT Gremlin ... ===
+Loading main menu
+=== Calculating Test small drone ... ===
+Loaded level Liftoff Arena
+"""
+
+
+def test_loaded_drone_is_the_last_one_built():
+    assert ui_driver.loaded_drone(LOG) == "Test small drone"
+    more = LOG + "=== Calculating Vortex Pro 250 ... ===\n"
+    assert ui_driver.loaded_drone(more) == "Vortex Pro 250"
+    assert ui_driver.loaded_drone("no drones here") is None
+    assert ui_driver.loaded_drone("") is None
+
+
+@pytest.mark.parametrize(
+    ("pos", "ok"),
+    [((10.0, 1.0, -5.0), True), ((12.0, 1.0, -5.0), True), ((14.0, 1.0, -5.0), False)],
+)
+def test_spawn_matches_within_tolerance(pos, ok):
+    assert ui_driver.SPAWN_TOLERANCE_M == 3.0
+    assert ui_driver.spawn_matches(pos, (10.0, 1.0, -5.0)) is ok
+    assert ui_driver.spawn_matches(pos, (10.0, 1.0, -5.0), tol=10.0)
+
+
+def test_unknown_drone_name_is_refused_before_touching_the_game():
+    with pytest.raises(HarnessConfigError, match="unknown Liftoff drone") as exc:
+        ui_driver.select_drone("Mystery 5-inch", anticheat=_no_anticheat)
+    assert "Test small drone" in str(exc.value)  # lists the known names
+    expected = ui_driver.DRONE_SLOTS["Test small drone"]["slot"]
+    assert ui_driver.drone_slot("Test small drone") == expected
+    assert ui_driver.drone_slot("Test small drone", slot=1) == 1
+
+
+def test_unknown_level_is_refused_before_touching_the_game():
+    with pytest.raises(HarnessConfigError, match="unknown level"):
+        ui_driver.select_drone("Test small drone", level="moon", anticheat=_no_anticheat)
+
+
+def test_unmeasured_menu_path_is_refused_before_touching_the_game(monkeypatch):
+    monkeypatch.setattr(ui_driver, "DRONE_MENU_PATH", ())
+    with pytest.raises(HarnessConfigError, match="not measured"):
+        ui_driver.select_drone("Test small drone", anticheat=_no_anticheat)
+
+
+SIZE = (1280, 540)
+
+
+class FakeGame:
+    """Records every ui_driver game call; serves screens, log text and telemetry."""
+
+    def __init__(self, monkeypatch, *, lit_before, lit_after, built, position=None):
+        self.calls: list = []
+        self.screens = [_drone_screen(lit_before, SIZE), _drone_screen(lit_after, SIZE)]
+        self.built = built
+        self.position = position
+        rec = self.calls.append
+        m = monkeypatch.setattr
+        m(ui_driver, "screen_size", lambda: SIZE)
+        m(ui_driver, "_focused", lambda: rec("focus"))
+        m(ui_driver, "to_main_menu", lambda: rec("to_main_menu"))
+        m(ui_driver, "click", lambda name, settle_s=1.0: rec(name))
+        m(ui_driver, "click_ref", lambda x, y, settle_s=1.0: rec(("click_ref", x, y)))
+        m(ui_driver, "_click_xy", lambda x, y, settle_s: rec(("click", x, y)))
+        m(ui_driver, "_scroll", lambda x, y, n: rec(("scroll", x, y, n)))
+        m(ui_driver, "_hover", lambda x, y: rec(("hover", x, y)))
+        m(ui_driver, "_grab_screen", lambda: rec("grab") or self.screens.pop(0))
+        m(ui_driver, "press_escape", lambda settle_s=1.5: rec("escape"))
+        m(ui_driver, "telemetry_streaming", lambda *a, **kw: True)
+        m(ui_driver, "telemetry_position", lambda *a, **kw: self.position)
+        m(ui_driver, "_log_size", lambda: 1234)
+        m(ui_driver, "_log_since", lambda off: rec(("log", off)) or self.built)
+        m(ui_driver.time, "sleep", lambda s: None)
+
+    def names(self):
+        return [c if isinstance(c, str) else c[0] for c in self.calls]
+
+    def of(self, kind):
+        return [c for c in self.calls if isinstance(c, tuple) and c[0] == kind]
+
+
+SLOT = ui_driver.DRONE_SLOTS["Test small drone"]["slot"]
+OTHER = (SLOT + 1) % ui_driver.DRONE_LIST["rows_visible"]
+BUILT = "=== Calculating Test small drone ... ==="
+
+
+def test_select_drone_hovers_verifies_clicks_and_checks_the_log(monkeypatch):
+    game = FakeGame(monkeypatch, lit_before=[OTHER], lit_after=[OTHER, SLOT], built=BUILT)
+    assert ui_driver.select_drone("Test small drone", anticheat=_no_anticheat) == SLOT
+    x, y = ui_driver.drone_row_xy(SLOT, SIZE)
+    names = game.names()
+    assert names[:2] == ["focus", "to_main_menu"]
+    # the menu path, the drone list opened last and scrolled to its END
+    path = [n for n in names if n in ui_driver.DRONE_MENU_PATH]
+    assert path == list(ui_driver.DRONE_MENU_PATH)
+    scrolls = game.of("scroll")
+    assert scrolls and scrolls[-1][3] < 0
+    assert names.index("scroll") > names.index("qs_drone")
+    # cursor off the rows -> grab -> cursor on the target -> grab -> click the target -> Play
+    assert game.of("hover")[-1] == ("hover", x, y)
+    i_grab2 = len(names) - 1 - names[::-1].index("grab")
+    assert game.calls[i_grab2 - 1] == ("hover", x, y)
+    assert game.calls[i_grab2 + 1] == ("click", x, y)
+    assert names.index("qs_play") > i_grab2 + 1
+    assert ("log", 1234) in game.calls  # the log is read from where it was before Play
+    assert "escape" not in names and not game.of("click_ref")  # no level change
+
+
+@pytest.mark.parametrize(
+    ("before", "after"), [([], [OTHER]), ([], []), ([SLOT], [SLOT]), ([], [SLOT, OTHER])]
+)
+def test_select_drone_row_mismatch_cancels_before_any_level_load(monkeypatch, before, after):
+    game = FakeGame(monkeypatch, lit_before=before, lit_after=after, built="")
+    with pytest.raises(ui_driver.DroneSelectionError, match="not flying it"):
+        ui_driver.select_drone("Test small drone", anticheat=_no_anticheat)
+    names = game.names()
+    assert names[-2:] == ["escape", "escape"]  # close the list, cancel the dialog
+    assert "qs_play" not in names
+    x, y = ui_driver.drone_row_xy(SLOT, SIZE)
+    assert ("click", x, y) not in game.calls  # the row was never clicked
+    assert issubclass(ui_driver.DroneSelectionError, HarnessConfigError)
+
+
+@pytest.mark.parametrize("built", ["=== Calculating Vortex Pro 250 ... ===", "nothing logged"])
+def test_select_drone_wrong_loaded_drone_is_a_named_error(monkeypatch, built):
+    FakeGame(monkeypatch, lit_before=[], lit_after=[SLOT], built=built)
+    with pytest.raises(ui_driver.DroneSelectionError, match="do not fly it"):
+        ui_driver.select_drone("Test small drone", anticheat=_no_anticheat)
+
+
+def test_select_drone_with_a_level_sets_the_three_dropdowns(monkeypatch):
+    rows = ui_driver.QUICK_SETUP_LEVELS["arena-freeflight"]
+    game = FakeGame(
+        monkeypatch, lit_before=[], lit_after=[SLOT], built=BUILT, position=rows["spawn"]
+    )
+    ui_driver.select_drone("Test small drone", level="arena-freeflight", anticheat=_no_anticheat)
+    refs = game.of("click_ref")
+    assert [(c[1], c[2]) for c in refs] == [
+        ui_driver.QUICK_SETUP_FIELDS[f] for f in ("mode", "environment", "track")
+    ]
+    # each field: open it, scroll to the top, scroll down to the row, click the row (scaled)
+    for field in ("mode", "environment", "track"):
+        fx, fy = ui_driver.QUICK_SETUP_FIELDS[field]
+        notches, offset = ui_driver.dropdown_scroll(rows[field])
+        i = game.calls.index(("click_ref", fx, fy))
+        nxt = game.calls[i + 1 : i + 4]
+        assert nxt[0] == ("scroll", fx, fy + 90, 30)
+        if notches:
+            assert nxt[1] == ("scroll", fx, fy + 90, -notches)
+        x, y = ui_driver.dropdown_row_xy((fx, fy), offset, SIZE)
+        assert ("click", x, y) in nxt
+    # the level is set before the drone list is opened
+    assert game.names().index("qs_drone") > game.calls.index(refs[-1])
+
+
+def test_select_drone_checks_the_spawn_when_known(monkeypatch):
+    monkeypatch.setitem(
+        ui_driver.QUICK_SETUP_LEVELS,
+        "test-level",
+        {"mode": 0, "environment": 0, "track": 0, "spawn": (10.0, 1.0, -5.0)},
+    )
+    FakeGame(monkeypatch, lit_before=[], lit_after=[SLOT], built=BUILT, position=(10.5, 1, -5))
+    ui_driver.select_drone("Test small drone", level="test-level", anticheat=_no_anticheat)
+    for pos in [(40.0, 1.0, -5.0), None]:
+        FakeGame(monkeypatch, lit_before=[], lit_after=[SLOT], built=BUILT, position=pos)
+        with pytest.raises(ui_driver.DroneSelectionError, match="spawn"):
+            ui_driver.select_drone("Test small drone", level="test-level", anticheat=_no_anticheat)
+
+
+def test_level_without_a_measured_spawn_skips_the_telemetry_check(monkeypatch):
+    monkeypatch.setitem(
+        ui_driver.QUICK_SETUP_LEVELS,
+        "unmeasured",
+        {"mode": 0, "environment": 0, "track": 0, "spawn": None},
+    )
+    FakeGame(monkeypatch, lit_before=[], lit_after=[SLOT], built=BUILT)
+    monkeypatch.setattr(
+        ui_driver, "telemetry_position", lambda *a, **kw: pytest.fail("no spawn to check")
+    )
+    assert (
+        ui_driver.select_drone("Test small drone", level="unmeasured", anticheat=_no_anticheat)
+        == SLOT
+    )
+
+
+def test_select_drone_runs_the_anticheat_check_first(monkeypatch):
+    order = []
+    monkeypatch.setattr(ui_driver, "drone_slot", lambda *a: order.append("validate") or 0)
+
+    def refuse():
+        order.append("anticheat")
+        raise AntiCheatRunningError(["vgc.exe"])
+
+    with pytest.raises(AntiCheatRunningError):
+        ui_driver.select_drone("Test small drone", anticheat=refuse)
+    assert order == ["anticheat"]
+
+
+def test_cli_select_drone_needs_a_name(capsys):
+    from drone_fly.cli.main import build_parser, main
+
+    a = build_parser().parse_args(
+        ["harness", "ui", "select-drone", "--name", "Test small drone", "--slot", "1",
+         "--level", "arena-freeflight"]
+    )  # fmt: skip
+    assert a.action == "select-drone" and a.name == "Test small drone" and a.slot == 1
+    assert a.level == "arena-freeflight"
+    assert main(["harness", "ui", "select-drone"]) == 2
+    assert "--name" in capsys.readouterr().err
+
+
+def test_cli_select_drone_passes_the_level(monkeypatch, capsys):
+    from drone_fly.cli.main import main
+
+    seen = {}
+
+    def fake(name, slot=None, *, level=None, **kw):
+        seen.update(name=name, slot=slot, level=level)
+        return 3
+
+    monkeypatch.setattr(ui_driver, "select_drone", fake)
+    argv = ["harness", "ui", "select-drone", "--name", "Vortex Pro 250", "--level", "infinity-loop"]
+    assert main(argv) == 0
+    assert seen == {"name": "Vortex Pro 250", "slot": None, "level": "infinity-loop"}
+    assert "slot 3" in capsys.readouterr().out
+
+
+def test_cli_select_drone_unknown_name_exit_2(monkeypatch, capsys):
+    from drone_fly.cli.main import main
+    from drone_fly.harness.liftoff import anticheat
+
+    monkeypatch.setattr(anticheat, "running_process_names", lambda: ["Liftoff.exe"])
+    assert main(["harness", "ui", "select-drone", "--name", "Nope"]) == 2
+    assert "unknown Liftoff drone" in capsys.readouterr().err

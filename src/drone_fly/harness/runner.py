@@ -107,6 +107,52 @@ class SimClock:
         self.t += dt
 
 
+def motors_spinning(sample: Any) -> bool | None:
+    """True when a telemetry sample shows non-zero motor RPM; None when it carries no RPM."""
+    rpm = None if sample is None else getattr(sample, "rpm", None)
+    if rpm is None:
+        return None
+    return float(np.max(np.abs(rpm))) > 0.0
+
+
+def confirm_disarmed(
+    sink: Any, source: Any, clock: Any, timeout_s: float, events: list[str]
+) -> str:
+    """Re-press Disarm every 0.5 s until telemetry shows the motors stopped (or give up).
+
+    Appends ``disarmed`` or ``disarm_unconfirmed`` to ``events`` and returns the outcome:
+    ``disarmed``, ``unconfirmed`` (then the sink keeps the throttle at minimum), ``no_rpm`` (the
+    stream has no RPM block) or ``skipped`` (no timeout, or nothing to press).
+    """
+    disarm = getattr(sink, "disarm", None)
+    if timeout_s <= 0 or disarm is None:
+        return "skipped"
+    start = clock.now()
+    next_press = start + 0.5
+    try:
+        while clock.now() - start < timeout_s:
+            samples = source.drain_raw()
+            spinning = motors_spinning(samples[-1]) if samples else None
+            if samples and spinning is None:
+                return "no_rpm"  # stream without RPM: cannot confirm
+            if spinning is False:
+                events.append("disarmed")
+                return "disarmed"
+            if clock.now() >= next_press:
+                if not disarm():
+                    return "skipped"
+                next_press = clock.now() + 0.5
+            clock.sleep_until(clock.now() + 0.05)
+    except Exception:  # noqa: BLE001 - never mask the stop reason
+        log.exception("confirming the disarm failed")
+    events.append("disarm_unconfirmed")
+    hold = getattr(sink, "hold_throttle_min", None)
+    if callable(hold):
+        hold()  # never park the pad at centred sticks while the drone may be armed
+    log.error("could not confirm the drone disarmed (motor RPM still > 0 or no telemetry)")
+    return "unconfirmed"
+
+
 @dataclass(frozen=True)
 class RunnerSettings:
     rate_hz: float = 50.0
@@ -330,34 +376,15 @@ class HarnessRunner:
         Records ``disarmed`` or ``disarm_unconfirmed`` in the run's events.
         """
         s = self.settings
-        sink = self.harness.action_sink
-        disarm = getattr(sink, "disarm", None)
-        if s.arm_confirm_s <= 0 or s.disarm_confirm_s <= 0 or disarm is None:
+        if s.arm_confirm_s <= 0:
             return
-        clock = self.clock
-        start = clock.now()
-        next_press = start + 0.5
-        try:
-            while clock.now() - start < s.disarm_confirm_s:
-                samples = self.harness.state_source.drain_raw()
-                rpm = getattr(samples[-1], "rpm", None) if samples else None
-                if samples and rpm is None:
-                    return  # stream without RPM: cannot confirm
-                if rpm is not None and float(np.max(np.abs(rpm))) == 0.0:
-                    result.events.append("disarmed")
-                    return
-                if clock.now() >= next_press:
-                    if not disarm():
-                        return
-                    next_press = clock.now() + 0.5
-                clock.sleep_until(clock.now() + 0.05)
-        except Exception:  # noqa: BLE001 - never mask the stop reason
-            log.exception("confirming the disarm failed")
-        result.events.append("disarm_unconfirmed")
-        hold = getattr(sink, "hold_throttle_min", None)
-        if callable(hold):
-            hold()  # never park the pad at centred sticks while the drone may be armed
-        log.error("could not confirm the drone disarmed (motor RPM still > 0 or no telemetry)")
+        confirm_disarmed(
+            self.harness.action_sink,
+            self.harness.state_source,
+            self.clock,
+            s.disarm_confirm_s,
+            result.events,
+        )
 
     def run(self, *, prepared: bool = False) -> RunResult:
         """Run until a stop condition; always ends with the sink in fail-safe."""
@@ -430,12 +457,12 @@ class HarnessRunner:
         A stream without RPM cannot confirm arming, so the check is dropped (logged once).
         """
         sample = self._last_sample
-        rpm = None if sample is None else getattr(sample, "rpm", None)
-        if sample is not None and rpm is None:
+        spinning = motors_spinning(sample)
+        if sample is not None and spinning is None:
             log.warning("telemetry has no MotorRPM block; cannot confirm arming")
             self._arm_deadline = None
             return
-        if rpm is not None and float(np.max(np.abs(rpm))) > 0.0:
+        if spinning:
             self._arm_deadline = None
             record.events.append("armed")
             return

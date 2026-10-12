@@ -230,3 +230,55 @@ Every `-RecordEvery` attempts, the run saves Liftoff's recording of that attempt
 as `<map>-model-<model>-attempt-<n>` (`...\LocalLow\LuGus Studios\Liftoff\Recordings\Race\`). The
 single steps are `drone-fly harness ui launch | last-session | reset | save-recording --name N |
 quit | shot` and `harness run ... --save-recording NAME`. Keep hands off the PC while it runs.
+
+## Measure a new drone
+
+System identification flies scripted manoeuvres with the drone and fits the airframe parameters the
+simulator needs. The result is a committed profile `drones/<id>/` (see [drones/README.md](../../drones/README.md)
+and [ADR 0005](../adr/0005-drone-profiles-and-sysid.md)). It runs unattended for roughly 10 minutes
+per drone (about 7 minutes of flight plus two level resets for the default 3-pass schedule).
+
+1. **Close League of Legends, the Riot client and Vanguard.** Check with `tasklist`. The sysid
+   commands refuse to send any input while `LeagueClient*`, `RiotClient*`, `vgc` or `vgtray` runs
+   (exit 2).
+2. Pick a **large, flat, open map**: the session holds 5 m, moves up to about 15 m sideways and
+   needs a clear floor. The measured map is **Liftoff Arena in free flight with no track** (the empty
+   stadium pitch, `--level arena-freeflight`). Its spawn is at one end of the pitch, so the session
+   flies 45 m forward first (`--home-forward 45`) and centres a 25 m geofence there.
+3. Select the drone and load the map:
+   `drone-fly harness ui select-drone --name "<exact Liftoff name>" --level arena-freeflight`.
+   It goes Single Player -> Quick Play -> **Quick Setup**: that dialog picks mode, environment,
+   track and drone, and its choices only apply on Play (which also makes them the Last Session).
+   Three checks guard it, each failing with a named error:
+   - the target row of the drone list (scrolled to its end) must light up under the cursor; on a
+     mismatch the dialog is cancelled and no level loads;
+   - after loading, Liftoff's `Player.log` must name the requested drone;
+   - the drone must sit at the level's spawn (telemetry).
+
+   Names, list rows and hover bands are in `ui_driver.DRONE_SLOTS`; levels in
+   `ui_driver.QUICK_SETUP_LEVELS`. Re-measure them with `harness ui shot` if Liftoff's menus change.
+4. Fly the schedule:
+   ```
+   .venv-cuda\Scripts\drone-fly.exe sysid liftoff --drone <id> --liftoff-name "<name>" --map "<map>" --home-forward 45 --radius 25
+   ```
+   (or let it select the drone itself with `--select --level arena-freeflight`).
+   It arms (RPM-confirmed), ramps the throttle on the ground to find the hover throttle, checks it
+   against the expected band, takes off to 5 m and runs 3 passes of throttle steps, chirp, bursts,
+   roll/pitch/yaw doublets and coasts. Between passes it lands, disarms and resets the level for a
+   full battery. F12 stops it. The output is `artifacts/sysid/<id>/<session>/` (telemetry, commands,
+   `meta.json`).
+   - Exit 5 means a fail-safe, a crash or `drone_mismatch` (the hover throttle says this is not the
+     requested drone). Continue a stopped session with `--session <name> --resume`.
+   - `--expect-hover lo:hi` sets the expected hover band for a drone without a profile or a
+     `DRONE_SLOTS` entry.
+   - `--plant synthetic` runs the whole pipeline on a simulated drone, without the game.
+5. Fit it:
+   ```
+   .venv-cuda\Scripts\drone-fly.exe sysid fit artifacts\sysid\<id>\<session> --drone <id> [--micro] [--camera-from-preset liftoff]
+   ```
+   This writes `drones/<id>/drone.yaml`, `sysid.md` and the PNGs (`--force` to overwrite).
+6. Check `fit_quality` in `drone.yaml`. `poor` means the held-out prediction missed the limits
+   (15 % of the commanded rate, 0.15 g). `sysid.md` says which signal missed.
+7. Commit **only** `drones/<id>/`. The raw session under `artifacts/` stays local.
+8. Restore your usual drone and map so the Last Session is right for the next run. For the
+   reference setup: `harness ui select-drone --name "Test small drone" --level infinity-loop`.
