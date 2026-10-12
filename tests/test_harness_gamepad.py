@@ -407,3 +407,127 @@ def test_keep_pad_connected_applies_to_local_pads_only():
     assert VgamepadActionSink.from_config(local, ctx).keep_pad_connected is True
     server = {**local, "pad": "server"}  # the long-lived pad server stays connected anyway
     assert VgamepadActionSink.from_config(server, ctx).keep_pad_connected is False
+
+
+# ----------------------------------------------------------------------------- UC67 drone profile
+
+
+def _micro():
+    from drone_fly import drones
+
+    return drones.load("liftoff-gremlin-micro")
+
+
+def _v2(collective_g, rates=(0.0, 0.0, 0.0)) -> ContractCommand:
+    return ContractCommand(
+        raw=np.zeros(4, np.float32),
+        collective=0.0,  # deliberately wrong: a drone sink must read collective_g
+        thrust=0.0,
+        rates=np.array(rates, np.float32),
+        collective_g=collective_g,
+        contract_version=2,
+    )
+
+
+def test_drone_throttle_map_inverts_the_thrust_curve():
+    from drone_fly.harness.liftoff.gamepad import DroneThrottleMap
+
+    prof = _micro()
+    t = DroneThrottleMap.from_profile(prof)
+    assert t.drone_id == "liftoff-gremlin-micro"
+    # 1.0 g is the measured hover: throttle 0.4708 -> stick -0.058 (UC64 hand-flown: -0.06)
+    assert t.stick(1.0) == pytest.approx(-0.058, abs=0.001)
+    assert t.hover_stick == t.stick(1.0)
+    assert t.stick(1.0) == pytest.approx(2 * prof.hover_throttle - 1, abs=0.01)
+    gs = np.linspace(0.0, prof.max_g, 41)
+    sticks = [t.stick(g) for g in gs]
+    assert all(b >= a for a, b in zip(sticks, sticks[1:], strict=False))  # monotone
+    for g in gs[gs > 0.01]:  # the inverse round-trips through the forward curve
+        frac = (t.stick(g) + 1.0) / 2.0
+        assert np.interp(frac, prof.thrust_curve.throttle, prof.thrust_curve.accel_g) == (
+            pytest.approx(g, abs=1e-6)
+        )
+    assert t.stick(0.0) == -1.0 and t.stick(-1.0) == -1.0  # clamps
+    assert t.stick(prof.max_g) == 1.0 and t.stick(10.0) == 1.0
+
+
+def test_drone_sink_maps_collective_g_and_profile_rates():
+    from drone_fly.harness.liftoff.gamepad import DroneThrottleMap
+
+    prof = _micro()
+    profiles = {a: prof.rate_profile(a) for a in ("roll", "pitch", "yaw")}
+    sink = VgamepadActionSink(
+        profiles, DroneThrottleMap.from_profile(prof), pad_factory=MockPad, rate_scale=1.0
+    )
+    hover = sink.sticks_for(_v2(1.0))
+    assert hover["left_y"] == pytest.approx(-0.058, abs=0.001)
+    assert sink.hover_stick == pytest.approx(hover["left_y"])
+    assert sink.sticks_for(_v2(2.0))["left_y"] > hover["left_y"]
+    for w in (0.3, -1.5, 4.0):
+        s = sink.sticks_for(_v2(1.0, rates=(w, 0, 0)))["right_x"]
+        assert profiles["roll"].rate_deg_s(s) == pytest.approx(math.degrees(w), rel=1e-6)
+        # the measured micro curve, not the old preset's 1.0 / 0.7
+        assert s != pytest.approx(RateProfile(1.0, 0.7, 0.0).stick_for_rate(math.degrees(w)))
+
+
+def test_drone_sink_without_collective_g_uses_the_reference_fraction():
+    from drone_fly.harness.liftoff.gamepad import DroneThrottleMap
+
+    t = DroneThrottleMap.from_profile(_micro())
+    legacy = _cmd(collective=0.4)  # a command built without collective_g
+    assert legacy.collective_g is None
+    assert t.command_stick(legacy) == pytest.approx(t.stick(1.0))  # 0.4 of meteor75 = 1 g
+
+
+def test_from_config_with_the_liftoff_preset_uses_its_drone():
+    from drone_fly.harness.config import load_config
+    from drone_fly.harness.interfaces import BuildContext
+    from drone_fly.harness.liftoff.gamepad import DroneThrottleMap
+
+    cfg = load_config("liftoff", preset="liftoff")
+    ctx = BuildContext(config=cfg, contract=SimpleNamespace(HOVER_THR=0.4))
+    sink = VgamepadActionSink.from_config(cfg.section("controls"), ctx)
+    prof = _micro()
+    assert isinstance(sink.throttle, DroneThrottleMap) and sink.throttle.drone_id == prof.id
+    for a in ("roll", "pitch", "yaw"):
+        assert sink.profiles[a] == prof.rate_profile(a)
+    assert sink.hover_stick == pytest.approx(-0.058, abs=0.001)
+    assert sink.signs == {"roll": 1.0, "pitch": 1.0, "yaw": -1.0}  # still preset settings
+
+
+def test_from_config_without_a_drone_is_the_pre_uc67_mapping():
+    from drone_fly.harness.config import load_config
+    from drone_fly.harness.interfaces import BuildContext
+
+    cfg = load_config(
+        "liftoff",
+        overrides={
+            "drone": None,
+            "controls.hover_stick": -0.4,
+            "controls.rates": {a: {"rc_rate": 1.0, "super_rate": 0.7, "expo": 0.0}
+                               for a in ("roll", "pitch", "yaw")},
+        },
+    )  # fmt: skip
+    ctx = BuildContext(config=cfg, contract=SimpleNamespace(HOVER_THR=0.4))
+    sink = VgamepadActionSink.from_config(cfg.section("controls"), ctx)
+    assert sink.throttle == ThrottleMap(0.4, -0.4)
+    assert sink.profiles["roll"] == RateProfile(1.0, 0.7, 0.0)
+    # a v2 hover command carries the reference fraction 0.4 -> the configured hover stick
+    hover = ContractCommand(np.zeros(4, np.float32), 0.4, 0.0, np.zeros(3, np.float32), 1.0, 2)
+    assert sink.sticks_for(hover)["left_y"] == pytest.approx(-0.4)
+
+
+def test_drone_key_is_validated():
+    from drone_fly.harness.config import check_drone, load_drone_profile
+
+    assert check_drone({}) is None and check_drone({"drone": None}) is None
+    assert check_drone({"drone": "meteor75", "controls": {"rates": None}}) == "meteor75"
+    with pytest.raises(HarnessConfigError, match="conflict"):
+        check_drone({"drone": "meteor75", "controls": {"hover_stick": -0.1}})
+    with pytest.raises(HarnessConfigError, match="conflict"):
+        check_drone({"drone": "meteor75", "controls": {"rates": {"roll": {}}}})
+    with pytest.raises(HarnessConfigError, match="profile id or null"):
+        check_drone({"drone": 7})
+    with pytest.raises(HarnessConfigError, match="config 'drone'"):
+        load_drone_profile({"drone": "no-such-drone"})
+    assert load_drone_profile({"drone": "liftoff-gremlin-micro"}).id == "liftoff-gremlin-micro"

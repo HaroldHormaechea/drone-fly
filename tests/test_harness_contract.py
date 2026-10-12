@@ -275,3 +275,80 @@ def test_decode_matches_reference_plant_step(harness_contract):
         level = c.plant_step(s0, np.array([raw[0], 0, 0, 0], np.float32))
         thr = (level["vel"][2] / c.DT + c.inference.G) * c.inference.M
         assert thr == pytest.approx(cmd.thrust, rel=1e-4, abs=1e-6)
+
+
+# ----------------------------------------------------------------------------- UC67 contract v2
+
+
+def _pre_uc67_decode(raw, contract):
+    """The harness decoding before UC67, verbatim (the bit-identity reference)."""
+    a = np.asarray(raw, dtype=np.float32).reshape(-1)
+    collective = np.clip((a[0] + 1) * 0.5, 0, 1)
+    thrust = collective * contract.MAX_THRUST
+    rates = (np.tanh(a[1:4]) * contract.MAX_BODY_RATE).astype(np.float32)
+    return float(collective), float(thrust), rates
+
+
+def test_v1_decode_is_bit_identical_to_the_pre_uc67_decoding(harness_contract):
+    rng = np.random.default_rng(67)
+    raws = rng.uniform(-3.0, 3.0, size=(500, 4)).astype(np.float32)
+    raws[:5, 0] = (-1.0, 0.0, 1.0, -0.2, 0.6)
+    for raw in raws:
+        cmd = decode_action(raw, harness_contract)
+        collective, thrust, rates = _pre_uc67_decode(raw, harness_contract)
+        assert cmd.collective == collective and cmd.thrust == thrust
+        np.testing.assert_array_equal(cmd.rates, rates)
+        assert cmd.contract_version == 1
+        assert cmd.collective_g == pytest.approx(collective * 2.5, abs=1e-12)  # meteor75 curve
+
+
+def test_v2_decode_fills_collective_g_and_the_reference_fraction(harness_contract):
+    from drone_fly.sim.action import ActionSpec
+
+    spec = ActionSpec.v2(1.0, 4.0, max_g=4.2)
+    hover = decode_action(np.zeros(4, np.float32), harness_contract, spec)
+    assert hover.contract_version == 2 and hover.collective_g == 1.0
+    assert hover.collective == pytest.approx(0.4)  # the reference plant's hover fraction
+    assert hover.thrust == pytest.approx(0.4 * harness_contract.MAX_THRUST, rel=1e-6)
+    hard = decode_action(np.array([9.0, 0, 0, 0], np.float32), harness_contract, spec)
+    assert hard.collective_g == 4.2 and hard.collective == 1.0  # fraction clamps on meteor75
+    assert hard.as_dict()["contract_version"] == 2 and hard.as_dict()["collective_g"] == 4.2
+
+
+def _ckpt_copy(src, tmp_path, name="model_readout.pt"):
+    import shutil
+
+    dst = tmp_path / name
+    shutil.copyfile(src, dst)
+    return dst
+
+
+def test_policy_runner_reads_the_sidecar(harness_contract, harness_checkpoint_30, tmp_path):
+    from drone_fly.sim.action import ActionSpec, write_sidecar
+
+    plain = _ckpt_copy(harness_checkpoint_30, tmp_path, "v1.pt")
+    runner = ContractPolicyRunner(harness_contract, plain, 30)
+    assert runner.contract_version is None
+    runner.load()
+    assert runner.action_spec == ActionSpec() and runner.contract_version == 1  # no sidecar
+
+    v2 = _ckpt_copy(harness_checkpoint_30, tmp_path, "v2.pt")
+    spec = ActionSpec.v2(1.0, 4.0, max_g=2.5)
+    write_sidecar(v2, spec, extra_dim=30, actor="k1-reservoir-aug", drone="meteor75", run_id="r")
+    runner = ContractPolicyRunner(harness_contract, v2, 30)
+    runner.load()
+    assert runner.action_spec == spec and runner.contract_version == 2
+
+
+def test_policy_runner_refuses_a_sidecar_extra_dim_mismatch(
+    harness_contract, harness_checkpoint_30, tmp_path
+):
+    from drone_fly.sim.action import ActionSpec, sidecar_path, write_sidecar
+
+    ckpt = _ckpt_copy(harness_checkpoint_30, tmp_path)
+    write_sidecar(ckpt, ActionSpec.v2(1.0, 4.0), extra_dim=70, actor="a", drone=None, run_id=None)
+    with pytest.raises(HarnessConfigError, match="extra_dim 70"):
+        ContractPolicyRunner(harness_contract, ckpt, 30).load()
+    sidecar_path(ckpt).write_text(json.dumps({"contract_version": 9}), encoding="utf-8")
+    with pytest.raises(HarnessConfigError, match="invalid contract sidecar"):
+        ContractPolicyRunner(harness_contract, ckpt, 30).load()

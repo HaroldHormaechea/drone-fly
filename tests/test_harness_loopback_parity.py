@@ -309,3 +309,88 @@ def test_inline_course_gen_dict_with_numpy_values_records(
     meta = json.loads((session.run_dir / "meta.json").read_text(encoding="utf-8"))
     assert meta["stop_reason"] == "completed"
     assert len(_harness_ticks(session.run_dir)) == 10
+
+
+# ----------------------------------------------------------------------------- UC67 contract v2
+
+
+def test_v1_command_steps_plant_step_bit_exactly(harness_contract):
+    from drone_fly.harness.loopback import LoopbackPlant
+    from drone_fly.harness.policy import decode_action
+
+    c = harness_contract
+    plant = LoopbackPlant(c, np.array([0.0, 0.0, 1.0], np.float32))
+    state = dict(plant.state)
+    rng = np.random.default_rng(1)
+    for _ in range(20):
+        raw = rng.uniform(-1.5, 1.5, 4).astype(np.float32)
+        plant.step_command(decode_action(raw, c))
+        state = c.plant_step(state, raw)
+        for key in ("pos", "vel", "quat", "omega"):
+            np.testing.assert_array_equal(plant.state[key], state[key])
+
+
+def test_v2_command_steps_the_sim_plant_like_the_equivalent_v1_action(harness_contract):
+    """On meteor75 a v2 action ``1 + a0`` g equals the v1 action ``2 (1 + a0) / 2.5 - 1``."""
+    from drone_fly.harness.loopback import LoopbackPlant
+    from drone_fly.harness.policy import decode_action
+    from drone_fly.sim.action import ActionSpec
+
+    c = harness_contract
+    spec = ActionSpec.v2(1.0, 4.0, max_g=2.5)
+    plant = LoopbackPlant(c, np.array([0.0, 0.0, 1.0], np.float32))
+    state = dict(plant.state)
+    rng = np.random.default_rng(2)
+    for _ in range(50):
+        raw2 = rng.uniform(-0.9, 0.9, 4).astype(np.float32)
+        cmd = decode_action(raw2, c, spec)
+        assert cmd.contract_version == 2
+        raw1 = raw2.copy()
+        raw1[0] = 2.0 * cmd.collective_g / 2.5 - 1.0
+        plant.step_command(cmd)
+        state = c.plant_step(state, raw1)
+        for key in ("pos", "vel", "quat", "omega"):
+            np.testing.assert_allclose(plant.state[key], state[key], atol=1e-4, err_msg=key)
+    assert plant.steps == 50
+
+
+def test_v2_checkpoint_runs_in_loopback_and_records_its_contract(
+    harness_contract, harness_checkpoint_70, harness_k1_dir, tmp_path
+):
+    import shutil
+
+    from drone_fly.sim.action import ActionSpec, write_sidecar
+
+    ckpt = tmp_path / "ckpt" / "model_readout.pt"
+    ckpt.parent.mkdir()
+    shutil.copyfile(harness_checkpoint_70, ckpt)
+    write_sidecar(ckpt, ActionSpec.v2(1.0, 4.0, max_g=2.5), extra_dim=70,
+                  actor="k1-reservoir-aug", drone="meteor75", run_id="t")  # fmt: skip
+    session = _run(
+        harness_contract,
+        ckpt,
+        harness_k1_dir,
+        tmp_path / "runs",
+        {"course": {"source": "course_gen", "seed": 0}},
+        0.4,
+    )
+    ticks = _harness_ticks(session.run_dir)
+    assert len(ticks) == 20
+    assert all(t["command"]["contract_version"] == 2 for t in ticks)
+    assert all(t["command"]["collective_g"] is not None for t in ticks)
+    meta = json.loads((session.run_dir / "meta.json").read_text(encoding="utf-8"))
+
+    def find(d, key):
+        if isinstance(d, dict):
+            if key in d:
+                return d[key]
+            for v in d.values():
+                r = find(v, key)
+                if r is not None:
+                    return r
+        return None
+
+    assert find(meta, "contract_version") == 2
+    assert find(meta, "action_contract")["collective_scale_g"] == 1.0
+    # the plant was stepped (moved off the spawn)
+    assert ticks[-1]["obs"] != ticks[0]["obs"]
