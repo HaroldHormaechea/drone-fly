@@ -189,14 +189,21 @@ class FreeSpaceEstimate:
 class ContractCommand:
     """The policy's raw action plus its exact contract decoding (``INFERENCE_CONTRACT.md`` §2).
 
-    ``collective`` is the clamped [0, 1] collective fraction, ``thrust`` the training-plant
-    Newtons, ``rates`` the commanded body rates ``[wx, wy, wz]`` in rad/s (FLU body frame).
+    ``collective_g`` is the canonical collective: body-z specific force in g (1.0 = hover on
+    any airframe; contract v2, UC67). ``collective`` (the [0, 1] collective fraction of the
+    reference plant, ``drones/meteor75``) and ``thrust`` (its Newtons) keep their pre-UC67
+    meaning; for a v2 command they are derived from ``collective_g`` on the reference plant, so
+    the overlay, recordings and the loopback parity read them unchanged. ``rates`` are the
+    commanded body rates ``[wx, wy, wz]`` in rad/s (FLU body frame). ``contract_version`` is the
+    action contract the checkpoint was decoded with (1 = legacy, 2 = hover-relative).
     """
 
     raw: np.ndarray
     collective: float
     thrust: float
     rates: np.ndarray
+    collective_g: float | None = None
+    contract_version: int = 1
 
     def as_dict(self) -> dict[str, Any]:
         return _jsonable(
@@ -205,6 +212,8 @@ class ContractCommand:
                 "collective": self.collective,
                 "thrust": self.thrust,
                 "rates": self.rates,
+                "collective_g": self.collective_g,
+                "contract_version": self.contract_version,
             }
         )
 

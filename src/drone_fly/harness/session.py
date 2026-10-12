@@ -273,6 +273,7 @@ def run_harness(
                     "checkpoint": Path(checkpoint).name,
                     "sha8": (policy.sha256 or "")[:8],
                     "extra_dim": extra_dim,
+                    "contract_version": policy.contract_version,
                     "preset": preset,
                 },
                 meta=build_meta(
@@ -293,6 +294,10 @@ def run_harness(
                     "checkpoint": str(Path(checkpoint).resolve()),
                     "checkpoint_sha256": policy.sha256,
                     "extra_dim": extra_dim,
+                    "contract_version": policy.contract_version,
+                    "action_contract": None
+                    if policy.action_spec is None
+                    else policy.action_spec.as_dict(),
                     "device": contract.device,
                     "gpu": gpu_name(),
                     "preset": preset,

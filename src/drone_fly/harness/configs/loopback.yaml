@@ -3,6 +3,11 @@
 # overlaid on this one; keys not listed here are rejected.
 harness: sim-loopback
 
+# The plant a contract-v2 checkpoint is stepped on (UC67: a single-env drone_fly.sim.Plant,
+# euler-legacy, at the contract DT). null = drones/meteor75, the reference plant. A v1
+# checkpoint is always stepped by the contract's plant_step on its raw action (bit-exact).
+drone: null
+
 contract:
   gpu_prototype_dir: null   # null -> $DRONE_FLY_GPU_PROTOTYPE -> <repo>/gpu_prototype
   k1_path: null             # null -> $DRONE_FLY_K1_PATH -> <repo>/artifacts/pruned/k1

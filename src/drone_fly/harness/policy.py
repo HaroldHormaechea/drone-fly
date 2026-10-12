@@ -3,14 +3,18 @@
 Loading goes through the contract's own ``load_policy(path, extra_dim, device)`` (``strict=False``
 with the ``body.layer.*``-only missing-keys assertion) — nothing is reimplemented here.
 
-:func:`decode_action` is the contract §2 mapping, written out for the sinks (they need the
-physical command, not the raw action): linear-clamp collective (**not** a sigmoid) and
-``tanh * MAX_BODY_RATE`` rates. The parity test pins it against ``plant_step``.
+The action contract version comes from the checkpoint's sidecar
+(``<stem>.contract.json``, :mod:`drone_fly.sim.action`); a checkpoint without one is v1.
+:func:`decode_action` delegates to the sim's NumPy decoders: v1 is the contract §2 mapping
+(linear-clamp collective, **not** a sigmoid, and ``tanh * MAX_BODY_RATE`` rates), bit-identical
+to the pre-UC67 decoding; v2 is the hover-relative collective. The parity test pins v1 against
+``plant_step``.
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +23,8 @@ import numpy as np
 from drone_fly.harness.errors import HarnessConfigError
 from drone_fly.harness.interfaces import PolicyRunner
 from drone_fly.harness.types import ContractCommand
+
+log = logging.getLogger(__name__)
 
 #: extra widths of the shipped augmented models (contract §4): 12, 30 (course), 70 (+raycast).
 SUPPORTED_EXTRA_DIMS = (12, 30, 70)
@@ -46,16 +52,27 @@ def sha256_file(path: str | Path) -> str:
     return h.hexdigest()
 
 
-def decode_action(raw: np.ndarray, contract: Any) -> ContractCommand:
-    """Contract §2: ``clip((a0+1)/2, 0, 1) * MAX_THRUST`` and ``tanh(a1:4) * MAX_BODY_RATE``."""
+def decode_action(raw: np.ndarray, contract: Any, spec: Any = None) -> ContractCommand:
+    """Decode a raw action with the checkpoint's :class:`~drone_fly.sim.action.ActionSpec`.
+
+    v1 (``spec`` None or version 1): ``collective = clip((a0+1)/2, 0, 1)``, ``thrust =
+    collective * MAX_THRUST``, ``rates = tanh(a1:4) * MAX_BODY_RATE`` (bit-identical to the
+    pre-UC67 decoding) and ``collective_g`` = the reference thrust curve at ``collective``.
+    v2: ``collective_g = clamp(1 + collective_scale_g * a0, 0, max_g)``, ``rates = tanh(a1:4) *
+    max_rate_rad_s``; ``collective`` / ``thrust`` are derived on the reference plant.
+    """
+    from drone_fly.sim.action import LEGACY_VERSION, ActionSpec, decode_numpy
+
+    spec = spec or ActionSpec()
+    d = decode_numpy(raw, spec)
     a = np.asarray(raw, dtype=np.float32).reshape(-1)
-    if a.shape[0] != 4:
-        raise ValueError(f"raw action must have 4 entries, got {a.shape[0]}")
-    collective = np.clip((a[0] + 1) * 0.5, 0, 1)
-    thrust = collective * contract.MAX_THRUST
-    rates = (np.tanh(a[1:4]) * contract.MAX_BODY_RATE).astype(np.float32)
     return ContractCommand(
-        raw=a.copy(), collective=float(collective), thrust=float(thrust), rates=rates
+        raw=a.copy(),
+        collective=d.fraction,
+        thrust=float(np.float32(d.fraction) * contract.MAX_THRUST),  # float32, as pre-UC67
+        rates=d.rates,
+        collective_g=d.collective_g,
+        contract_version=LEGACY_VERSION if spec.version == LEGACY_VERSION else spec.version,
     )
 
 
@@ -68,6 +85,12 @@ class ContractPolicyRunner(PolicyRunner):
         self._extra_dim = validate_extra_dim(extra_dim)
         self._policy: Any = None
         self.sha256: str | None = None
+        #: The checkpoint's action contract (sidecar; v1 when absent), set by :meth:`load`.
+        self.action_spec: Any = None
+
+    @property
+    def contract_version(self) -> int | None:
+        return None if self.action_spec is None else int(self.action_spec.version)
 
     @property
     def extra_dim(self) -> int:
@@ -81,6 +104,26 @@ class ContractPolicyRunner(PolicyRunner):
                 "the K1 connectome was not found (artifacts/pruned/k1 is absent from this "
                 "checkout). Pass --k1-path, set contract.k1_path, or set DRONE_FLY_K1_PATH."
             )
+        from drone_fly.sim.action import read_sidecar, spec_for_checkpoint
+
+        try:
+            self.action_spec = spec_for_checkpoint(self.checkpoint)
+            side = read_sidecar(self.checkpoint) or {}
+        except ValueError as exc:
+            raise HarnessConfigError(
+                f"invalid contract sidecar of {self.checkpoint}: {exc}"
+            ) from exc
+        if side.get("extra_dim") is not None and int(side["extra_dim"]) != self._extra_dim:
+            raise HarnessConfigError(
+                f"--extra-dim {self._extra_dim} does not match the checkpoint's sidecar "
+                f"extra_dim {side['extra_dim']}"
+            )
+        log.info(
+            "checkpoint %s: action contract v%d%s",
+            self.checkpoint.name,
+            self.action_spec.version,
+            "" if side else " (no .contract.json sidecar: legacy)",
+        )
         self.sha256 = sha256_file(self.checkpoint)
         self._policy = self.contract.load_policy(
             str(self.checkpoint), extra_dim=self._extra_dim, device=self.contract.device

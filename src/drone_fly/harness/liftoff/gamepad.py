@@ -11,8 +11,14 @@ Stick conventions (defaults, mode 2; every sign is explicit config):
 * ``+wx`` (roll, right wing down)         -> roll stick right  (right stick X +)
 * ``+wy`` (about the left axis, nose down) -> pitch stick forward (right stick Y +)
 * ``+wz`` (about up, counter-clockwise)    -> yaw stick left    (left stick X -)
-* throttle: piecewise-linear through ``(0, -1)``, ``(HOVER_THR, hover_stick)``, ``(1, +1)``
-  on the left stick Y.
+* throttle (left stick Y): with a ``drone: <id>`` in the config (UC67), the command's
+  ``collective_g`` (body-z specific force, g; 1.0 = hover) through the profile's INVERSE thrust
+  curve, ``stick = 2 * throttle_for_g(collective_g) - 1``, and the rate curves are the profile's
+  Betaflight rates; without one, the legacy piecewise-linear map of the reference-plant
+  collective fraction through ``(0, -1)``, ``(HOVER_THR, hover_stick)``, ``(1, +1)`` with the
+  ``controls.rates`` curves (``collective`` is ``collective_g`` re-expressed on the reference
+  plant, so this is the pre-UC67 mapping). ``rate_scale`` and ``stick_signs`` stay preset
+  settings either way.
 
 Arming (``controls.arm_button`` / ``controls.disarm_button``, optional): Liftoff only flies an
 armed drone, and binds *Arm* and *Disarm* to pad buttons (momentary presses). ``arm_button`` is
@@ -134,6 +140,41 @@ class ThrottleMap:
         c = min(max(float(collective), 0.0), 1.0)
         return float(np.interp(c, [0.0, self.hover_fraction, 1.0], [-1.0, self.hover_stick, 1.0]))
 
+    def command_stick(self, command: ContractCommand) -> float:
+        return self.stick(command.collective)
+
+
+@dataclass(frozen=True)
+class DroneThrottleMap:
+    """``collective_g`` -> stick through a drone profile's inverse thrust curve (UC67)."""
+
+    throttle: tuple[float, ...]
+    accel_g: tuple[float, ...]
+    drone_id: str = ""
+
+    @classmethod
+    def from_profile(cls, profile: Any) -> DroneThrottleMap:
+        c = profile.thrust_curve
+        return cls(tuple(c.throttle), tuple(c.accel_g), profile.id)
+
+    def stick(self, collective_g: float) -> float:
+        frac = float(
+            np.interp(float(collective_g), self.accel_g, self.throttle)
+        )  # clamps to [0, 1]
+        return float(np.clip(2.0 * frac - 1.0, -1.0, 1.0))
+
+    @property
+    def hover_stick(self) -> float:
+        return self.stick(1.0)
+
+    def command_stick(self, command: ContractCommand) -> float:
+        g = command.collective_g
+        if g is None:  # a command built without it: the reference plant's collective fraction
+            from drone_fly.sim.action import legacy_reference
+
+            g = float(legacy_reference().thrust_g(command.collective))
+        return self.stick(g)
+
 
 #: Pads kept connected after :meth:`VgamepadActionSink.close` (``controls.keep_pad_connected``):
 #: Liftoff re-arms and spins the motors up (about half throttle) when the virtual controller
@@ -171,7 +212,7 @@ class VgamepadActionSink(ActionSink):
     def __init__(
         self,
         profiles: dict[str, RateProfile],
-        throttle: ThrottleMap,
+        throttle: ThrottleMap | DroneThrottleMap,
         *,
         axis_map: dict[str, str] | None = None,
         signs: dict[str, float] | None = None,
@@ -247,9 +288,16 @@ class VgamepadActionSink(ActionSink):
                 return RemotePad(port)
 
             pad_kw = {"pad_factory": remote_pad, "button_resolver": str}
+        config = getattr(ctx, "config", None)
+        data = getattr(config, "data", config)
+        drone = None
+        if isinstance(data, dict):
+            from drone_fly.harness.config import load_drone_profile
+
+            drone = load_drone_profile(data)
         rates = cfg.get("rates") or {}
         profiles = {}
-        for axis in ("roll", "pitch", "yaw"):
+        for axis in ("roll", "pitch", "yaw") if drone is None else ():
             r = rates.get(axis) or {}
             profiles[axis] = RateProfile(
                 rc_rate=float(
@@ -266,20 +314,28 @@ class VgamepadActionSink(ActionSink):
             if v not in (1, -1):
                 raise HarnessConfigError(f"controls.stick_signs.{axis} must be 1 or -1")
             signs[axis] = float(v)
-        hover = ctx.contract.HOVER_THR if ctx is not None and ctx.contract is not None else 0.4
-        return cls(
-            profiles,
-            ThrottleMap(
+        throttle: ThrottleMap | DroneThrottleMap
+        if drone is not None:
+            profiles = {a: drone.rate_profile(a) for a in ("roll", "pitch", "yaw")}
+            throttle = DroneThrottleMap.from_profile(drone)
+        else:
+            contract = getattr(ctx, "contract", None)
+            hover = contract.HOVER_THR if contract is not None else 0.4
+            hs = cfg.get("hover_stick")
+            throttle = ThrottleMap(
                 float(hover),
                 float(
                     require_number(
-                        cfg.get("hover_stick", -0.4),
+                        -0.4 if hs is None else hs,
                         "controls.hover_stick",
                         min_value=-1,
                         max_value=1,
                     )
                 ),
-            ),
+            )
+        return cls(
+            profiles,
+            throttle,
             axis_map=cfg.get("axis_map"),
             signs=signs,
             rate_scale=float(
@@ -321,12 +377,17 @@ class VgamepadActionSink(ActionSink):
         wx, wy, wz = (float(r) for r in command.rates)
         deg = 180.0 / math.pi * self.rate_scale
         channel = {
-            "throttle": self.throttle.stick(command.collective),
+            "throttle": self.throttle.command_stick(command),
             "roll": self.signs["roll"] * self.profiles["roll"].stick_for_rate(wx * deg),
             "pitch": self.signs["pitch"] * self.profiles["pitch"].stick_for_rate(wy * deg),
             "yaw": self.signs["yaw"] * self.profiles["yaw"].stick_for_rate(wz * deg),
         }
         return {self.axis_map[ch]: float(np.clip(v, -1.0, 1.0)) for ch, v in channel.items()}
+
+    @property
+    def hover_stick(self) -> float:
+        """The throttle stick that hovers this airframe (1.0 g)."""
+        return float(self.throttle.hover_stick)
 
     def neutral_sticks(self) -> dict[str, float]:
         sticks = {ax: 0.0 for ax in STICK_AXES}
