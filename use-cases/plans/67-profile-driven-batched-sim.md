@@ -450,7 +450,7 @@ Torch only. No module-level device or tensors, no env vars, and **no imports of 
     - Preserve them in C:\dev\drone-fly\artifacts\sysid before cleanup (done), and never commit them.
 11. **Out of scope.** Kept extensible but not built:
     - the UC68 multi-track teacher (CourseEnv takes a course source);
-    - the UC69 observation noise (no config field added [C8]);
+    - the UC70 observation noise (no config field added [C8]);
     - moving the harness's v1 path off gpu_prototype;
     - a plain-MLP actor [C8].
 

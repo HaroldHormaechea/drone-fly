@@ -1,13 +1,13 @@
-# Use Case 69: Deployable student policy distilled from the teacher under a measured detector-noise model
+# Use Case 70: Deployable student policy distilled from the teacher under a measured detector-noise model
 
 ## Summary
-The UC68 teacher sees exact gate poses; the live harness only has the learned gate detector's estimates. These are noisy, biased with range and angle, sometimes missing, and late. This use case closes that gap in two steps. First, it **measures** the detector's real error statistics in Liftoff from auto-labelled captures, where XML geometry is projected through telemetry pose (the UC64 machinery). From these it builds a **noise model**, stored next to the detector weights it describes, so each detector version carries its own noise model. Second, it trains a **student** whose observation is exactly what the live harness assembles, including the measured perception age. The student learns from the teacher by DAgger-style distillation in the UC67 simulator, with the noise model applied to the teacher's exact observations, and is optionally fine-tuned with PPO afterwards. The student is exported as a checkpoint that `drone-fly harness run --harness liftoff` loads directly, with its observation-schema and action-contract versions embedded. Success is measured in the simulator under noise on held-out tracks; flying it in Liftoff is UC71.
+The UC68 teacher sees exact gate poses; the live harness only has the learned gate detector's estimates. These are noisy, biased with range and angle, sometimes missing, and late. This use case closes that gap in two steps. First, it **measures** the detector's real error statistics in Liftoff from auto-labelled captures, where XML geometry is projected through telemetry pose (the UC64 machinery). From these it builds a **noise model**, stored next to the detector weights it describes, so each detector version carries its own noise model. Second, it trains a **student** whose observation is exactly what the live harness assembles, including the measured perception age. The student learns from the teacher by DAgger-style distillation in the UC67 simulator, with the noise model applied to the teacher's exact observations, and is optionally fine-tuned with PPO afterwards. The student is exported as a checkpoint that `drone-fly harness run --harness liftoff` loads directly, with its observation-schema and action-contract versions embedded. Success is measured in the simulator under noise on held-out tracks; flying it in Liftoff is UC72.
 
 ## Acceptance Criteria
 1. **Noise measurement:**
    - `drone-fly train detector-noise --detector <weights> --captures <dir>…` runs the detector over auto-labelled capture frames.
    - Per gate type, binned by range and bearing, it computes: bias and covariance of the position, yaw and size estimates; detection probability; false-positive rate; and inference latency on the local GPU.
-   - It writes `noise_model.yaml` + `noise_report.md` (with plots) next to the detector, e.g. `artifacts/harness/liftoff/models/<detector-id>/`, and is included in the next detector release (UC70).
+   - It writes `noise_model.yaml` + `noise_report.md` (with plots) next to the detector, e.g. `artifacts/harness/liftoff/models/<detector-id>/`, and is included in the next detector release (UC71).
 2. **Noise model application:**
    - `sim` applies a noise model to exact gate observations on the GPU, in batch: biased/correlated position and yaw error, dropout following the detection probability, hold-last-estimate behaviour matching the harness, and perception age/latency.
    - It is unit-tested for statistics within tolerance of the model, over ≥ 10⁵ samples.
@@ -26,7 +26,7 @@ The UC68 teacher sees exact gate poses; the live harness only has the learned ga
 8. **Tests:** hermetic tests cover noise-model fitting on synthetic detector errors (recovered within tolerance), batch application statistics, observation parity, the checkpoint version guard, and the export round-trip.
 
 ## Potential Pitfalls & Open Questions
-- **Missing input** — Labelled captures exist only for Infinity Loop (UC64). The noise model is first fitted on Infinity Loop and refitted when UC70 adds more maps; the report states which maps it covers.
+- **Missing input** — Labelled captures exist only for Infinity Loop (UC64). The noise model is first fitted on Infinity Loop and refitted when UC71 adds more maps; the report states which maps it covers.
 - **Risk** — Detector errors on unseen maps may be much worse than on its training map. Fit the noise model on **held-out** capture segments only, never on the detector's own training frames.
 - **Assumption** — The 30-dim observation (gates + state, no obstacle rays) is the deployment target. The 70-dim depth variant is optional and follows the same path if depth noise is also modelled.
 - **Edge case** — Gate-loss stops (`gate_lost`) in the harness: the student must learn to fly through detection dropouts, and the harness's gate-loss timeout must be consistent with the dropout lengths seen in training.

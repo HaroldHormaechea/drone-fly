@@ -1,7 +1,7 @@
-# Use Case 71: Liftoff evaluation on held-out tracks + fine-tuning from Liftoff episodes
+# Use Case 72: Liftoff evaluation on held-out tracks + fine-tuning from Liftoff episodes
 
 ## Summary
-Close the loop in the real game. Today the episode loop (`scripts/liftoff/*.ps1`, `drone-fly harness ui`, the `liftoff-episodes` skill) can fly only the "Last Session" level. This use case adds **track selection** through Liftoff's menus for any catalogue track (UC68 `tracks/liftoff.yaml`) and drone (UC66 `select-drone`). It also adds an **evaluation run** that flies N attempts per track with a given student checkpoint (UC69) and **scores each attempt from telemetry against the track's XML**: gates passed in order, lap time, and stop reason. Results are written to `artifacts/eval/<drone-id>/<policy-id>/<track-id>/` and summarized in a cross-policy comparison report. Finally it adds **fine-tuning from logged Liftoff episodes**: DAgger relabelling of the logged states by the teacher (using exact gate poses reconstructed from telemetry + XML) and a small residual-policy correction trained on the sim-to-Liftoff gap. Each fine-tuned policy is re-evaluated on held-out tracks it was not fine-tuned on. Liftoff runs in real time, at about 20 s per attempt, so fine-tuning is sample-efficient and offline from logs, never RL from scratch in the game.
+Close the loop in the real game. Today the episode loop (`scripts/liftoff/*.ps1`, `drone-fly harness ui`, the `liftoff-episodes` skill) can fly only the "Last Session" level. This use case adds **track selection** through Liftoff's menus for any catalogue track (UC68 `tracks/liftoff.yaml`) and drone (UC66 `select-drone`). It also adds an **evaluation run** that flies N attempts per track with a given student checkpoint (UC70) and **scores each attempt from telemetry against the track's XML**: gates passed in order, lap time, and stop reason. Results are written to `artifacts/eval/<drone-id>/<policy-id>/<track-id>/` and summarized in a cross-policy comparison report. Finally it adds **fine-tuning from logged Liftoff episodes**: DAgger relabelling of the logged states by the teacher (using exact gate poses reconstructed from telemetry + XML) and a small residual-policy correction trained on the sim-to-Liftoff gap. Each fine-tuned policy is re-evaluated on held-out tracks it was not fine-tuned on. Liftoff runs in real time, at about 20 s per attempt, so fine-tuning is sample-efficient and offline from logs, never RL from scratch in the game.
 
 ## Acceptance Criteria
 1. **Track selection:**
@@ -31,7 +31,7 @@ Close the loop in the real game. Today the episode loop (`scripts/liftoff/*.ps1`
    - The output is a new deployable checkpoint under `artifacts/training/<drone-id>/<run-id>/`, with provenance listing the Liftoff episodes used.
 6. **No leakage:** fine-tuning only consumes episodes from `train`-split tracks. Held-out evaluation uses tracks never flown for fine-tuning, and a test enforces this.
 7. **Live acceptance (unattended allowed, Liftoff only):**
-   - The UC69 student is evaluated on at least 3 held-out tracks reachable through the menus, × 10 attempts, before and after one fine-tuning round, for `liftoff-gremlin-micro`.
+   - The UC70 student is evaluated on at least 3 held-out tracks reachable through the menus, × 10 attempts, before and after one fine-tuning round, for `liftoff-gremlin-micro`.
    - The report shows both.
    - Acceptance is the pipeline producing these numbers end to end. Flight improvement is reported, not required.
 8. **Safety:** all existing fail-safes apply (F12, focus loss, stale telemetry, RPM-confirmed disarm, pad watchdog, menu-safe idle). Menu automation aborts on any unverified step.

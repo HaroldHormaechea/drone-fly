@@ -1,4 +1,4 @@
-# Use Case 70: Gate detector generalization across Liftoff maps and gate types
+# Use Case 71: Gate detector generalization across Liftoff maps and gate types
 
 ## Summary
 The UC64 learned gate detector was trained only on Infinity Loop frames (one map, one inflatable-arch gate type). Flying random courses needs a detector that works across maps, lighting and gate styles. This use case builds a **multi-map capture → auto-label → train → evaluate → release** pipeline on top of the UC64 machinery (`harness/offline/capture.py`, `autolabel.py`, `gate_train.py`, `evaluate.py`, the gate-type table). Frames are captured from Liftoff **replays** where possible. The team first checks whether Liftoff streams telemetry while a replay plays. If it does, capture is automatic. If it does not, the drone pose is reconstructed from the replay/recording file itself, if it contains the trajectory. Only failing both does it fall back to the user hand-flying a few laps per map. The user's existing stored replays are used, but many reference incomplete races. Each capture is tied to a track-catalogue entry (UC68), so labels come from that track's XML. The detector is trained with the **same map-level train/held-out split as the track catalogue**, scored on held-out maps, and published as GitHub release `liftoff-gates-v2`, auto-downloaded like v1.
@@ -25,7 +25,7 @@ The UC64 learned gate detector was trained only on Infinity Loop frames (one map
    - It writes to `artifacts/harness/liftoff/models/<detector-id>/` (weights, deploy weights, training log, data manifest with capture hashes).
 7. **Evaluation:** `drone-fly harness eval` scores held-out maps per gate type for gates 4–25 m ahead: detection rate, median position error, median yaw error and latency. Targets on **held-out maps**: ≥ 70% detection and median position error ≤ 20% of range. On Infinity Loop it must not regress versus v1 by more than 5 pp detection.
 8. **Release:**
-   - The best detector is published as GitHub release `liftoff-gates-v2` (deploy weights, full weights, training log, data manifest, and the UC69 noise model + report once fitted).
+   - The best detector is published as GitHub release `liftoff-gates-v2` (deploy weights, full weights, training log, data manifest, and the UC70 noise model + report once fitted).
    - `gate_learned.py` auto-downloads it with a sha256 check. The preset selects v2; v1 stays selectable.
    - No frames or game data are committed.
 9. **Tests:** hermetic tests cover the inventory parsing (synthetic recording XML), completeness judgement, catalogue linking, gate-type table validation, and multi-capture dataset assembly with split enforcement.
