@@ -657,6 +657,10 @@ def cmd_student(args: argparse.Namespace) -> int:
         for k in ("n_envs", "device"):
             if k in overrides:
                 raw[k] = overrides[k]
+        # this invocation's phase knobs (--ppo-steps, --max-hours) apply to the resumed run
+        for section in ("distill", "finetune"):
+            if section in overrides:
+                raw[section] = {**(raw.get(section) or {}), **overrides[section]}
         cfg = student_from_mapping(raw)
     else:
         data = load_raw(args.config, overrides)

@@ -1131,8 +1131,10 @@ def _train_student(
     ep_rows: list[np.ndarray] = []
     interrupted = False
     actor.eval()
+    if resuming and steps >= cfg.base.budget:
+        log.info("DAgger budget already reached (%.3g steps): skipping to the next phase", steps)
     try:
-        while True:
+        while not (resuming and steps0 >= cfg.base.budget):
             it += 1
             frac = steps / cfg.base.budget
             beta = beta_at(frac, d)
@@ -1378,11 +1380,12 @@ def ppo_finetune(
     steps, it = 0, 0
     best = None
     t0 = time.time()
-    while (
-        steps < f.steps
-        and (max_iterations is None or it < max_iterations)
-        and (f.max_hours is None or time.time() - t0 < 3600.0 * float(f.max_hours))
-    ):
+    capped = False
+    while steps < f.steps and (max_iterations is None or it < max_iterations):
+        if f.max_hours is not None and time.time() - t0 >= 3600.0 * float(f.max_hours):
+            capped = True
+            log.info("wall-clock cap of %.2f h reached", float(f.max_hours))
+            break
         it += 1
         warm = it <= f.critic_warmup_iters
         bc = f.bc_lambda * max(0.0, 1.0 - steps / max(f.bc_decay_frac * f.steps, 1.0))
@@ -1464,8 +1467,17 @@ def ppo_finetune(
             best = _val_select(
                 actor, cfg, profile, val_pool, model, dev, sr, run, 100000 + it, best
             )
+    if capped or (max_iterations is not None and it >= max_iterations and steps < f.steps):
+        # stopped early: the final weights get their val check too (as DAgger's last iteration)
+        best = _val_select(actor, cfg, profile, val_pool, model, dev, sr, run, 100000 + it, best)
     sr.save_student()
-    return {"iterations": it, "steps": steps, "seconds": time.time() - t0, "best": best}
+    return {
+        "iterations": it,
+        "steps": steps,
+        "seconds": time.time() - t0,
+        "best": best,
+        "capped": capped,
+    }
 
 
 # ----------------------------------------------------------------------------- report (D8)
