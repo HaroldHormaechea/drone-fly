@@ -116,10 +116,13 @@ def test_trainable_and_frozen_parameters(student):
 
 
 def test_residual_and_encoder_flags(harness_k1_dir):
+    from drone_fly.training.config import StudentSection
+
     s = K1Student(harness_k1_dir, encoder=False, residual=False)
     tr = s.trainable_names()
     assert not any(n.startswith(("residual", "encoder")) for n in tr)
     assert s.arch() == {"kind": "k1-student", "encoder": False, "residual": False,
+                        "body_kernel": StudentSection().body_kernel,  # the config's default
                         "feat_dim": s.feat_dim, "enc": [SENSES, 64, ENC_OUT],
                         "residual_hidden": [256, 128]}  # fmt: skip
 
