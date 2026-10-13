@@ -217,8 +217,9 @@ class LearnedGateEstimator(TrackingGateEstimator):
         self.async_inference = bool(async_inference)
         self._lock = threading.Lock()
         self._wake = threading.Event()
-        self._pending: tuple[int | None, np.ndarray] | None = None
-        self._done: tuple[int | None, list[dict[str, Any]]] | None = None
+        self._pending: tuple[int | None, float | None, np.ndarray] | None = None
+        self._done: tuple[int | None, float | None, list[dict[str, Any]]] | None = None
+        self._frame_stamp: float | None = None
         self._worker: threading.Thread | None = None
         self._stopping = False
         self._worker_error: BaseException | None = None
@@ -353,7 +354,7 @@ class LearnedGateEstimator(TrackingGateEstimator):
                 job, self._pending = self._pending, None
             if job is None:
                 continue
-            index, image = job
+            index, stamp, image = job
             try:
                 dets = self.infer(image)
             except BaseException as exc:  # noqa: BLE001 - surfaced on the next tick
@@ -361,7 +362,7 @@ class LearnedGateEstimator(TrackingGateEstimator):
                     self._worker_error = exc
                 return
             with self._lock:
-                self._done = (index, dets)
+                self._done = (index, stamp, dets)
 
     def _raw_detections_async(self, image: np.ndarray, frame_index: int | None) -> list[dict]:
         if self._worker is None:
@@ -370,14 +371,16 @@ class LearnedGateEstimator(TrackingGateEstimator):
             if self._worker_error is not None:
                 raise RuntimeError("gate inference worker failed") from self._worker_error
             if frame_index is None or frame_index != self._latest_index:
-                self._pending = (frame_index, image)
+                self._pending = (frame_index, self._frame_stamp, image)
                 self._latest_index = frame_index
                 self._wake.set()
             done = self._done
         if done is None:
             return []
-        self._cache_index, self._cache = done
-        return done[1]
+        self._cache_index, self._cache = done[0], done[2]
+        if done[1] is not None:  # UC70: the detections' own capture stamp
+            self._det_stamp = done[1]
+        return done[2]
 
     def detection_lag_frames(self) -> int | None:
         """Newest submitted frame index minus the index the current detections came from."""
@@ -387,6 +390,7 @@ class LearnedGateEstimator(TrackingGateEstimator):
 
     def detect_frame(self, frame: Frame, state: FlightState) -> list[GateDetection]:
         self._frame_index = frame.index
+        self._frame_stamp = frame.stamp
         try:
             return super().detect_frame(frame, state)
         finally:

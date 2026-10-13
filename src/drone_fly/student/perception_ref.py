@@ -269,6 +269,8 @@ class ReferencePerception:
                                                         d["mk_n"], d["eps_n"])  # fmt: skip
         any_fp = (not self.exact) and d["fp_any"] < 1.0 - math.exp(
             -float(self.fp.get("rate_per_frame", 0.0)))  # fmt: skip
+        p_present, p_pick = self.model.acquisition()
+        wrong = (not self.exact) and d["fp_any"] < p_present
         fp_relb, fp_nb = self._fp_sample(d, scale) if not self.exact else (relb_t, nb_t)
         if frame:
             if not tg.fp:
@@ -277,7 +279,7 @@ class ReferencePerception:
             nx.miss = miss_n
             nx.z = z_n
         unacq = frame and not tg.acq
-        pick_fp = unacq and any_fp and ((not det_t) or d["fp_pick"] < 0.5)
+        pick_fp = unacq and wrong and ((not det_t) or d["fp_pick"] < p_pick)
         acq_true = unacq and det_t and not pick_fp
         assoc = float(np.linalg.norm(pos + R @ relb_t - tg.world)) <= c.assoc_limit
         upd_t = (frame and tg.acq and not tg.fp and det_t and assoc) or acq_true

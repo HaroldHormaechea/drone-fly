@@ -1224,6 +1224,65 @@ def _summ(x: list[float]) -> dict[str, Any]:
     }
 
 
+#: Below this many frames a proportion uses the conservative (upper) 95 % Wilson bound.
+ACQ_MIN_N = 30
+
+
+def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    if n == 0:
+        return 0.0, 1.0
+    p = k / n
+    den = 1 + z * z / n
+    mid = (p + z * z / (2 * n)) / den
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / den
+    return max(0.0, mid - half), min(1.0, mid + half)
+
+
+def fit_acquisition(seq: list[tuple[Any, list[Any]]], k_at: list[int], course: Any) -> dict:
+    """What the tracker's acquisition rule (``min distance * (1 + off_axis)``) picks on each
+    held-out frame: P(a wrong candidate — a false positive or another gate — is present) and
+    P(the rule picks a wrong one | the truth target is detected too). Small samples use the
+    upper (conservative) 95 % Wilson bound."""
+    n = course.n_passages
+    frames = present = both = wrong_pick = 0
+    for (f, dets), k in zip(seq, k_at, strict=True):
+        frames += 1
+        if not dets:
+            continue
+        truth = course.frame.to_contract_point(course.passages[k % n].center)
+        pos = np.asarray(f.state.pos, np.float64)
+        tol = max(1.0, 0.25 * float(np.linalg.norm(truth - pos)))
+        is_t = [float(np.linalg.norm(np.asarray(d.center, np.float64) - truth)) <= tol
+                for d in dets]  # fmt: skip
+        has_wrong = not all(is_t)
+        present += int(has_wrong)
+        if has_wrong and any(is_t):
+            both += 1
+            pick = min(range(len(dets)), key=lambda i: dets[i].distance * (1 + dets[i].off_axis))
+            wrong_pick += int(not is_t[pick])
+
+    def est(k: int, m: int) -> dict[str, Any]:
+        lo, hi = wilson(k, m)
+        p = k / m if m else None
+        small = m < ACQ_MIN_N
+        rule = "upper 95 % Wilson bound (n < 30)" if small else "point estimate"
+        used = hi if small or p is None else p
+        return {"k": k, "n": m, "p": p, "ci95": [lo, hi], "used": used, "rule": rule}
+
+    pres = est(present, frames)
+    pick = est(wrong_pick, both)
+    return {
+        "p_wrong_present": pres,
+        "p_pick_wrong": pick,
+        "used": {
+            "p_wrong_present": float(pres["used"]),
+            "p_pick_wrong": float(pick["used"]),
+            "source": f"validation replay of {frames} held-out frames ("
+            f"{pres['rule']} / {pick['rule']})",
+        },
+    }
+
+
 def validation_replay(
     seq: list[tuple[Any, list[Any]]],
     ks: np.ndarray,
@@ -1251,6 +1310,9 @@ def validation_replay(
         def detect_frame(self, frame: Any, state: Any) -> list[Any]:
             return cache[frame.index]
 
+    k_at = [int(ks[f.sample_index]) for f, _ in seq]
+    acq = fit_acquisition(seq, k_at, course)
+    model["acquisition"] = acq
     nm = NoiseModel(model)
     ap = nm.class_noise().aperture_m
     tr = _Replay(
@@ -1265,7 +1327,6 @@ def validation_replay(
     n = course.n_passages
     total = course.total_crossings
     stamps = [f.stamp for f, _ in seq]
-    k_at = [int(ks[f.sample_index]) for f, _ in seq]
     truth_cross = sum(max(0, b - a) for a, b in zip(k_at, k_at[1:], strict=False))
     blank = np.zeros((1, 1, 3), np.uint8)
     real_status, real_err, real_pass = [], [], 0
@@ -1288,35 +1349,50 @@ def validation_replay(
         lost_timeout_s=float(tracker["lost_timeout_s"]),
         world_scale_k=1.0,
     )
-    ref_err, ref_holds, ref_lost, ref_track = [], [], [], []
     scale = course.frame.world_scale
-    for s in range(seeds):
-        rng = np.random.default_rng(1000 + s)
-        ref = ReferencePerception(nm, cfg)
-        f0 = seq[0][0]
-        ref.reset(f0.stamp, course.frame.to_course_point(f0.state.pos), f0.state.quat,
-                  np.zeros(2))  # fmt: skip
-        sts = []
-        for i, ((f, _), k) in enumerate(zip(seq, k_at, strict=True)):
-            pc = course.frame.to_course_point(f.state.pos)
-            ref.push_pose(f.stamp, pc, f.state.quat)
-            nxt = course.passages[(k + 1) % n] if k + 1 < total else None
-            crossed = i > 0 and k > k_at[i - 1]
-            ref.step(
-                f.stamp, pc, f.state.quat, _passage_dict(course.passages[k % n]),
-                None if nxt is None else _passage_dict(nxt), crossed, scale,
-                sample(rng, TICK_DRAWS),
-            )  # fmt: skip
-            out = ref.outputs()
-            sts.append(STATUS_NAMES[out["status"]])
-            if out["acquired"]:
-                d = np.linalg.norm(out["target"] - course.passages[k % n].center) * scale
-                ref_err.append(float(d))
-        h, lo = _hold_runs(sts, stamps)
-        ref_holds += h
-        ref_lost.append(lo)
-        ref_track.append(float(np.mean([x == "tracking" for x in sts])))
     dur_min = max((stamps[-1] - stamps[0]) / 60.0, 1e-9)
+
+    def run_reference(model_: Any) -> dict[str, Any]:
+        ref_err, ref_holds, ref_lost, ref_track = [], [], [], []
+        for s in range(seeds):
+            rng = np.random.default_rng(1000 + s)
+            ref = ReferencePerception(model_, cfg)
+            f0 = seq[0][0]
+            ref.reset(f0.stamp, course.frame.to_course_point(f0.state.pos), f0.state.quat,
+                      np.zeros(2))  # fmt: skip
+            sts = []
+            for i, ((f, _), k) in enumerate(zip(seq, k_at, strict=True)):
+                pc = course.frame.to_course_point(f.state.pos)
+                ref.push_pose(f.stamp, pc, f.state.quat)
+                nxt = course.passages[(k + 1) % n] if k + 1 < total else None
+                crossed = i > 0 and k > k_at[i - 1]
+                ref.step(
+                    f.stamp, pc, f.state.quat, _passage_dict(course.passages[k % n]),
+                    None if nxt is None else _passage_dict(nxt), crossed, scale,
+                    sample(rng, TICK_DRAWS),
+                )  # fmt: skip
+                out = ref.outputs()
+                sts.append(STATUS_NAMES[out["status"]])
+                if out["acquired"]:
+                    dd = np.linalg.norm(out["target"] - course.passages[k % n].center) * scale
+                    ref_err.append(float(dd))
+            h, lo = _hold_runs(sts, stamps)
+            ref_holds += h
+            ref_lost.append(lo)
+            ref_track.append(float(np.mean([x == "tracking" for x in sts])))
+        return {
+            "seeds": seeds,
+            "target_error_m": _summ(ref_err),
+            "tracking_share": float(np.mean(ref_track)),
+            "hold_s": _summ(ref_holds),
+            "lost_events_mean": float(np.mean(ref_lost)),
+            "lost_events_per_min": float(np.mean(ref_lost)) / dur_min,
+            "passes": truth_cross,
+        }
+
+    ref_sum = run_reference(nm)
+    unfitted = {k: v for k, v in model.items() if k != "acquisition"}
+    ref_default = run_reference(NoiseModel(unfitted))
     real = {
         "target_error_m": _summ(real_err),
         "tracking_share": float(np.mean([x == "tracking" for x in real_status])),
@@ -1326,15 +1402,7 @@ def validation_replay(
         "lost_events_per_min": lost_r / dur_min,
         "tracker_passes": real_pass,
     }
-    ref_sum = {
-        "seeds": seeds,
-        "target_error_m": _summ(ref_err),
-        "tracking_share": float(np.mean(ref_track)),
-        "hold_s": _summ(ref_holds),
-        "lost_events_mean": float(np.mean(ref_lost)),
-        "lost_events_per_min": float(np.mean(ref_lost)) / dur_min,
-        "passes": truth_cross,
-    }
+
     re, fe = real["target_error_m"]["median"], ref_sum["target_error_m"]["median"]
     rh, fh = real["hold_s"]["median"], ref_sum["hold_s"]["median"]
     summary = {
@@ -1352,7 +1420,17 @@ def validation_replay(
         "note": "reference: truth-driven hand-over, synchronous frames (no latency), "
         f"{seeds} seeds; real: recorded detections, the tracker's own association + pass rule",
     }
-    return {"real": real, "reference": ref_sum, "summary": summary}
+    summary["acquisition fit (used)"] = (
+        f"P(wrong candidate) {acq['used']['p_wrong_present']:.2f}, P(pick wrong | target "
+        f"detected) {acq['used']['p_pick_wrong']:.2f} ({acq['used']['source']})"
+    )
+    de, dt_ = ref_default["target_error_m"]["median"], ref_default["tracking_share"]
+    summary["reference without the acquisition fit (0.5 pick, Poisson presence)"] = (
+        f"target error median {_fmt(de, '.2f')} m, tracking share {dt_:.2f}, lost events per "
+        f"min {ref_default['lost_events_per_min']:.2f}"
+    )
+    return {"real": real, "reference": ref_sum, "reference_unfitted": ref_default,
+            "summary": summary, "acquisition": acq}  # fmt: skip
 
 
 # ----------------------------------------------------------------------------- driver

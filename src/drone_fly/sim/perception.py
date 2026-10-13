@@ -577,9 +577,10 @@ class GatePerception:
             self.n_z, d["mk_n"], d["eps_n"],
         )  # fmt: skip
         if self.exact:
-            any_fp = torch.zeros_like(frame)
+            any_fp = wrong = torch.zeros_like(frame)
         else:
             any_fp = d["fp_any"] < 1.0 - math.exp(-self.tab["fp_rate"])
+            wrong = d["fp_any"] < self.tab["acq_wrong_present"]
         fp_relb, fp_nb = (self._fp_sample(d, pd, Rd, scale) if not self.exact
                           else (relb_t, nb_t))  # fmt: skip
         # Markov / AR state advances on every processed frame
@@ -589,7 +590,7 @@ class GatePerception:
         self.n_z = torch.where(frame.unsqueeze(-1), z_n, self.n_z)
         # target slot: acquisition (true or false positive) / association
         unacq = frame & ~self.t_acq
-        pick_fp = unacq & any_fp & (~det_t | (d["fp_pick"] < 0.5))
+        pick_fp = unacq & wrong & (~det_t | (d["fp_pick"] < self.tab.get("acq_pick_wrong", 0.5)))
         acq_true = unacq & det_t & ~pick_fp
         new_t = pos + _mv(R, relb_t)
         assoc = (new_t - self.t_world).norm(dim=-1) <= c.assoc_limit

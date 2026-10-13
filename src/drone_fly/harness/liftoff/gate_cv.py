@@ -31,6 +31,11 @@ Shared by every subclass (the tracker):
    first detection the target is the current position (hover) for ``acquire_timeout_s``.
 7. Encodings via :mod:`~drone_fly.harness.course_senses`; an unseen next gate uses the
    occluded form (``vis = 0``, bearing to its last-known position, else to the current gate).
+8. UC70 ages: each tracked gate keeps the capture stamp of the frame behind its last match
+   (``detect_frame`` records it; the async learned estimator substitutes its older frame's stamp).
+   ``info`` carries ``target_age_s`` / ``next_age_s`` (now - that stamp; ``lost_timeout_s`` when
+   nothing is held), ``target_valid`` (a current gate is held) and ``hand_over`` (passed this
+   tick). No behaviour changes.
 
 OpenCV is imported lazily (on the first frame / detection call).
 """
@@ -142,10 +147,12 @@ class _Tracked:
     area_frac: float = 0.0
     prev_signed: float | None = None
     cls: str | None = None
+    src_stamp: float = 0.0  # capture stamp of the frame behind the last match (UC70)
 
     @classmethod
-    def of(cls, d: GateDetection, now: float) -> _Tracked:
-        return cls(d.center.copy(), d.yaw, d.aperture, now, d.area_frac, cls=d.cls)
+    def of(cls, d: GateDetection, now: float, src_stamp: float | None = None) -> _Tracked:
+        return cls(d.center.copy(), d.yaw, d.aperture, now, d.area_frac, cls=d.cls,
+                   src_stamp=now if src_stamp is None else float(src_stamp))  # fmt: skip
 
     @property
     def gate(self) -> Gate:
@@ -189,6 +196,7 @@ class TrackingGateEstimator(GateEstimator):
 
     def detect_frame(self, frame: Frame, state: FlightState) -> list[GateDetection]:
         """Mask the frame, detect, and drop detections centred in a mask."""
+        self._det_stamp = frame.stamp  # an async detector replaces it with its source frame's
         image = frame.image
         if self.masks:
             image = self.masks.apply(image)
@@ -256,6 +264,7 @@ class TrackingGateEstimator(GateEstimator):
         self.gate_index = 0
         self._t0: float | None = None
         self._last_event: float | None = None  # last sighting or pass
+        self._det_stamp: float | None = None  # capture stamp behind the latest detections
 
     @property
     def lap(self) -> int:
@@ -294,17 +303,19 @@ class TrackingGateEstimator(GateEstimator):
         if self._t0 is None:
             self._t0 = now
         pos = np.asarray(state.pos, np.float64)
+        self._det_stamp = None
         dets = [] if frame is None else self.detect_frame(frame, state)
+        src = self._det_stamp
 
         match: GateDetection | None = None
         if self.current is not None and dets:
             match = self._associate(dets)
         elif self.current is None and dets:
             match = min(dets, key=lambda d: d.distance * (1.0 + d.off_axis))
-            self.current = _Tracked.of(match, now)
+            self.current = _Tracked.of(match, now, src)
         if match is not None and self.current is not None:
             prev = self.current.prev_signed
-            self.current = _Tracked.of(match, now)
+            self.current = _Tracked.of(match, now, src)
             self.current.prev_signed = prev
             self._last_event = now
 
@@ -315,7 +326,7 @@ class TrackingGateEstimator(GateEstimator):
             farther = [d for d in others if d.distance > float(np.linalg.norm(ref.center - pos))]
             if farther:
                 next_det = min(farther, key=lambda d: float(np.linalg.norm(d.center - ref.center)))
-                self.next_known = _Tracked.of(next_det, now)
+                self.next_known = _Tracked.of(next_det, now, src)
 
         passed = False
         if self.current is not None and self._passed(self.current, pos, match is not None):
@@ -353,6 +364,13 @@ class TrackingGateEstimator(GateEstimator):
             nxt = lookahead_unseen(pos, pos + np.array([1.0, 0.0, 0.0]))
 
         info: dict[str, Any] = {"detections": len(dets), "matched": match is not None}
+        lt = float(self.lost_timeout_s)
+        info["target_age_s"] = lt if self.current is None else float(now - self.current.src_stamp)
+        info["next_age_s"] = (
+            lt if self.next_known is None else float(now - self.next_known.src_stamp)
+        )
+        info["target_valid"] = self.current is not None
+        info["hand_over"] = passed
         if self.current is not None and self.current.cls is not None:
             info["gate_class"] = self.current.cls
         if frame is not None:

@@ -465,6 +465,17 @@ class NoiseModel:
     def next_misassoc_rate(self) -> float:
         return float(self.data["false_positives"].get("next_misassoc_rate", 0.0))
 
+    def acquisition(self) -> tuple[float, float]:
+        """``(P(a wrong candidate in a frame), P(the acquisition rule picks it | the target is
+        detected too))``: the fitted ``acquisition.used`` values (the replay fit), else the
+        Poisson false-positive presence and a coin flip."""
+        a = (self.data.get("acquisition") or {}).get("used") or {}
+        present = a.get("p_wrong_present")
+        pick = a.get("p_pick_wrong")
+        if present is None:
+            present = 1.0 - math.exp(-self.false_positive_rate())
+        return float(present), float(0.5 if pick is None else pick)
+
     def to_tables(self, device: Any = "cpu", dtype: Any = None) -> dict[str, Any]:
         """Torch tensors for :class:`~drone_fly.sim.perception.GatePerception` (first class;
         multi-class pools use the arch proxy for uncovered types)."""
@@ -496,6 +507,8 @@ class NoiseModel:
             "ar1_tau_s": float(cn.ar1_tau_s),
             "fp_rate": float(self.false_positive_rate()),
             "fp_next_misassoc": float(self.next_misassoc_rate()),
+            "acq_wrong_present": self.acquisition()[0],
+            "acq_pick_wrong": self.acquisition()[1],
             "fp_probs": T(probs),
             "fp_range_edges": T(r_edges),
             "fp_az_edges_deg": T(a_edges),
