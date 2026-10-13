@@ -37,6 +37,18 @@ def _preset_text() -> str:
     )
 
 
+#: UC71: the preset names its gate table by file reference; the table's provenance lives there.
+GATE_TYPES_FILE = "gate_types/liftoff.yaml"
+
+
+def _gate_types_text() -> str:
+    return (
+        resources.files("drone_fly.harness")
+        .joinpath("configs", *GATE_TYPES_FILE.split("/"))
+        .read_text("utf-8")
+    )
+
+
 # ----------------------------------------------------------------------------- mechanism
 
 
@@ -231,8 +243,9 @@ def _covered(lines: list[str], i: int) -> bool:
     return p is not None and _covered(lines, p)
 
 
-def test_every_preset_value_names_its_source():
-    lines = _preset_text().splitlines()
+@pytest.mark.parametrize("text", [_preset_text, _gate_types_text], ids=["preset", "gate-types"])
+def test_every_preset_value_names_its_source(text):
+    lines = text().splitlines()
     uncovered = [
         ln
         for i, ln in enumerate(lines)
@@ -254,13 +267,30 @@ def test_every_preset_value_names_its_source():
         r"resolution",
         r"hover_stick",
         r"world_scale",
-        r"aperture",
-        r"outer",
         r"scale: -0\.00535155",
     ],
 )
 def test_key_values_have_a_measurement_source_nearby(pattern):
-    lines = _preset_text().splitlines()
+    _assert_source_near(_preset_text(), pattern)
+
+
+def test_preset_references_the_gate_types_file(cfg):
+    assert re.search(rf"^gate_types: {re.escape(GATE_TYPES_FILE)}\s*(#.*)?$", _preset_text(), re.M)
+    assert cfg.gate_types_file == GATE_TYPES_FILE
+    assert [t["class"] for t in cfg.data["gate_types"]][0] == "inflatable_arch"
+
+
+@pytest.mark.parametrize(
+    "pattern", [r"aperture:", r"outer:", r"center_offset:", r"keypoints:", r"outline:"]
+)
+def test_gate_table_values_have_a_measurement_source_nearby(pattern):
+    """UC71: the gate-table keys moved (with their comments) into the gate-types file."""
+    assert not re.search(rf"^\s*-?\s*{pattern}", _preset_text(), re.M)  # not back in the preset
+    _assert_source_near(_gate_types_text(), pattern)
+
+
+def _assert_source_near(text: str, pattern: str) -> None:
+    lines = text.splitlines()
     i = next(k for k, ln in enumerate(lines) if re.search(pattern, ln))
     context = "\n".join(lines[max(0, i - 12) : i + 1])
     assert re.search(

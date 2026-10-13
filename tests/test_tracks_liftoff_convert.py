@@ -632,3 +632,29 @@ def test_default_gate_table_is_only_the_inflatable_arch_with_todays_keys():
 def test_gate_types_course_is_byte_identical(field):
     assert [q.cls for q in field.passages][4] == "inflatable_arch"  # converted via gate_types
     assert _passages_sha256(field) == FIELD_PASSAGES_SHA256
+
+
+def test_a_grown_gate_table_leaves_the_conversion_unchanged(monkeypatch):
+    """UC71 H1: new classes and the new bottom / family keys never reach the conversion."""
+    from drone_fly.harness import gate_types as gt_mod
+
+    base_gt, base_it = harness_tables()
+    real, calls = gt_mod.resolve_gate_types, []
+
+    def grown(value):
+        calls.append(value)
+        table = [dict(e) for e in real(value)]
+        table[0].update(bottom="open", family="inflatable")
+        return [
+            {"class": "square_gate", "match": "^Square", "aperture": [1.5, 1.5], "outer": [2, 2],
+             "bottom": "closed", "family": "truss"},
+            *table,
+            {"class": "truss_arch", "match": "^Truss", "aperture": [4, 3], "outer": [5, 4],
+             "bottom": "open"},
+        ]  # fmt: skip
+
+    monkeypatch.setattr(gt_mod, "resolve_gate_types", grown)
+    gt, it = harness_tables()
+    assert calls and gt == base_gt and it == base_it  # the grown table was read
+    assert set(gt[0]) == ARCH_KEYS
+    assert ConversionConfig.from_dict(None).fingerprint() == DEFAULT_FINGERPRINT
