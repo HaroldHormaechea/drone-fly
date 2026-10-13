@@ -696,3 +696,51 @@ def test_cli_dataset_report_counts_only_verified_preset_camera_heldout_captures(
     assert json.loads(out.read_text("utf-8"))["splits"]["held-out"] == {"FakeD": one}
     main([*args, str(unverified), str(borrum)])  # neither counts: no held-out map at all
     assert json.loads(out.read_text("utf-8"))["splits"]["held-out"] == {}
+
+
+def _train_args(world, tmp_path, *captures):
+    cfg = tmp_path / "small.yaml"
+    cfg.write_text(json.dumps(SMALL_CAMERA), "utf-8")
+    return ["harness", "gates", "train", *captures, "--split-source", str(world.catalogue.path),
+            "--trackdata-root", str(world.root), "--protect-holdout-of", "none", "--config",
+            str(cfg), "--backbone", "tiny-cnn", "--epochs", "1", "--device", "cpu",
+            "--input-width", "128", "--max-frames-per-capture", "4"]  # fmt: skip
+
+
+def test_gates_train_all_captures_leaves_heldout_maps_out(world, tmp_path, monkeypatch, caplog):
+    """``--all-captures`` skips held-out-map captures (logged) instead of raising."""
+    from drone_fly.harness.offline import capture_index, gate_train
+
+    monkeypatch.setattr(cat, "load_catalogue", lambda path: world.catalogue)
+    got = []
+
+    def fake_train(captures, **kw):
+        got.extend(captures)
+        return {"weights": "w.pt", "purpose": "evaluate", "chosen_epoch": 1,
+                "chosen_val_detection": None, "data_manifest": "m.json"}  # fmt: skip
+
+    monkeypatch.setattr(gate_train, "train_multi", fake_train)
+    args = _train_args(world, tmp_path, "--all-captures", "--captures-root", str(world.captures))
+    with caplog.at_level("INFO"):
+        assert main(args) == 0
+    every = capture_index.iter_capture_dirs(world.captures)
+    held = [d for d in every if d.parent.name == "FakeD"]
+    assert held and world.d in held
+    assert got == [d for d in every if d not in held]  # train / val / refusable ones remain
+    assert world.a in got and world.c in got
+    for d in held:
+        assert f"held-out map: {d.name} left out" in caplog.text
+
+
+def test_gates_train_refuses_a_heldout_capture_named_explicitly(world, tmp_path, monkeypatch,
+                                                                capsys):  # fmt: skip
+    monkeypatch.setattr(cat, "load_catalogue", lambda path: world.catalogue)
+    args = _train_args(world, tmp_path, "--captures", str(world.a), str(world.c), str(world.d))
+    with pytest.raises(TrackLeakageError, match="held-out maps are never trained or selected"):
+        assemble(
+            [world.a, world.d], catalogue=world.catalogue, table=TABLE, telemetry_cfg=TELEMETRY
+        )  # fmt: skip - the error the command raises
+    assert main(args) == 2  # EXIT_CONFIG: TrackLeakageError is a HarnessConfigError
+    err = capsys.readouterr().err
+    assert f"capture {world.d.name} is on FakeD" in err and "held-out maps are never" in err
+    assert not (world.models / "models").exists()  # nothing was trained
