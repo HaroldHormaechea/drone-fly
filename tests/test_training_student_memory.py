@@ -178,39 +178,135 @@ def test_the_buffer_built_matches_the_recorded_size(inputs, tmp_path, tiny_val, 
     assert cap == 200 and pin is False  # explicit true is still off on a CPU device
 
 
-# ----------------------------------------------------------------------------- memcheck
+# ----------------------------------------------------------------------------- replay_pin
 
 
-def _status(total, commit, **kw):
-    st = dict.fromkeys(("physical_total", "physical_available", "commit_total", "commit_limit",
-                        "process_private", "process_working_set"))  # fmt: skip
-    st.update(physical_total=total, commit_total=commit, **kw)
-    return st
+class FakeDevice:
+    def __init__(self, type_):
+        self.type = type_
+
+
+ONE_GIB = 1 << 30
 
 
 @pytest.mark.parametrize(
-    ("total", "commit", "alloc", "warn"),
+    ("buf_bytes", "pin_memory", "want"),
     [
-        (16 * GB, 12 * GB, 5 * GB, True),  # 17 > 16: would page
-        (16 * GB, 12 * GB, 3 * GB, False),
-        (16 * GB, 12 * GB, 4 * GB, False),  # exactly physical: not over
-        (16 * GB, 16 * GB, 1, True),
-        (None, 12 * GB, 5 * GB, False),  # unknown numbers: quiet
-        (16 * GB, None, 5 * GB, False),
-        (0, 12 * GB, 5 * GB, False),
+        (ONE_GIB - 1, None, True),  # auto: pin only below 1 GiB
+        (ONE_GIB, None, False),
+        (ONE_GIB + 1, None, False),
+        (ONE_GIB - 1, True, True),  # an explicit value wins over the size
+        (ONE_GIB, True, True),
+        (ONE_GIB + 1, True, True),
+        (ONE_GIB - 1, False, False),
+        (ONE_GIB, False, False),
+        (ONE_GIB + 1, False, False),
     ],
 )
-def test_preflight_warns_only_on_overcommit(monkeypatch, caplog, total, commit, alloc, warn):
-    monkeypatch.setattr(memcheck, "memory_status", lambda: _status(total, commit))
+def test_replay_pin_on_cuda(buf_bytes, pin_memory, want):
+    assert distill.AUTO_PIN_MAX_BYTES == ONE_GIB
+    for dev in (FakeDevice("cuda"), torch.device("cuda"), torch.device("cuda", 0), "cuda"):
+        assert distill.replay_pin(buf_bytes, pin_memory, dev) is want, dev
+
+
+@pytest.mark.parametrize("pin_memory", [None, True, False])
+@pytest.mark.parametrize("device", [FakeDevice("cpu"), torch.device("cpu"), "cpu", "mps"])
+@pytest.mark.parametrize("buf_bytes", [0, ONE_GIB - 1, ONE_GIB + 1])
+def test_replay_pin_is_always_false_off_cuda(buf_bytes, device, pin_memory):
+    assert distill.replay_pin(buf_bytes, pin_memory, device) is False
+
+
+@pytest.mark.xfail(strict=True, reason="replay_pin compares str(device) with 'cuda', so an "
+                   "indexed device string such as 'cuda:0' counts as off-CUDA")  # fmt: skip
+def test_replay_pin_with_an_indexed_device_string():
+    assert distill.replay_pin(1, True, "cuda:0") is True
+
+
+def test_the_run_uses_replay_pin(inputs, tmp_path, tiny_val, monkeypatch):
+    from drone_fly.sim.action import read_sidecar
+
+    seen = []
+    real = distill.replay_pin
+
+    def spy(buf_bytes, pin_memory, device):
+        out = real(buf_bytes, pin_memory, device)
+        seen.append((buf_bytes, pin_memory, str(device), out))
+        return out
+
+    monkeypatch.setattr(distill, "replay_pin", spy)
+    cfg = tiny_student_config(inputs.k07, distill={"pin_memory": True})
+    res = train(inputs, tmp_path, cfg)
+    rb = read_sidecar(res.run.path / "checkpoints" / "student.pt")["replay_buffer"]
+    assert seen == [(rb["bytes"], True, "cpu", False)] and rb["pinned"] is False
+
+
+# ----------------------------------------------------------------------------- memcheck
+
+
+def _status(total=16 * GB, avail=8 * GB, private=1 * GB, commit=40 * GB):
+    """Mocked OS numbers; commit is deliberately far above physical (Windows' usual state)."""
+    st = dict.fromkeys(("physical_total", "physical_available", "commit_total", "commit_limit",
+                        "process_private", "process_working_set"))  # fmt: skip
+    st.update(physical_total=total, physical_available=avail, process_private=private,
+              commit_total=commit)  # fmt: skip
+    return st
+
+
+def _preflight(monkeypatch, caplog, alloc, **numbers):
+    monkeypatch.setattr(memcheck, "memory_status", lambda: _status(**numbers))
     with caplog.at_level(logging.INFO, logger=memcheck.log.name):
         st = memcheck.preflight(alloc, "the test buffer")
-    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    return st, warnings
+
+
+@pytest.mark.parametrize(
+    ("alloc", "numbers", "over_process", "over_available"),
+    [
+        # physical 16, available 8, private 1 (GB) unless overridden; commit 40 never matters
+        (2 * GB, {}, False, False),  # quiet, although commit 40 + 2 > 16
+        (9 * GB, {"avail": 10 * GB}, False, False),  # 1 + 9 = 10 <= 16, 9 <= 10
+        (9 * GB, {}, False, True),  # 9 > available 8
+        (8 * GB, {}, False, False),  # == available: not over
+        (8 * GB + 1, {}, False, True),
+        (6 * GB, {"private": 11 * GB}, True, False),  # 11 + 6 = 17 > 16, 6 <= 8
+        (5 * GB, {"private": 11 * GB}, False, False),  # 11 + 5 == 16: not over
+        (5 * GB + 1, {"private": 11 * GB}, True, False),
+        (10 * GB, {"private": 7 * GB}, True, True),  # both
+        (9 * GB, {"private": None}, False, True),  # unknown private: only the available test
+        (20 * GB, {"private": None, "avail": 30 * GB}, False, False),
+        (17 * GB, {"avail": None, "private": 0}, True, False),  # unknown available
+        (2 * GB, {"avail": None}, False, False),
+        (5 * GB, {"total": None, "private": 15 * GB}, False, False),  # unknown physical
+        (5 * GB, {"total": 0, "private": 15 * GB}, False, False),
+        (5 * GB, {"total": None, "avail": None, "private": None, "commit": None}, False, False),
+    ],
+)
+def test_preflight_overcommit_rule(monkeypatch, caplog, alloc, numbers, over_process,
+                                   over_available):  # fmt: skip
+    st, warnings = _preflight(monkeypatch, caplog, alloc, **numbers)
+    warn = over_process or over_available
+    assert st["over_process"] is over_process and st["over_available"] is over_available
     assert st["overcommit"] is warn and st["about_to_allocate"] == alloc
-    assert bool(warnings) is warn
+    assert len(warnings) == int(warn)
+    assert "memory preflight (the test buffer)" in caplog.text  # the info line, always
     if warn:
-        assert "Not stopping anything" in warnings[0].getMessage()
-        assert "the test buffer" in warnings[0].getMessage()
-    assert "memory preflight (the test buffer)" in caplog.text  # always logged
+        msg = warnings[0]
+        assert "the test buffer" in msg and "Not stopping anything" in msg
+        # both comparisons are named, with their numbers
+        assert "this process private" in msg and "vs physical" in msg and "vs available" in msg
+
+
+def test_preflight_warning_numbers(monkeypatch, caplog):
+    st, warnings = _preflight(monkeypatch, caplog, 6 * GB, private=11 * GB, avail=5 * GB)
+    assert st["over_process"] and st["over_available"]
+    assert warnings == [
+        "memory preflight: 6.0 GB for the test buffer; this process private 11.0 GB + 6.0 GB = "
+        "17.0 GB vs physical 16.0 GB, and 6.0 GB vs available 5.0 GB: the machine will page "
+        "(slower training). Consider a smaller distill.buffer, distill.pin_memory: false, or "
+        "closing other programs. Not stopping anything."
+    ]
+    assert "system commit 40.0 GB" in caplog.text  # commit is logged, not judged
 
 
 @pytest.mark.parametrize("platform", ["win32", "linux"])
@@ -224,7 +320,7 @@ def test_memory_status_never_raises(monkeypatch, platform):
     st = memcheck.memory_status()
     assert set(st) >= {"physical_total", "commit_total"} and all(v is None for v in st.values())
     out = memcheck.preflight(5 * GB)
-    assert out["overcommit"] is False
+    assert out["overcommit"] is out["over_process"] is out["over_available"] is False
 
 
 def test_memory_status_on_an_unknown_platform(monkeypatch):
@@ -249,14 +345,12 @@ def test_memory_status_reads_this_machine():
     assert st["commit_total"] <= st["commit_limit"]
 
 
-@pytest.mark.xfail(
-    __import__("sys").platform == "win32",
-    strict=True,
-    reason="memcheck._windows calls GetProcessMemoryInfo with GetCurrentProcess's default c_int "
-    "restype: the -1 pseudo-handle is truncated, the call fails (ERROR_INVALID_HANDLE) and the "
-    "process counters stay 0",
-)
 def test_memory_status_reads_this_process():
     st = _real_status()
     for k in ("process_private", "process_working_set"):
         assert isinstance(st[k], int) and st[k] > 0, k
+    # it follows a real allocation (64 MB, touched)
+    blob = bytearray(64 << 20)
+    after = memcheck.memory_status()["process_private"]
+    assert after - st["process_private"] > 32 << 20
+    del blob
