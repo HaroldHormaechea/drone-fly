@@ -16,6 +16,7 @@
     drone-fly harness eval --capture <dir> --labels <dir> [--preset] [--gate-weights] [--device]
     drone-fly harness label --capture <dir> --track <xml> [--race] [--props] [--preset] [--out]
                           [--preview N] [--lag-ms]
+    drone-fly harness captures register <dir> --track <catalogue-id> [--trackdata-root] [--force]
     drone-fly harness train-gates --labels <dir>... [--out] [--preset] [--epochs] [--backbone]
                           [--holdout-frac 0.2 | --holdout t0:t1]
     drone-fly harness depth-fit --capture <dir> --track <xml> [--race] [--props] [--preset]
@@ -291,6 +292,26 @@ def _cmd_label(args: argparse.Namespace) -> int:
     print(f"labels: {meta['out_dir']}")
     if meta["previews"]:
         print(f"previews: {Path(meta['previews'][0]).parent}")
+    return EXIT_OK
+
+
+def _cmd_captures_register(args: argparse.Namespace) -> int:
+    from drone_fly.harness.offline.capture_index import capture_sha256, register
+
+    meta = register(
+        args.dir,
+        args.track,
+        config=args.config,
+        preset=args.preset or "liftoff",
+        trackdata_root=args.trackdata_root,
+        source=args.source,
+        force=args.force,
+    )
+    c = meta["completeness"]
+    print(f"registered {meta['name']}: {meta['catalogue_id']} ({meta['map']}, {meta['split']})")
+    print(f"completeness: {c['status']} ({c['source']}: {c.get('passed')}/{c.get('required')})")
+    print(f"capture sha256: {capture_sha256(args.dir)}")
+    print("alignment: unverified (run `drone-fly harness captures verify`)")
     return EXIT_OK
 
 
@@ -686,6 +707,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_label.add_argument("--preview-dir", help="preview root (default .../reports/label-preview)")
     p_label.add_argument("--lag-ms", type=float, default=0.0, help="frame -> telemetry lag")
     p_label.set_defaults(func=_cmd_label)
+
+    p_caps = hsub.add_parser("captures", help="multi-map gate captures (UC71)")
+    csub = p_caps.add_subparsers(dest="captures_command", required=True)
+    p_reg = csub.add_parser("register", help="write meta.json for an existing capture folder")
+    p_reg.add_argument("dir", help="capture folder (frames.csv + telemetry)")
+    p_reg.add_argument("--track", required=True, help="tracks/liftoff.yaml catalogue id")
+    p_reg.add_argument("--trackdata-root", help="trackdata root (completeness from telemetry)")
+    p_reg.add_argument("--source", choices=("manual",), default="manual")
+    p_reg.add_argument("--force", action="store_true", help="rewrite an existing meta.json")
+    _common(p_reg)
+    p_reg.set_defaults(func=_cmd_captures_register)
 
     p_train = hsub.add_parser("train-gates", help="train the learned gate detector on labels")
     p_train.add_argument("--labels", nargs="+", required=True, help="label folder(s)")
