@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Synthetic UC68 fixture (generate_fixtures.py); Liftoff 1.4 passage format. -->
+<Race xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <name>fake-arena-02</name>
+  <spawnPointID>100</spawnPointID>
+  <checkPointPassages>
+    <RaceCheckpointPassage>
+      <uniqueId>d</uniqueId>
+      <checkPointID>3</checkPointID>
+      <passageType>Finish</passageType>
+      <directionality>LeftToRight</directionality>
+      <nextPassageIDs />
+    </RaceCheckpointPassage>
+    <RaceCheckpointPassage>
+      <uniqueId>x</uniqueId>
+      <checkPointID>2</checkPointID>
+      <passageType>Pass</passageType>
+      <directionality>LeftToRight</directionality>
+      <nextPassageIDs><string>d</string></nextPassageIDs>
+    </RaceCheckpointPassage>
+    <RaceCheckpointPassage>
+      <uniqueId>c</uniqueId>
+      <checkPointID>6</checkPointID>
+      <passageType>Pass</passageType>
+      <directionality>LeftToRight</directionality>
+      <nextPassageIDs><string>d</string></nextPassageIDs>
+    </RaceCheckpointPassage>
+    <RaceCheckpointPassage>
+      <uniqueId>b</uniqueId>
+      <checkPointID>8</checkPointID>
+      <passageType>Pass</passageType>
+      <directionality>LeftToRight</directionality>
+      <nextPassageIDs><string>c</string><string>x</string></nextPassageIDs>
+    </RaceCheckpointPassage>
+    <RaceCheckpointPassage>
+      <uniqueId>a</uniqueId>
+      <checkPointID>1</checkPointID>
+      <passageType>Start</passageType>
+      <directionality>LeftToRight</directionality>
+      <nextPassageIDs><string>b</string></nextPassageIDs>
+    </RaceCheckpointPassage>
+  </checkPointPassages>
+</Race>

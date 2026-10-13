@@ -1,0 +1,56 @@
+{
+ "format": 1,
+ "environment": "FakeDesert",
+ "source": {
+  "bundle": "fakedesert.bundle",
+  "build_id": "900"
+ },
+ "counts": {
+  "box": 2,
+  "capsule": 0,
+  "sphere": 0,
+  "mesh": 0,
+  "terrain": 1,
+  "trigger": 0
+ },
+ "colliders": [
+  {
+   "t": "box",
+   "p": [
+    0,
+    -0.5,
+    15
+   ],
+   "q": [
+    0.0,
+    0.0,
+    0.0,
+    1.0
+   ],
+   "s": [
+    30,
+    0.5,
+    30
+   ]
+  },
+  {
+   "t": "box",
+   "p": [
+    20,
+    1,
+    40
+   ],
+   "q": [
+    0.0,
+    0.0,
+    0.0,
+    1.0
+   ],
+   "s": [
+    1,
+    1,
+    1
+   ]
+  }
+ ]
+}

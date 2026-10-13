@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Synthetic UC68 fixture (generate_fixtures.py); Unity metres, Y-up. -->
+<Track xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <name>Fake Hall 02 - Shapes</name>
+  <environment>FakeHall</environment>
+  <blueprints>
+    <TrackBlueprint>
+      <itemID>FakeAsymGate01</itemID>
+      <instanceID>h1</instanceID>
+      <position><x>0</x><y>0</y><z>10</z></position>
+      <rotation><x>0</x><y>90</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>FakeArchMesh01</itemID>
+      <instanceID>h2</instanceID>
+      <position><x>10</x><y>0</y><z>15</z></position>
+      <rotation><x>0</x><y>0</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>FakeGateX01</itemID>
+      <instanceID>h3</instanceID>
+      <position><x>20</x><y>0</y><z>10</z></position>
+      <rotation><x>0</x><y>90</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint xsi:type="TrackBlueprintSpawnpoint">
+      <itemID>SpawnPointSingle</itemID>
+      <instanceID>h0</instanceID>
+      <position><x>0</x><y>0</y><z>-5</z></position>
+      <rotation><x>0</x><y>0</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>FakeRotatedBar01</itemID>
+      <instanceID>h4</instanceID>
+      <position><x>10</x><y>0</y><z>5</z></position>
+      <rotation><x>0</x><y>0</y><z>0</z></rotation>
+      <scale><x>2</x><y>1</y><z>1</z></scale>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>FakeCapsule01</itemID>
+      <instanceID>h5</instanceID>
+      <position><x>25</x><y>0</y><z>0</z></position>
+      <rotation><x>0</x><y>0</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>FakeMeshProp01</itemID>
+      <instanceID>h6</instanceID>
+      <position><x>-8</x><y>0</y><z>12</z></position>
+      <rotation><x>0</x><y>0</y><z>0</z></rotation>
+    </TrackBlueprint>
+  </blueprints>
+</Track>
