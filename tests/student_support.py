@@ -219,3 +219,88 @@ class StaticDrone:
         )
         self.p.step(t, self.pos, self.quat, target, nx, nv, cr, self.scale, draws=draws)
         return self.p.outputs(t)
+
+
+# ----------------------------------------------------------------------------- student runs
+
+#: The ``liftoff`` preset's camera (what a live session flies with).
+LIFTOFF_CAMERA: dict[str, Any] = {
+    "resolution": [2560, 1080],
+    "hfov_deg": 120.0,
+    "uptilt_deg": 20.0,
+    "masks_norm": [],
+    "min_in_frame_frac": 0.5,
+    "max_range_m": 60.0,
+}
+STUDENT_DRONE = "liftoff-gremlin-micro"
+
+
+def write_student_run(
+    root: Path,
+    *,
+    actor: str = "k1-student",
+    k1_path: Any = None,
+    name: str = "student-run",
+    world_scale: float = 6.0,
+    camera: dict[str, Any] | None = None,
+    lost_timeout_s: float = 1.3,
+    detector_sha256: str = "d" * 64,
+    seed: int = 0,
+) -> Path:
+    """A student run folder as ``training.distill`` writes it: ``checkpoints/student.pt`` (the
+    readout state) + its ``.contract.json`` with the student sidecar keys, and the val selection."""
+    import json
+
+    from drone_fly.controller.student import build_student
+    from drone_fly.sim.action import ActionSpec, write_sidecar
+    from drone_fly.sim.student_obs import schema
+
+    cam = copy.deepcopy(camera or LIFTOFF_CAMERA)
+    run = root / name
+    (run / "checkpoints").mkdir(parents=True, exist_ok=True)
+    (run / "eval").mkdir(exist_ok=True)
+    torch.manual_seed(seed)
+    student = build_student(actor, k1_path=k1_path)
+    ck = run / "checkpoints" / "student.pt"
+    torch.save(student.readout_state_dict(), ck)
+    sch = schema(world_scale=world_scale, lost_timeout_s=lost_timeout_s, acquire_timeout_s=3.0,
+                 camera=cam, assoc_radius=1.0)  # fmt: skip
+    side = {
+        "actor_arch": student.arch(),
+        "teacher": {
+            "run_id": "teacher-run-a",
+            "checkpoint": "x/teacher.pt",
+            "obs_schema": "teacher-obs v1",
+        },  # fmt: skip
+        "noise_model": {
+            "path": "noise_model.yaml",
+            "sha256": "n" * 64,
+            "detector_id": "liftoff-gates-dddddddd",
+            "detector_sha256": detector_sha256,
+            "revision": 1,
+        },  # fmt: skip
+        "perception": {
+            "mode": "noise",
+            "lost_timeout_s": lost_timeout_s,
+            "acquire_timeout_s": 3.0,
+            "uncovered": "proxy",
+        },  # fmt: skip
+        "camera": cam,
+        "timing": {
+            "mode": "random",
+            "control_hz": [28.0, 45.0],
+            "action_delay_s": [0.0, 0.03],
+            "skip_prob": [0.0, 0.35],
+            "source": "measured",
+        },  # fmt: skip
+        "contention": {"contention": False, "conditions": [], "allowed": False},
+        "deployable": actor == "k1-student",
+        "role": "deployable" if actor == "k1-student" else "baseline",
+    }
+    write_sidecar(ck, ActionSpec.v2(1.0, 4.0, 3.0), extra_dim=int(sch["dim"]), actor=actor,
+                  drone=STUDENT_DRONE, run_id=name, obs_schema=sch, world_scale=world_scale,
+                  course_conversion={"fingerprint": "fp"}, extra=side)  # fmt: skip
+    (run / "eval" / "student_selection.json").write_text(
+        json.dumps({"checkpoint": "student.pt", "it": 1, "macro_completion": 0.5}), "utf-8"
+    )
+    return run

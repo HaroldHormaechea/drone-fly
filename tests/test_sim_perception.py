@@ -367,3 +367,18 @@ def test_noise_mode_without_a_model_is_refused():
         GatePerception(None, 1, "cpu", config=PerceptionConfig(mode="noise"))
     with pytest.raises(ValueError, match="perception.mode"):
         PerceptionConfig(mode="optimistic")
+
+
+def test_low_detection_probability_with_short_bursts_keeps_its_rate(tmp_path, caplog):
+    """QA bug fix: bursts too short for a low p_det are lengthened (with a warning) instead of
+    flooring the stationary detection rate at 1 / (1 + L)."""
+    model = load_model(tmp_path, a=-3.0, burst_s=0.04, timing=FAST)  # p 0.047, L 2 frames
+    n, warm, ticks = 2048, 20, 60
+    p, d, tgt = run(model, n, warm + ticks, 0.02)
+    det = []
+    for i in range(warm + ticks):
+        d.tick(tgt)
+        if i >= warm:
+            det.append(p.t_miss.logical_not().float().mean().item())
+    assert float(np.mean(det)) == pytest.approx(sigmoid(-3.0), abs=0.01)
+    assert "inconsistent" in caplog.text
