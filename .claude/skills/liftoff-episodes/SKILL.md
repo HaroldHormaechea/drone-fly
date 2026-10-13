@@ -15,7 +15,8 @@ Repo root: the drone-fly checkout (e.g. `C:\dev\drone-fly`). Everything runs thr
 ## Before you start (check, don't assume)
 
 1. **No anti-cheat game open** (e.g. League of Legends / Riot Vanguard). Ask the user if unsure.
-   The loop uses a virtual gamepad and takes over mouse and focus.
+   The loop uses a virtual gamepad and takes over mouse and focus. Every live `harness run`
+   also refuses on its own (exit 2) while one runs.
 2. **The user agrees to hands-off time.** While the loop runs, clicking or typing elsewhere steals
    focus (a run then stops with `focus_lost`; menu clicks may miss). Tell them roughly how long.
 3. Liftoff setup (one-time, see `docs/harness/liftoff-live-session.md`): borderless fullscreen
@@ -95,6 +96,27 @@ Produces the drone profile `drones/<id>/drone.yaml` + `sysid.md` (UC-66; details
    `harness ui select-drone --name "Test small drone" --level infinity-loop`.
 
 Dry run without the game: `sysid liftoff --drone <id> --plant synthetic`.
+
+## Oracle teacher session (UC69)
+
+Flies a UC68 teacher with exact gate poses from the track XML. It is a control-only diagnostic and
+never feeds training. Details are in `docs/harness/liftoff-live-session.md` § "Oracle teacher
+session".
+
+1. Wait for the teacher's training and its val selection to finish. The run refuses with exit 2
+   while the training run is active; `-AllowConcurrentTraining` allows a labelled smoke run only.
+2. Run `tasklist`. If League is running, stop and do nothing live. If only Vanguard (`vgc` /
+   `vgtray`) is running, close it. **Anti-cheat check:** every live Liftoff `harness run` now
+   refuses on its own while League, the Riot client or Vanguard is running (exit 2).
+3. Load the track as the Last Session (Infinity Loop = `liftoff-arena-04`). There is no level
+   loading. A wrong level fails the start check: exit 6, the drone is never armed, and the script
+   stops.
+4. Fly the attempts:
+   `.\scripts\liftoff\Invoke-LiftoffAttempts.ps1 -Teacher <run folder> -Track liftoff-arena-04 -Attempts 10 -RecordEvery 10 -Quit`
+   (defaults: 10 attempts, 300 s each). The script runs `harness oracle-report` on the session at
+   the end.
+5. Read `report.md` in the session folder: the verdict, the failure modes and the tick rate.
+   Commit only the summary under `docs/harness/reports/`, never `artifacts/`.
 
 ## For training / fine-tuning
 

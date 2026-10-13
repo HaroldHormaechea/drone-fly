@@ -254,6 +254,59 @@ as `<map>-model-<model>-attempt-<n>` (`...\LocalLow\LuGus Studios\Liftoff\Record
 single steps are `drone-fly harness ui launch | last-session | reset | save-recording --name N |
 quit | shot` and `harness run ... --save-recording NAME`. Keep hands off the PC while it runs.
 
+## Oracle teacher session (UC69)
+
+This session flies the UC68 privileged teacher with **exact** gate poses: the track XML plus
+telemetry, with no vision. It tests whether control transfers to Liftoff, separately from
+perception. It is a diagnostic only: the oracle is never used for training or held-out tuning, and
+every output is labelled ORACLE. See [ADR 0008](../adr/0008-oracle-teacher-in-liftoff.md).
+
+**Prerequisites**
+
+1. The teacher's training has finished and its val selection exists (`eval/val_selection.json`).
+   The session refuses with exit 2 while the run still writes checkpoints or `progress.json`.
+   `-AllowConcurrentTraining` allows a labelled smoke run that does not count toward AC9.
+2. `tasklist` shows no League of Legends, Riot client or Vanguard (`vgc`, `vgtray`).
+3. The track to fly is the loaded **Last Session**: Liftoff Arena "04 - Infinity Loop" =
+   `liftoff-arena-04`, with the teacher's drone (`liftoff-gremlin-micro`). If needed, set it with
+   `harness ui select-drone --name "Test small drone" --level infinity-loop`. There is no level
+   loading.
+4. The track data (XMLs, `props.json`, `scenes/`) is at `artifacts/harness/trackdata`, or pass
+   `-TrackdataRoot` / `$DRONE_FLY_TRACKDATA`.
+
+**Commands**
+
+```powershell
+.\scripts\liftoff\Start-LiftoffSession.ps1
+.\scripts\liftoff\Invoke-LiftoffAttempts.ps1 -Teacher artifacts\training\liftoff-gremlin-micro\<run> `
+    -Track liftoff-arena-04 -Attempts 10 -RecordEvery 10 -Quit
+# one attempt by hand:
+.venv-cuda\Scripts\drone-fly.exe harness run --harness liftoff --preset liftoff `
+    --teacher <run> --track liftoff-arena-04 --perception oracle --duration 300
+.venv-cuda\Scripts\drone-fly.exe harness oracle-report --session <session folder>
+```
+
+**What to expect**
+
+- **Exit codes.**
+  - 0 or 5: the attempt ended normally, by the episode monitor, the duration cap or the course
+    finish.
+  - 6: the drone is not at the track's start, so the wrong level is loaded. The drone is never
+    armed, and the script stops.
+  - 2: refused, because training is active, the schema differs, the scene differs, or anti-cheat
+    is running.
+- **World scale.** The oracle flies at `world_scale` 1.0, so the preset's 4.0 is ignored and
+  recorded in `meta.json`. It captures no frames and runs the teacher on the CPU.
+- **Where results go.** Sessions are written to
+  `artifacts/eval/<drone>/<run>/oracle/<track>/sessions/<UTC>-<sha8>/`, which holds the frozen
+  checkpoint, `attempts/` and `report.md` / `report.json`. A copy of the latest report goes to the
+  track level.
+- **What is committed.** Only `docs/harness/reports/uc69-oracle-liftoff-arena-04.md`.
+
+**Conclusion**
+
+Pending the live stage (AC9). The report's conclusion paragraph will be pasted here.
+
 ## Measure a new drone
 
 System identification flies scripted manoeuvres with the drone and fits the airframe parameters the
