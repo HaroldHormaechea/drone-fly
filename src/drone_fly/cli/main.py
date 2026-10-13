@@ -366,6 +366,9 @@ def _cmd_ui(args: argparse.Namespace) -> int:
         if not args.name:
             raise HarnessConfigError("ui save-recording needs --name")
         print(f"save-recording: {ui_driver.save_recording(args.name)}")
+    elif args.action == "retry":
+        ui_driver.retry(args.level or "infinity-loop")
+        print("retry: ok")
     else:
         ui_driver.ACTIONS[args.action]()
         print(f"{args.action}: ok")
@@ -721,7 +724,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ui.add_argument("--slot", type=int, help="select-drone: list row (default: DRONE_SLOTS)")
     p_ui.add_argument(
-        "--level", help="select-drone: also load this level (ui_driver.QUICK_SETUP_LEVELS)"
+        "--level",
+        help="select-drone: also load this level; retry: the level whose spawn to verify "
+        "(default infinity-loop; ui_driver.QUICK_SETUP_LEVELS)",
     )
     p_ui.set_defaults(func=_cmd_ui)
 

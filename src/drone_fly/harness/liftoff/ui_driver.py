@@ -252,38 +252,117 @@ def reset(timeout_s: float = 20.0) -> None:
     _wait(lambda: telemetry_streaming(wait_s=1.0), timeout_s, "telemetry after the reset")
 
 
-def drone_at_rest(window_s: float = 1.0, tol_m: float = 0.05) -> bool:
-    """True when two telemetry positions ``window_s`` apart differ by less than ``tol_m``."""
-    a = telemetry_position(wait_s=2.0)
-    time.sleep(window_s)
-    b = telemetry_position(wait_s=2.0)
+#: Post-race screen buttons (reference y; the column right of the replay), top to bottom.
+#: MEASURED 2026-10-13 on the Infinity Loop result screen (UC69 it1374 live).
+POST_RACE_BUTTONS = (
+    ("save_recording", 838),
+    ("retry", 888),
+    ("random_race", 938),
+    ("level_selection", 988),
+    ("main_menu", 1038),
+)
+#: Probe columns inside the buttons, left / right of the label (reference x).
+POST_RACE_XS = (2360, 2510)
+#: A plain button is light grey (~240, a hovered one ~231); the selected one is Liftoff's red.
+BUTTON_GREY = (225, 248)
+BUTTON_RED = (209, 96, 85)
+
+
+class RetryError(HarnessConfigError):
+    """The race did not restart at the spawn after clicking "Retry" on the post-race screen."""
+
+
+def post_race_buttons(img: Any) -> dict[str, str | None]:
+    """``{button: "plain" | "selected" | None}`` on the post-race screen (``None`` = not drawn).
+
+    Both probe columns must agree; ``img`` is a full-screen RGB array of any size. Pure.
+    """
+    h, w = img.shape[:2]
+    out: dict[str, str | None] = {}
+    for name, y_ref in POST_RACE_BUTTONS:
+        states = set()
+        for x_ref in POST_RACE_XS:
+            px = [
+                int(v)
+                for v in img[round(y_ref * h / REFERENCE[1]), round(x_ref * w / REFERENCE[0])]
+            ]
+            if max(px) - min(px) < 6 and BUTTON_GREY[0] <= px[0] <= BUTTON_GREY[1]:
+                states.add("plain")
+            elif max(abs(px[i] - BUTTON_RED[i]) for i in range(3)) <= 14:
+                states.add("selected")
+            else:
+                states.add(None)
+        out[name] = states.pop() if len(states) == 1 else None
+    return out
+
+
+def post_race_screen(img: Any) -> bool:
+    """True when the post-race button column is drawn (every button plain or selected). Pure."""
+    return all(v is not None for v in post_race_buttons(img).values())
+
+
+def restart_ok(a: Any, b: Any, spawn: Any | None, *, tol_m: float = 0.05) -> tuple[bool, str]:
+    """Is the drone back at the start, from two positions taken ``window_s`` apart? Pure.
+
+    Requires both samples, a non-zero position (the post-race state streams (0, 0, 0)), rest
+    (``|a - b| < tol_m``) and, with a ``spawn``, :func:`spawn_matches`.
+    """
     if a is None or b is None:
-        return False
-    return sum((float(x) - float(y)) ** 2 for x, y in zip(a, b, strict=True)) ** 0.5 < tol_m
+        return False, "no telemetry"
+    if all(abs(float(v)) < 1e-6 for v in b):
+        return False, "position (0, 0, 0): the post-race state"
+    moved = sum((float(x) - float(y)) ** 2 for x, y in zip(a, b, strict=True)) ** 0.5
+    if moved >= tol_m:
+        return False, f"moving ({moved:.2f} m in the window)"
+    if spawn is not None and not spawn_matches(b, spawn):
+        return False, f"at {tuple(round(float(v), 2) for v in b)}, not the spawn {spawn}"
+    return True, "at the spawn, at rest"
 
 
-def retry(timeout_s: float = 45.0, appear_s: float = 4.0, settle_s: float = 3.0) -> None:
-    """After a finished race: click "Retry" on the post-race screen (restarts at the spawn).
+def retry(
+    level: str | None = "infinity-loop",
+    *,
+    tries: int = 3,
+    appear_s: float = 3.0,
+    screen_timeout_s: float = 25.0,
+    settle_s: float = 3.0,
+    rest_window_s: float = 2.0,
+) -> None:
+    """After a finished race: restart it with "Retry" on the post-race screen, verified.
 
-    The screen animates in a few seconds after the finish and the race replay plays behind it,
-    so: wait ``appear_s``, click, and verify by telemetry that the drone is at rest (the replay
-    moves it); re-click until it is, for at most ``timeout_s``. The run's start check verifies
-    the position against the track.
+    1. wait ``appear_s``, then until the post-race buttons are drawn (pixel probe; the screen
+       animates in a few seconds after the finish, and clicks before that are lost);
+    2. hover Retry and check the probe shows it selected (the selection can sit on another
+       button, e.g. "Random race"), then click;
+    3. require a non-zero position at the ``level`` spawn (:data:`QUICK_SETUP_LEVELS`; ``None``
+       skips the position check) and at rest over ``rest_window_s`` (:func:`restart_ok`).
+
+    Up to ``tries`` clicks, then :class:`RetryError`.
     """
     _focused()
     _require_level()
+    spawn = None if level is None else QUICK_SETUP_LEVELS[level]["spawn"]
+    u = _user32()
     time.sleep(appear_s)
-    deadline = time.monotonic() + timeout_s
-    while True:
+    last = "not tried"
+    for attempt in range(1, tries + 1):
+        _wait(lambda: post_race_screen(_grab_screen()), screen_timeout_s, "the post-race screen")
+        x, y = scaled("race_retry")
+        u.SetCursorPos(x, y)
+        time.sleep(0.4)
+        state = post_race_buttons(_grab_screen())
+        if state.get("retry") != "selected":
+            log.info("Retry not shown selected after hovering (%s); clicking anyway", state)
         click("race_retry", settle_s=settle_s)
-        if drone_at_rest():
+        a = telemetry_position(wait_s=2.0)
+        time.sleep(rest_window_s)
+        b = telemetry_position(wait_s=2.0)
+        ok, last = restart_ok(a, b, spawn)
+        if ok:
+            log.info("race restarted (try %d): %s", attempt, last)
             return
-        if time.monotonic() >= deadline:
-            raise HarnessConfigError(
-                f"the race did not restart within {timeout_s:.0f} s of clicking Retry "
-                "(the drone is still moving: post-race replay?)"
-            )
-        log.info("drone still moving after Retry; clicking again")
+        log.warning("Retry try %d/%d did not restart the race: %s", attempt, tries, last)
+    raise RetryError(f"the race did not restart after {tries} Retry clicks: {last}")
 
 
 RECORDINGS_DIR = Path(os.environ.get("USERPROFILE", "~")) / (
