@@ -368,12 +368,11 @@ def first_window_stats(traj: Trajectory, arm_end_clock: float | None) -> dict[st
 def _takeoff_tumble(
     traj: Trajectory, arm_end: float | None, first_cross: float | None
 ) -> str | None:
-    if arm_end is None:
+    """Only an attempt that never reached the first gate: an aggressive racing take-off banks far
+    past 60 deg within 2 s and then flies the course (UC69 live: first gate at 3.6 s)."""
+    if arm_end is None or first_cross is not None:
         return None
-    hi = arm_end + FIRST_WINDOW_S
-    if first_cross is not None:
-        hi = min(hi, first_cross)
-    m = _window(traj, arm_end, hi)
+    m = _window(traj, arm_end, arm_end + FIRST_WINDOW_S)
     if not m.any():
         return None
     tilt = float(traj.tilt_deg()[m].max())
