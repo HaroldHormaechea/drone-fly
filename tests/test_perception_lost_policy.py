@@ -459,12 +459,21 @@ def test_a_tracker_block_unlike_this_builds_schema_is_refused(harness_k1_dir, tm
         plan_student(p)
 
 
-@pytest.mark.xfail(strict=True, reason="validate_meta / plan_student accept any "
-                   "tracker.lost_policy string; only the live estimator refuses it")  # fmt: skip
-def test_an_unknown_policy_in_the_checkpoint_is_refused_at_load(harness_k1_dir, tmp_path):
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("lost_policy", "retry", r"lost_policy 'retry' not in"),
+        ("lost_hard_stop_s", 0.0, r"lost_hard_stop_s 0\.0 must be > 0"),
+        ("lost_hard_stop_s", -1.0, r"lost_hard_stop_s -1\.0 must be > 0"),
+        ("drop_after_s", -0.1, r"drop_after_s -0\.1 must be >= 0"),
+    ],
+)
+def test_a_bad_tracker_value_in_the_checkpoint_is_refused_at_load(harness_k1_dir, tmp_path,
+                                                                  field, value, match):  # fmt: skip
+    """Refused by the version guard at load (plan_student), before any estimator is built."""
     from drone_fly.harness.student import plan_student
 
     p = _edited(_export(harness_k1_dir, tmp_path), tmp_path,
-                lambda tr: tr.update(lost_policy="retry"))  # fmt: skip
-    with pytest.raises((StudentSchemaError, HarnessConfigError), match="lost_policy"):
+                lambda tr: tr.update({field: value}))  # fmt: skip
+    with pytest.raises(StudentSchemaError, match=match):
         plan_student(p)
