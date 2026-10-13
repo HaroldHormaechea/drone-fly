@@ -194,4 +194,35 @@ misses are `pnp_range`); beyond 15 m most misses are no centre peak at all (52 o
 
 ## Results
 
-Pending (P1 bulk captures, P2-P6).
+### P1 replay captures (2026-10-13, 17:08-19:15, unattended)
+
+34 replay captures plus the reference capture, all preset camera except the one Borrum test
+capture (`liftoff-arena-2026-10-13-replay-02`, uptilt 30, train map):
+
+| Split | Map | Captures | Verified now |
+|---|---|---|---|
+| held-out | ThePit | 5 | 3 (tracks 02, 05) |
+| held-out | MinusTwo | 2 | 0 |
+| held-out | HangarC03 | 2 | 0 |
+| val | AutumnFields | 3 | 0 |
+| val | Rustline | 3 | 0 |
+| val | Surtur | 3 | 0 |
+| train | LiftoffArena | 5 (+ reference) | 5 (+ reference) |
+| train | MarinaBay, ShortCircuit, TheGreen | 1, 1, 2 | 1, 1, 1 |
+| train | StrawBale, PineValley, Permafrost, Hannover, BandoCity | 2, 2, 1, 1, 1 | 0 |
+
+Verified captures had margins 1.37-2.37 with the camera peak within one step (uptilt 19.03 vs
+20.03, hfov 120). The 22 unverified ones are on tracks without an inflatable arch: `verify` needs
+a gate class of the table on the track, so they stay `verified: false` (excluded by `assemble` and
+G1) until P3 adds their gate classes and re-runs `captures verify`.
+
+**Operational lessons.**
+- A window that comes to the front during a replay (the Claude terminal did, once) puts foreign
+  frames into the capture and sends the end-of-replay keys elsewhere; that capture and the next
+  were discarded and redone. `captures replay` now watches the focus during the recording
+  (refocusing, and refusing the capture when focus was lost) and refocuses before leaving.
+- Dropdowns scroll no further than their end: an entry among the last 5 of a list longer than 5 is
+  picked from the end (`--browser-pos ENV/N,RACE/N,ROW` gives the entry counts).
+- Frame rate: 7.3-10 fps at the requested 10 (heavy maps render slower).
+- The Borrum pass (other-camera recordings on train maps) was not run in this window: a
+  follow-up.

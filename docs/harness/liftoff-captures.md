@@ -135,14 +135,17 @@ uptilt). Strategy B is used for the bulk captures.
 
 ## AC3. Replay capture: `drone-fly harness captures replay`
 
-`drone-fly harness captures replay --recording <name> --browser-pos ENV,RACE,ROW [--max-s N]
+`drone-fly harness captures replay --recording <name> --browser-pos ENV[/N],RACE[/N],ROW [--max-s N]
 [--fps 10] [--allow-pending-camera]` plays a stored recording in Liftoff and captures it:
 
 1. checks the recording (catalogue match; the preset camera, else `pending-camera` is refused
    unless `--allow-pending-camera`);
 2. drives the menus (`harness/liftoff/ui_replay.py`): Liftoff running -> replay browser -> the
    Environment and Race dropdown entries and the list row given by `--browser-pos` (0-based; `-`
-   keeps a filter) -> Replay -> Play, each step verified on screen; the ticked browser is saved as
+   keeps a filter; `/N` = that dropdown's number of entries, needed when the entry is among its
+   last 5, which are picked from the end) -> Replay -> Play, each step verified on screen; Liftoff
+   must keep the focus while it records (a capture during which another window came up is refused:
+   replay it); the ticked browser is saved as
    `browser.png` in the capture; a failed step aborts with a screenshot under
    `artifacts/harness/liftoff/reports/ui-failures/`. The driver cannot read the entries' text, so
    the indices come from the operator (a `harness ui shot` of the browser); a wrong pick replays

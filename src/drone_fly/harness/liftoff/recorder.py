@@ -415,6 +415,7 @@ def record_replay(
     preset: str | None = "liftoff",
     allow_pending_camera: bool = False,
     browser_pos: tuple[int | None, int | None, int] | None = None,
+    dropdown_counts: tuple[int | None, int | None] = (None, None),
 ) -> tuple[Path, dict[str, Any]]:
     """``captures replay`` (AC3): play a stored recording in Liftoff and capture it.
 
@@ -475,16 +476,24 @@ def record_replay(
     env_i, race_i, row = browser_pos
     ui_replay.ensure_running()
     ui_replay.open_replays()
-    ui_replay.select_recording(env_i, race_i, row, str(out / "browser.png"))
+    ui_replay.select_recording(
+        env_i, race_i, row, str(out / "browser.png"),
+        env_count=dropdown_counts[0], race_count=dropdown_counts[1],
+    )  # fmt: skip
     recorder = CaptureRecorder(out, port=port, fps=fps, telemetry=strat == "A")
     recorder.start()  # frames before Play have no pose and are dropped when loading
     try:
         t_play = ui_replay.play()
-        while time.time() - t_play < limit:
-            time.sleep(0.5)
+        lost = ui_replay.watch_focus(t_play + limit)
     finally:
         stats = recorder.stop()
         ui_replay.stop_to_menu()
+    if lost:
+        raise HarnessConfigError(
+            f"another window took the focus during the replay at "
+            f"{[round(t - t_play, 1) for t in lost]} s: the frames in {out} are not all "
+            "Liftoff's; discard the capture and replay it"
+        )
     if strat == "B":
         write_pose_capture(out, rec, t0_frame_s=t_play)
     comp = rc.completeness_from_laps(rec, entry) or {

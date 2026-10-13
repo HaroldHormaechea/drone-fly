@@ -153,17 +153,42 @@ def _click_point(name: str, settle_s: float = 1.0, dy: int = 0) -> None:
                         round((y + dy) * h / ui_driver.REFERENCE[1]), settle_s)  # fmt: skip
 
 
-def _pick_dropdown(field: str, index: int) -> None:
-    """Open the dropdown ``field`` and click its entry ``index`` (scrolling past 5 rows)."""
+def dropdown_plan(index: int, count: int | None) -> tuple[str, int, int]:
+    """``(scroll, notches, row offset px)`` for dropdown entry ``index`` of ``count`` entries. Pure.
+
+    ``scroll`` is ``top`` (scroll to the top, then ``notches`` down) or ``end`` (scroll to the end).
+    A list scrolls no further than its end, so an entry among the last 5 of a list longer than 5
+    is picked from the end (MEASURED P1: The Pit's 6 races, entry 4 landed on entry 2 when scrolled
+    from the top); ``count`` None assumes a long list.
+    """
+    from drone_fly.harness.liftoff import ui_driver
+
+    rows, pitch = ui_driver.DROPDOWN_ROW["rows"], ui_driver.DROPDOWN_ROW["pitch"]
+    if count is not None:
+        if not 0 <= index < count:
+            raise HarnessConfigError(f"dropdown entry {index} outside its {count} entries")
+        if count <= rows:
+            return "top", 0, index * pitch
+        if index >= count - rows:
+            return "end", 0, (index - (count - rows)) * pitch
+    notches, offset = ui_driver.dropdown_scroll(index)
+    return "top", notches, offset
+
+
+def _pick_dropdown(field: str, index: int, count: int | None = None) -> None:
+    """Open the dropdown ``field`` and click its entry ``index`` (see :func:`dropdown_plan`)."""
     from drone_fly.harness.liftoff import ui_driver
 
     _click_point(field, settle_s=0.8)
-    notches, offset = ui_driver.dropdown_scroll(index)
+    scroll, notches, offset = dropdown_plan(index, count)
     fx, fy = POINTS[field]
-    # as Quick Setup: reference coordinates; positive scrolls up (to the top), negative down
-    ui_driver._scroll(fx, fy + 90, 30)
-    if notches:
-        ui_driver._scroll(fx, fy + 90, -notches)
+    # as Quick Setup: reference coordinates; positive scrolls up, negative down
+    if scroll == "end":
+        ui_driver._scroll(fx, fy + 90, -30)
+    else:
+        ui_driver._scroll(fx, fy + 90, 30)
+        if notches:
+            ui_driver._scroll(fx, fy + 90, -notches)
     x, y = ui_driver.dropdown_row_xy((fx, fy), offset)
     ui_driver._click_xy(x, y, 1.0)
 
@@ -189,15 +214,25 @@ def open_replays() -> None:
 
 
 def select_recording(
-    env_index: int | None, race_index: int | None, row: int, shot_path: str | None = None
+    env_index: int | None,
+    race_index: int | None,
+    row: int,
+    shot_path: str | None = None,
+    *,
+    env_count: int | None = None,
+    race_count: int | None = None,
 ) -> None:
-    """Pick Environment / Race by dropdown index (None = keep) and tick list row ``row``."""
+    """Pick Environment / Race by dropdown index (None = keep; ``*_count`` = the dropdown's number
+    of entries, needed for an entry among the last 5) and tick list row ``row``."""
     from drone_fly.harness.liftoff import ui_driver
 
+    if not _screen(browser_visible)():
+        raise ReplayStepError("select_recording", "not in the replay browser",
+                              failure_shot("select_recording"))  # fmt: skip
     if env_index is not None:
-        _pick_dropdown("filter_environment", env_index)
+        _pick_dropdown("filter_environment", env_index, env_count)
     if race_index is not None:
-        _pick_dropdown("filter_race", race_index)
+        _pick_dropdown("filter_race", race_index, race_count)
     y = list_row_y(row)
     _click_point("list_tick_x0", settle_s=0.8, dy=y - POINTS["list_tick_x0"][1])
     _verify("select_recording", _screen(browser_visible), 5.0, "the browser after the pick")
@@ -229,13 +264,37 @@ def force_fpv() -> None:
     """No-op: replays open in the recording's FPV camera (measured); verify checks it."""
 
 
-def stop_to_menu() -> None:
+def stop_to_menu(tries: int = 2) -> None:
+    """Esc -> Replay Selection -> Confirm, Liftoff focused first (another window may have come
+    up: MEASURED P1, the keys then went to that window); retried once."""
     from drone_fly.harness.liftoff import ui_driver
 
-    ui_driver.press_escape(settle_s=1.5)
-    _click_point("pause_replay_selection", settle_s=1.5)
-    _click_point("confirm", settle_s=4.0)
-    _verify("stop_to_menu", _screen(browser_visible), 20.0, "the replay browser")
+    for _ in range(tries):
+        if not ui_driver.focus_liftoff():
+            continue
+        ui_driver.press_escape(settle_s=1.5)
+        _click_point("pause_replay_selection", settle_s=1.5)
+        _click_point("confirm", settle_s=4.0)
+        if _screen(browser_visible)():
+            return
+    _verify("stop_to_menu", _screen(browser_visible), 10.0, "the replay browser")
+
+
+def watch_focus(until: float, poll_s: float = 0.5) -> list[float]:
+    """Keep Liftoff in front until wall time ``until``; returns the wall times focus was lost
+    (frames then show another window: the capture must be checked or discarded)."""
+    from drone_fly.harness.liftoff import ui_driver
+    from drone_fly.harness.liftoff.focus import Win32ForegroundFocusProbe
+
+    probe = Win32ForegroundFocusProbe(ui_driver.PROCESS)
+    probe.start()
+    lost: list[float] = []
+    while time.time() < until:
+        time.sleep(poll_s)
+        if not probe.has_focus():
+            lost.append(time.time())
+            probe.request_focus()
+    return lost
 
 
 def start_replay(

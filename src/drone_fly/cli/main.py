@@ -368,18 +368,30 @@ def _cmd_captures_record(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _browser_pos(text: str | None) -> tuple[int | None, int | None, int] | None:
-    """``ENV,RACE,ROW`` (0-based; ``-`` keeps that filter) -> a tuple."""
+def _browser_pos(
+    text: str | None,
+) -> tuple[tuple[int | None, int | None, int], tuple[int | None, int | None]] | None:
+    """``ENV[/N],RACE[/N],ROW`` (0-based; ``-`` keeps that filter; ``/N`` = the dropdown's entry
+    count) -> ``((env, race, row), (env count, race count))``."""
     if not text:
         return None
     parts = text.split(",")
     if len(parts) != 3:
         raise HarnessConfigError(f"--browser-pos must be ENV,RACE,ROW, got {text!r}")
     try:
-        env, race = (None if v.strip() == "-" else int(v) for v in parts[:2])
-        return env, race, int(parts[2])
+        idx, counts = [], []
+        for v in parts[:2]:
+            i, _, n = v.strip().partition("/")
+            idx.append(None if i == "-" else int(i))
+            counts.append(int(n) if n else None)
+        return (idx[0], idx[1], int(parts[2])), (counts[0], counts[1])
     except ValueError as exc:
         raise HarnessConfigError(f"--browser-pos must be integers or '-', got {text!r}") from exc
+
+
+def _browser_kwargs(text: str | None) -> dict[str, object]:
+    parsed = _browser_pos(text)
+    return {} if parsed is None else {"browser_pos": parsed[0], "dropdown_counts": parsed[1]}
 
 
 def _cmd_captures_replay(args: argparse.Namespace) -> int:
@@ -395,7 +407,7 @@ def _cmd_captures_replay(args: argparse.Namespace) -> int:
         trackdata_root=args.trackdata_root,
         preset=args.preset or "liftoff",
         allow_pending_camera=args.allow_pending_camera,
-        browser_pos=_browser_pos(args.browser_pos),
+        **_browser_kwargs(args.browser_pos),
     )
     print(json.dumps(res, indent=2))
     print(f"capture: {out}")
@@ -986,8 +998,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep.add_argument("--fps", type=float, default=10.0)
     p_rep.add_argument("--port", type=int, default=9001)
     p_rep.add_argument("--strategy", choices=("auto", "A", "B", "C"), default="auto")
-    p_rep.add_argument("--browser-pos", help="ENV,RACE,ROW: replay-browser dropdown / list "
-                       "indices, 0-based ('-' keeps a filter)")  # fmt: skip
+    p_rep.add_argument("--browser-pos", help="ENV[/N],RACE[/N],ROW: replay-browser dropdown / "
+                       "list indices, 0-based ('-' keeps a filter; /N = entries in that "
+                       "dropdown, needed for its last 5)")  # fmt: skip
     p_rep.add_argument("--dir", help="Recordings folder (default %%USERPROFILE%%\\AppData\\...)")
     p_rep.add_argument("--trackdata-root", help="trackdata root (verify)")
     p_rep.add_argument("--allow-pending-camera", action="store_true",
