@@ -284,6 +284,13 @@ def test_inventory_rows(lib, tmp_path, monkeypatch):
                     environment="FakeField")  # fmt: skip
     arena2(rec_dir / "Race" / "ai.xml", name="FakeArena-model-m1-attempt-2")
     (rec_dir / "Race" / "junk.xml").write_text("<Track/>", "utf-8")
+    # the Borrum on a val map (fake-field-01) and on a held-out map (fake-hall-02)
+    write_recording(rec_dir / "Race" / "bval.xml", name="borrum-val", drone="borrum",
+                    environment="FakeField", track_uuid="track-uuid-2",
+                    race_uuid="race-uuid-2")  # fmt: skip
+    write_recording(rec_dir / "Race" / "bheld.xml", name="borrum-held", drone="borrum",
+                    environment="FakeHall", track_uuid="track-uuid-5",
+                    race_uuid="race-uuid-5")  # fmt: skip
     rows = rows_by_name(inventory(rec_dir, catalogue=catalogue_of(lib), trackdata_root=lib.root,
                                   preset_uptilt_deg=20.0,
                                   captures_root=tmp_path / "none"))  # fmt: skip
@@ -293,8 +300,13 @@ def test_inventory_rows(lib, tmp_path, monkeypatch):
     assert ok.completeness == {"status": "complete", "source": "laps", "passed": 1, "required": 1}
     assert ok.states == 121 and ok.rate_hz == 10.0 and ok.source == "user"
     b = rows["borrum"]
-    assert b.capturable == "pending-camera" and b.camera == "different"
+    assert b.capturable == "train-only" and b.camera == "different"  # train map
     assert "uptilt 30.0 vs preset 20" in b.reason and "Borrum 180 X" in b.reason
+    assert "train maps only" in b.reason
+    for name, split in (("borrum-val", "val"), ("borrum-held", "held-out")):
+        r = rows[name]
+        assert r.capturable == "no" and r.split == split and r.camera == "different"
+        assert f"on a {split} map: selection and evaluation stay on the preset camera" in r.reason
     assert rows["dnf - 00_00_000"].completeness["status"] == "incomplete"
     nm = rows["nomatch"]
     assert (nm.capturable, nm.reason, nm.match) == ("no", "no catalogue match", "unmatched")
@@ -306,7 +318,8 @@ def test_inventory_rows(lib, tmp_path, monkeypatch):
     junk = rows["junk"]
     assert junk.capturable == "no" and junk.reason.startswith("unreadable: ")
     table = inventory_table(list(rows.values()))
-    assert "7 recordings: {" in table and "'pending-camera': 1" in table
+    assert "9 recordings: {" in table and "'train-only': 1" in table
+    assert "pending-camera" not in table
 
 
 def test_uptilt_within_half_a_degree_is_the_preset_camera(lib, tmp_path, monkeypatch):
@@ -317,7 +330,7 @@ def test_uptilt_within_half_a_degree_is_the_preset_camera(lib, tmp_path, monkeyp
     assert inventory(rec_dir, catalogue=c, preset_uptilt_deg=20.0,
                      captures_root=tmp_path / "n")[0].capturable == "yes"  # fmt: skip
     row = inventory(rec_dir, catalogue=c, preset_uptilt_deg=19.4, captures_root=tmp_path / "n")[0]
-    assert row.capturable == "pending-camera"  # 0.63 deg off
+    assert row.capturable == "train-only"  # 0.63 deg off, on a train map
     assert inventory(rec_dir, catalogue=c, preset_uptilt_deg=30.0,
                      captures_root=tmp_path / "n")[0].camera == "different"  # fmt: skip
 
@@ -386,6 +399,6 @@ def test_cli_inventory_json(lib, tmp_path, monkeypatch, capsys):
     text = capsys.readouterr().out
     assert "2 recordings:" in text and f"inventory: {out}" in text
     rows = {r["name"]: r for r in json.loads(out.read_text("utf-8"))}
-    assert rows["ok"]["capturable"] == "yes" and rows["borrum"]["capturable"] == "pending-camera"
+    assert rows["ok"]["capturable"] == "yes" and rows["borrum"]["capturable"] == "train-only"
     assert rows["ok"]["catalogue_id"] == "fake-arena-02" and Path(rows["ok"]["path"]).is_file()
     assert set(rows["ok"]) >= {"completeness", "sha256", "uptilt_deg", "split", "match"}

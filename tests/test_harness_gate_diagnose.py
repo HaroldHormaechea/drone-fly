@@ -212,7 +212,7 @@ def test_resolve_detector_folder_needs_exactly_one_eval_weights(tmp_path):
 MAPS = {"FakeA": "train", "FakeC": "val", "FakeD": "held-out", "FakeE": "held-out"}
 
 
-def capture(root: Path, m: str, nn: int = 1) -> Path:
+def capture(root: Path, m: str, nn: int = 1, uptilt: float = 20.0) -> Path:
     d = root / m / f"{cat.kebab(m)}-2026-10-13-manual-{nn:02d}"
     d.mkdir(parents=True)
     (d / "frames.csv").write_text("t_wall_ns,file\n", "utf-8")
@@ -220,7 +220,7 @@ def capture(root: Path, m: str, nn: int = 1) -> Path:
     e = {"id": f"{cat.kebab(m)}-01", "map": m, "track": "t.xml", "race": "r.xml",
          "sha256": {"track": "a" * 64, "race": "b" * 64}}  # fmt: skip
     write_meta(d, build_meta(d, e, camera={"resolution": [W, H], "hfov_deg": 120.0,
-                                           "uptilt_deg": 20.0}, drone="x"))  # fmt: skip
+                                           "uptilt_deg": uptilt}, drone="x"))  # fmt: skip
     return d
 
 
@@ -242,9 +242,11 @@ def heldout(tmp_path, monkeypatch):
     monkeypatch.setattr(cat, "load_catalogue", lambda path: catalogue)
     monkeypatch.setattr(gdg, "resolve_detector", lambda p: Path(p))
 
+    cfg = SimpleNamespace(section=lambda key: {"uptilt_deg": 20.0})  # the preset camera
+
     def build_estimator(path, **kw):
         return SimpleNamespace(meta=w.meta.get(str(path), w.meta.get("*", {})), device=w.device,
-                               path=str(path)), None  # fmt: skip
+                               path=str(path)), cfg  # fmt: skip
 
     def capture_frames(d, cfg, window=None):
         return {}, [d.name, window], {}
@@ -355,6 +357,28 @@ def test_discovered_captures_skip_other_splits(heldout, monkeypatch):
     rep = ev.run_heldout_eval("new.pt", report_path=w.report)
     assert set(rep["captures"]) == {w.d.name}
     monkeypatch.setattr(capture_index, "iter_capture_dirs", lambda root=None: [w.a])
+    with pytest.raises(HarnessConfigError, match="no labelled capture on a held-out map"):
+        ev.run_heldout_eval("new.pt", report_path=w.report)
+
+
+def test_heldout_eval_stays_on_the_preset_camera(heldout, monkeypatch, caplog):
+    from drone_fly.harness.offline import capture_index
+
+    w = heldout
+    borrum = capture(w.root, "FakeD", 2, uptilt=30.0)  # another drone's camera, held-out map
+    near = capture(w.root, "FakeE", 2, uptilt=20.4)  # within CAMERA_TOL_DEG 0.5
+    for d in (w.d, borrum, near):
+        w.records[d.name] = many("arch", 30, 30)
+    with pytest.raises(HarnessConfigError,
+                       match=f"{borrum.name} uses camera uptilt 30, not the preset's 20: "
+                             "evaluation stays on the deployed camera"):  # fmt: skip
+        run(w, [w.d, borrum])  # named explicitly: refused
+    monkeypatch.setattr(capture_index, "iter_capture_dirs", lambda root=None: [w.d, borrum, near])
+    with caplog.at_level("WARNING"):
+        rep = ev.run_heldout_eval("new.pt", report_path=w.report)
+    assert set(rep["captures"]) == {w.d.name, near.name}  # discovered: skipped with a warning
+    assert f"{borrum.name} uses camera uptilt 30" in caplog.text and "skipped" in caplog.text
+    monkeypatch.setattr(capture_index, "iter_capture_dirs", lambda root=None: [borrum])
     with pytest.raises(HarnessConfigError, match="no labelled capture on a held-out map"):
         ev.run_heldout_eval("new.pt", report_path=w.report)
 

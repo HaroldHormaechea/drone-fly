@@ -122,12 +122,14 @@ class World:
                                           [k / 10 for k in range(1, 110)])  # fmt: skip
 
     def add(self, m: str, nn: int = 1, *, verified=True, labels=True, static=False,
-            meta=True) -> Path:  # fmt: skip
+            meta=True, uptilt=None) -> Path:  # fmt: skip
         src_cap, src_labels = self.src_static if static else self.src
         d = shutil.copytree(src_cap, self.captures / m / session(m, nn))
         if meta:
             e = self.catalogue.by_id(entry_id(m))
             cam = {**CFG.section("camera")}
+            if uptilt is not None:  # another drone's camera (e.g. the Borrum 180 at 30 deg)
+                cam["uptilt_deg"] = uptilt
             mt = build_meta(d, e, camera=cam, drone="liftoff-gremlin-micro")
             mt["alignment"] = {"verified": verified, "margin": 1.4 if verified else 1.0}
             write_meta(d, mt)
@@ -194,6 +196,29 @@ def test_a_held_out_capture_raises_track_leakage(world):
     with pytest.raises(TrackLeakageError, match="held-out maps are never trained"):
         build(world, [world.a, world.d])
     assert issubclass(TrackLeakageError, HarnessConfigError)
+
+
+def test_other_cameras_are_for_train_maps_only(world):
+    assert gd.CAMERA_TOL_DEG == 0.5
+    assert gd.same_camera({"camera": {"uptilt_deg": 20.5}}, 20.0)
+    assert not gd.same_camera({"camera": {"uptilt_deg": 20.6}}, 20.0)
+    assert not gd.same_camera({"camera": {"uptilt_deg": 30}}, 20.0)
+    train30 = world.add("FakeB", 31, uptilt=30.0)
+    val30 = world.add("FakeC", 32, uptilt=30.0)
+    val_near = world.add("FakeC", 33, uptilt=20.4)
+    ds = build(world, [world.a, train30, val30, val_near], preset_uptilt_deg=20.0)
+    roles = {c.name: c.role for c in ds.captures}
+    assert roles[train30.name] == "train"  # view diversity on a train map
+    assert roles[val_near.name] == "selection"  # within the tolerance
+    assert roles[val30.name] is None
+    reason = next(c.reason for c in ds.captures if c.name == val30.name)
+    assert reason == (
+        "camera uptilt 30 is not the preset's 20: other cameras are for train maps only"
+    )
+    assert {it.capture for it in ds.items} == {world.a.name, train30.name, val_near.name}
+    assert {r["name"] for r in ds.manifest()["refused"]} == {val30.name}
+    # without a preset uptilt (the old call) nothing is refused for its camera
+    assert build(world, [val30]).captures[0].role == "selection"
 
 
 def test_include_selection_in_train_routes_val_maps_to_train(world):

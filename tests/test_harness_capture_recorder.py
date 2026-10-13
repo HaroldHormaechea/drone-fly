@@ -261,53 +261,198 @@ def test_write_pose_capture_refusals(tmp_path):
         write_pose_capture(d, rec, t0_frame_s=0.0)
 
 
-# ----------------------------------------------------------------------------- ui_replay
+# ----------------------------------------------------------------------------- ui_replay (P1)
+
+H, W = 108, 256  # synthetic screens at 1/10 of the 2560 x 1080 reference
+
+
+def screen(*, browser=False, bar=None):
+    """A synthetic screen: the browser panel white, and/or a playback bar (``"paused"`` or
+    ``"playing"``: the timer row changed)."""
+    img = np.zeros((H, W, 3), np.uint8)
+    if browser:
+        img[70:85, 170:200] = 255  # BOXES["browser_list"] / 10
+    if bar == "paused":
+        img[90, 100:158] = 255  # one white row of BOXES["playback_bar"] / 10
+    elif bar == "playing":
+        img[92, 100:158] = 255
+    return img
+
+
+class FakeUI:
+    """Every ui_driver primitive the replay steps use: clicks, keys and shots are recorded, the
+    screen grabs follow ``screens`` (the last one repeats)."""
+
+    def __init__(self, monkeypatch):
+        self.calls, self.screens = [], [screen()]
+        for name in ("launch", "_focused", "press_escape", "type_text", "telemetry_streaming",
+                     "_user32", "_hover"):  # fmt: skip
+            monkeypatch.setattr(ui_driver, name,
+                                lambda *a, _n=name, **k: self.calls.append((_n,)))  # fmt: skip
+        monkeypatch.setattr(ui_driver, "screen_size", lambda: (2560, 1080))
+        monkeypatch.setattr(
+            ui_driver, "_click_xy", lambda x, y, s=0: self.calls.append(("click", x, y))
+        )
+        monkeypatch.setattr(
+            ui_driver, "_scroll", lambda x, y, n: self.calls.append(("scroll", x, y, n))
+        )
+        monkeypatch.setattr(ui_driver, "shot", lambda p: self.calls.append(("shot", p)) or p)
+        monkeypatch.setattr(ui_driver, "_grab_screen", self.grab)
+        monkeypatch.setattr(ui_replay.time, "sleep", lambda s: None)
+        monkeypatch.setattr(ui_replay, "failure_shot", lambda step, root=None: f"/shots/{step}.png")
+
+    def grab(self):
+        self.calls.append(("grab",))
+        return self.screens.pop(0) if len(self.screens) > 1 else self.screens[0]
+
+    @property
+    def clicks(self):
+        return [c[1:] for c in self.calls if c[0] == "click"]
+
+    @property
+    def touched(self):
+        """Calls that would touch the game (anything but screen grabs)."""
+        return [c for c in self.calls if c[0] != "grab"]
 
 
 @pytest.fixture
-def ui_calls(monkeypatch):
-    """Every ui_driver primitive the replay steps use, replaced by a call recorder."""
-    calls = []
-    names = ("launch", "_focused", "_grab_screen", "_click_xy", "screen_size", "press_escape",
-             "shot", "type_text", "telemetry_streaming", "_user32")  # fmt: skip
-    for name in names:
-        monkeypatch.setattr(ui_driver, name, lambda *a, _n=name, **k: calls.append(_n))
-    return calls
+def ui(monkeypatch):
+    return FakeUI(monkeypatch)
 
 
-def test_placeholders_are_listed_and_refused(ui_calls):
-    missing = ui_replay.unmeasured()
-    assert "POINTS.main_replays" in missing and "PROBES.fpv_camera" in missing
-    assert "CAMERA_KEY_VK" in missing and "POINTS.replays_search" not in missing  # optional
-    with pytest.raises(HarnessConfigError, match="placeholders, not measured yet") as exc:
-        ui_replay.require_measured()
-    assert all(m in str(exc.value) for m in missing)
-    assert ui_calls == []
+def P(name, dy=0):
+    x, y = ui_replay.POINTS[name]
+    return (x, y + dy)
 
 
-def test_start_replay_refuses_before_touching_the_game(ui_calls):
-    with pytest.raises(HarnessConfigError, match="placeholders"):
-        ui_replay.start_replay("r", "Race", expect_telemetry=False)
-    assert ui_calls == []  # no launch, focus, click, key or screenshot
-
-
-def test_require_measured_passes_once_everything_is_measured(monkeypatch):
-    monkeypatch.setattr(ui_replay, "POINTS", {k: (1, 1) for k in ui_replay.POINTS})
-    monkeypatch.setattr(ui_replay, "PROBES", {k: (1, 1, (0, 0, 0), 5) for k in ui_replay.PROBES})
-    monkeypatch.setattr(ui_replay, "CAMERA_KEY_VK", 0x43)
-    assert ui_replay.unmeasured() == []
-    ui_replay.require_measured()
-
-
-def test_probe_matches_is_pure_and_scales_to_the_image():
-    img = np.zeros((108, 256, 3), np.uint8)  # 1/10 of the 2560 x 1080 reference
-    img[54, 128] = (200, 100, 50)
+def test_box_and_white_fraction_are_pure_and_scale():
+    img = screen(browser=True)
     before = img.copy()
-    assert ui_replay.probe_matches(img, (1280, 540, (200, 100, 50), 0))
-    assert ui_replay.probe_matches(img, (1280, 540, (205, 95, 50), 5))
-    assert not ui_replay.probe_matches(img, (1280, 540, (206, 100, 50), 5))
-    assert not ui_replay.probe_matches(img, (0, 0, (200, 100, 50), 5))
+    assert ui_replay.box(img, "browser_list").shape == (15, 30, 3)
+    assert ui_replay.box(np.zeros((1080, 2560, 3), np.uint8), "playback_bar").shape == (60, 580, 3)
+    region = np.zeros((2, 2, 3), np.uint8)
+    region[0] = 255
+    assert ui_replay.white_fraction(region) == 0.5
+    assert ui_replay.white_fraction(np.full((1, 1, 3), 235, np.uint8)) == 0.0  # > level only
+    assert ui_replay.white_fraction(np.full((1, 1, 3), 236, np.uint8)) == 1.0
+    assert ui_replay.white_fraction(np.zeros((0, 0, 3), np.uint8)) == 0.0
     assert np.array_equal(img, before)
+
+
+def test_bar_and_browser_checks():
+    assert ui_replay.bar_visible(screen(bar="paused")) and ui_replay.bar_visible(
+        screen(bar="playing")
+    )
+    assert not ui_replay.bar_visible(screen()) and not ui_replay.bar_visible(screen(browser=True))
+    assert ui_replay.browser_visible(screen(browser=True))
+    assert not ui_replay.browser_visible(screen(bar="paused"))
+    partial = screen(browser=True)
+    partial[70:76, 170:200] = 0  # 60 % white < 80 %
+    assert not ui_replay.browser_visible(partial)
+
+
+def test_list_row_y():
+    assert ui_replay.LIST_ROWS == 10 and ui_replay.LIST_PITCH == 44.9
+    assert [ui_replay.list_row_y(r) for r in (0, 1, 9)] == [362, 407, 766]
+    for bad in (-1, 10):
+        with pytest.raises(HarnessConfigError, match="outside the 10 visible rows"):
+            ui_replay.list_row_y(bad)
+
+
+def test_open_replays_clicks_through_the_menus(ui):
+    ui.screens = [screen(), screen(browser=True)]  # not open yet; open after the clicks
+    ui_replay.open_replays()
+    assert ui.clicks == [P("main_tools"), P("tools_replay"), P("replay_card")]
+    ui.calls.clear()
+    ui.screens = [screen(browser=True)]
+    ui_replay.open_replays()  # already open: no clicks
+    assert ui.clicks == []
+
+
+def test_select_recording_picks_dropdowns_and_the_row(ui):
+    ui.screens = [screen(browser=True)]
+    ui_replay.select_recording(2, None, 3, shot_path="cap/browser.png")
+    fx, fy = P("filter_environment")
+    assert ui.clicks == [
+        (fx, fy),  # open the Environment dropdown
+        (fx - 14, fy + 32 + 2 * 30),  # its entry 2 (no scroll needed)
+        (P("list_tick_x0")[0], ui_replay.list_row_y(3)),  # tick row 3
+    ]
+    assert ("shot", "cap/browser.png") in ui.calls and not any(c[0] == "scroll" for c in ui.calls)
+    ui.calls.clear()
+    ui_replay.select_recording(None, 1, 0)  # keep the environment; race entry 1
+    rx, ry = P("filter_race")
+    assert ui.clicks == [(rx, ry), (rx - 14, ry + 32 + 30), P("list_tick_x0")]
+    assert not any(c[0] == "shot" for c in ui.calls)
+
+
+def test_select_recording_refuses_a_row_outside_the_list_before_clicking_it(ui):
+    ui.screens = [screen(browser=True)]
+    with pytest.raises(HarnessConfigError, match="outside the 10 visible rows"):
+        ui_replay.select_recording(None, None, 10)
+    assert ui.clicks == []
+
+
+DROPDOWN_SCROLL_BUG = (
+    "UC71 QA P1 finding: ui_replay._pick_dropdown passes the positive 'notches down' of "
+    "ui_driver.dropdown_scroll straight to ui_driver._scroll, whose positive direction scrolls UP "
+    "(quick setup scrolls to the top with +30, then down with -notches), and passes screen pixels "
+    "where _scroll expects reference coordinates: a dropdown entry >= 4 picks the wrong row"
+)
+
+
+@pytest.mark.xfail(strict=True, reason=DROPDOWN_SCROLL_BUG)
+def test_a_deep_dropdown_entry_scrolls_the_list_down(ui):
+    ui.screens = [screen(browser=True)]
+    ui_replay.select_recording(6, None, 0)  # dropdown_scroll(6) == (1 notch, 80 px)
+    scrolls = [c for c in ui.calls if c[0] == "scroll"]
+    assert scrolls and scrolls[-1][3] < 0  # down the list
+
+
+def test_play_waits_for_the_paused_bar_then_plays(ui):
+    ui.screens = [screen(), screen(bar="paused"), screen(bar="paused"), screen(bar="playing")]
+    t0 = time.time()
+    t_play = ui_replay.play()
+    assert t0 <= t_play <= time.time()
+    assert ui.clicks == [P("browser_replay"), P("playback_play")]  # one Play click
+
+
+def test_play_retries_play_and_gives_up_after_three(ui):
+    ui.screens = [screen(bar="paused")]  # the bar never changes
+    with pytest.raises(ui_replay.ReplayStepError, match="playback did not start") as exc:
+        ui_replay.play()
+    assert exc.value.step == "play" and exc.value.screenshot == "/shots/play.png"
+    assert ui.clicks.count(P("playback_play")) == 3
+    ui.calls.clear()
+    # unchanged after the first Play, changed after the second
+    ui.screens = [screen(bar="paused")] * 4 + [screen(bar="playing")]
+    ui_replay.play()
+    assert ui.clicks.count(P("playback_play")) == 2
+
+
+def test_play_refuses_strategy_a_before_any_click(ui):
+    with pytest.raises(HarnessConfigError, match="no telemetry"):
+        ui_replay.play(expect_telemetry=True)
+    assert ui.touched == []
+
+
+def test_stop_to_menu_and_force_fpv(ui):
+    ui.screens = [screen(browser=True)]
+    ui_replay.stop_to_menu()
+    assert ui.calls[0] == ("press_escape",)
+    assert ui.clicks == [P("pause_replay_selection"), P("confirm")]
+    ui.calls.clear()
+    ui_replay.force_fpv()  # the replay opens in the recording's FPV camera
+    assert ui.calls == []
+
+
+def test_start_replay_runs_the_steps_in_order(ui):
+    ui.screens = [screen(browser=True), screen(browser=True), screen(bar="paused"),
+                  screen(bar="paused"), screen(bar="playing")]  # fmt: skip
+    t_play = ui_replay.start_replay(None, None, 0, shot_path="b.png")
+    assert isinstance(t_play, float)
+    assert ui.calls[:2] == [("launch",), ("_focused",)]
+    assert ui.clicks == [P("list_tick_x0"), P("browser_replay"), P("playback_play")]
 
 
 def test_a_failed_step_raises_with_its_screenshot(monkeypatch):
@@ -320,10 +465,10 @@ def test_a_failed_step_raises_with_its_screenshot(monkeypatch):
     assert isinstance(e, HarnessConfigError)
 
 
-def test_unmeasured_click_points_are_refused(ui_calls):
-    with pytest.raises(HarnessConfigError, match="replay point main_replays is not measured"):
-        ui_replay.open_replays()
-    assert ui_calls == []
+def test_the_placeholder_api_is_gone():
+    for name in ("require_measured", "unmeasured", "PROBES", "CAMERA_KEY_VK"):
+        assert not hasattr(ui_replay, name)
+    assert all(v is not None for v in ui_replay.POINTS.values())
 
 
 # ----------------------------------------------------------------------------- record / replay
@@ -333,58 +478,164 @@ def test_replay_strategy_is_b():
     assert REPLAY_STRATEGY == "B" and recorder.REPLAY_HUD_MASKS == []
 
 
+def test_the_default_socket_binds_localhost(tmp_path, monkeypatch):
+    bound = []
+
+    class Sock:
+        def __init__(self, *a):
+            pass
+
+        def bind(self, addr):
+            bound.append(addr)
+
+        def settimeout(self, t):
+            pass
+
+        def recvfrom(self, n):
+            time.sleep(0.01)
+            raise TimeoutError
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(recorder.socket, "socket", Sock)
+    rec = CaptureRecorder(tmp_path / "cap", frames=False, port=9123)
+    rec.start()
+    rec.stop()
+    assert bound == [("127.0.0.1", 9123)]
+
+
+VAL = {"track_uuid": "track-uuid-2", "race_uuid": "race-uuid-2", "environment": "FakeField"}
+HELD = {"track_uuid": "track-uuid-5", "race_uuid": "race-uuid-5", "environment": "FakeHall"}
+
+
 @pytest.fixture
-def replay_env(lib, tmp_path, monkeypatch, ui_calls):
+def replay_env(lib, tmp_path, monkeypatch, ui):
     use_library(monkeypatch, lib)
-    started = []
-    monkeypatch.setattr(ui_replay, "start_replay", lambda *a, **k: started.append(a))
     rec_dir = tmp_path / "Recordings"
     write_recording(rec_dir / "Race" / "small.xml", name="small", **ARENA2)
     write_recording(rec_dir / "Race" / "borrum.xml", name="borrum", drone="borrum", **ARENA2)
+    write_recording(rec_dir / "Race" / "borrum-val.xml", name="borrum-val", drone="borrum", **VAL)
+    write_recording(rec_dir / "Race" / "borrum-held.xml", name="borrum-held", drone="borrum",
+                    **HELD)  # fmt: skip
     write_recording(rec_dir / "Race" / "lost.xml", name="lost", environment="Nowhere",
                     track_uuid="x", race_uuid="y")  # fmt: skip
-    return rec_dir, started
+    return rec_dir
 
 
 def replay(rec_dir, name, **kw):
     return record_replay(name, recordings_dir=rec_dir, captures_root=rec_dir.parent / "caps", **kw)
 
 
-def test_strategy_c_gives_the_manual_fallback(replay_env):
-    rec_dir, started = replay_env
+def test_strategy_c_gives_the_manual_fallback(replay_env, ui):
     with pytest.raises(HarnessConfigError) as exc:
-        replay(rec_dir, "small", strategy="C")
+        replay(replay_env, "small", strategy="C")
     text = str(exc.value)
     assert text == MANUAL_FALLBACK.format(why="strategy C", track="fake-arena-02")
     assert "captures record --track fake-arena-02" in text and "--search-lag" in text
-    assert started == []
+    assert ui.touched == []
 
 
-def test_pending_camera_is_refused_unless_allowed(replay_env, ui_calls):
-    rec_dir, started = replay_env
-    with pytest.raises(HarnessConfigError, match=r"another drone/camera \(Borrum 180 X.*uptilt 30"):
-        replay(rec_dir, "borrum")
-    # allowed: it gets as far as the placeholder gate, still before any game interaction
-    with pytest.raises(HarnessConfigError, match="placeholders, not measured yet"):
-        replay(rec_dir, "borrum", allow_pending_camera=True)
-    assert started == [] and ui_calls == []
-    assert not (rec_dir.parent / "caps").exists()  # no capture folder made
+@pytest.mark.parametrize(("name", "split"), [("borrum-val", "val"), ("borrum-held", "held-out")])
+def test_other_camera_recordings_are_refused_on_val_and_heldout_maps(replay_env, ui, name, split):
+    for allow in (False, True):  # the flag does not open val / held-out maps
+        with pytest.raises(HarnessConfigError,
+                           match=f"uptilt 30.0\\) on a {split} map: val / held-out captures stay "
+                                 "on the preset camera"):  # fmt: skip
+            replay(replay_env, name, allow_pending_camera=allow, browser_pos=(0, 0, 0))
+    assert ui.touched == [] and not (replay_env.parent / "caps").exists()
 
 
-def test_unmatched_recordings_are_refused(replay_env):
-    rec_dir, started = replay_env
+def test_other_camera_on_a_train_map_needs_the_flag(replay_env, ui):
+    with pytest.raises(HarnessConfigError,
+                       match=r"another drone/camera \(Borrum 180 X.*train maps only; pass "
+                             "--allow-pending-camera"):  # fmt: skip
+        replay(replay_env, "borrum", browser_pos=(0, 0, 0))
+    # with the flag it reaches the next gate: the browser position
+    with pytest.raises(HarnessConfigError, match="pass --browser-pos ENV,RACE,ROW"):
+        replay(replay_env, "borrum", allow_pending_camera=True)
+    assert ui.touched == [] and not (replay_env.parent / "caps").exists()
+
+
+def test_unmatched_recordings_and_bad_strategies_are_refused(replay_env, ui):
     with pytest.raises(HarnessConfigError, match="'lost' matches no catalogue entry"):
-        replay(rec_dir, "lost")
+        replay(replay_env, "lost", browser_pos=(0, 0, 0))
     with pytest.raises(HarnessConfigError, match="--strategy must be"):
-        replay(rec_dir, "small", strategy="D")
-    assert started == []
+        replay(replay_env, "small", strategy="D")
+    assert ui.touched == []
 
 
-def test_a_preset_camera_recording_stops_at_the_placeholder_gate(replay_env, ui_calls):
-    rec_dir, started = replay_env
-    with pytest.raises(HarnessConfigError, match="placeholders"):
-        replay(rec_dir, "small")
-    assert started == [] and ui_calls == []
+def test_a_preset_camera_recording_needs_the_browser_position(replay_env, ui):
+    with pytest.raises(HarnessConfigError, match="pass --browser-pos ENV,RACE,ROW"):
+        replay(replay_env, "small")
+    assert ui.touched == [] and not (replay_env.parent / "caps").exists()
+
+
+def test_record_replay_strategy_b_end_to_end_with_fakes(replay_env, monkeypatch, tmp_path):
+    """Every game-facing step faked: the flow, the browser screenshot, the pose capture and the
+    meta.json of an allowed other-camera recording on a train map."""
+    from drone_fly.harness.offline import align
+    from drone_fly.harness.offline.capture_index import read_meta
+
+    steps, t0_ns = [], time.time_ns() - 100_000_000_000  # Play 100 s ago: the wait loop ends
+    monkeypatch.setattr(ui_replay, "ensure_running", lambda: steps.append("ensure_running"))
+    monkeypatch.setattr(ui_replay, "open_replays", lambda: steps.append("open_replays"))
+
+    def select(env, race, row, shot):
+        steps.append(("select", env, race, row, shot))
+
+    monkeypatch.setattr(ui_replay, "select_recording", select)
+    monkeypatch.setattr(ui_replay, "play", lambda: steps.append("play") or t0_ns / 1e9)
+    monkeypatch.setattr(ui_replay, "stop_to_menu", lambda: steps.append("stop_to_menu"))
+
+    class FakeRecorder:
+        def __init__(self, out, **kw):
+            self.out, self.kw = out, kw
+            steps.append(("recorder", kw["telemetry"]))
+
+        def start(self):
+            frames_only_capture(self.out, t0_ns, n=30)
+
+        def stop(self):
+            return {"datagrams": 0, "frames": 30}
+
+    monkeypatch.setattr(recorder, "CaptureRecorder", FakeRecorder)
+
+    class Res:
+        def alignment_block(self):
+            return {"verified": True}
+
+    monkeypatch.setattr(align, "verify_capture", lambda out, **kw: Res())
+    out, res = replay(replay_env, "borrum", allow_pending_camera=True, browser_pos=(2, None, 4),
+                      max_s=0.0)  # fmt: skip
+    assert steps == ["ensure_running", "open_replays",
+                     ("select", 2, None, 4, str(out / "browser.png")), ("recorder", False),
+                     "play", "stop_to_menu"]  # fmt: skip
+    assert out.parent == replay_env.parent / "caps" / "FakeArena"
+    assert out.name.endswith("-replay-01") and res["alignment"] == {"verified": True}
+    assert res["match"] == "uuid" and res["stats"]["frames"] == 30
+    meta = read_meta(out)
+    assert meta["source"] == "replay" and meta["pose_source"] == "recording-xml"
+    assert meta["recording"]["name"] == "borrum" and len(meta["recording"]["sha256"]) == 64
+    assert meta["camera"]["uptilt_deg"] == 30.0 and meta["camera"]["source"] == "recording"
+    assert meta["catalogue_id"] == "fake-arena-02" and meta["masks"] == []
+    cap = load_capture(out, TELEMETRY, cut_margin_s=0.0)
+    assert cap.layout == "run" and len(cap.frames) == 30  # the strategy B pose pairs every frame
+
+
+def test_browser_pos_parsing():
+    from drone_fly.cli.main import _browser_pos
+
+    assert _browser_pos(None) is None and _browser_pos("") is None
+    assert _browser_pos("2,-,3") == (2, None, 3)
+    assert _browser_pos("-,-,0") == (None, None, 0)
+    assert _browser_pos(" 1 , 2 ,9") == (1, 2, 9)
+    for bad in ("1,2", "1,2,3,4", "-"):
+        with pytest.raises(HarnessConfigError, match="must be ENV,RACE,ROW"):
+            _browser_pos(bad)
+    for bad in ("a,1,2", "1,2,-", "1.5,2,3"):
+        with pytest.raises(HarnessConfigError, match="integers or '-'"):
+            _browser_pos(bad)
 
 
 def test_find_recording(tmp_path):
@@ -436,5 +687,10 @@ def test_cli_parsers():
     assert s.strategy == "B" and s.allow_pending_camera and s.dir == "R"
     d = p.parse_args(["harness", "captures", "replay", "--recording", "x"])
     assert d.strategy == "auto" and not d.allow_pending_camera and d.max_s is None
+    assert d.browser_pos is None
+    b = p.parse_args(
+        ["harness", "captures", "replay", "--recording", "x", "--browser-pos", "2,-,3"]
+    )
+    assert b.browser_pos == "2,-,3"  # parsed by _browser_pos in the command
     with pytest.raises(SystemExit):
         p.parse_args(["harness", "captures", "replay", "--recording", "x", "--strategy", "D"])
