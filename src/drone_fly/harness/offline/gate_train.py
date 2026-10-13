@@ -54,7 +54,7 @@ import logging
 import math
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -269,6 +269,124 @@ def _augment_colour(torch: Any, x: Any, rng: np.random.Generator) -> Any:
         idx = torch.tensor(np.flatnonzero(blur), device=dev)
         x[idx] = F.avg_pool2d(x[idx], 3, stride=1, padding=1, count_include_pad=False)
     return x.clamp(0, 255)
+
+
+@dataclass(frozen=True)
+class RollAug:
+    """Roll augmentation (UC71 R2): rotate a frame about the camera's principal point.
+
+    A pure rotation about the optical axis keeps every keypoint's ray angle to the axis, so the
+    PnP range of a gate is unchanged; zoom / scale / crop would change the apparent range and are
+    deliberately not offered. With probability ``p`` an image is rolled by an angle uniform in
+    ``+-max_deg``, or, with probability ``tail_p`` of those, uniform in ``+-tail_deg`` (hard banked
+    turns are rare in the captures). ``shift`` (fraction of the width, <= 0.05) adds a small random
+    translation that moves the keypoints with it. Keypoints rotated out of the frame become
+    not-visible; a gate whose centre leaves the frame is dropped. Uncovered corners are filled with
+    the ImageNet mean colour, which ``normalize_pad`` maps to 0 - the same value as its bottom
+    padding - so they carry no structure; reflection padding would mirror unlabelled gates in.
+    """
+
+    max_deg: float = 0.0
+    p: float = 0.6
+    tail_deg: float = 60.0
+    tail_p: float = 0.15
+    shift: float = 0.0
+
+    @property
+    def enabled(self) -> bool:
+        return self.max_deg > 0 or self.shift > 0
+
+    def validate(self) -> RollAug:
+        if not (0 <= self.max_deg <= 90 and 0 <= self.tail_deg <= 90 and 0 <= self.p <= 1
+                and 0 <= self.tail_p <= 1 and 0 <= self.shift <= 0.05):  # fmt: skip
+            raise HarnessConfigError(
+                "roll augmentation: max/tail degrees in [0, 90], probabilities in [0, 1], "
+                "shift in [0, 0.05] of the width"
+            )
+        return self
+
+    def sample(self, rng: np.random.Generator, n: int, width: int) -> tuple[np.ndarray, np.ndarray]:
+        """Per image ``(angle_deg, shift_px (n, 2))``; 0 / (0, 0) when not augmented."""
+        ang = np.zeros(n)
+        on = rng.random(n) < self.p if self.max_deg > 0 else np.zeros(n, bool)
+        tail = on & (rng.random(n) < self.tail_p)
+        ang[on] = rng.uniform(-self.max_deg, self.max_deg, int(on.sum()))
+        ang[tail] = rng.uniform(-self.tail_deg, self.tail_deg, int(tail.sum()))
+        sh = (
+            rng.uniform(-1.0, 1.0, (n, 2)) * self.shift * width
+            if self.shift > 0
+            else np.zeros((n, 2))
+        )
+        return ang, sh
+
+
+def roll_affine(angle_deg: float, center: np.ndarray, shift: np.ndarray) -> np.ndarray:
+    """Forward 2x3 pixel map of a roll: ``p' = R(angle) (p - c) + c + shift`` (image y down, so a
+    positive angle turns the content clockwise on screen). Pure."""
+    a = math.radians(angle_deg)
+    rot = np.array([[math.cos(a), -math.sin(a)], [math.sin(a), math.cos(a)]])
+    c = np.asarray(center, np.float64)
+    return np.concatenate([rot, (c - rot @ c + np.asarray(shift, np.float64))[:, None]], axis=1)
+
+
+def apply_affine(m: np.ndarray, pts: np.ndarray) -> np.ndarray:
+    p = np.asarray(pts, np.float64).reshape(-1, 2)
+    return p @ m[:, :2].T + m[:, 2]
+
+
+def roll_gates(gates: list[dict[str, Any]], m: np.ndarray, width: int, height: int) -> list[dict]:
+    """Network targets through a forward pixel map ``m``: keypoints moved, the ones leaving the
+    ``width x height`` frame made not-visible, gates whose centre leaves it dropped. Pure."""
+    out = []
+    for g in gates:
+        c = apply_affine(m, g["center"])[0]
+        if not (0 <= c[0] <= width - 1 and 0 <= c[1] <= height - 1):
+            continue
+        kp = apply_affine(m, g["keypoints"])
+        inside = (
+            (kp[:, 0] >= 0) & (kp[:, 0] <= width - 1) & (kp[:, 1] >= 0) & (kp[:, 1] <= height - 1)
+        )
+        out.append({"cls": g["cls"], "center": c, "keypoints": kp,
+                    "visible": np.asarray(g["visible"], bool) & inside})  # fmt: skip
+    return out
+
+
+def _sample_theta(m: np.ndarray, width: int, height: int) -> np.ndarray:
+    """``affine_grid`` theta (normalised output -> input, align_corners=False) of a forward map."""
+    inv = np.linalg.inv(np.vstack([m, [0.0, 0.0, 1.0]]))[:2]  # output px -> input px
+    s = np.diag([width / 2.0, height / 2.0])
+    t = np.array([(width - 1) / 2.0, (height - 1) / 2.0])
+    s_inv = np.linalg.inv(s)
+    a = s_inv @ inv[:, :2] @ s
+    b = s_inv @ (inv[:, :2] @ t + inv[:, 2] - t)
+    return np.concatenate([a, b[:, None]], axis=1)
+
+
+def _augment_roll(
+    torch: Any, x: Any, gates: list[list[dict]], rng: np.random.Generator, aug: RollAug,
+    center: np.ndarray, height: int,
+) -> tuple[Any, list[list[dict]]]:  # fmt: skip
+    """:class:`RollAug` on a ``(B, 3, H, W)`` [0, 255] batch (GPU ``grid_sample``) + its targets."""
+    import torch.nn.functional as F
+
+    from drone_fly.harness.liftoff.gate_net import IMAGENET_MEAN
+
+    b, _, h, w = x.shape
+    ang, sh = aug.sample(rng, b, w)
+    moved = np.flatnonzero((ang != 0) | (np.abs(sh).sum(axis=1) > 0))
+    if not len(moved):
+        return x, gates
+    ms = {int(i): roll_affine(ang[i], center, sh[i]) for i in moved}
+    theta = torch.as_tensor(np.stack([_sample_theta(ms[int(i)], w, h) for i in moved]),
+                            dtype=x.dtype, device=x.device)  # fmt: skip
+    mean = torch.tensor(IMAGENET_MEAN, dtype=x.dtype, device=x.device).view(1, 3, 1, 1) * 255.0
+    sel = torch.as_tensor(moved, device=x.device)
+    grid = F.affine_grid(theta, [len(moved), 3, h, w], align_corners=False)
+    x = x.clone()
+    x[sel] = F.grid_sample(x[sel] - mean, grid, mode="bilinear", padding_mode="zeros",
+                           align_corners=False) + mean  # fmt: skip
+    gates = [roll_gates(g, ms[i], w, height) if i in ms else g for i, g in enumerate(gates)]
+    return x, gates
 
 
 def train_gates(
@@ -722,6 +840,7 @@ def train_multi(
     device: str = "auto",
     seed: int = 0,
     out_root: str | Path | None = None,
+    roll: RollAug | None = None,
 ) -> dict[str, Any]:
     """``drone-fly harness gates train`` (UC71 AC6): multi-capture, catalogue-split training.
 
@@ -733,6 +852,7 @@ def train_multi(
     are never loaded.
     """
     torch = lazy_import("torch", purpose="gate-net training")
+    from drone_fly.harness.liftoff.gate_cv import camera_from_config
     from drone_fly.harness.liftoff.gate_learned import configured_weights
     from drone_fly.harness.liftoff.gate_net import (
         BACKBONES,
@@ -777,6 +897,7 @@ def train_multi(
         "seed": seed,
         "deploy": deploy,
         "protect_holdout_of": None if protect_holdout_of is None else str(protect_holdout_of),
+        "roll_aug": None if roll is None or not roll.enabled else asdict(roll.validate()),
     }
     ds = gd.assemble(
         resolve_captures([str(c) for c in captures]),
@@ -810,6 +931,9 @@ def train_multi(
     in_w, _, padded, scale = geometry
     out_h, out_w = padded // STRIDE, in_w // STRIDE
     targets_raw = [_train_gates(it.row, table, scale) for it in ds.items]
+    in_h = int(geometry[1])
+    cam = camera_from_config(cfg.section("camera"))
+    principal = np.array([cam.cx * scale, cam.cy * scale])  # the optical axis in input pixels
     scorer = None
     if select == "val-detection":
         scorer = SelectionScorer(ds, sel_idx, table, cfg, cfg.section("telemetry"), geometry, dev)
@@ -847,6 +971,8 @@ def train_multi(
                     _flip_gates(g, table, in_w) if f else g
                     for g, f in zip(gates, flip, strict=True)
                 ]
+            if roll is not None and roll.enabled:
+                x, gates = _augment_roll(torch, x, gates, rng, roll, principal, in_h)
             x = _augment_colour(torch, x, rng)
         tg = [build_targets(g, out_h, out_w, len(table), table.max_keypoints) for g in gates]
         tt = {k: torch.as_tensor(np.stack([t[k] for t in tg])).to(dev) for k in tg[0]}

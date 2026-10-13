@@ -485,7 +485,7 @@ def _trainable_captures(args: argparse.Namespace) -> list[Path]:
 
 
 def _cmd_gates_train(args: argparse.Namespace) -> int:
-    from drone_fly.harness.offline.gate_train import train_multi
+    from drone_fly.harness.offline.gate_train import RollAug, train_multi
 
     meta = train_multi(
         _trainable_captures(args),
@@ -507,6 +507,13 @@ def _cmd_gates_train(args: argparse.Namespace) -> int:
         protect_holdout_of=None if args.protect_holdout_of == "none" else args.protect_holdout_of,
         deploy=args.deploy,
         device=args.device,
+        roll=RollAug(
+            max_deg=args.aug_roll_deg,
+            p=args.aug_roll_p,
+            tail_deg=args.aug_roll_tail_deg,
+            tail_p=args.aug_roll_tail_p,
+            shift=args.aug_shift,
+        ),
     )
     print(f"weights: {meta['weights']} ({meta['purpose']}, epoch {meta['chosen_epoch']})")
     if meta.get("chosen_val_detection"):
@@ -1078,6 +1085,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_gt.add_argument("--deploy", action="store_true",
                       help="retrain on train + val maps (select last) -> *-deploy.pt")  # fmt: skip
     p_gt.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    p_gt.add_argument("--aug-roll-deg", type=float, default=0.0,
+                      help="roll about the principal point: +-deg (0 = off, as R1)")  # fmt: skip
+    p_gt.add_argument("--aug-roll-p", type=float, default=0.6, help="share of images rolled")
+    p_gt.add_argument("--aug-roll-tail-deg", type=float, default=60.0,
+                      help="the rarer, larger roll range")  # fmt: skip
+    p_gt.add_argument("--aug-roll-tail-p", type=float, default=0.15,
+                      help="share of rolled images drawn from the tail range")  # fmt: skip
+    p_gt.add_argument("--aug-shift", type=float, default=0.0,
+                      help="random translation, fraction of the width (<= 0.05)")  # fmt: skip
     p_gt.set_defaults(func=_cmd_gates_train)
     p_gr = gsub.add_parser("dataset-report", help="in-range gate-frame counts and the G1 gate")
     _gate_inputs(p_gr)

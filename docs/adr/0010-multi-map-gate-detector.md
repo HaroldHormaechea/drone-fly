@@ -333,3 +333,13 @@ Under D-U1, of the held-out types only `inflatable_arch` is seen in training; `a
 verified (margin 1.73, camera peak uptilt 19.03 / hfov 120) and adds 707 in-range arch
 gate-frames (130 at 4-8 m) on a second val map. Val: AutumnFields 707, Surtur 678. Every G1
 criterion now passes.
+
+### P4 training (started 2026-10-13 21:57)
+
+R1 (`harness gates train --all-captures --select val-detection --val-every 2 --epochs 40`,
+resnet18-hf as v1, balanced map x class sampling, v1's window protected) runs with
+`--frame-stride 2`: consecutive 10 fps frames are near-duplicates, so every second frame halves
+the epoch time and the frame cache (6.8 GB) while the counts still clear G1 (val AutumnFields ~353,
+Surtur ~339 in-range gate-frames). The GPU was **contended**: the user played League of Legends on
+it during the run, so timings and latencies of this run are not clean measurements.
+`--all-captures` leaves held-out-map captures out of training (named ones still raise).
