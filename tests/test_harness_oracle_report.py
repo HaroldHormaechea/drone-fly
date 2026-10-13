@@ -8,11 +8,14 @@ the fail-safe exclusion and re-run note, the tick-rate figures and the concurren
 
 from __future__ import annotations
 
+import csv
+import dataclasses
 import json
 import os
 import shutil
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from drone_fly.harness.errors import HarnessConfigError
@@ -366,3 +369,54 @@ def test_report_refusals(tmp_path, course):
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
     with pytest.raises(HarnessConfigError, match="no track_id"):
         build_report(sdir, sim=False)
+
+
+# ----------------------------------------------------------------------------- power export
+
+
+def _powered_samples(course, pts, *, spin_at):
+    """``path_samples`` with full stick, a sagging pack and the motors spun up from ``spin_at``."""
+    out = []
+    for i, s in enumerate(path_samples(course, pts, dt=0.01)):
+        r = 25000.0 if i >= spin_at else 1000.0
+        out.append(dataclasses.replace(
+            s, inputs=np.array([1.0, 0.0, 0.0, 0.0], np.float32),
+            battery=np.array([1.0 - 0.001 * i, 16.8 - 0.01 * i], np.float32),
+            rpm=np.array([r, r + 1.0, r + 2.0, r + 3.0], np.float32),
+        ))  # fmt: skip
+    return out
+
+
+def test_export_power_writes_per_attempt_csvs_and_a_readme(tmp_path):
+    c = make_course()
+    sdir = tmp_path / "S1"
+    for name, spin_at in (("a00-clean", 60), ("a01-partial", 70)):
+        write_attempt(sdir / "attempts", name, _powered_samples(c, CLEAN, spin_at=spin_at),
+                      stop_reason="course_finished", stop_class="course_finished")  # fmt: skip
+    res = orep.export_power(sdir)
+    out = sdir / "power"
+    assert res == {"dir": str(out), "files": 2}
+    assert sorted(p.name for p in out.glob("*.csv")) == ["a00-clean.csv", "a01-partial.csv"]
+    assert orep.POWER_COLUMNS == (
+        "t_from_spin_up_s", "clock_s", "liftoff_t_s", "volts", "charge", "throttle_stick",
+        "rpm_0", "rpm_1", "rpm_2", "rpm_3", "f_bodyz_g", "airspeed_mps", "vz_mps", "tilt_deg",
+    )  # fmt: skip
+    with (out / "a00-clean.csv").open(newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    with (out / "a00-clean.csv").open(newline="", encoding="utf-8") as fh:
+        assert tuple(next(csv.reader(fh))) == orep.POWER_COLUMNS
+    assert len(rows) == len(CLEAN)  # one row per telemetry sample
+    assert float(rows[60]["t_from_spin_up_s"]) == pytest.approx(0.0, abs=1e-6)
+    assert float(rows[0]["t_from_spin_up_s"]) == pytest.approx(-0.6, abs=1e-6)
+    r = rows[100]
+    assert float(r["volts"]) == pytest.approx(15.8, abs=1e-4)
+    assert float(r["charge"]) == pytest.approx(0.9, abs=1e-4)
+    assert float(r["throttle_stick"]) == 1.0
+    assert [float(r[f"rpm_{k}"]) for k in range(4)] == [25000.0, 25001.0, 25002.0, 25003.0]
+    assert float(r["vz_mps"]) == pytest.approx(2.94, abs=0.01)  # climbing 1.47 m in 0.5 s
+    for col in ("clock_s", "liftoff_t_s", "airspeed_mps", "tilt_deg"):
+        assert r[col] != ""
+    readme = (out / "README.md").read_text(encoding="utf-8")
+    assert readme.startswith("# Power series")
+    for col in ("t_from_spin_up_s", "f_bodyz_g", "airspeed_mps", "throttle_stick"):
+        assert f"`{col}`" in readme

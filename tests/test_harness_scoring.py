@@ -8,6 +8,7 @@ priority, the live / offline crossing comparison and a whole recorded attempt
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import numpy as np
@@ -364,14 +365,98 @@ def test_priority_order_tumble_over_floor():
     assert f["secondary"][0] == "altitude_loss"
 
 
+# ----------------------------------------------------------------------------- power loss
+
+#: hover at 3.5 m, then sink to 1.0 m (an altitude loss on its own)
+SINK = segments(((0, 0, 3.5), (2, 0, 3.5), 51), ((2, 0, 3.5), (2, 0, 1.0), 151))
+
+
+def _powered(tr, *, spin_at=20, cut_at=None, stick=1.0, live_motor=False):
+    """``tr`` with motors at 1000 rpm, spun up to 25000 from ``spin_at`` and cut to 1000 from
+    ``cut_at`` (``live_motor``: motor 3 keeps spinning), a constant stick and a sagging pack."""
+    n = tr.n
+    rpm = np.full((n, 4), 1000.0)
+    rpm[spin_at:] = 25000.0
+    if cut_at is not None:
+        rpm[cut_at:, : 3 if live_motor else 4] = 1000.0
+    return dataclasses.replace(
+        tr, rpm=rpm, throttle=np.full(n, stick), volts=np.linspace(16.8, 13.2, n),
+        charge=np.linspace(1.0, 0.2, n),
+    )  # fmt: skip
+
+
+def _classify_powered(course, tr, *, reason="episode_end:crash_settled", arm=0.0):
+    cr = score_crossings(tr, course)
+    lift = detect_liftoff(tr, arm)
+    li = min([i for i in lift.values() if i is not None], default=None)
+    contact = sim_rule_contact(tr, course, RULES, liftoff_index=li)
+    return classify_failure(tr, course, cr, stop_reason=reason, arm_end_clock=arm,
+                            contact=contact, power=sc.power_summary(tr))  # fmt: skip
+
+
+def test_power_loss_fires_on_a_full_stick_motor_cut_after_spin_up():
+    course = make_course()
+    tr = _powered(traj_of(course, SINK), spin_at=20, cut_at=120, stick=0.95)
+    ps = sc.power_summary(tr)
+    assert ps["spin_up_clock"] == pytest.approx(tr.clock[20])
+    assert ps["volts_at_spin_up"] == pytest.approx(tr.volts[20])
+    loss = ps["loss"]
+    assert loss["index"] == 120
+    assert loss["t_from_spin_up_s"] == pytest.approx(tr.clock[120] - tr.clock[20])
+    assert loss["t_from_spin_up_s"] == pytest.approx(1.0, abs=1e-6)
+    assert loss["volts"] == pytest.approx(tr.volts[120])
+    assert loss["charge"] == pytest.approx(tr.charge[120])
+    assert loss["throttle"] == pytest.approx(0.95)
+    assert loss["rpm_before"] == 25000.0 and loss["rpm_after"] == 1000.0
+    np.testing.assert_allclose(loss["pos"], tr.pos[120])
+    f = _classify_powered(course, tr)
+    assert "power_loss" in f["details"]
+    assert "motors cut to 1000 rpm at stick 0.95" in f["details"]["power_loss"]
+
+
+def test_power_loss_needs_full_stick_all_motors_and_a_prior_spin_up():
+    course = make_course()
+    tr = traj_of(course, SINK)
+    # low stick: an idle cut is a pilot input, not a power loss
+    assert sc.power_summary(_powered(tr, cut_at=120, stick=0.5))["loss"] is None
+    # just at the stick threshold (strictly above it is required)
+    assert sc.power_summary(_powered(tr, cut_at=120, stick=sc.POWER_STICK))["loss"] is None
+    # one motor still spinning
+    assert sc.power_summary(_powered(tr, cut_at=120, live_motor=True))["loss"] is None
+    # full stick with the motors low from the start: never spun up, so never a power loss
+    ps = sc.power_summary(_powered(tr, spin_at=tr.n))
+    assert ps == {"spin_up_clock": None, "loss": None}
+    # low motors before the spin-up do not count, only those after it
+    ps = sc.power_summary(_powered(tr, spin_at=100))
+    assert ps["loss"] is None and ps["spin_up_clock"] == pytest.approx(tr.clock[100])
+    assert "power_loss" not in _classify_powered(course, _powered(tr, cut_at=120, stick=0.5))[
+        "details"
+    ]
+    assert sc.power_summary(dataclasses.replace(tr, rpm=None)) is None  # no RPM telemetry
+
+
+def test_power_loss_takes_priority_over_altitude_loss():
+    course = make_course()
+    tr = _powered(traj_of(course, SINK), cut_at=120)
+    f = _classify_powered(course, tr)
+    assert f["primary"] == "power_loss"
+    assert "altitude_loss" in f["secondary"]
+    # the same flight without the cut is a plain altitude loss
+    assert _classify_powered(course, _powered(tr))["primary"] == "altitude_loss"
+
+
 def test_priority_table_and_thresholds():
     assert sc.FAILURE_MODES[0] == "takeoff_tumble" and sc.FAILURE_MODES[-1] == "other"
-    assert [sc.MODE_PRIORITY[m] for m in sc.FAILURE_MODES] == ["1", "1b", "2", "3", "4", "5",
-                                                                 "6", "7"]  # fmt: skip
+    assert len(sc.FAILURE_MODES) == 9
+    assert [sc.MODE_PRIORITY[m] for m in sc.FAILURE_MODES] == ["1", "1b", "1c", "2", "3", "4",
+                                                                 "5", "6", "7"]  # fmt: skip
+    assert sc.FAILURE_MODES[1:4] == ("no_liftoff", "power_loss", "gate_frame_collision")
     th = sc.thresholds()
     assert th["tumble_tilt_deg"] == 60.0 and th["tumble_rate_rad_s"] == 10.0
     assert th["impact_speed_drop_mps"] == 3.0 and th["osc_sign_changes_per_s"] == 6.0
-    assert len(th) == 17
+    assert th["power_loss_rpm"] == 3000.0 and th["power_stick"] == 0.9
+    assert th["power_spin_rpm"] == 20000.0 and th["full_stick"] == 0.95
+    assert len(th) == 21
 
 
 # ----------------------------------------------------------------------------- live vs offline

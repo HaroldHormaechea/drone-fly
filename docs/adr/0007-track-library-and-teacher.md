@@ -249,9 +249,62 @@ were changed to **0.005 / 0.005** before any training run, so this is not val tu
 - 195,507 env-steps/s, env only;
 - pool 167 MB on the GPU; peak 412 MB.
 
-<!-- RESULTS:PILOT -->
+**Runs invalidated by setup bugs.** None of these counts as one of the two full runs.
 
-<!-- RESULTS:RUN1 -->
+| run | steps | invalidated by | symptom |
+|---|---|---|---|
+| pilot 1 (`…211653Z…-INVALID-gatebug`) | 42M | the torch pass rule's intersection parameter had the wrong sign under its clamp, so no `opening` passage could ever count (only volumes did). Fixed and parity-tested against the NumPy reference: 0 mismatches in 53,520 random segments. | procedural completion 0; 37 % of episodes timed out with no crossing |
+| pilot 2 (`…213404Z…-pilot2-INVALID-gateblock`) | 100M | gate frames filled their openings (54 train passages), and procedural obstacles were 35–66 m blocks (D4 v2, D8) | completion plateaued at about 5 % with 79 % collisions; procedural episodes ended in collision 93.5 % of the time |
+| run 1, first attempt (`…221026Z…-INVALID-gateblock`) | 108M | same as pilot 2 | same plateau |
+
+A training-only fix was made at the same time. About 10 % of route starts spawned inside or against geometry and crashed on their first tick. They now need 0.3 m of clearance, or they fall back to an air start (`ROUTE_START_CLEARANCE_M`).
+
+Pilot 2 also confirmed challenger condition 2. Only 0.2 % of ground starts ended `floor` before 1.5 s, because the plant rests the drone at 0.12 m, above the 0.08 m kill height. Measuring from the support top therefore needed no change.
+
+Pilot 2 throughput was about 52k steps/s on a GPU shared with games (97–100 % utilisation).
+
+**Pilot readout.** After the fixes, the first 1e8 steps of run 1 served as the pilot. At 94M steps,
+training-episode completion was 13.7 % (Liftoff 8.2 %, procedural 21.6 %), against the
+about 5 % plateau before the fixes.
+
+**Run 1.**
+
+| | value |
+|---|---|
+| run | `20261012T231445Z-teacher-liftoff` (conversion v2, it 0–1603) → `20261013T014931Z-teacher-liftoff` (`--continue-from`, conversion v3, it 1603–3815) |
+| steps | 2.0e9 |
+| throughput | 77–117k steps/s |
+| training-episode completion at the end | 67.8 % (Liftoff 64.6 %, procedural 72.6 %) |
+
+Val selection (randomized, seed 4321, N = 32, 14 val tracks):
+
+| checkpoint | val macro |
+|---|---|
+| it1920 (≈1.0e9 steps) | **32.1 %** (selected) |
+| it2400 | 24.3 % |
+| it2880 | 25.4 % |
+| it3360 | 24.1 % |
+| final | 27.0 % |
+
+AC8 results for it1920 (randomized counts; nominal in brackets for information):
+
+| split | macro | scene | no-scene (optimistic) | flagged | tracks ≥ 95 % | tracks at 0 % |
+|---|---|---|---|---|---|---|
+| train (63) | **68.9 %** [75.8 %] | 59.8 % (30) | 77.3 % (33) | 69.5 % (17) | 25 | 7 |
+| held-out (15) | **21.2 %** [22.5 %] | 0.0 % (2) | 24.5 % (13) | 0.0 % (2) | 0 | 9 |
+
+Both targets were missed (train ≥ 95 %, held-out ≥ 80 %). The per-track tables are in
+`<run>/eval/{train,val,held-out}.md`.
+
+Failure modes:
+- **Generalization gap.** Val peaks at about 1e9 steps and then stalls while train keeps rising.
+  Failures on unseen maps are mostly early collisions: on val, 53 % of outcomes are collisions.
+- **Scene geometry.** Train scene tracks are about 17 points below no-scene ones. Failures cluster
+  at passages whose straight legs pass within 0–0.4 m of scene walls.
+- **Synthetic spawns float at gate-centre height** (a conversion flaw). minus-two-01 times out on
+  every episode without a single gate.
+- **Dive start.** On the-pit-06 the start gate is 9 m below a raised spawn, and the policy never
+  reaches it.
 
 ### D10. Catalogue schema
 
@@ -259,6 +312,131 @@ The full schema is in [tracks/README.md](../../tracks/README.md). Both sources s
 (`id`, `source`, `track` / `race`, `map`, `gate_types`, `laps`, `split`, `status`, `stats`,
 `flags`). Only names, hashes and derived stats are committed. Unconvertible pairs are kept with their
 reason, and splits stay stable across re-scans.
+
+## Conversion v3 (fixed during run 1; found by QA)
+
+Two conversion bugs were found while run 1 was training. Both were fixed in `CONVERSION_VERSION` 3,
+and the catalogue was re-scanned with its splits unchanged.
+
+**Floor under downhill routes.** `floor_z` was `min(0, lowest opening bottom)`, which ignored route
+volumes. On downhill routes, checkpoint volumes below the spawn support lay under the floor-kill
+height, so 11 of 63 train tracks could not be completed. Hannover-01's route, for example, goes
+about 60 m below the spawn. This capped train completion near 82.5 % and taught `floor` on every
+descent. The floor now sits at or below every passage, openings and volumes alike
+(`passage_bottom_z`). Verified: 0 of 1872 passages, in any split, have their centre within 0.2 m of
+the floor or heightfield below them.
+
+**Hairpin travel direction.** `_travel_dirs` uses the bisector of the incoming and outgoing legs.
+At a hairpin, where the legs are nearly antiparallel, it collapsed: volume normals could turn
+near-vertical, and openings could be oriented from the wrong side. QA measured 31 of 1872 passages
+with |in + out| < 0.5. When |unit(in) + unit(out)| < 0.5 (`HAIRPIN_BISECTOR_MIN`), the incoming leg
+is now used. The remaining near-vertical normals all belong to genuinely vertical route segments:
+- marina-bay-03 #23 and #24 climb straight up;
+- short-circuit-03 #15 and surtur-03 #22 go straight up and back down.
+
+**Run 1 continued, not restarted.** At it 1603 (840.4M steps, conversion v2), run 1
+(`…231445Z…`) was stopped. It continued as a new run from its `resume.pt` on v3 courses:
+`drone-fly train teacher --continue-from <run>`. The continuation carries over the weights, the
+optimiser, the step counter (so the 2e9 budget and the slack schedule carry on) and the RNG.
+
+The observation schema and action contract did not change; only the course geometry did. The source
+run is left untouched. The lineage is recorded in the new run's `lineage.json` and in every
+checkpoint sidecar (`lineage.continued_from`: run, iteration, steps, source conversion version). The
+new run's sidecar `course_conversion` is v3, so evals and UC69 use v3. Under D9 this is still run 1:
+a bug-fix continuation, not a val-driven change.
+
+**Hairpins and floor in the run-1 evals.**
+- **Floor.** Every one of the 11 floor-capped train tracks now completes: hannover-01, marina-bay-04
+  and short-circuit-01 at 100 %; bando-city-02 and permafrost-03 at 97 %; bardwells-yard-01 and -06
+  at 88 %; bando-city-03 at 81 %; straw-bale-06 at 66 %.
+- **Hairpins.** Only paris-drone-festival-02 fails mainly at a hairpin: 16 of its 32 episodes fail
+  at or just after #7, a real 180° turn. short-circuit-03 and liftoff-arena-01 fail elsewhere.
+
+## Run 2: the single val-driven change set (D9)
+
+Run 1 missed both targets: train 68.9 %, val 32.1 %, held-out 21.2 %. D9 therefore allows one change
+set, driven by val evidence, and one more run. Held-out was not consulted for any of these choices.
+
+**A. Conversion v4 (bug fixes, not tuning).**
+- **Synthetic spawns on the ground.** A track without a spawn item got a spawn 3 m before passage 0
+  at the gate's CENTRE height. With no support underneath, the ground start rested on nothing,
+  0.7–2.5 m above the floor, a state never seen in training. It is now placed at passage 0's
+  bottom. Verified on all four synthetic-spawn tracks: the spawn is at the bottom of passage 0,
+  which is ground level on minus-two-01, where the gate centre is 0.66 m up.
+- **Frame-fidelity check: not a bug, unchanged.** `FlagGateGeneric01` and the `Inflatable*` gates
+  showed only 25 % and 49 % of their openings clear of solids. Their "solids" are the real Liftoff
+  colliders, though: the flag-banner meshes and the inflatable tubes (capsule radius 0.39 m) sit
+  inside the trigger volume. The trigger is simply larger than the free aperture.
+- **`pack_courses` empty-cell-table fix.** An empty table appended a stray CSR start, so every
+  later course read the wrong rows. This bug was latent: no current course has an empty table.
+
+**B. Generalization (the val-driven part).** Val peaked at about 1e9 steps and then stalled while
+train kept rising, and most val failures were early collisions on unseen maps.
+- **(i) Course augmentation, training only** (`tracks/augment.py`, `tracks.augment`). Every Liftoff
+  train course is also flown mirrored (y → −y) and at 0.85× and 1.15× scale, in all 6 combinations.
+  The copies are built once at pool build time. Only the geometry changes; the plant, observation
+  and action are untouched.
+  - Verified on 5 train tracks × 3 variants: pass-rule verdicts are identical on 9,540 random
+    segments, surface distances and floor heights match the scaled originals to about 1e-13, and
+    the run-1 policy flies all six Arena-04 variants at 100 %.
+- **(ii) Procedural share 0.5** (was 0.4).
+- **(iii) Checkpoints every about 1.2e8 steps** (229 iterations), so val selection can catch an
+  early peak.
+- An obstacle curriculum for procedural courses was not adopted.
+
+**D. Power and thrust at speed (D11), added after the UC69 live test.** In Liftoff, run 1's
+it1920 flew a full lap of Infinity Loop plus 3 gates on all 10 attempts. Every attempt then lost
+power about 18.3 s after spin-up: the pack reached the 2.70 V/cell cutoff.
+
+The teacher held collective at max_g almost all the time, because the sim never charged it for
+doing so. Full stick also delivers only about 2.8 g at racing speed, not 4.23 g. A teacher trained
+without a power model would always floor it and die at about 18 s. See D11.
+
+**From scratch.** The approved plan had been a warm start from it1920. Because D changes the
+dynamics, run 2 trains from scratch on v4 + D, and a full-throttle policy is a poor prior. A and B
+are unchanged; C is still not adopted.
+
+The config is `teacher-liftoff-aug`: `plant.power: true`, a 2e9 budget, and the default slack
+curriculum. `--continue-from` (a run folder, or a `teacher_it<N>.pt`, with its lineage recorded)
+stays available but is not used for run 2.
+
+### D11. Battery and thrust-at-speed model (optional plant extension)
+
+`sim/power.py` is enabled only by a profile `power` block AND plant `power: true`, so meteor75 and
+every UC67 path are unchanged. It is fitted on the UC66 micro-full sysid session and the 10 UC69
+live attempts. The fit and validation are in `drones/liftoff-gremlin-micro/sysid.md` ("Power
+model"), and `python -m drone_fly.sysid.power_fit` reproduces both.
+
+| part | model |
+|---|---|
+| full-stick thrust | `max_g · (V / V_full)^0.05 · max(0.2, 1 − 0.38 · v_axial / 20)`; voltage barely matters, inflow does. The applied thrust and the motor state are capped at it. |
+| motor effort | `E = T · inflow^−0.805`, in the units of Liftoff's RPM |
+| drain | `dq/dt = −0.00389 · E^0.946` |
+| persistent sag | `ds/dt = 1.13e-4 · E^5.28`; it never recovers, and is negligible below about 2.5 g |
+| voltage | `V = OCV(q) − s − 0.545 · E^0.687` |
+| cutoff | V < 8.10 V latches the motors at idle; the env ends the episode with the new outcome `power_loss` (a crash) |
+| randomization | capacity (drain) ±10 %, internal resistance (sag and IR) ±20 %, inflow ±15 %, initial charge 0.85–1 |
+
+Validation: open-loop replay of the live sticks gives a cutoff at 17.7–17.9 s against 18.0–18.3 s
+measured (from spin-up), and the model's full-stick thrust is within 4 % in every speed band.
+
+The thrust model is consistent with UC69's measured body-z specific force. At full stick above
+22 m/s, the model thrust (2.83 g) minus the plant's drag gives a p50 of 1.66 g and a p95 of 2.89 g;
+UC69's export measured 1.67 g and 2.91 g. UC69 quoted about 2.4 g, but that figure is specific
+force, which includes drag.
+
+The rewards are unchanged: losing power ends the episode, so managing the throttle is learned.
+
+**`teacher-obs` v2.** The actor and the critic both observe the battery: 2 values at [148:150),
+`batt_charge` and `batt_volts / cells`, defined exactly as Liftoff's live telemetry provides them,
+with input scales 1 and 1/4.2. Without this, the policy could only learn a fixed habit of not
+flooring it, never "charge is low, ease off". The UC69 harness builds the block with
+`tracks.teacher_obs_ref.battery_from_telemetry`.
+
+v1 checkpoints still evaluate on their 148 values: the evaluator builds the version named in the
+sidecar. `teacher-liftoff` (run 1) stays on v1, and `teacher-liftoff-aug` (run 2) uses v2. The
+critic's extras include the battery in both cases; it reads as a full pack when the power model is
+off.
 
 ## Consequences
 

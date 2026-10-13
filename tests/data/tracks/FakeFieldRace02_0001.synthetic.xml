@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Synthetic UC68 fixture (generate_fixtures.py); legacy flat format. -->
+<Race>
+  <name>fake-field-02</name>
+  <laps>1</laps>
+  <checkpoints>
+    <Checkpoint><instanceID>c1</instanceID></Checkpoint>
+    <Checkpoint><instanceID>w1</instanceID></Checkpoint>
+    <Checkpoint><instanceID>c2</instanceID></Checkpoint>
+  </checkpoints>
+</Race>

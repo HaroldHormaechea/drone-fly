@@ -75,7 +75,7 @@ from drone_fly.sim.pool import (
 from drone_fly.tracks.catalogue import TrackDataError, sha256_file
 from drone_fly.tracks.liftoff_extract.props import box_corners, hull, opening
 
-CONVERSION_VERSION = 2  # v2: mesh / approx gate frames become rings (ADR 0007 D4)
+CONVERSION_VERSION = 4  # v2 gate rings; v3 floor under volumes, hairpins; v4 grounded spawn
 _M = np.asarray(UNITY_TO_CONTRACT, np.float64)
 SOURCE_SCENE, SOURCE_ITEM, SOURCE_TABLE, SOURCE_PROCEDURAL = 0, 1, 2, 3
 NONSOLID_TYPES = ("TrackBlueprintAction", "TrackBlueprintSpawnpoint", "TrackBlueprintRibbon")
@@ -537,8 +537,41 @@ def classify_passage(
     )  # fmt: skip
 
 
+def _volume_z_extent(shape: str, R: np.ndarray, h: np.ndarray) -> float:
+    """Half the vertical extent of a volume (local frame ``R``, half-size ``h``)."""
+    if shape == "sphere":
+        return float(h[0])
+    if shape == "cylinder":  # axis = local y, radius h[0], half-height h[1]
+        return abs(R[2, 1]) * float(h[1]) + math.hypot(R[2, 0], R[2, 2]) * float(h[0])
+    return float(np.abs(R[2, :]) @ h)
+
+
+def passage_bottom_z(p: Passage) -> float:
+    """Lowest z of a passage (an opening's outline, or a volume's extent)."""
+    if p.kind == "opening":
+        if not len(p.outline):
+            return float(p.center[2])
+        return float((p.center + p.outline @ p.rot[:, :2].T)[:, 2].min())
+    return float(p.center[2]) - _volume_z_extent(p.shape, p.vol_rot, p.vol_half)
+
+
+def _raw_bottom_z_c(r: _RawPassage) -> float:
+    """Lowest contract-frame z of a raw passage (before the course frame exists)."""
+    if r.kind == "opening" and len(r.outline_pts_c):
+        return float(np.min(np.asarray(r.outline_pts_c)[:, 2]))
+    return float((_M @ r.center_u)[2]) - _volume_z_extent(r.shape, r.vol_rot_c, r.vol_half)
+
+
+#: Below this |unit(in) + unit(out)| a passage is a hairpin: the bisector is degenerate (v3).
+HAIRPIN_BISECTOR_MIN = 0.5
+
+
 def _travel_dirs(centres: np.ndarray, spawn: np.ndarray, circuit: bool) -> np.ndarray:
-    """Per passage: the bisector of the incoming and outgoing route legs (unit)."""
+    """Per passage: the bisector of the incoming and outgoing route legs (unit).
+
+    At a hairpin (in and out legs nearly antiparallel) the bisector collapses toward an arbitrary
+    (often near-vertical) direction, so the incoming leg is used instead (v3).
+    """
     n = len(centres)
     out = np.zeros((n, 3))
     for i in range(n):
@@ -547,12 +580,19 @@ def _travel_dirs(centres: np.ndarray, spawn: np.ndarray, circuit: bool) -> np.nd
         else:
             prev = centres[i - 1] if i > 0 else spawn
             nxt = centres[i + 1] if i < n - 1 else None
-        d = _unit(centres[i] - prev)
-        if nxt is not None:
-            d = d + _unit(nxt - centres[i])
-        if np.linalg.norm(d) < 1e-9:
-            d = _unit(centres[i] - prev) if np.linalg.norm(centres[i] - prev) > 1e-9 else d
-        out[i] = _unit(d)
+        d_in = _unit(centres[i] - prev) if np.linalg.norm(centres[i] - prev) > 1e-9 else None
+        d_out = _unit(nxt - centres[i]) if nxt is not None else None
+        if d_out is not None and np.linalg.norm(nxt - centres[i]) < 1e-9:
+            d_out = None
+        if d_in is None:
+            d = d_out if d_out is not None else np.zeros(3)
+        elif d_out is None:
+            d = d_in
+        else:
+            d = d_in + d_out
+            if np.linalg.norm(d) < HAIRPIN_BISECTOR_MIN:
+                d = d_in
+        out[i] = _unit(d) if np.linalg.norm(d) > 1e-9 else np.zeros(3)
     return out
 
 
@@ -720,6 +760,8 @@ def convert_liftoff(
         d[2] = 0.0
         d = _unit(d) if np.linalg.norm(d) > 1e-9 else np.array([1.0, 0.0, 0.0])
         sp = c0 - cfg.synthetic_spawn_back_m * d
+        # v4: on the ground (the first passage's bottom), not floating at its centre height
+        sp[2] = _raw_bottom_z_c(raws[0])
         yaw = math.atan2(d[1], d[0])
         flags.append("synthetic-spawn")
     top = None
@@ -756,11 +798,10 @@ def convert_liftoff(
             (hf_c.x0 - origin[0]) / ws, (hf_c.y0 - origin[1]) / ws, hf_c.cell / ws,
             (hf_c.z - origin[2]) / ws,
         )  # fmt: skip
-    bottoms = [
-        float((p.center + p.outline @ p.rot[:, :2].T)[:, 2].min())
-        for p in passages
-        if p.kind == "opening" and len(p.outline)
-    ]
+    # the floor backstop sits at or below EVERY passage (v3: volumes too; a downhill route whose
+    # checkpoint volumes lie below the spawn support was uncompletable under the v2 opening-only
+    # rule)
+    bottoms = [passage_bottom_z(p) for p in passages]
     floor_z = min([0.0, *bottoms])
 
     # solids crossing an opening (flagged, not dropped)

@@ -60,10 +60,19 @@ OSC_WINDOW_S = 2.0
 OSC_SIGN_CHANGES_PER_S = 6.0
 OSC_RMS_RAD_S = 3.0
 LIVE_MATCH_S = 0.1
+#: Power loss: every motor below POWER_LOSS_RPM while the throttle stick is above POWER_STICK,
+#: after the motors first spun above POWER_SPIN_RPM (Liftoff's low-voltage cutoff, UC69 live).
+POWER_LOSS_RPM = 3000.0
+POWER_STICK = 0.9
+POWER_SPIN_RPM = 20000.0
+#: The specific-force summary's "full stick": the stick above this with the motors spun up.
+FULL_STICK = 0.95
+G = 9.81
 
 FAILURE_MODES = (
     "takeoff_tumble",
     "no_liftoff",
+    "power_loss",
     "gate_frame_collision",
     "altitude_loss",
     "overshoot",
@@ -75,6 +84,7 @@ FAILURE_MODES = (
 MODE_PRIORITY = {
     "takeoff_tumble": "1",
     "no_liftoff": "1b",
+    "power_loss": "1c",
     "gate_frame_collision": "2",
     "altitude_loss": "3",
     "overshoot": "4",
@@ -90,7 +100,7 @@ def thresholds() -> dict[str, float]:
         "FIRST_WINDOW_S TUMBLE_TILT_DEG TUMBLE_RATE_RAD_S IMPACT_SPEED_DROP_MPS IMPACT_WINDOW_S "
         "FRAME_PLANE_M FRAME_INNER_MARGIN_M FRAME_OUTER_MARGIN_M DEFAULT_FRAME_WIDTH_M LOW_ALT_M "
         "SINK_VZ_MPS SINK_HOLD_S OVERSHOOT_HOLD_S OSC_WINDOW_S OSC_SIGN_CHANGES_PER_S "
-        "OSC_RMS_RAD_S LIVE_MATCH_S"
+        "OSC_RMS_RAD_S LIVE_MATCH_S POWER_LOSS_RPM POWER_STICK POWER_SPIN_RPM FULL_STICK"
     ).split()
     return {n.lower(): float(globals()[n]) for n in names}
 
@@ -110,6 +120,11 @@ class Trajectory:
     omega: np.ndarray  # (n, 3) body rates (rad/s)
     #: ``disc[i]``: the segment ``i - 1 -> i`` spans a discontinuity (time backwards / a jump).
     disc: np.ndarray
+    #: Optional telemetry blocks (NaN where a sample lacks them; None when no sample has them).
+    rpm: np.ndarray | None = None  # (n, 4) motor RPM
+    throttle: np.ndarray | None = None  # (n,) throttle stick input as Liftoff reports it
+    volts: np.ndarray | None = None  # (n,) pack voltage
+    charge: np.ndarray | None = None  # (n,) pack charge fraction
 
     @property
     def n(self) -> int:
@@ -125,7 +140,26 @@ class Trajectory:
         return np.degrees(np.arccos(np.clip(cz, -1.0, 1.0)))
 
     def slice(self, lo: int, hi: int) -> Trajectory:
-        return Trajectory(*(getattr(self, f)[lo:hi] for f in self.__dataclass_fields__))
+        return Trajectory(
+            *(
+                None if getattr(self, f) is None else getattr(self, f)[lo:hi]
+                for f in self.__dataclass_fields__
+            )
+        )
+
+    def specific_force_body_z(self, half: int = 3) -> np.ndarray:
+        """Specific force along body z (g): ``(dv/dt + g) . z_body``, ``dv/dt`` over +-``half``."""
+        out = np.full(self.n, np.nan)
+        for i in range(self.n):
+            j0, j1 = max(i - half, 0), min(i + half, self.n - 1)
+            dt = self.clock[j1] - self.clock[j0]
+            if j1 <= j0 or dt <= 0:
+                continue
+            f = (self.vel[j1] - self.vel[j0]) / dt + np.array([0.0, 0.0, G])
+            w, x, y, z = self.quat[i]
+            zb = np.array([2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y)])
+            out[i] = float(f @ zb) / G
+        return out
 
 
 def trajectory_from_samples(
@@ -152,11 +186,37 @@ def trajectory_from_samples(
         vel[i] = fr.to_course_vector(unity_to_contract_position(s.velocity))
         quat[i] = unity_to_contract_quat(s.quat_xyzw)
         omega[i] = gm.apply(s.gyro)
+
+    def block(get: Any, width: int) -> np.ndarray | None:
+        vals = [get(s) for s in samples]
+        if not vals or all(v is None for v in vals):
+            return None
+        rows = [
+            np.full(width, np.nan) if v is None else np.asarray(v, np.float64).reshape(-1)[:width]
+            for v in vals
+        ]
+        return np.array(rows).reshape(n, width)
+
+    rpm = block(lambda s: s.rpm, 4)
+    thr = block(lambda s: None if s.inputs is None else s.inputs[:1], 1)
+    bat = block(lambda s: s.battery, 2)
     disc = np.zeros(n, bool)
     if n > 1:
         jump = np.linalg.norm(np.diff(pos, axis=0), axis=1) * fr.world_scale
         disc[1:] = (np.diff(t) < 0) | (jump > max_jump_m)
-    return Trajectory(t, clock, pos, vel, quat, omega, disc)
+    return Trajectory(
+        t,
+        clock,
+        pos,
+        vel,
+        quat,
+        omega,
+        disc,
+        rpm,
+        None if thr is None else thr[:, 0],
+        None if bat is None else bat[:, 1],
+        None if bat is None else bat[:, 0],
+    )
 
 
 # ----------------------------------------------------------------------------- crossings
@@ -368,12 +428,11 @@ def first_window_stats(traj: Trajectory, arm_end_clock: float | None) -> dict[st
 def _takeoff_tumble(
     traj: Trajectory, arm_end: float | None, first_cross: float | None
 ) -> str | None:
-    if arm_end is None:
+    """Only an attempt that never reached the first gate: an aggressive racing take-off banks far
+    past 60 deg within 2 s and then flies the course (UC69 live: first gate at 3.6 s)."""
+    if arm_end is None or first_cross is not None:
         return None
-    hi = arm_end + FIRST_WINDOW_S
-    if first_cross is not None:
-        hi = min(hi, first_cross)
-    m = _window(traj, arm_end, hi)
+    m = _window(traj, arm_end, arm_end + FIRST_WINDOW_S)
     if not m.any():
         return None
     tilt = float(traj.tilt_deg()[m].max())
@@ -483,6 +542,61 @@ def _oscillation(traj: Trajectory) -> str | None:
     return None
 
 
+def power_summary(traj: Trajectory) -> dict[str, Any] | None:
+    """Pack / motor figures: spin-up, the power-loss event (if any) and the body-z specific force
+    at full stick in the first 5 s vs. the last 3 s before the loss / the end (``None`` without
+    RPM telemetry)."""
+    if traj.rpm is None or traj.n < 2:
+        return None
+    top = np.nanmax(traj.rpm, axis=1)
+    spun = np.flatnonzero(top > POWER_SPIN_RPM)
+    if not len(spun):
+        return {"spin_up_clock": None, "loss": None}
+    i0 = int(spun[0])
+    thr = traj.throttle if traj.throttle is not None else np.full(traj.n, np.nan)
+    idx = np.arange(traj.n)
+    lost = np.flatnonzero((idx > i0) & (top < POWER_LOSS_RPM) & (thr > POWER_STICK))
+    loss = None
+    end = traj.n
+    if len(lost):
+        j = int(lost[0])
+        end = j
+        loss = {
+            "index": j,
+            "t_from_spin_up_s": float(traj.clock[j] - traj.clock[i0]),
+            "volts": None if traj.volts is None else float(traj.volts[j]),
+            "charge": None if traj.charge is None else float(traj.charge[j]),
+            "throttle": float(thr[j]),
+            "rpm_before": float(np.nanmax(top[max(i0, j - 20) : j])),
+            "rpm_after": float(top[j]),
+            "pos": [float(x) for x in traj.pos[j]],
+        }
+    fz = traj.specific_force_body_z()
+    full = (thr > FULL_STICK) & (top > POWER_SPIN_RPM) & np.isfinite(fz) & (idx < end)
+    speed = np.linalg.norm(traj.vel, axis=1)
+
+    def window(lo: float, hi: float) -> dict[str, Any] | None:
+        m = full & (traj.clock >= lo) & (traj.clock <= hi)
+        if not m.any():
+            return None
+        return {
+            "f_bodyz_g_p50": float(np.median(fz[m])),
+            "f_bodyz_g_p95": float(np.percentile(fz[m], 95)),
+            "speed_mps_p50": float(np.median(speed[m])),
+            "volts_p50": None if traj.volts is None else float(np.nanmedian(traj.volts[m])),
+            "samples": int(m.sum()),
+        }
+
+    c0, c_end = float(traj.clock[i0]), float(traj.clock[end - 1])
+    return {
+        "spin_up_clock": c0,
+        "volts_at_spin_up": None if traj.volts is None else float(traj.volts[i0]),
+        "loss": loss,
+        "full_stick_first_5s": window(c0, c0 + 5.0),
+        "full_stick_last_3s": window(c_end - 3.0, c_end),
+    }
+
+
 def classify_failure(
     traj: Trajectory,
     course: Any,
@@ -492,6 +606,7 @@ def classify_failure(
     arm_end_clock: float | None,
     contact: Contact | None,
     outer_by_class: dict[str, tuple[float, float]] | None = None,
+    power: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """``{"primary", "secondary", "details"}`` of a failed attempt (priority: FAILURE_MODES)."""
     first_cross = crossings[0].clock if crossings else None
@@ -501,6 +616,13 @@ def classify_failure(
         det["takeoff_tumble"] = tumble
     if stop_reason == "episode_end:no_liftoff" and not tumble:
         det["no_liftoff"] = "no lift-off after arming"
+    loss = (power or {}).get("loss")
+    if loss:
+        det["power_loss"] = (
+            f"motors cut to {loss['rpm_after']:.0f} rpm at stick {loss['throttle']:.2f}, "
+            f"{loss['t_from_spin_up_s']:.1f} s after spin-up, pack {loss['volts']} V "
+            f"(charge {loss['charge']})"
+        )
     checks = (
         ("gate_frame_collision", lambda: _gate_frame_impact(traj, course, outer_by_class)),
         ("altitude_loss", lambda: _altitude_loss(traj, course, contact)),
@@ -673,6 +795,7 @@ def score_attempt(
         "live_mismatches": compare_live(crossings, rec.live_crossings),
         "arm_confirm_delay_s": rec.meta.get("arm_confirm_delay_s"),
         "training_active": bool(rec.meta.get("training_active")),
+        "power": power_summary(traj),
         "failure": None,
     }
     if not complete:
@@ -684,5 +807,6 @@ def score_attempt(
             arm_end_clock=rec.arm_end_clock,
             contact=contact,
             outer_by_class=outer_by_class,
+            power=out["power"],
         )
     return out

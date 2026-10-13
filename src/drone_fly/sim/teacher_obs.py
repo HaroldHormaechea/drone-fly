@@ -1,4 +1,4 @@
-"""The privileged teacher observation, schema ``teacher-obs`` v1: 148 float32, raw and exact.
+"""The privileged teacher observation, schema ``teacher-obs`` v2 (150 float32; v1 = the first 148).
 
 All quantities are in the **course frame** (:class:`~drone_fly.sim.pool.CourseFrame`: the contract
 frame translated to the spawn support and divided by ``world_scale``); the body frame is FLU.
@@ -22,6 +22,11 @@ Blocks, in order (:data:`BLOCKS`):
 6. ``altitude`` [142]: z minus the highest solid / floor surface straight below the drone.
 7. ``prev_action`` [143:147): the raw policy output of the previous tick (zeros at the start).
 8. ``arm_remaining_s`` [147]: ``max(0, arm_until - t)`` (0 once armed and for air starts).
+9. ``battery`` [148:150) (v2 only): ``charge`` (Liftoff's ``batt_charge``, 0..1) and the pack
+   voltage per cell (``batt_volts / cells``, V). In the sim, the plant's power model; a full pack
+   (1.0, 4.2 V) when the plant has none.
+
+``teacher-obs`` v1 (148 values) is exactly the first 148; v1 checkpoints keep evaluating on it.
 
 :func:`schema` is written into every teacher checkpoint's sidecar (``obs_schema``); the actor
 applies the fixed per-value :func:`input_scale` inside its module. The NumPy single-drone
@@ -36,12 +41,14 @@ from typing import Any
 
 import torch
 
-from drone_fly.sim.multi_course import quat_matrix, ray_down_top_torch
+from drone_fly.sim.multi_course import FULL_CELL_V, quat_matrix, ray_down_top_torch
 from drone_fly.sim.quat import gravity_body
 
 NAME = "teacher-obs"
-VERSION = 1
-BLOCKS: tuple[tuple[str, int], ...] = (
+#: The current version (new runs); every entry of VERSIONS is still buildable and evaluable.
+VERSION = 2
+VERSIONS = (1, 2)
+BLOCKS_V1: tuple[tuple[str, int], ...] = (
     ("harness30", 30),
     ("attitude6", 6),
     ("vel_body", 3),
@@ -51,7 +58,21 @@ BLOCKS: tuple[tuple[str, int], ...] = (
     ("prev_action", 4),
     ("arm_remaining_s", 1),
 )
+BLOCKS: tuple[tuple[str, int], ...] = (*BLOCKS_V1, ("battery", 2))
 DIM = sum(w for _, w in BLOCKS)
+DIM_V1 = sum(w for _, w in BLOCKS_V1)
+
+
+def blocks(version: int = VERSION) -> tuple[tuple[str, int], ...]:
+    if version not in VERSIONS:
+        raise ValueError(f"unknown teacher-obs version {version} (known: {VERSIONS})")
+    return BLOCKS_V1 if version == 1 else BLOCKS
+
+
+def dim(version: int = VERSION) -> int:
+    return sum(w for _, w in blocks(version))
+
+
 #: The harness30 prefix layout (``harness.assembler.EXTRA_LAYOUT`` truncated to 30).
 HARNESS_LAYOUT: tuple[tuple[str, int], ...] = (
     ("obs", 12),
@@ -85,7 +106,7 @@ def block_slice(name: str) -> slice:
     raise KeyError(name)
 
 
-def input_scale() -> list[float]:
+def input_scale(version: int = VERSION) -> list[float]:
     """Fixed per-value multipliers the actor applies to the raw observation (recorded)."""
     pos, vel, rate, dist, size = 1 / 20.0, 1 / 10.0, 1 / 10.0, 1 / 20.0, 1 / 10.0
     h30 = [pos] * 3 + [1.0] * 3 + [vel] * 3 + [rate] * 3  # obs12
@@ -96,25 +117,27 @@ def input_scale() -> list[float]:
     out += ([pos] * 3 + [1.0] * 6 + [size, size, dist, 1.0]) * GATES_AHEAD
     out += ([1 / OBS_RANGE_M] * 4 + [1.0] * 4) * N_OBSTACLES
     out += [1 / 10.0] + [1.0] * 4 + [2.0]
-    assert len(out) == DIM
+    if version >= 2:
+        out += [1.0, 1.0 / FULL_CELL_V]  # battery: charge, volts per cell
+    assert len(out) == dim(version)
     return out
 
 
-def schema() -> dict[str, Any]:
+def schema(version: int = VERSION) -> dict[str, Any]:
     """The JSON-able ``obs_schema`` written into the sidecar."""
     start = 0
-    blocks = []
-    for n, w in BLOCKS:
-        blocks.append({"name": n, "start": start, "width": w})
+    layout = []
+    for n, w in blocks(version):
+        layout.append({"name": n, "start": start, "width": w})
         start += w
-    return {
+    out = {
         "name": NAME,
-        "version": VERSION,
-        "dim": DIM,
+        "version": version,
+        "dim": dim(version),
         "dtype": "float32",
         "frame": "course frame (contract, translated to the spawn support, / world_scale); "
         "body FLU",
-        "blocks": blocks,
+        "blocks": layout,
         "harness30": {
             "layout": [list(x) for x in HARNESS_LAYOUT],
             "extra_dim": 30,
@@ -164,8 +187,16 @@ def schema() -> dict[str, Any]:
         "prev_action": "raw policy output of the previous tick, before decoding / clipping",
         "arm_remaining_s": "max(0, arm_until - t); harness: max(arm_settle_s, arm_press_s) "
         "counted down from the arm press",
-        "input_scale": input_scale(),
+        "input_scale": input_scale(version),
     }
+    if version >= 2:
+        out["battery"] = {
+            "features": ["charge", "volts_per_cell"],
+            "charge": "Liftoff telemetry batt_charge (0..1)",
+            "volts_per_cell": "Liftoff telemetry batt_volts / cells (V); input scale 1 / 4.2",
+            "no_power_model": [1.0, FULL_CELL_V],
+        }
+    return out
 
 
 def _body(R: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -252,8 +283,10 @@ def harness30(env: Any) -> torch.Tensor:
     return torch.cat([obs12, curr, look, vision], dim=-1)
 
 
-def build_teacher_obs(env: Any) -> torch.Tensor:
-    """``(n, 148)`` teacher observations of a ``MultiCourseEnv``."""
+def build_teacher_obs(env: Any, version: int | None = None) -> torch.Tensor:
+    """``(n, dim(version))`` teacher observations of a ``MultiCourseEnv`` (default: its
+    ``obs_version``)."""
+    version = int(version or getattr(env, "obs_version", VERSION))
     pos, vel, q = env.pos, env.vel, env.quat
     R = quat_matrix(q)
     parts = [harness30(env), R[:, :, 0], R[:, :, 1], _body(R, vel)]
@@ -302,4 +335,6 @@ def build_teacher_obs(env: Any) -> torch.Tensor:
     parts.append(env.prev_action.to(pos.dtype))
     arm = (env.arm_until - env.t).clamp(min=0.0).to(pos.dtype).unsqueeze(-1)
     parts.append(arm)
+    if version >= 2:
+        parts.append(env.battery().to(pos.dtype))
     return torch.cat(parts, dim=-1)

@@ -258,6 +258,11 @@ def filter_uncovered(pool: Any, model: Any) -> Any:
     return replace(pool, courses=[pool.courses[i] for i in keep], groups=groups)
 
 
+def teacher_obs_version_of(sidecar: dict[str, Any]) -> int:
+    """The teacher's ``teacher-obs`` version (v1 sidecars predate the battery block)."""
+    return int((sidecar.get("obs_schema") or {}).get("version", 1))
+
+
 def build_student_env(
     cfg: Any,
     profile: Any,
@@ -272,7 +277,10 @@ def build_student_env(
     env_config: Any = None,
     randomization_scale: float | None = None,
     episode_log: bool = True,
+    teacher_obs_version: int | None = None,
 ) -> Any:
+    """The student env; ``teacher_obs_version`` = the frozen teacher's ``obs_schema`` version
+    (its ``teacher_obs`` must be the observation the teacher was trained on)."""
     from drone_fly.sim.student_env import StudentCourseEnv
     from drone_fly.training.ppo import build_teacher_env
 
@@ -289,6 +297,8 @@ def build_student_env(
         episode_log=episode_log,
     )
     env.slack = 0.0
+    if teacher_obs_version is not None:
+        env.obs_version = int(teacher_obs_version)
     return StudentCourseEnv(
         env,
         model,
@@ -383,11 +393,17 @@ def evaluate_policy(
     teacher: bool = False,
     batch: int = 4096,
     course_filter: Any = None,
+    teacher_obs_version: int | None = None,
 ) -> dict[str, Any]:
     """Per-track completion of a student (``mode`` noise / exact) or the teacher (exact obs)."""
     from drone_fly.sim.multi_course import OUTCOMES
     from drone_fly.sim.student_env import STRATA
 
+    if teacher and teacher_obs_version is None and getattr(policy, "obs_dim", None):
+        from drone_fly.sim.teacher_obs import VERSIONS, dim
+
+        by_dim = {dim(v): v for v in VERSIONS}
+        teacher_obs_version = by_dim.get(int(policy.obs_dim))
     keep = [i for i, c in enumerate(pool.courses) if course_filter is None or course_filter(c)]
     ids = np.repeat(np.asarray(keep, np.int64), episodes)
     parts: dict[str, list[np.ndarray]] = {}
@@ -403,6 +419,7 @@ def evaluate_policy(
             seed=seed + s,
             mode=mode,
             episode_log=False,
+            teacher_obs_version=teacher_obs_version,
             **mode_settings(cfg, model),
         )
         torch.manual_seed(seed + s)
@@ -671,7 +688,13 @@ def student_sidecar(
         ),
         "world_scale": float(cfg.student.world_scale),
         "actor_arch": actor.arch(),
-        "teacher": {**teacher_ck.record(), "obs_schema": "teacher-obs v1"},
+        "teacher": {
+            **teacher_ck.record(),
+            "obs_schema": "{} v{}".format(
+                (teacher_ck.sidecar.get("obs_schema") or {}).get("name"),
+                (teacher_ck.sidecar.get("obs_schema") or {}).get("version"),
+            ),
+        },
         "noise_model": {
             "path": str(model.path) if model.path else None,
             "sha256": model.sha256,
@@ -878,7 +901,15 @@ def _train_student(
     run.write_tracks_snapshot(pool)
     timing = student_timing(cfg, model)
     pcfg = perception_config(cfg, model)
-    senv = build_student_env(cfg, profile, dev, pool, model, timing=timing)
+    senv = build_student_env(
+        cfg,
+        profile,
+        dev,
+        pool,
+        model,
+        timing=timing,
+        teacher_obs_version=teacher_obs_version_of(ck.sidecar),
+    )
     teacher, _ = load_teacher(ck.checkpoint, dev)
     actor = build_actor(cfg, dev, k1_path=k1_path, warm=not resuming)
     spec = cfg.base.action
@@ -1167,12 +1198,14 @@ def ppo_finetune(
     """The optional L4 phase (see the module docstring)."""
     from drone_fly.controller.student import StudentPPOAdapter
     from drone_fly.sim.multi_course import CRITIC_EXTRA_DIM
-    from drone_fly.sim.teacher_obs import DIM as TDIM
+    from drone_fly.sim.teacher_obs import dim as tdim
     from drone_fly.sim.teacher_obs import input_scale as tscale
 
     f = cfg.finetune
+    tv = int(getattr(senv.env, "obs_version", 2))  # the teacher's teacher-obs version
+    TDIM = tdim(tv)  # noqa: N806
     ac = StudentPPOAdapter(
-        actor, TDIM + CRITIC_EXTRA_DIM, list(tscale()) + [1.0] * CRITIC_EXTRA_DIM
+        actor, TDIM + CRITIC_EXTRA_DIM, list(tscale(tv)) + [1.0] * CRITIC_EXTRA_DIM
     ).to(dev)
     with torch.no_grad():
         actor.log_std.fill_(f.logstd)
@@ -1361,7 +1394,16 @@ def evaluate_student_run(
         "student_noise": evaluate_policy(actor, cfg, profile, pool, model, dev, mode="noise", **kw),
         "student_exact": evaluate_policy(actor, cfg, profile, pool, model, dev, mode="exact", **kw),
         "teacher_exact": evaluate_policy(
-            teacher, cfg, profile, pool, model, dev, mode="exact", teacher=True, **kw
+            teacher,
+            cfg,
+            profile,
+            pool,
+            model,
+            dev,
+            mode="exact",
+            teacher=True,
+            teacher_obs_version=teacher_obs_version_of(s["teacher"].sidecar),
+            **kw,
         ),
     }
     if baseline is not None:

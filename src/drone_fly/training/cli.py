@@ -8,7 +8,9 @@
   time limit and episode count in ``gpu_prototype``'s ``BatchedProcCourse`` (loaded through
   ``harness.contract.load_contract``) and reports both rates plus the 07 model's historical 96 %.
 * ``teacher``: train the UC68 multi-track privileged teacher (``configs/teacher-liftoff.yaml``,
-  :func:`drone_fly.training.ppo.train_teacher`); ``--resume <run>`` continues a run.
+  :func:`drone_fly.training.ppo.train_teacher`); ``--resume <run>`` continues a run in place;
+  ``--continue-from <run>`` starts a NEW run (this config, current course conversion) from that
+  run's ``resume.pt`` (weights, optimizer, step counter, curriculum), recording the lineage.
 * ``eval <run|teacher.pt> --tracks <selector>``: the UC68 per-track report
   (:mod:`drone_fly.training.evaluate`).
 * ``bench``: env-steps/s of ``gpu_prototype`` vs :class:`~drone_fly.sim.course.CourseEnv` at
@@ -91,6 +93,8 @@ def cmd_teacher(args: argparse.Namespace) -> int:
         overrides["drone"] = args.drone
     if args.scenes_root:
         overrides["tracks"] = {"scenes_root": args.scenes_root}
+    if args.resume and args.continue_from:
+        raise SystemExit("--resume and --continue-from are exclusive")
     if args.resume:
         raw = yaml.safe_load((Path(args.resume) / "config.yaml").read_text(encoding="utf-8"))
         raw = teacher_raw_from_snapshot(raw)
@@ -108,6 +112,7 @@ def cmd_teacher(args: argparse.Namespace) -> int:
         _profile(cfg.drone),
         run_root=args.output_root,
         resume=args.resume,
+        continue_from=args.continue_from,
         max_iterations=args.max_iterations,
         k1_path=args.k1_path,
     )
@@ -726,6 +731,11 @@ def add_parser(sub: Any) -> None:
     p_t.add_argument("--procedural", type=float, help="procedural share of the mix, e.g. 0.4")
     p_t.add_argument("--config", default="teacher-liftoff", help="teacher config (name or path)")
     p_t.add_argument("--resume", help="run folder to resume (keeps its config.yaml)")
+    p_t.add_argument(
+        "--continue-from",
+        dest="continue_from",
+        help="start a NEW run from a run folder (its resume.pt) or a teacher_it<N>.pt checkpoint",
+    )
     p_t.add_argument("--budget", type=float)
     p_t.add_argument("--n-envs", type=int, dest="n_envs")
     p_t.add_argument("--device", help="auto | cpu | cuda")

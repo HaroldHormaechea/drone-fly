@@ -173,11 +173,11 @@ for t in range(N):
     s = plant_step(s, action)                  # §3 integrator (50 Hz)
 ```
 
-## 7. Teacher checkpoints: `teacher-obs` v1, CourseFrame, sidecar keys (UC68)
+## 7. Teacher checkpoints: `teacher-obs` v1 / v2, CourseFrame, sidecar keys (UC68)
 
 Teacher checkpoints are written by `drone-fly train teacher` and use action contract **v2** (§0).
-They take a different observation from the K1 models: the privileged **`teacher-obs` v1**, 148
-float32 values with exact (noise-free) quantities. See
+They take a different observation from the K1 models: the privileged **`teacher-obs`**, with
+exact (noise-free) quantities. v1 has 148 float32 values; v2 adds the battery for 150. See
 [ADR 0007](adr/0007-track-library-and-teacher.md). The actor is a plain MLP (`actor: mlp-teacher`)
 that applies its own fixed per-value input scaling, so the observation is fed **raw**.
 
@@ -208,6 +208,14 @@ The body frame is FLU.
 | `altitude` | [142] | z minus the highest solid or floor surface straight below |
 | `prev_action` | [143:147) | the raw policy output of the previous tick, before decoding, clipping or arm override; zeros at the start |
 | `arm_remaining_s` | [147] | seconds until the motors accept commands; 0 once armed and for air starts |
+| `battery` (v2 only) | [148:150) | `batt_charge` (0–1) and `batt_volts / cells` (V per cell), exactly as Liftoff's telemetry reports them; input scale 1 and 1/4.2 |
+
+**Versions.** `teacher-obs` v2 (150 values) is the current version; v1 is its first 148 values.
+The sidecar's `obs_schema.version` says which one a checkpoint takes. A harness builds the battery
+block from live telemetry with `tracks.teacher_obs_ref.battery_from_telemetry(batt_charge,
+batt_volts, cells)`, where `cells` comes from the drone profile's `power.cells`. A v2 teacher was
+trained with the plant's power model (low-voltage cutoff, thrust drop at speed); see
+`drones/<id>/sysid.md`, "Power model".
 
 **Harness obstacle list.** Placed track items only: never scene colliders, never route-gate frames.
 Each is one AABB, kept if its max half-extent is at most 3.0 m and it lies inside the course

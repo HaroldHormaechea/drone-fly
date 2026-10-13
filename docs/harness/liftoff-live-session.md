@@ -302,10 +302,26 @@ every output is labelled ORACLE. See [ADR 0008](../adr/0008-oracle-teacher-in-li
   checkpoint, `attempts/` and `report.md` / `report.json`. A copy of the latest report goes to the
   track level.
 - **What is committed.** Only `docs/harness/reports/uc69-oracle-liftoff-arena-04.md`.
+- **Power data.** `oracle-report` also exports per-attempt power time series to the session's `power/` folder (gitignored): pack voltage, charge, throttle stick, RPM, specific force and airspeed.
 
 **Conclusion**
 
-Pending the live stage (AC9). The report's conclusion paragraph will be pasted here.
+The live session ran on 2026-10-13: Infinity Loop, 10 attempts, the val-selected `teacher_it1920`. Full results are in [the summary](reports/uc69-oracle-liftoff-arena-04.md).
+
+With exact gate poses, **control transfers**:
+
+- take-off is clean;
+- every attempt flies a full lap plus three gates (11 of 33 crossings), with 91.7 % per-passage success;
+- the loop holds 50 Hz.
+
+Every attempt then ends the same way, at the same place (**power_loss**). About 18.3 s after spin-up, the 3S pack sags to Liftoff's **8.10 V low-voltage cutoff**, with 74 % charge left. The motors drop to idle under full stick, and the drone falls.
+
+Two simulator gaps cause this:
+
+- **No battery model.** The teacher holds the collective at `max_g` almost all the time, and the simulator has no battery, so nothing pays for that.
+- **Thrust at speed.** The measured specific force at full stick at 24 m/s is about 2 g median, against the profile's static 4.23 g. Liftoff's lap is therefore 13.0 s vs 10.6 s in the sim.
+
+So the remaining gap is power and aerodynamics modelling (a pack sag / cutoff model, thrust vs. airspeed), not perception.
 
 ## Measure a new drone
 
