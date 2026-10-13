@@ -323,11 +323,11 @@ Two simulator gaps cause this:
 
 So the remaining gap is power and aerodynamics modelling (a pack sag / cutoff model, thrust vs. airspeed), not perception.
 
-**Run 2 (2026-10-13), `teacher_it1374`.** This teacher was trained with the fitted pack model and sees its battery (teacher-obs v2). **3 of 3 valid attempts finished all 4 laps (33/33)** in about 73.7 s, a little faster than its sim race. The pack stayed above the cutoff (8.83 V minimum, 48 % charge left).
+**Run 2 (2026-10-13), `teacher_it1374`.** This teacher was trained with the fitted pack model and sees its battery (teacher-obs v2). **All 10 flown attempts finished all 4 laps (33/33)** in 73.8 s, against 77-79 s in its sim. The pack stayed above the cutoff (8.82 V minimum, 48 % charge left).
 
-With the power model, control transfers completely. The remaining gap is perception (UC70/UC71).
+With the power model, control transfers completely (100 %, 95 % interval 72.2-100 %). The remaining gap is perception (UC70/UC71).
 
-The other 7 attempts wait on a post-race Retry fix: after a finished race, `ui retry` must wait for the result screen and confirm the spawn before the next attempt starts.
+After a finished race, Liftoff's post-race screen needs `harness ui retry`, not `reset`. It waits for the screen, clicks Retry and confirms the drone is at the spawn and at rest. `Invoke-LiftoffAttempts.ps1 -Teacher` does this automatically.
 
 ## Measure a new drone
 

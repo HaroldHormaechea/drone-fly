@@ -4,7 +4,7 @@
 > TRAIN track, stale-build scene. Summary of the gitignored session report; no telemetry or frames
 > are committed.
 
-## Run 2: teacher_it1374 (teacher-obs v2, battery-aware), 2026-10-13
+## Run 2: teacher_it1374 (teacher-obs v2, battery-aware), 2026-10-13: AC9 result
 
 | | |
 |---|---|
@@ -13,71 +13,86 @@
 | Training | trained with the power model fitted on run 1's telemetry |
 | Course | conversion v4 `7d4c8e44dcbb995e`; world scale 1.0 |
 | Session | `artifacts/eval/liftoff-gremlin-micro/20261013T075647Z-teacher-liftoff-aug/oracle/liftoff-arena-04/sessions/20261013T134302Z-a140e970/` |
-| Attempts | 6: 3 flew (N_eff 3) and 3 were refused (see below) |
+| Attempts | 13 recorded: **10 flown (N_eff 10)** and 3 refused before arming (see below) |
 
-### Result: the teacher finishes the race
+### Result: 10 of 10 finished the race
 
-**3 of 3 valid attempts finished the full race: 33 of 33 crossings, 4 laps, no contact under the
-sim's rules.**
+**All 10 flown attempts finished the full race: 33 of 33 crossings, 4 laps, no contact under the
+sim's rules, no power loss.**
 
-Mechanical verdict: **control transfers**. Live sim-rule completion is 100 % [43.9, 100] % (N_eff
-3), against the sim's 87.5 % randomized / 100 % nominal. The report also flags the session for a
-re-run because 3 of its 6 attempts were refused.
+| | |
+|---|---|
+| Verdict | **control transfers** |
+| Live completion, sim rules | 100 % (Wilson 95 % interval 72.2-100 %, N_eff 10) |
+| Sim completion, same checkpoint and track | 87.5 % randomized, 100 % nominal |
 
 | attempt | race time (1st to last crossing) | lap times | first gate after arming | min pack V | at the finish |
 |---|---|---|---|---|---|
 | 1 | 73.78 s | 14.12 / 18.19 / 20.30 / 21.16 s | 3.59 s | 8.83 V | 9.98 V, charge 0.48 |
-| 3 | 73.76 s | 14.09 / 18.15 / 20.35 / 21.17 s | 3.59 s | 8.84 V | 9.95 V, charge 0.48 |
-| 5 | 73.68 s | 14.07 / 18.15 / 20.31 / 21.15 s | 3.59 s | 8.84 V | 9.95 V, charge 0.48 |
+| 2 | 73.76 s | 14.09 / 18.15 / 20.35 / 21.17 s | 3.59 s | 8.84 V | 9.95 V, charge 0.48 |
+| 3 | 73.68 s | 14.07 / 18.15 / 20.31 / 21.15 s | 3.59 s | 8.84 V | 9.95 V, charge 0.48 |
+| 4 | 73.92 s | 14.12 / 18.23 / 20.36 / 21.20 s | 3.59 s | 8.84 V | 9.96 V, charge 0.48 |
+| 5 | 73.80 s | 14.09 / 18.23 / 20.32 / 21.16 s | 3.59 s | 8.83 V | 9.94 V, charge 0.48 |
+| 6 | 73.84 s | 14.08 / 18.23 / 20.32 / 21.21 s | 3.61 s | 8.85 V | 9.96 V, charge 0.48 |
+| 7 | 73.80 s | 14.09 / 18.23 / 20.33 / 21.15 s | 3.57 s | 8.83 V | 9.96 V, charge 0.48 |
+| 8 | 73.71 s | 14.04 / 18.20 / 20.36 / 21.11 s | 3.59 s | 8.82 V | 9.94 V, charge 0.48 |
+| 9 | 73.87 s | 14.14 / 18.19 / 20.35 / 21.19 s | 3.59 s | 8.83 V | 9.94 V, charge 0.48 |
+| 10 | 73.82 s | 14.07 / 18.24 / 20.31 / 21.20 s | 3.59 s | 8.84 V | 9.96 V, charge 0.48 |
 
-- **Liftoff's own race clock:** 1:13.759 and 1:13.675 on its result screen, in 1st and 2nd place
+- **Race time:** 73.80 s p50 (73.68 to 73.92). Liftoff's own result screen read 1:13.7, 1st or 2nd
   against the AI ghosts.
-- **Sim, same checkpoint:** a 79.3 s race randomized and 77.2 s nominal, with 19.3-19.7 s laps.
-  The live race is a little faster.
-- **Battery:** no power loss in any attempt. The lowest pack voltage was 8.83 V, still above
-  Liftoff's 8.10 V cutoff. The race ends about 76 s after spin-up with 48 % charge left.
-- **Thrust at full stick:** the body-z specific force is 1.8 g p50 / 3.4 g p95 at 23 m/s, the same
-  shortfall as run 1. The teacher now flies within it.
-- **Loop:** 50.0 Hz, 3 missed deadlines in 11,680 ticks. Live vs offline crossings: 0 mismatches.
+- **Sim race, same checkpoint:** 79.3 s randomized, 77.2 s nominal. The live race is about 4-7 %
+  faster.
+- **Consistency:** the flights are near-deterministic. The spread is 0.24 s over the race and
+  under 0.15 s per lap.
+- **Battery:** the lowest pack voltage was 8.82 V, above Liftoff's 8.10 V cutoff. Each race ends
+  about 76 s after spin-up with 48 % charge left.
+- **Thrust at full stick:** body-z specific force 1.8 g p50 / 3.5 g p95 at 23 m/s. That is the
+  same shortfall against the profile's 4.23 g as run 1, and the teacher now flies within it.
+- **Loop:** 50.0 Hz (p50 and min), 11 missed deadlines in 38,949 ticks. Live vs offline crossings:
+  0 mismatches.
 
-### Refused attempts: a harness reset issue, not a flight
+### Refused attempts and the retry fix
 
-Attempts 2, 4 and 6 were refused at the start check (exit 6). The telemetry was 37.7 m off,
-rotated 90 deg and moving at 2.7-10 m/s, so the drone was never armed.
+Three attempts were refused at the start check (exit 6) and never armed. They are excluded from
+N_eff. Each followed a finished race: the telemetry was 37.7 m off, rotated 90 deg and moving at
+2.7-10 m/s.
 
-- **What happens:** after a finished race, Liftoff shows its post-race screen with the race replay
-  running behind it. Esc -> Reset does not respawn from there.
-- **First fix:** `ui retry`, which clicks the screen's "Retry" button. It works when the screen
-  has settled. It worked by hand twice, and both times the drone was at the spawn and at rest.
-- **Why it failed inside the loop:** it clicked within about 1-5 s of the finish, before the
-  screen accepted input.
-- **Why the at-rest check passed anyway:** in the post-race state Liftoff streams position
-  (0, 0, 0), so two identical zero samples looked like a drone at rest.
-
-The remaining 7 attempts are deferred until a fixed retry has been verified live. The fix:
-- wait for the post-race screen by a pixel probe of the Retry button;
-- click, then require **both** a non-zero position at the level's spawn (`spawn_matches`) and
-  rest over a longer window;
-- otherwise re-click.
+- **Cause:** after a finished race, Liftoff shows its post-race screen with the replay running
+  behind it, and Esc -> Reset does not respawn from there.
+- **The interim `ui retry`, a click on that screen's Retry, failed in two ways:**
+  - Inside the loop it clicked within about 1-5 s of the finish, before the screen accepted
+    input.
+  - Its at-rest check passed falsely, because the post-race state streams position (0, 0, 0).
+- **The verified retry** (`ui_driver.retry`):
+  1. waits for the screen by a pixel probe of its five buttons;
+  2. hovers and clicks Retry;
+  3. accepts only a **non-zero** position at the level's spawn (`spawn_matches`) at rest over
+     2 s;
+  4. re-clicks up to 3 times, then stops with `RetryError`.
+- **Result:** it restarted the race on the first try after all 7 later finishes (1 by hand, 6 in
+  the loop).
+- **Side effect:** the last attempt's in-game recording was not saved. The save hook runs at the
+  stop, but the pause-menu save path is not available from the post-race screen.
 
 ### Comparison with run 1
 
 | | run 1: it1920 (v1, no power model) | run 2: it1374 (v2, battery-aware) |
 |---|---|---|
-| crossings | 11 / 33 in 10 of 10 attempts | **33 / 33 in 3 of 3** |
-| end | power_loss: 8.10 V cutoff 18.3 s after spin-up | finished at about 76 s, min 8.83 V |
+| attempts | 10 flown | 10 flown |
+| crossings | 11 / 33 in all 10 | **33 / 33 in all 10** |
+| end | power_loss: 8.10 V cutoff 18.3 s after spin-up | race finished at about 76 s, min 8.82 V |
 | lap 1 | 13.0 s | 14.1 s |
+| race | not finished | 73.8 s (sim: 77-79 s) |
 | speed on the long legs | about 24 m/s | about 23 m/s |
 
 ### Conclusion
 
-Once the simulator models the pack, and the teacher sees its battery and is trained under it,
+With the battery modelled in the simulator, and the teacher seeing its pack and trained under it,
 **control transfers completely with oracle gates**. The privileged teacher races all 4 laps of
-Infinity Loop in Liftoff, matching or beating its own sim lap times. Run 1's failure was a
-modelling gap (battery and power), not a control gap. **The remaining gap to a live student is
+Infinity Loop in Liftoff in 10 of 10 attempts, slightly faster than in its own sim. Run 1's
+failure was a power-modelling gap, not a control gap. **The remaining gap to a live student is
 perception (UC70/UC71).**
-
-Still open: the remaining 7 attempts for N = 10, which wait on the retry fix.
 
 ---
 
