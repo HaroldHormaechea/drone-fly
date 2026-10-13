@@ -514,7 +514,8 @@ def _cmd_gates_dataset_report(args: argparse.Namespace) -> int:
             continue
         if split == "held-out":
             lab = gd.labels_dir_for(d, meta)
-            if lab is not None:
+            ok_cam = gd.same_camera(meta, float(cfg.section("camera")["uptilt_deg"]))
+            if lab is not None and meta["alignment"].get("verified") and ok_cam:
                 heldout_rows.setdefault(meta["map"], []).extend(load_labels(lab).rows)
             continue
         usable.append(d)

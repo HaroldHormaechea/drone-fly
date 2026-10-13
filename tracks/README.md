@@ -21,7 +21,8 @@ machine.
 ```
 drone-fly tracks list [--split train|val|held-out] [--source liftoff|procedural]
 drone-fly tracks check [--source ...] [--root DIR] [--scenes-root DIR] [--require-scenes]
-                       [--entry ID ...] [--gate-coverage | --require-gate-coverage] [--preset P]
+                       [--entry ID ...] [--gate-coverage | --require-gate-coverage]
+                       [--require-visible-passages] [--preset P]
 drone-fly tracks scan --source liftoff [--root DIR] [--scenes-root DIR] [--seed 68]
 drone-fly tracks stats --split train [--root DIR]
 drone-fly tracks extract-scenes [--map M ...] [--bundle M=NAME] [--witness M=POINTS] [--force]
@@ -35,7 +36,9 @@ drone-fly tracks extract-props [--force] [--root DIR] [--game-dir DIR]
   `--gate-coverage` (UC71) also lists, per Liftoff entry, the itemIDs that the harness gate-type
   table (`harness/configs/gate_types/liftoff.yaml`) does not cover - neither a gate class, a
   checkpoint volume nor a `not_gates` entry - and the route passages with no visible gate
-  (volume-only); `--require-gate-coverage` makes either a failure. `--entry` limits the check to
+  (volume-only), with their share; `--require-gate-coverage` fails on unknown itemIDs and
+  `--require-visible-passages` also on volume-only passages (many races mark the route with flags,
+  tyres or light rigs around invisible checkpoints, so volume-only is a property of the track). `--entry` limits the check to
   some entries. The gate table does not change the conversion: only `inflatable_arch` reaches it
   (ADR 0010 §1).
 - `scan` pairs, converts and hashes every local track/race pair, then writes `tracks/liftoff.yaml`.

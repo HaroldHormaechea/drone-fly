@@ -13,8 +13,11 @@ never silently treated as gates: ``tracks check --gate-coverage`` lists them,
 ``--require-gate-coverage`` fails on them, and ``harness label`` refuses a track that has any.
 
 A route passage that is a checkpoint volume with no visible gate around it is ``volume-only``: the
-detector cannot see it (the student's ``perception.uncovered`` covers it, UC70). "Around" = a
-visible gate's aperture centre within half the volume's largest extent + :data:`NEAR_MARGIN_M`.
+detector cannot see it (the student's ``perception.uncovered`` covers it, UC70). It is a property
+of the track (many Liftoff races mark the route with flags, tyres or light rigs only), not a gap
+in the table, so it is reported with its share; only ``--require-visible-passages`` fails on it.
+"Around" = a visible gate's aperture centre within half the volume's largest extent +
+:data:`NEAR_MARGIN_M`.
 """
 
 from __future__ import annotations
@@ -63,7 +66,7 @@ def _volume_radius(it: PlacedItem) -> float:
 
 def _aperture_centre(it: PlacedItem, table: GateTypeTable) -> np.ndarray:
     gtype = table.classify(it.item_id)
-    off = np.asarray(gtype.center_offset if gtype else (0.0, 0.0, 0.0), np.float64)
+    off = gtype.item_center() if gtype else np.zeros(3)
     return np.asarray(it.position, np.float64) + it.rotation @ (off * np.asarray(it.scale))
 
 
@@ -80,8 +83,18 @@ class TrackCoverage:
     volume_only: list[int] = field(default_factory=list)  # route passage indices
 
     @property
+    def covered(self) -> bool:
+        """Every item is classified (no unknown itemIDs)."""
+        return not self.unknown
+
+    @property
     def ok(self) -> bool:
+        """Covered and every route passage has a visible gate."""
         return not self.unknown and not self.volume_only
+
+    @property
+    def volume_only_share(self) -> float:
+        return len(self.volume_only) / self.passages if self.passages else 0.0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -101,7 +114,10 @@ class TrackCoverage:
         if self.unknown:
             parts.append(f"unknown itemIDs {self.unknown}")
         if self.volume_only:
-            parts.append(f"{len(self.volume_only)} volume-only passage(s) {self.volume_only}")
+            parts.append(
+                f"{len(self.volume_only)} volume-only passage(s) "
+                f"({100 * self.volume_only_share:.0f} %) {self.volume_only}"
+            )
         return ", ".join(parts)
 
 

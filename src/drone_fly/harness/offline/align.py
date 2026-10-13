@@ -149,8 +149,10 @@ def gate_edge_world(gates: list[Any]) -> list[GateEdges]:
     """Per placed gate: its centre, edge points and tangent-shifted edge points (world)."""
     out = []
     for g in gates:
-        p, t = edge_points_local(g.gtype)
-        out.append(GateEdges(g.center_w, g.local_to_world(p), g.local_to_world(p + TANGENT_M * t)))
+        p, t = edge_points_local(g.gtype)  # gate frame [u, v, 0] -> item frame
+        lp = g.gtype.local_points(p[:, :2])
+        la = g.gtype.local_points((p + TANGENT_M * t)[:, :2])
+        out.append(GateEdges(g.center_w, g.local_to_world(lp), g.local_to_world(la)))
     return out
 
 

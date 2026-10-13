@@ -226,3 +226,71 @@ G1) until P3 adds their gate classes and re-runs `captures verify`.
 - Frame rate: 7.3-10 fps at the requested 10 (heavy maps render slower).
 - The Borrum pass (other-camera recordings on train maps) was not run in this window: a
   follow-up.
+
+### P3 gate types, labels, verification and G1 (2026-10-13, CPU)
+
+**Gate types.** Ten classes were added for the captured tracks (`configs/gate_types/liftoff.yaml`),
+one per geometry with a regex over the branding variants, dimensions from the props.json colliders
+(the trigger via `opening()`): `airgate_big`, `airgate_small`, `generic_gate`,
+`generic_double_gate`, `multigp_frame_7x6`, `multigp_frame_8x10`, `light_gate_300x220`,
+`light_hoop`, `inflatable_gate`, `truss_gate_finish`. A new optional key `normal: x` handles props
+built facing their `+x` axis (`TrussGateFinishGeneric01`). Calls made from the colliders alone and
+marked `HEURISTIC` in the file: the open bottom of both MultiGP frames (no bottom-bar collider) and
+the lower opening as the double gate's aperture. The conversion still sees only
+`inflatable_arch`: the default fingerprint stays `639beb3ef1bd8bec`.
+
+**Coverage.** Over the 21 catalogue entries with a capture there is no unknown itemID left
+(`tracks check --require-gate-coverage` exits 0). Many route passages have no visible gate at all -
+the race marks them with flags, tyres or light rigs around an invisible checkpoint volume
+(autumn-fields-06, permafrost-02, rustline-01, straw-bale-05: 100 %; surtur-02 98 %; short-circuit-02
+90 %; others 12-63 %). That is a property of the track, not a table gap, so
+`--require-gate-coverage` now fails on unknown itemIDs only and the volume-only share is reported;
+`--require-visible-passages` keeps the stricter rule (**deviation from AC5's wording**, which
+failed on either).
+
+**Verification.** The geometry of the new classes is confirmed by `captures verify`: 13 of the 22
+pending captures verified with margins 2.01-3.60 and the camera peak within one step
+(bando-city 3.60, hangar-c03 2.89 / 2.95, minus-two 2.45 / 2.65, the-pit-06 2.55 / 2.19, pine-valley
+2.27 / 2.14, hannover 2.37, surtur-01 2.31, the-green-01 2.01). Unverifiable and excluded: the 9
+captures on tracks with no visible gate (AutumnFields 06 x3, Rustline 01 x3, StrawBale 05 x2,
+Permafrost 02) and surtur-02/03 (one finish gate: 20 / 15 frames with a gate in view < 50).
+
+**Occlusion.** Not measurable on this machine: no scene cache of a captured map is present locally
+(the catalogue lists BandoCity, Hannover and ShortCircuit as `ok`, the files are not in the
+trackdata root). `tracks extract-scenes` (UnityPy, reads the installed game files) would build them;
+labels carry no `occluded` flag until then.
+
+**G1 (`gates dataset-report`): NO-GO on one criterion, val maps (1 of 2).** In-range (4-25 m)
+gate-frames, with the 4-8 / 8-15 / 15-25 m bins:
+
+| Split | Map | Type | 4-25 | 4-8 | 8-15 | 15-25 |
+|---|---|---|---|---|---|---|
+| train | LiftoffArena | inflatable_arch | 3047 | 498 | 1013 | 1536 |
+| train | PineValley | airgate_big | 1297 | 286 | 412 | 599 |
+| train | Hannover | airgate_big | 804 | 118 | 244 | 442 |
+| train | Hannover | inflatable_gate | 139 | 20 | 48 | 71 |
+| train | TheGreen | inflatable_gate | 419 | 69 | 136 | 214 |
+| train | TheGreen | inflatable_arch | 378 | 67 | 120 | 191 |
+| train | BandoCity | light_gate_300x220 | 333 | 63 | 109 | 161 |
+| train | BandoCity | light_hoop | 262 | 14 | 80 | 168 |
+| train | MarinaBay | inflatable_arch | 294 | 55 | 97 | 142 |
+| train | MarinaBay | multigp_frame_8x10 | 289 | 75 | 82 | 132 |
+| train | MarinaBay | multigp_frame_7x6 | 56 | 11 | 21 | 24 |
+| train | ShortCircuit | inflatable_arch | 127 | 14 | 37 | 76 |
+| val | Surtur | airgate_big | 678 | 138 | 238 | 302 |
+| held-out | MinusTwo | airgate_small | 6828 | 1181 | 1891 | 3756 |
+| held-out | ThePit | inflatable_arch | 1237 | 221 | 510 | 506 |
+| held-out | ThePit | generic_gate | 721 | 99 | 206 | 416 |
+| held-out | HangarC03 | truss_gate_finish | 501 | 91 | 172 | 238 |
+
+Train 7,445 gate-frames on 7 maps (1,290 at 4-8 m), held-out 3 maps with a seen type
+(`inflatable_arch` 1,237), the protected v1 window intact. Val: only Surtur. AutumnFields' only
+preset-camera recordings are on race 06, which has no visible gate; Rustline and DubaiLegends have
+no visible gates on any track; the Borrum recordings may not be used on val maps. **The second val
+map needs a hand-flown capture (P2):** AutumnFields 03 or 04 (13 / 12 inflatable arches, a known
+class) or 02 (19 MultiGP 8x10 frames plus 5 MultiGP float squares, a new class). Another unattended
+replay session cannot fill it.
+
+Under D-U1, of the held-out types only `inflatable_arch` is seen in training; `airgate_small`,
+`generic_gate` and `truss_gate_finish` are reported as `unseen type` (`airgate_small` is
+`airgate_big`'s shape at 0.59 scale, but a class carries one size for PnP).

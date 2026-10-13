@@ -6,7 +6,10 @@ estimator (class -> object points for PnP). A new gate style is a new entry here
 retrain — no new code.
 
 Coordinates are **Unity-local** Liftoff metres of the placed item: ``x`` right, ``y`` up, the
-gate plane at ``z = 0`` (the item's forward axis ``+z`` is the plane normal).
+gate plane at ``z = 0`` (the item's forward axis ``+z`` is the plane normal). A prop built facing
+its ``+x`` axis instead (e.g. ``TrussGateFinishGeneric01``) sets ``normal: x``: its ``[u, v]``
+keypoints / outline and its ``[u, v, n]`` ``center_offset`` are then given in the gate plane and
+map to the item as ``(n, v, -u)`` (:meth:`GateType.item_point`).
 
 * ``aperture`` / ``outer`` — ``[width, height]`` of the fly-through opening / the whole frame.
 * ``center_offset`` — the aperture centre in the item frame (the gate "position").
@@ -50,6 +53,7 @@ from drone_fly.harness.errors import HarnessConfigError
 
 _REQUIRED = ("class", "match", "aperture", "outer")
 BOTTOMS = ("open", "closed")
+NORMALS = ("z", "x")
 
 
 def _pair(value: Any, key: str, *, positive: bool = True) -> tuple[float, float]:
@@ -87,6 +91,7 @@ class GateType:
     tube_radius: float = 0.0
     bottom: str | None = None  # open | closed (required in a gate-types file)
     family: str | None = None  # reporting only
+    normal: str = "z"  # the item axis the gate plane faces (z, or x for props built sideways)
 
     @property
     def n_keypoints(self) -> int:
@@ -106,10 +111,25 @@ class GateType:
         k = self.keypoints
         return np.stack([k[:, 0] - cx, -(k[:, 1] - cy), np.zeros(len(k))], axis=1)
 
+    def item_point(self, uvn: np.ndarray) -> np.ndarray:
+        """Gate-frame ``(N, 3)`` points ``[u, v, n]`` -> item-local (see the module docstring)."""
+        p = np.asarray(uvn, np.float64).reshape(-1, 3)
+        if self.normal == "x":
+            return np.stack([p[:, 2], p[:, 1], -p[:, 0]], axis=1)
+        return p.copy()
+
+    def item_center(self) -> np.ndarray:
+        """The aperture centre in the item frame ``(3,)``."""
+        return self.item_point(np.asarray(self.center_offset, np.float64))[0]
+
+    def item_normal(self) -> np.ndarray:
+        """The gate plane's normal in the item frame ``(3,)``."""
+        return np.array([1.0, 0.0, 0.0] if self.normal == "x" else [0.0, 0.0, 1.0])
+
     def local_points(self, points_xy: np.ndarray | None = None) -> np.ndarray:
-        """Planar Unity-local ``[x, y]`` points -> ``(N, 3)`` Unity-local points (``z = 0``)."""
+        """Planar gate-frame ``[u, v]`` points -> ``(N, 3)`` Unity item-local points."""
         p = self.keypoints if points_xy is None else np.asarray(points_xy, np.float64)
-        return np.concatenate([p, np.zeros((len(p), 1))], axis=1)
+        return self.item_point(np.concatenate([p, np.zeros((len(p), 1))], axis=1))
 
     def flip_permutation(self) -> np.ndarray:
         """Index permutation that swaps every left/right pair (identity elsewhere)."""
@@ -180,6 +200,9 @@ class GateType:
         family = d.get("family")
         if family is not None and (not isinstance(family, str) or not family):
             raise HarnessConfigError(f"{key}.family must be a non-empty string")
+        normal = d.get("normal", "z")
+        if normal not in NORMALS:
+            raise HarnessConfigError(f"{key}.normal must be one of {list(NORMALS)}, got {normal!r}")
         return cls(
             cls=name,
             match=d["match"],
@@ -192,6 +215,7 @@ class GateType:
             tube_radius=float(radius),
             bottom=bottom,
             family=family,
+            normal=normal,
         )
 
 

@@ -78,12 +78,12 @@ def place_gate(item: PlacedItem, gtype: GateType) -> PlacedGate:
         p = np.asarray(local, np.float64) * item.scale
         return (p @ item.rotation.T + item.position) @ _M.T
 
-    fwd = _M @ (item.rotation @ np.array([0.0, 0.0, 1.0]))
+    fwd = _M @ (item.rotation @ gtype.item_normal())
     return PlacedGate(
         item=item,
         gtype=gtype,
         keypoints_w=world(gtype.local_points()),
-        center_w=world(np.asarray([gtype.center_offset], np.float64))[0],
+        center_w=world(gtype.item_center()[None])[0],
         forward_w=fwd / (np.linalg.norm(fwd) + 1e-12),
     )
 
@@ -230,7 +230,8 @@ def check_gate_types_against_props(
         b = collider_bounds(entry["colliders"])
         if b["solid"] is not None:
             lo, hi = np.asarray(b["solid"]["min"]), np.asarray(b["solid"]["max"])
-            width, height = hi[0] - lo[0], hi[1] - max(lo[1], 0.0)
+            ax = 2 if gtype.normal == "x" else 0  # the in-plane horizontal item axis
+            width, height = hi[ax] - lo[ax], hi[1] - max(lo[1], 0.0)
             for name, got, want in (
                 ("outer width", width, gtype.outer[0]),
                 ("outer height", height, gtype.outer[1]),
@@ -244,7 +245,7 @@ def check_gate_types_against_props(
         if trig is not None:
             half, center = np.asarray(trig["half"]), np.asarray(trig["center"])
             for name, got, want in (
-                ("aperture width", 2 * half[0], gtype.aperture[0]),
+                ("aperture width", 2 * half[2 if gtype.normal == "x" else 0], gtype.aperture[0]),
                 ("aperture height", 2 * half[1], gtype.aperture[1]),
                 ("aperture centre y", center[1], gtype.center_offset[1]),
             ):

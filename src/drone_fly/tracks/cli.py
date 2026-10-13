@@ -6,7 +6,8 @@
   convert; with ``--require-scenes`` a map without a usable scene fails. ``--gate-coverage``
   (UC71) also lists, per liftoff entry, the itemIDs the preset's gate-type table does not cover
   and the route passages with no visible gate (``drone_fly.tracks.gate_coverage``);
-  ``--require-gate-coverage`` makes either a failure.
+  ``--require-gate-coverage`` fails on unknown itemIDs, ``--require-visible-passages`` also on
+  volume-only passages.
 * ``scan --source liftoff [--root] [--scenes-root] [--seed]``: (re)write ``tracks/liftoff.yaml``.
 * ``stats --split S``: leg spacing / aperture percentiles over ONE split (the procedural ranges
   are taken from ``--split train`` only).
@@ -62,7 +63,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     bad = 0
     conv = ConversionConfig.from_dict({"scene_policy": "require"} if args.require_scenes else None)
-    coverage = args.gate_coverage or args.require_gate_coverage
+    coverage = args.gate_coverage or args.require_gate_coverage or args.require_visible_passages
     table = not_gates = None
     if coverage:
         from drone_fly.harness.config import load_config
@@ -89,7 +90,8 @@ def cmd_check(args: argparse.Namespace) -> int:
                 bad += 1
                 print(f"  FAIL {e['id']}: {exc}")
             if coverage and root is not None:
-                bad += _check_coverage(e, root, table, not_gates, args.require_gate_coverage)
+                bad += _check_coverage(e, root, table, not_gates, args.require_gate_coverage,
+                                       args.require_visible_passages)  # fmt: skip
     missing = sorted(wanted - {e["id"] for n in _cat_names(args.source)
                                for e in cat.load_named(n).entries})  # fmt: skip
     if missing:
@@ -99,8 +101,11 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 0 if not bad else 1
 
 
-def _check_coverage(e: dict[str, Any], root: Any, table: Any, not_gates: Any, strict: bool) -> int:
-    """Print one entry's gate coverage; 1 if ``strict`` and it is not covered, else 0."""
+def _check_coverage(
+    e: dict[str, Any], root: Any, table: Any, not_gates: Any, strict: bool, visible: bool = False
+) -> int:
+    """Print one entry's gate coverage; 1 if ``strict`` and an itemID is unknown (or ``visible`` and
+    a route passage has no visible gate), else 0."""
     from drone_fly.harness.errors import HarnessConfigError
     from drone_fly.tracks.gate_coverage import entry_coverage
 
@@ -109,9 +114,10 @@ def _check_coverage(e: dict[str, Any], root: Any, table: Any, not_gates: Any, st
     except (HarnessConfigError, OSError) as exc:
         print(f"       gates FAIL {e['id']}: {exc}")
         return 1
-    tag = "gates ok  " if cov.ok else ("gates FAIL" if strict else "gates warn")
+    failed = (strict and not cov.covered) or (visible and not cov.ok)
+    tag = "gates ok  " if cov.ok else ("gates FAIL" if failed else "gates warn")
     print(f"       {tag} {e['id']}: {cov.summary()}")
-    return int(strict and not cov.ok)
+    return int(failed)
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
@@ -204,7 +210,9 @@ def add_parser(sub: Any) -> None:
     p.add_argument("--gate-coverage", action="store_true",
                    help="report unknown gate itemIDs / volume-only passages (UC71)")  # fmt: skip
     p.add_argument("--require-gate-coverage", action="store_true",
-                   help="fail entries with unknown itemIDs or volume-only passages")  # fmt: skip
+                   help="fail entries with unknown itemIDs")  # fmt: skip
+    p.add_argument("--require-visible-passages", action="store_true",
+                   help="also fail route passages with no visible gate (volume-only)")  # fmt: skip
     p.add_argument("--preset", default="liftoff", help="harness preset whose gate_types to use")
     p.set_defaults(func=cmd_check)
     p = tsub.add_parser("scan", help="scan the local trackdata and write tracks/<source>.yaml")
