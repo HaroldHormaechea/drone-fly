@@ -1,0 +1,62 @@
+# UC68 privileged teacher on the Liftoff gremlin micro (ADR 0007, D8). `drone-fly train teacher`.
+#  - tracks: 60 % Liftoff TRAIN tracks (courses with a usable scene x2 within the group) + 40 %
+#    procedural Liftoff-sized courses; world_scale 1.0 (D5); maps without a scene fall back to
+#    placed props + the floor plane (allow-missing). Val / held-out are never loaded (AC9).
+#  - dynamics randomization 1 + random timing (inherited from proc-course-dr)
+#  - starts: half ground (spawn support, 0.5 s arm delay), half air; 30 % of the air starts begin
+#    before a random route passage (training only)
+#  - pass slack 0.5 m -> 0 over the first half of the budget (0 in every evaluation)
+#  - rewards set a priori (ADR 0007 parameter-source table), PPO from scratch, learned log_std
+extends: proc-course-dr
+drone: liftoff-gremlin-micro
+n_envs: 8192
+budget: 2.0e9
+randomization_scale: 1.0
+obs: teacher-obs-v1
+actor:
+  kind: mlp-teacher
+warm_start:
+  checkpoint: null
+  legacy_v1: false
+tracks:
+  mix:
+    - {select: "liftoff:train", weight: 0.6, scene_weight: 2.0}
+    - {select: "procedural:proc-liftoff", weight: 0.4}
+  world_scale: 1.0
+  scene_policy: allow-missing
+env:
+  reward_reference_dt_s: 0.02   # dense rewards are per 20 ms of flight
+  drone_radius_m: 0.12
+  floor_kill_m: 0.08
+  liftoff_grace_s: 0.3
+  obs_range_m: 12.0
+  start:
+    ground_fraction: 0.5
+    air_z_m: [0.8, 1.5]
+    arm_delay_s: 0.5
+    route_fraction: 0.3
+    route_back_m: [2.0, 6.0]
+  rewards:
+    progress_per_m: 1.0
+    gate: 10.0
+    finish: 50.0
+    crash: 10.0
+    upright: 0.005    # pre-pilot a-priori rebalance from 0.3 (ADR 0007): hover 25/s -> 0.5/s
+    spin: 0.005       # from 0.2
+    action_rate: 0.01
+slack:
+  init_m: 0.5
+  frac: 0.5
+ppo:
+  lr: 3.0e-4
+  roll: 64
+  epochs: 4
+  minibatches: 16
+  gamma: 0.995
+  lam: 0.95
+  logstd_init: -0.5
+  logstd_final: null          # learned
+checkpoint_every_iters: 480   # ~2.5e8 env steps at 8192 envs x 64
+checkpoint_every_s: 600
+log_every_iters: 10
+episode_log_capacity: 262144

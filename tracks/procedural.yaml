@@ -1,0 +1,34 @@
+# Procedural course catalogue (UC68). Hand-written; same entry schema as liftoff.yaml (see
+# tracks/README.md). Procedural courses are train-only. Each entry is a POOL of `pool_size`
+# courses: sim.course_gen.sample_course(seed_base + i) verbatim, every length times a per-course
+# scale drawn from `scale`, apertures mapped onto `aperture_m`.
+#
+# proc-liftoff ranges come from `drone-fly tracks stats --split train` (2026-10-12, 63 train
+# tracks, 1206 legs): leg spacing p10 14.6 m / p90 60.1 m, aperture p10 2.2 m / p90 10.0 m.
+# course_gen's mean leg chord is 2.4 m (target chord U(1.8, 3.0)), so scale = spacing / 2.4.
+schema_version: 1
+source: procedural
+world_scale: 1.0
+split:
+  method: fixed (procedural specs are train only)
+entries:
+- id: proc-liftoff
+  source: procedural
+  map: procedural
+  gate_types:
+  - procedural-square
+  laps: null
+  split: train
+  status: ok
+  name: Liftoff-sized procedural courses
+  spec:
+    seed_base: 680000
+    pool_size: 256
+    ng: [5, 16]
+    laps: [1, 4]
+    tier: full
+    tunnels: false
+    variety: true
+    no_obs: false
+    scale: [6.1, 25.0]
+    aperture_m: [2.2, 10.0]

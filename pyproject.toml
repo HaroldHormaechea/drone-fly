@@ -61,6 +61,13 @@ harness = [
 overlay = [
     "PySide6-Essentials; sys_platform == 'win32'",
 ]
+# UC68: optional Liftoff scene / props extraction (`drone-fly tracks extract-scenes`,
+# `extract-props`). UnityPy is imported lazily inside the extract functions only; reading the
+# cached JSON needs nothing. Install with `uv sync --extra liftoff-extract`, or into an existing
+# venv: `uv pip install --python <venv python> UnityPy==1.25.4`.
+liftoff-extract = [
+    "UnityPy==1.25.4",
+]
 
 [project.scripts]
 drone-fly = "drone_fly.cli.main:main"

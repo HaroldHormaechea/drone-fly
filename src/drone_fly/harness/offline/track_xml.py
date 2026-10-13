@@ -52,6 +52,11 @@ class PlacedItem:
     position: np.ndarray  # Unity
     rotation: np.ndarray  # Unity rotation matrix (3x3)
     scale: np.ndarray  # Unity local scale
+    #: The blueprint's ``xsi:type`` (``TrackBlueprintFlag``, ``...Spawnpoint``, ...), when present.
+    xsi_type: str | None = None
+
+
+_XSI_TYPE = "{http://www.w3.org/2001/XMLSchema-instance}type"
 
 
 def _local(tag: str) -> str:
@@ -129,9 +134,17 @@ def parse_track_items(path: str | Path) -> list[PlacedItem]:
                 position=_xyz(_child(el, "position"), (0.0, 0.0, 0.0)),
                 rotation=_rotation(_child(el, "rotation")),
                 scale=_xyz(_child(el, "scale"), (1.0, 1.0, 1.0)),
+                xsi_type=_xsi_type(el),
             )
         )
     return items
+
+
+def _xsi_type(el: ET.Element) -> str | None:
+    raw = el.attrib.get(_XSI_TYPE)
+    if raw is None:
+        raw = next((v for k, v in el.attrib.items() if _local(k) == "type"), None)
+    return raw.rsplit(":", 1)[-1] if raw else None
 
 
 @dataclass(frozen=True)
@@ -154,6 +167,8 @@ class RaceRoute:
     branches: tuple[tuple[str, tuple[str, ...]], ...] = ()
     walk: tuple[str, ...] = ()
     format: str = "flat"
+    #: ``spawnPointID`` (the track ``instanceID`` of the race's spawn item), when present.
+    spawn_point_id: str | None = None
 
 
 def _text(el: ET.Element, name: str) -> str | None:
@@ -218,6 +233,9 @@ def _parse_passages(root: ET.Element) -> RaceRoute | None:
             laps = int(el.text.strip())
             break
     ids = [p["checkpoint"] for p in walk]
+    spawn = next(
+        ((el.text or "").strip() for el in root.iter() if _local(el.tag) == "spawnpointid"), None
+    )
     circuit = finished and len(walk) > 1 and ids[0] == ids[-1]
     per_lap = walk[:-1] if circuit else walk
     return RaceRoute(
@@ -230,6 +248,7 @@ def _parse_passages(root: ET.Element) -> RaceRoute | None:
         branches=tuple(branches),
         walk=tuple(ids),
         format="passages",
+        spawn_point_id=spawn or None,
     )
 
 
@@ -308,6 +327,75 @@ def _gate_geometry(
     return None, min(w, h), np.array(entry.get("center_offset", [0.0, h / 2.0, 0.0]), np.float64)
 
 
+@dataclass(frozen=True)
+class TrackGeometry:
+    """Everything a track + race XML pair says, before any classification (UC68).
+
+    ``items`` are every placed blueprint (Unity pose, scale, ``xsi:type``); ``passages`` are the
+    route's items in per-lap order (a checkpoint crossed twice per lap appears twice), or ``()``
+    without a race; ``spawn`` is the race's ``spawnPointID`` item, else the first ``SpawnPoint*``
+    item, else ``None``. :meth:`contract_pose` maps an item into the contract frame.
+    """
+
+    items: tuple[PlacedItem, ...]
+    route: RaceRoute | None
+    passages: tuple[PlacedItem, ...]
+    spawn: PlacedItem | None
+    name: str | None = None
+    environment: str | None = None
+
+    @staticmethod
+    def contract_pose(it: PlacedItem) -> tuple[np.ndarray, np.ndarray]:
+        """``(position, rotation)`` of an item in the contract frame (``R_c = M R_u M^T``)."""
+        return _to_contract(it.position), _M @ it.rotation @ _M.T
+
+    @property
+    def circuit(self) -> bool:
+        return True if self.route is None else bool(self.route.circuit)
+
+    @property
+    def laps(self) -> int | None:
+        return None if self.route is None else self.route.laps
+
+
+def _track_meta(path: str | Path) -> tuple[str | None, str | None]:
+    try:
+        root = ET.parse(path).getroot()
+    except (ET.ParseError, OSError) as exc:
+        raise HarnessConfigError(f"cannot read track XML {path}: {exc}") from exc
+    name = env = None
+    for c in root:
+        if _local(c.tag) == "name":
+            name = (c.text or "").strip() or None
+        elif _local(c.tag) == "environment":
+            env = (c.text or "").strip() or None
+    return name, env
+
+
+def load_track_geometry(
+    track: str | Path, race: str | Path | None, *, race_id_tag: str = "instanceID"
+) -> TrackGeometry:
+    """Parse a track + race pair into a :class:`TrackGeometry` (no item table, no scale)."""
+    items = tuple(parse_track_items(track))
+    route = parse_race_route(race, race_id_tag)
+    passages: tuple[PlacedItem, ...] = ()
+    if route is not None and route.checkpoint_ids:
+        by_id = {it.instance_id: it for it in items if it.instance_id}
+        missing = [i for i in route.checkpoint_ids if i not in by_id]
+        if missing:
+            raise HarnessConfigError(
+                f"race references gate instances missing from the track: {missing}"
+            )
+        passages = tuple(by_id[cid] for cid in route.checkpoint_ids)
+    spawn = None
+    if route is not None and route.spawn_point_id:
+        spawn = next((it for it in items if it.instance_id == route.spawn_point_id), None)
+    if spawn is None:
+        spawn = next((it for it in items if it.item_id.startswith("SpawnPoint")), None)
+    name, env = _track_meta(track)
+    return TrackGeometry(items, route, passages, spawn, name, env)
+
+
 def load_track_course(
     track: str | Path,
     race: str | Path | None,
@@ -333,8 +421,9 @@ def load_track_course(
     table = gate_types
     if table is not None and not isinstance(table, GateTypeTable):
         table = GateTypeTable.from_config(table)
-    items = parse_track_items(track)
-    route = parse_race_route(race, race_id_tag)
+    geometry = load_track_geometry(track, race, race_id_tag=race_id_tag)
+    items = list(geometry.items)
+    route = geometry.route
     route_ids = set(route.checkpoint_ids) if route else set()
     gates_raw: list[tuple[PlacedItem, tuple[str | None, float, np.ndarray]]] = []
     obstacles = []
@@ -382,15 +471,8 @@ def load_track_course(
 
     circuit = True
     if route is not None and route.checkpoint_ids:
-        by_id = {it.instance_id: it for it in items if it.instance_id}
-        missing = [i for i in route.checkpoint_ids if i not in by_id]
-        if missing:
-            raise HarnessConfigError(
-                f"race references gate instances missing from the track: {missing}"
-            )
         gates_raw = []
-        for cid in route.checkpoint_ids:
-            it = by_id[cid]
+        for cid, it in zip(route.checkpoint_ids, geometry.passages, strict=True):
             geom = _gate_geometry(it, table, item_table)
             if geom is None:
                 raise HarnessConfigError(

@@ -172,3 +172,88 @@ for t in range(N):
     action = policy.act(obs, extra)            # float32[4]
     s = plant_step(s, action)                  # §3 integrator (50 Hz)
 ```
+
+## 7. Teacher checkpoints: `teacher-obs` v1 / v2, CourseFrame, sidecar keys (UC68)
+
+Teacher checkpoints are written by `drone-fly train teacher` and use action contract **v2** (§0).
+They take a different observation from the K1 models: the privileged **`teacher-obs`**, with
+exact (noise-free) quantities. v1 has 148 float32 values; v2 adds the battery for 150. See
+[ADR 0007](adr/0007-track-library-and-teacher.md). The actor is a plain MLP (`actor: mlp-teacher`)
+that applies its own fixed per-value input scaling, so the observation is fed **raw**.
+
+### Course frame
+
+All positions are in the **course frame**. This is the contract frame (Z-up, right-handed, metres),
+translated so that the spawn's support point is the origin, then divided by `world_scale`. It is
+never rotated. `drone_fly.sim.pool.CourseFrame` is the one implementation:
+
+```
+to_course_point(p)  = (p - origin_contract) / world_scale
+to_course_vector(v) = v / world_scale
+```
+
+The UC68 teacher is trained at `world_scale: 1.0` (Liftoff metres). A harness must take
+`world_scale` from the sidecar, **not** the legacy `world_scale: 4.0` of the live-harness config.
+The body frame is FLU.
+
+### Layout
+
+| block | slice | content |
+|---|---|---|
+| `harness30` | [0:30) | exactly `ContractObservationAssembler.assemble(..., extra_dim=30)`: the §1 `make_obs` 12, `curr_gate`, `next_lookahead` and `obstacle_vision` from `course_senses`, over the course's **harness obstacle list**, with no occlusion noise |
+| `attitude6` | [30:36) | the first two columns of R(body → world) |
+| `vel_body` | [36:39) | velocity in the body frame |
+| `gates` | [39:78) | target, next and next-next passage × 13: centre relative to the drone (body, 3), travel-oriented normal (body, 3), up vector (body, 3), w, h, distance, valid. A row past the finish is all zeros. |
+| `obstacles` | [78:142) | the 8 nearest surfaces of the full geometry × 8: nearest point relative to the drone (body, 3), distance, outward normal (body, 3), valid (0 beyond 12 m) |
+| `altitude` | [142] | z minus the highest solid or floor surface straight below |
+| `prev_action` | [143:147) | the raw policy output of the previous tick, before decoding, clipping or arm override; zeros at the start |
+| `arm_remaining_s` | [147] | seconds until the motors accept commands; 0 once armed and for air starts |
+| `battery` (v2 only) | [148:150) | `batt_charge` (0–1) and `batt_volts / cells` (V per cell), exactly as Liftoff's telemetry reports them; input scale 1 and 1/4.2 |
+
+**Versions.** `teacher-obs` v2 (150 values) is the current version; v1 is its first 148 values.
+The sidecar's `obs_schema.version` says which one a checkpoint takes. A harness builds the battery
+block from live telemetry with `tracks.teacher_obs_ref.battery_from_telemetry(batt_charge,
+batt_volts, cells)`, where `cells` comes from the drone profile's `power.cells` and is recorded in the
+sidecar as `obs_schema.battery.cells` (with `power_model: true|false`). A v2 teacher was
+trained with the plant's power model (low-voltage cutoff, thrust drop at speed); see
+`drones/<id>/sysid.md`, "Power model".
+
+**Harness obstacle list.** Placed track items only: never scene colliders, never route-gate frames.
+Each is one AABB, kept if its max half-extent is at most 3.0 m and it lies inside the course
+corridor. At most `O_h` items are kept (722 for the current catalogue), nearest the route first.
+`course_senses` runs over the whole list. The rule text is pinned in `obs_schema.harness30.harness_list`
+and `course_conversion`, so a live oracle (UC69) passes an identical list.
+
+**Gate pass rule** (`sim.pool.gate_crossed`). An opening counts only when the segment from the
+previous to the current position crosses its plane in the travel direction, inside the outline. A
+volume counts when the segment enters it moving along the route. Doubling back never counts.
+Evaluation uses zero slack.
+
+References:
+- `drone_fly.tracks.teacher_obs_ref.build_teacher_obs` is the NumPy single-drone reference. It
+  calls the real harness assembler.
+- `drone_fly.sim.teacher_obs.build_teacher_obs` is the batched training builder. Tests pin it to
+  the reference.
+
+### Sidecar keys
+
+A teacher's `<stem>.contract.json` adds three keys to the §0 ones:
+
+```json
+{"contract_version": 2, "actor": "mlp-teacher", "drone": "liftoff-gremlin-micro", "...": "...",
+ "obs_schema": {"name": "teacher-obs", "version": 1, "dim": 148, "blocks": ["..."],
+                "harness30": {"...": "..."}, "gates": {"...": "..."}, "input_scale": ["..."]},
+ "world_scale": 1.0,
+ "course_conversion": {"version": 1, "fingerprint": "...", "parameters": {"...": "..."},
+                       "rules": {"...": "..."}, "scenes": {"<Map>": {"sha256": "...", "bundle": "...",
+                       "build_id": "...", "status": "..."}}, "props": {"sha256": "...", "build_id": "..."}}}
+```
+
+- `obs_schema` describes the observation exactly: its block names, widths and offsets, plus the
+  pinned `course_senses` constants and harness-list rule.
+- `course_conversion` records how the XMLs and scenes became courses: the rules, the parameters
+  (corridor, cell size, candidate cap, observation range, harness cap and max half-extent), and the
+  hashes of every scene cache and of `props.json`.
+- `drone-fly train eval` refuses a checkpoint whose schema name or version, or whose conversion
+  version, it does not know.
+- A checkpoint without `obs_schema` is not a teacher.

@@ -23,6 +23,7 @@ from drone_fly.controller.encoding import (
     motor_neuron_indices,
     sensory_neuron_indices,
 )
+from drone_fly.controller.mlp_teacher import MLPTeacher
 from drone_fly.controller.modality import (
     ModalityAbsentError,
     ModalityError,
@@ -73,6 +74,7 @@ __all__ = [
     "THROTTLE_RANGE",
     "ConnectomeActorNetwork",
     "ConnectomePolicy",
+    "MLPTeacher",
     "ModalityAbsentError",
     "ModalityError",
     "ModalityMetadataError",

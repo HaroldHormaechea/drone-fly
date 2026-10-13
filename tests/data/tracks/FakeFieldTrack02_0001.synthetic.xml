@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Synthetic UC68 fixture (generate_fixtures.py); Unity metres, Y-up. -->
+<Track xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <name>Fake Field 02 - Unknown</name>
+  <environment>FakeField</environment>
+  <blueprints>
+    <TrackBlueprint>
+      <itemID>CheckpointBoxFlexible01</itemID>
+      <instanceID>c1</instanceID>
+      <position><x>0</x><y>2</y><z>10</z></position>
+      <rotation><x>0</x><y>0</y><z>0</z></rotation>
+      <scale><x>4</x><y>3</y><z>1</z></scale>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>CheckpointBox4mX3m01</itemID>
+      <instanceID>c2</instanceID>
+      <position><x>0</x><y>2</y><z>25</z></position>
+      <rotation><x>0</x><y>90</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>CheckpointWeird01</itemID>
+      <instanceID>w1</instanceID>
+      <position><x>0</x><y>2</y><z>40</z></position>
+      <rotation><x>0</x><y>0</y><z>0</z></rotation>
+    </TrackBlueprint>
+  </blueprints>
+</Track>

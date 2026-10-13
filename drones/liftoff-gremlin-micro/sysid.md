@@ -166,3 +166,83 @@ Windows whose experiment span (window + recovery) is shorter than the horizon ar
 | `p2-step-0.20-` | throttle_step | 1.99 | 0.0032 | 0.235 | - | - | 0.027 | 0.336 |
 | `p2-doublet-pitch-0.20-` | rate_doublet | 1.74 | 0.116 | 0.559 | - | - | 0.114 | 0.509 |
 <!-- uc67-plant-replay:end -->
+
+## Power model (UC68)
+
+<!-- uc68-power:start -->
+The UC69 live flights on Infinity Loop all ended about 18.3 s after spin-up, when the 3S pack hit
+Liftoff's low-voltage cutoff: 8.10 V, or 2.70 V per cell, at about 74 % charge. The motors then
+dropped to idle. The plant's optional power model (`sim/power.py`, the `power` block of
+`drone.yaml`, plant config `power: true`) reproduces this.
+
+**Data.** UC66 `micro-full` (148 s, mostly hover, at most 11.7 m/s), plus the 10 UC69 attempts,
+which fly near full stick at 20–26 m/s for about 18 s each. Re-run the fit with:
+
+```
+python -m drone_fly.sysid.power_fit fit <micro-full telemetry.csv> "<uc69 attempts>/*/telemetry.csv"
+```
+
+**Thrust at speed.** The measured specific thrust is the velocity derivative plus gravity,
+projected on body up, plus the profile drag. It is about 1.01 g at hover throttle. At full stick it
+falls with the axial inflow (the velocity component along body z):
+`T_avail = max_g · (V / V_full)^0.05 · max(0.2, 1 − 0.38 · v_axial / 20 m/s)`. RMSE 0.197 g over
+3226 full-stick windows.
+
+Voltage has almost no effect on thrust (exponent 0.05). Liftoff's RPM follows the throttle whatever
+the pack voltage, until the cutoff.
+
+| speed (m/s) | measured (g) | model (g) |
+|---|---|---|
+| 0–8 | 3.60 | 3.67 |
+| 8–16 | 3.11 | 2.99 |
+| 16–22 | 3.14 | 3.05 |
+| 22–30 | 2.83 | 2.83 |
+
+At racing speed (24 m/s, v_axial ≈ 17 m/s) full stick gives about 2.8 g of thrust, not the
+profile's 4.23 g. Subtracting the profile drag gives the body-z specific force an accelerometer
+would read. At full stick above 22 m/s this is p50 1.66 g / p95 2.89 g, against UC69's measured
+`f_bodyz_g` of 1.67 g / 2.91 g.
+
+**Battery.**
+
+*Effort.* The motor effort is `E = max_g · rpm / 33087`. Liftoff's RPM is linear in the zero-inflow
+thrust: hover RPM gives 1 g. In the sim, `E = T · inflow^−0.805`, where the exponent is fitted on
+RPM at full stick.
+
+*Fitted model* (replayed per session by least squares):
+
+| quantity | model | fitted values |
+|---|---|---|
+| charge | `dq/dt = −d1 · E^k` | d1 = 0.003887 /s, k = 0.946; hover drains about 0.39 %/s |
+| persistent sag | `ds/dt = a · E^p`, with no recovery | a = 1.131e-4 V/s, p = 5.28 |
+| voltage | `V = 12.607 − 2.249 · (1 − q) − s − 0.545 · E^0.687` | |
+
+The persistent sag is negligible below an effort of about 2.5 g (0.014 V/s), and about 0.19 V/s at
+4 g. The logged voltage stays at 8.08 V at idle after the cutoff, so it does not recover.
+
+*Fit quality.* Voltage RMSE is 0.118 V on UC69 and 0.178 V on micro-full. Charge RMSE is 0.001 on
+UC69 and 0.013 on micro-full.
+
+**Validation** (`python -m drone_fly.sysid.power_fit validate`). The logged sticks of each live
+attempt are replayed open loop through the full plant (power on, nominal, float64), starting from a
+ground start:
+
+| | measured (from spin-up: first motor above 20000 rpm) | replay |
+|---|---|---|
+| cutoff, all 10 attempts | 18.0–18.3 s | 17.7–17.9 s |
+| full-stick thrust per speed band | | within 4 % (table above) |
+
+**Randomization.**
+
+| parameter | range |
+|---|---|
+| `drain_scale` (capacity) | 0.9–1.1 |
+| `sag_scale` (internal resistance, persistent part) | 0.8–1.2 |
+| `ir_scale` (internal resistance, instantaneous part) | 0.8–1.2 |
+| `inflow_scale` | 0.85–1.15 |
+| `initial_charge` | 0.85–1.0 |
+
+**Limits.** The fit covers effort up to 4.23 g and charge between 0.42 and 1. Below 0.42 the
+open-circuit voltage is extrapolated linearly. The meteor75 profile has no power block, and every
+plant without `power: true` is the UC67 plant.
+<!-- uc68-power:end -->

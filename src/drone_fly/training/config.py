@@ -46,7 +46,19 @@ TOP_KEYS = (
     "checkpoint_every_iters",
     "log_every_iters",
     "episode_log_capacity",
+    # UC68 teacher configs
+    "tracks",
+    "env",
+    "obs",
+    "slack",
+    "checkpoint_every_s",
 )
+#: Keys a teacher config inherits from ``proc-course-dr`` but does not use.
+TEACHER_IGNORED = ("course", "curriculum", "k1_path")
+ACTOR_KINDS = ("k1-reservoir-aug", "mlp-teacher")
+TEACHER_OBS = "teacher-obs-v1"
+#: ``obs`` value -> ``teacher-obs`` schema version (v2 adds the battery block).
+TEACHER_OBS_VERSIONS = {"teacher-obs-v1": 1, "teacher-obs-v2": 2}
 
 
 class TrainConfigError(HarnessConfigError):
@@ -83,6 +95,8 @@ class CurriculumConfig:
 class ActorConfig:
     kind: str = "k1-reservoir-aug"
     extra_dim: int = 30
+    #: mlp-teacher: initial (learned) log_std.
+    logstd_init: float | None = None
 
 
 @dataclass(frozen=True)
@@ -206,6 +220,10 @@ def from_mapping(data: dict[str, Any]) -> TrainConfig:
     unknown = set(data) - set(TOP_KEYS)
     if unknown:
         raise TrainConfigError(f"unknown training config keys {sorted(unknown)}")
+    if data.get("tracks") is not None or (data.get("actor") or {}).get("kind") == "mlp-teacher":
+        raise TrainConfigError(
+            f"{data.get('name')!r} is a teacher config: use `drone-fly train teacher --config`"
+        )
     for req in ("drone", "course", "action"):
         if data.get(req) is None:
             raise TrainConfigError(f"training config needs '{req}'")
@@ -252,3 +270,165 @@ def from_mapping(data: dict[str, Any]) -> TrainConfig:
 def load_train_config(ref: str | Path, overrides: dict[str, Any] | None = None) -> TrainConfig:
     """Load a packaged config by name, or a YAML path (``extends`` resolved)."""
     return from_mapping(load_raw(ref, overrides))
+
+
+# ----------------------------------------------------------------------------- UC68 teacher
+
+
+@dataclass(frozen=True)
+class SlackConfig:
+    """Pass-rule slack curriculum: ``init_m`` at the start, linearly 0 after ``frac`` of budget."""
+
+    init_m: float = 0.5
+    frac: float = 0.5
+
+
+@dataclass(frozen=True)
+class TracksConfig:
+    """The course mix and the conversion (UC68 D7/D8)."""
+
+    mix: tuple[dict[str, Any], ...]
+    world_scale: float = 1.0
+    scene_policy: str = "allow-missing"
+    root: str | None = None
+    scenes_root: str | None = None
+    conversion: dict[str, Any] = field(default_factory=dict)
+    #: Training-only course augmentation (``tracks.augment``): ``{mirror: bool, scales: [..]}``.
+    augment: dict[str, Any] = field(default_factory=dict)
+
+    def conversion_dict(self) -> dict[str, Any]:
+        return {
+            **self.conversion,
+            "world_scale": self.world_scale,
+            "scene_policy": self.scene_policy,
+        }
+
+
+@dataclass(frozen=True)
+class TeacherConfig:
+    """A ``train teacher`` config (``configs/teacher-liftoff.yaml``)."""
+
+    name: str
+    drone: str
+    action: ActionSpec
+    tracks: TracksConfig
+    env: Any  # sim.multi_course.MultiCourseConfig
+    n_envs: int = 8192
+    budget: float = 2e9
+    seed: int = 0
+    device: str = "auto"
+    randomization_scale: float = 1.0
+    obs: str = TEACHER_OBS
+    plant: PlantConfig = field(default_factory=PlantConfig)
+    timing: TimingConfig = field(default_factory=TimingConfig)
+    actor: ActorConfig = field(default_factory=lambda: ActorConfig(kind="mlp-teacher"))
+    ppo: PPOConfig = field(default_factory=PPOConfig)
+    slack: SlackConfig = field(default_factory=SlackConfig)
+    checkpoint_every_iters: int = 480
+    checkpoint_every_s: float = 600.0
+    log_every_iters: int = 10
+    episode_log_capacity: int = 262144
+    raw: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
+
+    @property
+    def obs_version(self) -> int:
+        return TEACHER_OBS_VERSIONS[self.obs]
+
+    def __post_init__(self) -> None:
+        if self.actor.kind not in ACTOR_KINDS:
+            raise TrainConfigError(f"unknown actor.kind {self.actor.kind!r} ({ACTOR_KINDS})")
+        if self.obs not in TEACHER_OBS_VERSIONS:
+            known = sorted(TEACHER_OBS_VERSIONS)
+            raise TrainConfigError(f"obs must be one of {known}, got {self.obs!r}")
+        if self.action.version != 2:
+            raise TrainConfigError("the teacher uses action contract v2")
+        if self.n_envs < 1 or self.budget <= 0:
+            raise TrainConfigError("n_envs must be >= 1 and budget > 0")
+        if not self.tracks.mix:
+            raise TrainConfigError("tracks.mix must list at least one selector")
+
+    def snapshot(self) -> dict[str, Any]:
+        out = asdict(self)
+        out.pop("raw", None)
+        out["action"] = self.action.as_dict()
+        out["contract_version"] = self.action.version
+        out["kind"] = "teacher"
+        return _plain(out)
+
+
+def validate_train_selectors(mix: Any) -> None:
+    """Every mix selector must resolve to train entries only (AC9 leakage guard)."""
+    from drone_fly.tracks import catalogue as cat
+
+    cats: dict[str, Any] = {}
+    for g in mix:
+        sel = cat.parse_selector(str(g["select"]))
+        if sel.source not in cats:
+            cats[sel.source] = cat.load_named(sel.source)
+        cat.select(cats[sel.source], sel, "train")
+
+
+def teacher_from_mapping(data: dict[str, Any], *, validate_tracks: bool = True) -> TeacherConfig:
+    from drone_fly.sim.multi_course import MultiCourseConfig
+
+    unknown = set(data) - set(TOP_KEYS)
+    if unknown:
+        raise TrainConfigError(f"unknown training config keys {sorted(unknown)}")
+    ws = data.get("warm_start") or {}
+    if ws.get("checkpoint"):
+        raise TrainConfigError(
+            "the teacher trains from scratch: warm_start.checkpoint must be null"
+        )
+    for req in ("drone", "tracks", "env", "action"):
+        if data.get(req) is None:
+            raise TrainConfigError(f"teacher config needs '{req}'")
+    t = dict(data["tracks"])
+    unknown = set(t) - set(TracksConfig.__dataclass_fields__)
+    if unknown:
+        raise TrainConfigError(f"unknown tracks keys {sorted(unknown)}")
+    mix = tuple(dict(g) for g in t.pop("mix", None) or ())
+    for g in mix:
+        if "select" not in g or set(g) - {"select", "weight", "scene_weight"}:
+            raise TrainConfigError("tracks.mix entries are {select, weight, scene_weight}")
+    try:
+        tracks = TracksConfig(mix=mix, **t)
+        env = MultiCourseConfig.from_dict(data["env"])
+        plant = PlantConfig.from_dict(data.get("plant"))
+        timing = TimingConfig.from_dict(data.get("timing"))
+        action = ActionSpec.from_dict(data["action"])
+    except (ValueError, TypeError) as exc:
+        raise TrainConfigError(str(exc)) from exc
+    if validate_tracks:
+        validate_train_selectors(tracks.mix)
+    actor = dict(data.get("actor") or {})
+    actor.setdefault("kind", "mlp-teacher")
+    actor.pop("extra_dim", None)
+    kw = {
+        k: data[k]
+        for k in ("n_envs", "seed", "device", "checkpoint_every_iters", "log_every_iters",
+                  "episode_log_capacity", "obs")
+        if k in data
+    }  # fmt: skip
+    for k in ("budget", "randomization_scale", "checkpoint_every_s"):
+        if k in data:
+            kw[k] = float(data[k])
+    return TeacherConfig(
+        name=str(data.get("name") or "teacher"),
+        drone=str(data["drone"]),
+        action=action,
+        tracks=tracks,
+        env=env,
+        plant=plant,
+        timing=timing,
+        actor=_section(ActorConfig, actor, "actor"),
+        ppo=_section(PPOConfig, data.get("ppo"), "ppo"),
+        slack=_section(SlackConfig, data.get("slack"), "slack"),
+        raw=data,
+        **kw,
+    )
+
+
+def load_teacher_config(
+    ref: str | Path, overrides: dict[str, Any] | None = None, *, validate_tracks: bool = True
+) -> TeacherConfig:
+    return teacher_from_mapping(load_raw(ref, overrides), validate_tracks=validate_tracks)

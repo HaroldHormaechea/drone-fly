@@ -58,6 +58,11 @@ the attitude is held, the rate response stays at rest and the motor state is cap
 thrust that would lift it, so commands given on the ground do not wind up into a jump at
 lift-off. Lift-off is ``z > rest + eps`` with ``vz > 0``; after it the env is airborne for good
 (``lifted``). Simplifications: no tip-over, no sliding, no I-term wind-up.
+
+**Power (optional, UC68).** With ``PlantConfig.power`` and a profile ``power`` block, a
+:class:`~drone_fly.sim.power.PowerState` caps the applied thrust and the motor state at what full
+stick can deliver given the pack voltage and the axial inflow, drains the pack, and latches the
+low-voltage cutoff (motors to idle). Off by default: every UC67 path is unchanged.
 """
 
 from __future__ import annotations
@@ -94,6 +99,8 @@ class PlantConfig:
     gravity: float = 9.81
     #: Ring size of the delay line (raise it when delay / period exceeds about 6).
     delay_slots: int = 8
+    #: Battery + thrust-at-speed model (needs a profile ``power`` block; UC68). Off: UC67 plant.
+    power: bool = False
 
     def __post_init__(self) -> None:
         if self.integrator not in INTEGRATORS:
@@ -190,6 +197,14 @@ class Plant:
             profile, randomization_scale, self.generator, device=dev, dtype=dt
         )
         self.params = self.randomizer.sample(n)
+        self.power = None
+        if cfg.power:
+            from drone_fly.sim.power import PowerState
+
+            if getattr(profile, "power", None) is None:
+                raise ValueError(f"plant.power needs a 'power' block in drone profile {profile.id}")
+            self.power = PowerState(profile.power, n, device=dev, dtype=dt, seed=seed,
+                                    randomization_scale=randomization_scale)  # fmt: skip
 
         z3 = torch.zeros(n, 3, dtype=dt, device=dev)
         self.pos = z3.clone()
@@ -263,6 +278,8 @@ class Plant:
         if resample:
             self.randomizer.resample(self.params, mask)
             self._update_channel_delay()
+        if self.power is not None:
+            self.power.reset(mask, resample=resample)
 
         def put(cur: torch.Tensor, new: Any, m: torch.Tensor) -> torch.Tensor:
             new_t = torch.as_tensor(new, dtype=cur.dtype, device=cur.device)
@@ -393,6 +410,13 @@ class Plant:
             thrust, w_att = mean[:, 0], mean[:, 1:]
         omega = y[:, 1:]
         motor = y[:, 0]
+        if self.power is not None:
+            # full stick can deliver at most this (pack voltage, axial inflow); cutoff -> idle
+            v_ax = quat_rotate_inv(self.quat, self.vel)[:, 2]
+            avail = self.power.available_g(self.max_g * p.thrust_scale, v_ax)
+            thrust = torch.minimum(thrust, avail)
+            motor = torch.minimum(motor, avail)
+            self.power.update(thrust, h[:, 0])
         quat = (quat_euler_step if self.legacy else quat_exp_step)(self.quat, w_att, h)
         v_b = quat_rotate_inv(quat, self.vel)  # drag on the OLD velocity
         speed = self.vel.norm(dim=-1, keepdim=True)
