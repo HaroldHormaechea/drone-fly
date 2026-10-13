@@ -95,6 +95,7 @@ class AlignResult:
                     "ok",
                     "best_uptilt_deg",
                     "best_hfov_deg",
+                    "neighbours",
                     "meta_uptilt_deg",
                     "meta_hfov_deg",
                 )
@@ -409,9 +410,25 @@ def camera_check(
         reasons.append(f"camera off: best uptilt {bu:g} vs meta {camera.uptilt_deg:g}")
     if abs(bh - camera.hfov_deg) > CAM_HFOV_STEP + 1e-9:
         reasons.append(f"camera off: best hfov {bh:g} vs meta {camera.hfov_deg:g}")
+    # evidence: each axis neighbour's score relative to the camera under test (the grid centre)
+    ci, cj = (
+        int(np.argmin(np.abs(ups - camera.uptilt_deg))),
+        int(np.argmin(np.abs(hfs - camera.hfov_deg))),
+    )
+    centre = float(grid[ci, cj])
+    neighbours = {}
+    for d in (-6, -3, 3, 6):
+        k = ci + int(round(d / CAM_UPTILT_STEP))
+        if 0 <= k < len(ups):
+            neighbours[f"uptilt{d:+d}"] = round(float(grid[k, cj]) / max(centre, 1e-12), 4)
+    for d in (-10, -5, 5, 10):
+        k = cj + int(round(d / CAM_HFOV_STEP))
+        if 0 <= k < len(hfs):
+            neighbours[f"hfov{d:+d}"] = round(float(grid[ci, k]) / max(centre, 1e-12), 4)
     return {
         "ok": not reasons,
         "reasons": reasons,
+        "neighbours": neighbours,
         "best_uptilt_deg": bu,
         "best_hfov_deg": bh,
         "meta_uptilt_deg": camera.uptilt_deg,

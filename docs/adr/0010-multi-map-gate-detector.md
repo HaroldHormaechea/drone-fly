@@ -101,8 +101,14 @@ test, and the capture is unverified when the peak is more than one step away on 
 its own reason (`camera off: best hfov 130 vs meta 120`). The check runs only when the margin
 passes (without signal the peak location is noise). With `--search-uptilt` the camera under test
 carries the searched uptilt, which `verify` then writes to `meta.camera` (`source: align`). The
-absolute margin and the edge rule stay. On the reference capture the peak is exactly the preset
-camera (uptilt 20, hfov 120): still `verified: true`, margin 1.40. Runtime: 65 extra re-scores,
+absolute margin and the edge rule stay; there is no score-ratio criterion (one rule, the peak
+location). On the reference capture the peak is exactly the preset camera (uptilt 20, hfov 120):
+still `verified: true`, margin 1.40. The verdict records each axis neighbour's score relative to
+the camera under test (`alignment.camera_check.neighbours`); reference capture:
+
+| Neighbour | uptilt -6 | -3 | +3 | +6 | hfov -10 | -5 | +5 | +10 |
+|---|---|---|---|---|---|---|---|---|
+| score / centre | 0.76 | 0.81 | 0.81 | 0.85 | 0.72 | 0.80 | 0.84 | 0.84 | Runtime: 65 extra re-scores,
 about 11 s per `verify --search-lag` in total on the CPU (was about 12 s; frame loading dominates).
 
 **P1 gate (mandatory).** The gap between the correct pose (1.40) and the nearest wrong one (1.15)
