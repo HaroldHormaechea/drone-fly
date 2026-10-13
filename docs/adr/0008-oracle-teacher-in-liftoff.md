@@ -91,3 +91,34 @@ way it fails says which.
   covers it.
 - The lift-off rule uses the sim's rule (above the resting height and climbing) with a 2 cm margin
   against telemetry jitter, or 0.3 m above the support, whichever comes first.
+
+## Results (2026-10-13, AC9)
+
+The session flew `teacher_it1920` (val-selected) on Infinity Loop for 10 attempts. The summary is
+[docs/harness/reports/uc69-oracle-liftoff-arena-04.md](../harness/reports/uc69-oracle-liftoff-arena-04.md).
+
+**What transferred:**
+- take-off was clean;
+- every attempt flew 11 of 33 crossings (a full lap plus three gates), with 91.7 % per-passage
+  success;
+- the loop ran at 50 Hz with 1 missed deadline;
+- the live and offline crossings agreed exactly.
+
+**What ended every attempt:**
+- In all 10, about 18.3 s after spin-up, the pack hit Liftoff's 8.10 V low-voltage cutoff
+  (74 % charge left), and the motors cut to idle under full stick.
+- The teacher saturates the collective almost all the time. The simulator has no battery, so the
+  sim reaches 100 %.
+- At 24 m/s the measured specific force at full stick is only about 2 g median (3 g p95), against
+  the profile's static 4.23 g. So Liftoff laps in 13.0 s against the sim's 10.6 s.
+
+**Changes made after this run:**
+- The classifier gained a `power_loss` mode (priority 1c): every motor below 3000 rpm while the
+  throttle stick is above 0.9.
+- A take-off tumble now requires that the attempt never reached the first gate.
+- The report records the pack voltage and charge at the cut, the time from spin-up, and the
+  full-stick specific force.
+- It exports the per-attempt power time series for fitting a pack / thrust model.
+
+**Conclusion:** control transfers with exact gates. The next gap is a power / aerodynamics model in
+the simulator (pack sag and cutoff, thrust vs. airspeed), not perception.

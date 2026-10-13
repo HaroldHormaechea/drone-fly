@@ -26,6 +26,7 @@ import shutil
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -162,7 +163,32 @@ def live_summary(scores: list[dict[str, Any]], course: Any) -> dict[str, Any]:
         ],
         "live_mismatches": sum(len(s["live_mismatches"]) for s in scores),
         "training_active": any(s.get("training_active") for s in scores),
+        "power": power_aggregate(valid),
     }
+
+
+def power_aggregate(scores: list[dict[str, Any]]) -> dict[str, Any]:
+    """Power-loss events and full-stick specific force over the attempts (``scoring.power``)."""
+    pw = [s["power"] for s in scores if s.get("power")]
+    losses = [p["loss"] for p in pw if p.get("loss")]
+
+    def med(key: str, sub: str) -> float | None:
+        v = [p[key][sub] for p in pw if p.get(key) and p[key].get(sub) is not None]
+        return float(np.median(v)) if v else None
+
+    return {
+        "attempts_with_power_loss": len(losses),
+        "loss_volts": _stat([x["volts"] for x in losses]),
+        "loss_charge": _stat([x["charge"] for x in losses]),
+        "loss_t_from_spin_up_s": _stat([x["t_from_spin_up_s"] for x in losses]),
+        "volts_at_spin_up": _stat([p.get("volts_at_spin_up") for p in pw]),
+        "full_stick_first_5s": {k: med("full_stick_first_5s", k)
+                                for k in ("f_bodyz_g_p50", "f_bodyz_g_p95", "speed_mps_p50",
+                                          "volts_p50")},
+        "full_stick_last_3s": {k: med("full_stick_last_3s", k)
+                               for k in ("f_bodyz_g_p50", "f_bodyz_g_p95", "speed_mps_p50",
+                                         "volts_p50")},
+    }  # fmt: skip
 
 
 def _laps_sim(score: dict[str, Any], course: Any) -> int:
@@ -513,6 +539,27 @@ def markdown(rep: dict[str, Any]) -> str:
             + (f" (FLAG: above {ARM_DELAY_FLAG_S} s)" if arm["flagged"] else "")
         )
     lines.append(f"- live vs offline crossing mismatches: {live['live_mismatches']}")
+    pa = live.get("power") or {}
+    if pa:
+        lines += ["", "## Power (pack and motors)", ""]
+        n_loss = pa["attempts_with_power_loss"]
+        lines.append(f"- power loss (motor cut at stick > 0.9): {n_loss} of N_eff {n} attempts")
+        if n_loss:
+            lines.append(
+                f"- at the cut: pack {stat(pa['loss_volts'])} V, charge {stat(pa['loss_charge'])}, "
+                f"{stat(pa['loss_t_from_spin_up_s'])} s after spin-up "
+                f"(pack at spin-up {stat(pa['volts_at_spin_up'])} V)"
+            )
+        for name, label in (("full_stick_first_5s", "first 5 s"),
+                            ("full_stick_last_3s", "last 3 s before the cut / end")):  # fmt: skip
+            w = pa.get(name) or {}
+            if w.get("f_bodyz_g_p50") is not None:
+                lines.append(
+                    f"- body-z specific force at full stick, {label}: "
+                    f"p50 {w['f_bodyz_g_p50']:.2f} g, p95 {w['f_bodyz_g_p95']:.2f} g "
+                    f"at {w['speed_mps_p50']:.1f} m/s, pack "
+                    f"{_fmt(w['volts_p50'])} V"
+                )
     lines += [
         "",
         "## Tick rate",
@@ -563,6 +610,67 @@ def _fmt(x: float | None) -> str:
     return "-" if x is None else f"{x:.1f}"
 
 
+POWER_COLUMNS = (
+    "t_from_spin_up_s", "clock_s", "liftoff_t_s", "volts", "charge", "throttle_stick",
+    "rpm_0", "rpm_1", "rpm_2", "rpm_3", "f_bodyz_g", "airspeed_mps", "vz_mps", "tilt_deg",
+)  # fmt: skip
+
+
+def export_power(session: str | Path) -> dict[str, Any]:
+    """Per-attempt power time series for fitting a pack / thrust model (gitignored, under
+    ``<session>/power/``): pack voltage, charge, throttle stick, RPM x 4, body-z specific force and
+    airspeed (= ground speed: Liftoff's arena has no wind)."""
+    import csv
+
+    from drone_fly.harness.liftoff.telemetry import GyroMap
+    from drone_fly.harness.scoring import load_attempt, trajectory_from_samples
+    from drone_fly.sim.pool import CourseFrame
+
+    identity = SimpleNamespace(frame=CourseFrame())  # contract frame: the series needs no route
+    sdir = Path(session)
+    out_dir = sdir / "power"
+    out_dir.mkdir(exist_ok=True)
+    files = []
+    for d in attempt_dirs(sdir):
+        rec = load_attempt(d)
+        tr = trajectory_from_samples(
+            rec.samples, identity, GyroMap.from_config((rec.config or {}).get("telemetry") or {})
+        )
+        if tr.n == 0 or tr.rpm is None:
+            continue
+        top = np.nanmax(tr.rpm, axis=1)
+        spun = np.flatnonzero(top > 20000.0)
+        c0 = float(tr.clock[spun[0]]) if len(spun) else float(tr.clock[0])
+        fz = tr.specific_force_body_z()
+        sp = np.linalg.norm(tr.vel, axis=1)
+        tilt = tr.tilt_deg()
+        path = out_dir / f"{d.name}.csv"
+        with path.open("w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(POWER_COLUMNS)
+            for i in range(tr.n):
+                w.writerow([
+                    round(tr.clock[i] - c0, 4), round(tr.clock[i], 4), round(tr.t[i], 4),
+                    None if tr.volts is None else tr.volts[i],
+                    None if tr.charge is None else tr.charge[i],
+                    None if tr.throttle is None else tr.throttle[i],
+                    *[round(float(x), 1) for x in tr.rpm[i]],
+                    None if not np.isfinite(fz[i]) else round(float(fz[i]), 4),
+                    round(float(sp[i]), 3), round(float(tr.vel[i, 2]), 3), round(float(tilt[i]), 2),
+                ])  # fmt: skip
+        files.append(str(path))
+    readme = out_dir / "README.md"
+    readme.write_text(
+        "# Power series (UC69 oracle session)\n\nOne CSV per attempt, one row per telemetry "
+        "sample (~100 Hz). `t_from_spin_up_s` counts from the first sample with a motor above "
+        "20000 rpm. `f_bodyz_g` = (dv/dt + g) . body z / g, dv/dt over +-3 samples. "
+        "`airspeed_mps` = ground speed (no wind). `throttle_stick` is Liftoff's throttle input. "
+        "Gitignored: local data for fitting a pack / thrust model.\n",
+        encoding="utf-8",
+    )
+    return {"dir": str(out_dir), "files": len(files)}
+
+
 def write_report(
     session: str | Path,
     *,
@@ -575,6 +683,10 @@ def write_report(
 
     sdir = Path(session)
     rep = build_report(sdir, sim_episodes=sim_episodes, sim=sim, evaluate=evaluate)
+    try:
+        rep["power_export"] = export_power(sdir)
+    except Exception:  # noqa: BLE001 - the export is a by-product
+        log.exception("power export failed")
     md = markdown(rep)
     out = {"md": str(sdir / "report.md"), "json": str(sdir / "report.json")}
     (sdir / "report.md").write_text(md, encoding="utf-8")
