@@ -455,6 +455,8 @@ class StudentSection:
     residual: bool = False  # L2
     logstd_init: float = -1.5
     warm_start: str = "training/07-proc-course-flight/model_readout.pt"
+    #: The frozen K1 body's propagation kernel (``controller.student.BODY_KERNELS``).
+    body_kernel: str = "csr16"
 
 
 @dataclass(frozen=True)

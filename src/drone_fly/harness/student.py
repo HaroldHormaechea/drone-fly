@@ -371,7 +371,7 @@ class StudentPolicyRunner(PolicyRunner):
         with torch.no_grad():
             x = torch.as_tensor(np.asarray(extra, np.float32), device=self._device).reshape(1, -1)
             if brain and hasattr(a, "k1"):
-                full = a.k1.propagated_full(x[:, :12])
+                full = a.propagate(x[:, :12])  # the trained kernel (actor_arch.body_kernel)
                 feats = a.k1.tap(full)
             else:
                 feats = a.features(x)

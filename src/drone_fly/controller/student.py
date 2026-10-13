@@ -18,6 +18,12 @@
   zero, added to ``pi``.
 * trainable: ``tap_norm``, ``pi``, ``encoder``, ``residual``, ``log_std``; frozen: the body (incl.
   ``input_projection``) and the reservoir's unused value head.
+* **body kernel** (``body_kernel``, recorded in :meth:`K1Student.arch`): the frozen body's
+  propagation runs on a CSR copy of its connectome matrix, built once (the weights never change):
+  ``csr16`` (fp16 values and states, the default; ~6.5x the COO path on the RTX 3050, max state
+  error 2.5e-4), ``csr32`` (exact, ~2.8x) or ``coo`` (the reservoir's own ``propagated_full``).
+  Training and the live harness use the same kernel. ``csr16`` falls back to ``csr32`` on the CPU
+  (no fp16 sparse kernels there).
 
 :class:`MLPStudent` (``actor: mlp-student``) — a comparison baseline only: 256-256-128 ELU over the
 59 scaled values. It is never the deployable export (``train export`` refuses it without
@@ -48,6 +54,7 @@ RESIDUAL_HIDDEN = (256, 128)
 MLP_HIDDEN = (256, 256, 128)
 ACT_DIM = 4
 STUDENT_KINDS = ("k1-student", "mlp-student")
+BODY_KERNELS = ("csr16", "csr32", "coo")
 
 
 class K1Student(nn.Module):
@@ -63,8 +70,14 @@ class K1Student(nn.Module):
         encoder: bool = True,
         residual: bool = False,
         logstd_init: float = -1.5,
+        body_kernel: str = "csr16",
     ) -> None:
         super().__init__()
+        if body_kernel not in BODY_KERNELS:
+            raise ValueError(f"body_kernel must be one of {BODY_KERNELS}, got {body_kernel!r}")
+        self.body_kernel = body_kernel
+        self._csr: Any = None
+        self._csr_key: Any = None
         self.use_encoder = bool(encoder)
         self.use_residual = bool(residual)
         self.k1 = K1ReservoirAug(DIM + ENC_OUT, k1_path, connectome=connectome)
@@ -98,9 +111,48 @@ class K1Student(nn.Module):
             if keep is not None:
                 self.log_std.fill_(keep)
 
+    # ---- the frozen body ----
+    def kernel_in_use(self, device: Any) -> str:
+        if self.body_kernel == "csr16" and torch.device(device).type != "cuda":
+            return "csr32"
+        return self.body_kernel
+
+    def _csr_matrix(self, device: Any, dtype: torch.dtype) -> torch.Tensor:
+        key = (str(device), dtype)
+        if self._csr is None or self._csr_key != key:
+            layer = self.k1.body.layer
+            with torch.no_grad():
+                w = layer.effective_weight().detach().index_select(0, layer._edge_order)
+                n = layer.n_neurons
+                coo = torch.sparse_coo_tensor(layer._coalesced_edge_index, w, size=(n, n))
+                csr = coo.coalesce().to_sparse_csr()
+                self._csr = torch.sparse_csr_tensor(
+                    csr.crow_indices(), csr.col_indices(), csr.values().to(dtype), size=(n, n)
+                ).to(device)
+            self._csr_key = key
+        return self._csr
+
+    @torch.no_grad()
+    def propagate(self, obs12: torch.Tensor) -> torch.Tensor:
+        """The frozen body's full propagated state ``(B, N)`` (float32) for the 12-value obs."""
+        kernel = self.kernel_in_use(obs12.device)
+        if kernel == "coo":
+            return self.k1.propagated_full(obs12)
+        body = self.k1.body
+        x = obs12.to(torch.float32)
+        projected = body.input_projection(x)
+        state = torch.zeros(x.shape[0], self.k1.N, dtype=torch.float32, device=x.device)
+        state = state.index_add(1, body.sensory_index, projected)
+        dtype = torch.float16 if kernel == "csr16" else torch.float32
+        m = self._csr_matrix(x.device, dtype)
+        y = state.t().contiguous().to(dtype)
+        for _ in range(body.layer.n_steps):
+            y = torch.tanh(m @ y)
+        return y.t().float()
+
     # ---- the actor protocol ----
     def features(self, obs: torch.Tensor) -> torch.Tensor:
-        return self.k1.features(obs[:, :12])
+        return self.k1.tap(self.propagate(obs[:, :12]))
 
     def readout_input(self, feats: torch.Tensor, obs: torch.Tensor) -> torch.Tensor:
         obs = obs.to(feats.dtype if feats.dtype.is_floating_point else torch.float32)
@@ -134,6 +186,7 @@ class K1Student(nn.Module):
 
     def arch(self) -> dict[str, Any]:
         return {"kind": self.kind, "encoder": self.use_encoder, "residual": self.use_residual,
+                "body_kernel": self.body_kernel,
                 "feat_dim": self.feat_dim, "enc": [SENSES, ENC_HIDDEN, ENC_OUT],
                 "residual_hidden": list(RESIDUAL_HIDDEN)}  # fmt: skip
 
@@ -178,10 +231,10 @@ class MLPStudent(nn.Module):
 
 def build_student(kind: str, *, k1_path: Any = None, connectome: Any = None,
                   encoder: bool = True, residual: bool = False,
-                  logstd_init: float = -1.5) -> nn.Module:  # fmt: skip
+                  logstd_init: float = -1.5, body_kernel: str = "csr16") -> nn.Module:  # fmt: skip
     if kind == "k1-student":
         return K1Student(k1_path, connectome=connectome, encoder=encoder, residual=residual,
-                         logstd_init=logstd_init)  # fmt: skip
+                         logstd_init=logstd_init, body_kernel=body_kernel)  # fmt: skip
     if kind == "mlp-student":
         return MLPStudent(logstd_init=logstd_init)
     raise ValueError(f"unknown student actor {kind!r} ({STUDENT_KINDS})")
@@ -192,7 +245,8 @@ def student_from_state(kind: str, arch: dict[str, Any], state: dict[str, torch.T
     """Rebuild a student from an exported / saved readout state (``body.layer.*`` rebuilt)."""
     m = build_student(kind, k1_path=k1_path, connectome=connectome,
                       encoder=bool(arch.get("encoder", True)),
-                      residual=bool(arch.get("residual", False)))  # fmt: skip
+                      residual=bool(arch.get("residual", False)),
+                      body_kernel=str(arch.get("body_kernel", "coo")))  # fmt: skip
     missing, unexpected = m.load_state_dict(state, strict=False)
     bad = [k for k in missing if not k.startswith("k1.body.layer.")]
     if bad or unexpected:

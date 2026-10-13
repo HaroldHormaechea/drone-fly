@@ -327,7 +327,12 @@ def build_actor(cfg: Any, dev: Any, *, k1_path: Any = None, warm: bool = True) -
 
     s = cfg.student
     actor = build_student(
-        s.actor, k1_path=k1_path, encoder=s.encoder, residual=s.residual, logstd_init=s.logstd_init
+        s.actor,
+        k1_path=k1_path,
+        encoder=s.encoder,
+        residual=s.residual,
+        logstd_init=s.logstd_init,
+        body_kernel=s.body_kernel,
     )
     if warm and s.actor == "k1-student":
         actor.warm_start(
