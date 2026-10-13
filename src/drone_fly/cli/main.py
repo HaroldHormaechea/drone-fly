@@ -5,6 +5,10 @@
                           [--preset <name>] [--config <yaml>] [--k1-path] [--gpu-prototype-dir]
                           [--device] [--duration] [--dry-run] [--output-root] [--no-record]
                           [--overlay [--no-overlay-launch]] [--recordable]
+    drone-fly harness run --harness liftoff --teacher <run|teacher.pt> --track <id>
+                          [--perception oracle|detector] [--trackdata-root] [--scenes-root]
+                          [--allow-concurrent-training] [--session <dir> | --session-stamp S]
+    drone-fly harness oracle-report --session <dir> [--sim-episodes 32] [--no-sim]
     drone-fly harness eval --session <run dir> --track <xml> --race <xml> --config <yaml>
                           [--report <json>]
     drone-fly harness eval --capture <dir> --labels <dir> [--preset] [--gate-weights] [--device]
@@ -46,7 +50,8 @@
 
 Exit codes: 0 ok, 2 config/usage error (also: anti-cheat software running), 3 missing optional
 dependency, 4 perception coverage refusal, 5 fail-safe stop (sysid: fail-safe, crash or drone
-mismatch; the session is resumable).
+mismatch; the session is resumable), 6 start misaligned (UC69 oracle: the drone is not at the
+track's start; it was never armed).
 """
 
 from __future__ import annotations
@@ -70,6 +75,8 @@ EXIT_CONFIG = 2
 EXIT_DEPENDENCY = 3
 EXIT_COVERAGE = 4
 EXIT_FAILSAFE = 5
+#: UC69: the telemetry spawn does not match the track's start (the drone was never armed).
+EXIT_START_MISALIGNED = 6
 
 
 def _cmd_list(args: argparse.Namespace) -> int:
@@ -91,8 +98,27 @@ def _cmd_list(args: argparse.Namespace) -> int:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    from drone_fly.harness.errors import StartMisalignedError
     from drone_fly.harness.session import run_harness
 
+    if args.teacher is not None and (args.checkpoint is not None or args.extra_dim is not None):
+        raise HarnessConfigError("--teacher is exclusive with --checkpoint / --extra-dim")
+    if args.teacher is None and (args.checkpoint is None or args.extra_dim is None):
+        raise HarnessConfigError("pass --checkpoint and --extra-dim, or --teacher")
+    teacher_kw = {}
+    if args.teacher is not None:
+        teacher_kw = {
+            "teacher": args.teacher,
+            "track": args.track,
+            "perception": args.perception,
+            "trackdata_root": args.trackdata_root,
+            "scenes_root": args.scenes_root,
+            "allow_concurrent_training": args.allow_concurrent_training,
+            "session_dir": args.session,
+            "session_stamp": args.session_stamp,
+        }
+    elif args.perception == "oracle":
+        raise HarnessConfigError("--perception oracle needs --teacher")
     session = run_harness(
         args.harness,
         args.checkpoint,
@@ -111,6 +137,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         and not args.no_overlay_launch,
         recordable=True if args.recordable else None,
         save_recording=args.save_recording,
+        **teacher_kw,
     )
     r = session.result
     print(
@@ -119,8 +146,21 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
     if session.run_dir is not None:
         print(f"recorded: {session.run_dir}")
+    if session.session_dir is not None:
+        print(f"session: {session.session_dir}")
     _hold_until_ctrl_c(session.overlay_process)
+    if r.reason == StartMisalignedError.REASON:
+        return EXIT_START_MISALIGNED
     return EXIT_FAILSAFE if r.is_failsafe_stop else EXIT_OK
+
+
+def _cmd_oracle_report(args: argparse.Namespace) -> int:
+    from drone_fly.harness.offline.oracle_report import write_report
+
+    out = write_report(args.session, sim_episodes=args.sim_episodes, sim=not args.no_sim)
+    print(out["verdict"]["text"])
+    print(f"report: {out['written']['md']}")
+    return EXIT_OK
 
 
 PAD_KEPT_MESSAGE = (
@@ -501,9 +541,34 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = hsub.add_parser("run", help="run a harness")
     p_run.add_argument("--harness", required=True, help="registered harness name")
-    p_run.add_argument("--checkpoint", required=True, help="stripped model_readout.pt")
+    p_run.add_argument("--checkpoint", help="stripped model_readout.pt (or --teacher)")
     p_run.add_argument(
-        "--extra-dim", type=int, required=True, choices=(12, 30, 70), help="model extra width"
+        "--extra-dim", type=int, choices=(12, 30, 70), help="model extra width (with --checkpoint)"
+    )
+    p_run.add_argument(
+        "--teacher",
+        help="UC69: a UC68 teacher run folder or .pt (exclusive with --checkpoint/--extra-dim)",
+    )
+    p_run.add_argument("--track", help="UC69: catalogue track id, e.g. liftoff-arena-04")
+    p_run.add_argument(
+        "--perception",
+        choices=("oracle", "detector"),
+        help="UC69 with --teacher: oracle (exact gates from the track; default) or detector",
+    )
+    p_run.add_argument("--trackdata-root", help="track XMLs + props.json ($DRONE_FLY_TRACKDATA)")
+    p_run.add_argument("--scenes-root", help="scene caches ($DRONE_FLY_SCENES)")
+    p_run.add_argument(
+        "--allow-concurrent-training",
+        action="store_true",
+        help="fly while the teacher's run still trains (labelled; never counts toward AC9)",
+    )
+    p_run.add_argument(
+        "--session",
+        help="UC69 session folder (default artifacts/eval/<drone>/<run>/oracle/<track>/sessions/"
+        "<stamp>-<sha8>)",
+    )
+    p_run.add_argument(
+        "--session-stamp", help="UC69: the <stamp> of the default session folder (default: now)"
     )
     p_run.add_argument("--preset", help="packaged preset overlaid before --config")
     p_run.add_argument("--config", help="YAML overlaid on the harness's packaged default")
@@ -544,6 +609,16 @@ def build_parser() -> argparse.ArgumentParser:
         "(implies --overlay; overlay.recordable)",
     )
     p_run.set_defaults(func=_cmd_run)
+
+    p_orep = hsub.add_parser(
+        "oracle-report", help="UC69: score an oracle teacher session and compare it with the sim"
+    )
+    p_orep.add_argument("--session", required=True, help="session folder (with attempts/)")
+    p_orep.add_argument(
+        "--sim-episodes", type=int, default=32, help="sim episodes per mode (default 32)"
+    )
+    p_orep.add_argument("--no-sim", action="store_true", help="skip the sim evaluation")
+    p_orep.set_defaults(func=_cmd_oracle_report)
 
     p_eval = hsub.add_parser(
         "eval", help="score vision estimators on a recorded session or a labelled capture"
