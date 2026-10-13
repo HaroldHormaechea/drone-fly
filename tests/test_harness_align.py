@@ -51,6 +51,8 @@ PRESET_UPTILT_DEG = 20.0
 CFG = load_config("liftoff", SMALL_CAMERA, preset="liftoff")
 TABLE = GateTypeTable.from_config(CFG.data["gate_types"])
 FAST = {"lag_range_s": 0.3, "lag_step_s": 0.05, "max_frames": 60}
+NEIGHBOURS = {"uptilt-6", "uptilt-3", "uptilt+3", "uptilt+6", "hfov-10", "hfov-5", "hfov+5",
+              "hfov+10"}  # fmt: skip
 
 
 def flight(duration_s=14.0, rate_hz=100.0):
@@ -225,6 +227,13 @@ def test_a_wrong_camera_is_not_verified(scene, tmp_path, hfov, uptilt, reason):
     wrong = run(fresh(scene, "good", tmp_path / "w", hfov=hfov, uptilt=uptilt), scene,
                 search_lag=True)  # fmt: skip
     assert right.verified and right.camera["ok"] and right.camera["reasons"] == []
+    # evidence: every axis neighbour scores below the correct camera (ratio to the centre < 1)
+    assert set(right.camera["neighbours"]) == NEIGHBOURS
+    assert all(v < 1.0 for v in right.camera["neighbours"].values()), right.camera["neighbours"]
+    assert right.alignment_block()["camera_check"]["neighbours"] == right.camera["neighbours"]
+    # a wrong camera has a neighbour scoring ABOVE it (towards the true one)
+    assert set(wrong.camera["neighbours"]) == NEIGHBOURS
+    assert max(wrong.camera["neighbours"].values()) > 1.0
     assert wrong.margin >= MARGIN_MIN  # the margin alone would pass it ...
     assert wrong.reasons == [reason] and not wrong.verified  # ... the camera check does not
     assert wrong.camera["ok"] is False and wrong.camera["reasons"] == [reason]
@@ -298,6 +307,8 @@ def test_verify_capture_writes_the_alignment_block(scene, tmp_path):
     assert a["lag_ms"] == pytest.approx(-1000.0 * a["offset_s"], abs=0.1)
     assert a["frames"] >= MIN_FRAMES and a["reasons"] == [] and str(MARGIN_MIN) in a["method"]
     assert a["camera_check"]["ok"] is True
+    assert set(a["camera_check"]["neighbours"]) == NEIGHBOURS
+    assert all(v < 1.0 for v in a["camera_check"]["neighbours"].values())
     assert meta["camera"]["uptilt_deg"] == TRUE_UPTILT_DEG and meta["camera"]["source"] == "test"
     before = (cap / "meta.json").read_text("utf-8")
     verify_capture(cap, write=False, config=SMALL_CAMERA, track_xml=scene.track,
