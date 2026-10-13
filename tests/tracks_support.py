@@ -128,6 +128,39 @@ def load(lib: Library, entry_id: str, **kw: Any) -> Any:
                        use_cache=False, **kw)[0]  # fmt: skip
 
 
+def write_teacher_config(lib: Library, path: Path, **over: Any) -> Path:
+    """A tiny CPU teacher config (``extends: teacher-liftoff``) over the temp library.
+
+    4 envs, 4-step rollouts, a checkpoint every iteration, and course time limits capped at 0.1 s
+    (``tracks.conversion``) so episodes end (timeout) within a rollout.
+    """
+    import yaml
+
+    data = {
+        "extends": "teacher-liftoff",
+        "name": "teacher-test",
+        "n_envs": 4,
+        "budget": 1.0e9,
+        "device": "cpu",
+        "seed": 3,
+        "ppo": {"roll": 4, "epochs": 1, "minibatches": 2},
+        "log_every_iters": 1,
+        "checkpoint_every_iters": 1,
+        "checkpoint_every_s": 1.0e9,
+        "episode_log_capacity": 512,
+        "tracks": {
+            "mix": [{"select": "liftoff:train", "weight": 0.6, "scene_weight": 2.0},
+                    {"select": "procedural:proc-test", "weight": 0.4}],
+            "root": str(lib.root),
+            "scenes_root": str(lib.scenes_root),
+            "conversion": {"time_base_s": 0.05, "time_max_s": 0.1},
+        },
+    }  # fmt: skip
+    data.update(over)
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    return path
+
+
 def action_spec() -> Any:
     from drone_fly.sim.action import ActionSpec
 

@@ -63,11 +63,38 @@ gitignored.
 | `conversion_version` | version of the conversion rules; eval refuses an unknown one |
 | `scanned` | date of the last scan |
 | `split` | `method`, `seed`, `ratios` (train / val / held-out) and per-split `counts` of maps and tracks |
-| `maps` | per map: its `split` and `scene` (`status`, `bundle`, `build_id`, `sha256`, `counts`, `flags`) |
+| `maps` | per map: its `split` and `scene` (`status`, `bundle`, `build_id`, `sha256`, `counts`, `flags`, `validation`); see [Map scene block](#map-scene-block) |
 | `root_files` | `index.json` and `props.json`: `sha256` and game `build_id` |
 | `harness_cap` | the harness obstacle-list cap O_h: `value`, `p99`, `tracks`, `source` (train stats only) |
 | `outlier_thresholds` | `spacing_max_m`, `altitude_span_m`, `extent_m`, `passages`, `aperture_min_m` |
 | `entries` | the tracks |
+
+### Map scene block
+
+`maps.<Map>.scene` describes the map's scene cache:
+
+| field | meaning |
+|---|---|
+| `status` | `ok`, `stale-build`, `invalid`, `ambiguous` or `missing`; see [Scene caches](#scene-caches) |
+| `bundle` | the scene bundle the cache was read from |
+| `build_id` | the game build the cache was extracted from |
+| `sha256` | hash of the cache file |
+| `counts` | colliders in the cache, by type (below) |
+| `flags` | map-level flags: `no-terrain`, `partial`, `stale-build` |
+| `validation` | the geometric check against the current XMLs (below) |
+
+`counts`:
+- `box`, `capsule`, `sphere`: emitted solid primitives;
+- `mesh`: mesh colliders, counted but not emitted;
+- `terrain`: terrain colliders;
+- `trigger`: trigger colliders, never solid.
+
+`validation`:
+- `near`: the share of route gate positions with a scene collider centre within 25 m (needs ≥ 0.7);
+- `inside`: the share of witness points inside a solid (needs ≤ 0.005);
+- `valid`: whether both thresholds pass. A failed check makes the map `invalid`.
+
+Only `status` is present when a map has no cache.
 
 ### Entry (both sources)
 

@@ -249,6 +249,20 @@ were changed to **0.005 / 0.005** before any training run, so this is not val tu
 - 195,507 env-steps/s, env only;
 - pool 167 MB on the GPU; peak 412 MB.
 
+**Runs invalidated by setup bugs.** None of these counts as one of the two full runs.
+
+| run | steps | invalidated by | symptom |
+|---|---|---|---|
+| pilot 1 (`…211653Z…-INVALID-gatebug`) | 42M | the torch pass rule's intersection parameter had the wrong sign under its clamp, so no `opening` passage could ever count (only volumes did). Fixed and parity-tested against the NumPy reference: 0 mismatches in 53,520 random segments. | procedural completion 0; 37 % of episodes timed out with no crossing |
+| pilot 2 (`…213404Z…-pilot2-INVALID-gateblock`) | 100M | gate frames filled their openings (54 train passages), and procedural obstacles were 35–66 m blocks (D4 v2, D8) | completion plateaued at about 5 % with 79 % collisions; procedural episodes ended in collision 93.5 % of the time |
+| run 1, first attempt (`…221026Z…-INVALID-gateblock`) | 108M | same as pilot 2 | same plateau |
+
+A training-only fix was made at the same time. About 10 % of route starts spawned inside or against geometry and crashed on their first tick. They now need 0.3 m of clearance, or they fall back to an air start (`ROUTE_START_CLEARANCE_M`).
+
+Pilot 2 also confirmed challenger condition 2. Only 0.2 % of ground starts ended `floor` before 1.5 s, because the plant rests the drone at 0.12 m, above the 0.08 m kill height. Measuring from the support top therefore needed no change.
+
+Pilot 2 throughput was about 52k steps/s on a GPU shared with games (97–100 % utilisation).
+
 <!-- RESULTS:PILOT -->
 
 <!-- RESULTS:RUN1 -->
@@ -259,6 +273,40 @@ The full schema is in [tracks/README.md](../../tracks/README.md). Both sources s
 (`id`, `source`, `track` / `race`, `map`, `gate_types`, `laps`, `split`, `status`, `stats`,
 `flags`). Only names, hashes and derived stats are committed. Unconvertible pairs are kept with their
 reason, and splits stay stable across re-scans.
+
+## Conversion v3 (fixed during run 1; found by QA)
+
+Two conversion bugs were found while run 1 was training. Both were fixed in `CONVERSION_VERSION` 3,
+and the catalogue was re-scanned with its splits unchanged.
+
+**Floor under downhill routes.** `floor_z` was `min(0, lowest opening bottom)`, which ignored route
+volumes. On downhill routes, checkpoint volumes below the spawn support lay under the floor-kill
+height, so 11 of 63 train tracks could not be completed. Hannover-01's route, for example, goes
+about 60 m below the spawn. This capped train completion near 82.5 % and taught `floor` on every
+descent. The floor now sits at or below every passage, openings and volumes alike
+(`passage_bottom_z`). Verified: 0 of 1872 passages, in any split, have their centre within 0.2 m of
+the floor or heightfield below them.
+
+**Hairpin travel direction.** `_travel_dirs` uses the bisector of the incoming and outgoing legs.
+At a hairpin, where the legs are nearly antiparallel, it collapsed: volume normals could turn
+near-vertical, and openings could be oriented from the wrong side. QA measured 31 of 1872 passages
+with |in + out| < 0.5. When |unit(in) + unit(out)| < 0.5 (`HAIRPIN_BISECTOR_MIN`), the incoming leg
+is now used. The remaining near-vertical normals all belong to genuinely vertical route segments:
+- marina-bay-03 #23 and #24 climb straight up;
+- short-circuit-03 #15 and surtur-03 #22 go straight up and back down.
+
+**Run 1 continued, not restarted.** At it 1603 (840.4M steps, conversion v2), run 1
+(`…231445Z…`) was stopped. It continued as a new run from its `resume.pt` on v3 courses:
+`drone-fly train teacher --continue-from <run>`. The continuation carries over the weights, the
+optimiser, the step counter (so the 2e9 budget and the slack schedule carry on) and the RNG.
+
+The observation schema and action contract did not change; only the course geometry did. The source
+run is left untouched. The lineage is recorded in the new run's `lineage.json` and in every
+checkpoint sidecar (`lineage.continued_from`: run, iteration, steps, source conversion version). The
+new run's sidecar `course_conversion` is v3, so evals and UC69 use v3. Under D9 this is still run 1:
+a bug-fix continuation, not a val-driven change.
+
+<!-- RESULTS:HAIRPIN -->
 
 ## Consequences
 

@@ -7,8 +7,8 @@ source: liftoff-xml
 root: artifacts/harness/trackdata
 scenes_root: null
 world_scale: 1.0
-conversion_version: 2
-scanned: '2026-10-12'
+conversion_version: 3
+scanned: '2026-10-13'
 split:
   method: 'map-hash-greedy: held-out, then val, to round(ratio*N) tracks + 2 maps'
   seed: 68
@@ -827,7 +827,7 @@ entries:
       min: 5.97
       median: 24.99
       max: 55.61
-    extent_m: 161.57
+    extent_m: 157.47
     altitude_span_m: 3.58
     aperture_m:
       min: 2.238
@@ -942,7 +942,7 @@ entries:
       min: 9.83
       median: 24.62
       max: 54.6
-    extent_m: 90.52
+    extent_m: 89.61
     altitude_span_m: 9.31
     aperture_m:
       min: 1.32
@@ -2796,7 +2796,7 @@ entries:
       min: 7.4
       median: 35.53
       max: 83.12
-    extent_m: 370.1
+    extent_m: 363.02
     altitude_span_m: 10.78
     aperture_m:
       min: 2.2
@@ -2850,7 +2850,7 @@ entries:
       min: 5.61
       median: 23.03
       max: 66.09
-    extent_m: 206.75
+    extent_m: 204.49
     altitude_span_m: 7.18
     aperture_m:
       min: 1.75
@@ -3860,11 +3860,11 @@ entries:
       min: 9.04
       median: 36.95
       max: 92.08
-    extent_m: 353.41
+    extent_m: 353.8
     altitude_span_m: 17.15
     aperture_m:
-      min: 1.945
-      median: 5.097
+      min: 0.289
+      median: 5.071
     harness_list: 344
     harness_overflow: 0
     harness_candidates: 344
@@ -3878,7 +3878,8 @@ entries:
     spawn: real
     spawn_support_offset_m: -0.013
     time_limit_s: 240.0
-  flags: []
+  flags:
+  - outlier-aperture
 - id: straw-bale-01
   source: liftoff-xml
   track: StrawBaleTrack01_0001.xml
@@ -5034,11 +5035,11 @@ entries:
       min: 20.12
       median: 38.97
       max: 61.17
-    extent_m: 300.95
+    extent_m: 288.22
     altitude_span_m: 114.77
     aperture_m:
-      min: 2.2
-      median: 3.288
+      min: 0.814
+      median: 2.703
     harness_list: 24
     harness_overflow: 0
     harness_candidates: 24
@@ -5056,6 +5057,7 @@ entries:
   - branching
   - no-scene
   - outlier-altitude
+  - outlier-aperture
 - id: the-russian-woodpecker-01
   source: liftoff-xml
   track: TheRussianWoodpeckerTrack01_0001.xml
@@ -5086,10 +5088,10 @@ entries:
       min: 20.85
       median: 50.39
       max: 145.7
-    extent_m: 372.42
+    extent_m: 371.69
     altitude_span_m: 124.52
     aperture_m:
-      min: 2.771
+      min: 1.491
       median: 8.047
     harness_list: 51
     harness_overflow: 0

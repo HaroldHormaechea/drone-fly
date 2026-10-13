@@ -173,20 +173,15 @@ def test_volume_and_opening_precedence(field):
             assert q.normal[0] > 0.99  # centre heights differ: a slight tilt
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="QA finding (UC68): at a hairpin (incoming and outgoing legs nearly antiparallel) the "
-    "travel bisector degenerates to the small vertical residue, so a VOLUME's route direction "
-    "turns vertical and only a climbing / descending entry counts. Seen in the real data on "
-    "paris-drone-festival-02 (nz 0.98, 0.48), short-circuit-03, dubai-legends-01, surtur-03, "
-    "the-pit-06, the-russian-woodpecker-01.",
-)
 def test_hairpin_volume_route_direction_stays_horizontal(field):
+    """QA finding, fixed in conversion v3: at a hairpin the travel bisector degenerated to the
+    small vertical residue (a volume then only counted a climbing entry); v3 uses the incoming
+    leg. Real data: paris-drone-festival-02, short-circuit-03, surtur-03, ..."""
     # fake-field-01 is a straight line raced as a circuit: passage 0 (a flexible box at y 2) is
     # entered from passage 5 (y 1.5) going -x and left going +x
     p0 = field.passages[0]
     assert abs(p0.normal[2]) < 0.5
-    assert (p0.w, p0.h) == pytest.approx((4.0, 3.0))
+    assert (p0.w, p0.h) == pytest.approx((4.0, 3.0), abs=0.02)  # legs differ in height
 
 
 def test_prop_openings_facing_z_and_x(arena):
@@ -565,3 +560,25 @@ def test_conversion_config_validation():
         ConversionConfig.from_dict({"scene_policy": "maybe"})
     with pytest.raises(TrackDataError):
         ConversionConfig.from_dict({"world_scale": 0})
+
+
+def test_every_route_passage_lies_above_the_floor_kill_plane(tmp_path, props):
+    """QA finding, fixed in conversion v3: floor_z ignored volume passages, so a route volume
+    below the spawn support lay under the floor-kill plane (11 of 63 train tracks in v2)."""
+    from drone_fly.sim.pool import FLOOR_KILL_M
+    from tests.data.tracks.generate_fixtures import flat_race, item_xml, track_xml
+
+    items = [item_xml("SpawnPointSingle", "s", (0, 1, -4), xsi="TrackBlueprintSpawnpoint"),
+             item_xml("FakeCrate01", "k", (0, 0, -4))]  # the spawn stands on the crate (top 1 m)
+    corners = [(0, 0.3, 4), (8, 0.3, 12), (0, 0.3, 20), (-8, 0.3, 12)]  # a diamond loop
+    items += [item_xml("CheckpointBoxFlexible01", f"v{i}", xyz, scale=(2, 0.4, 2))
+              for i, xyz in enumerate(corners)]  # fmt: skip
+    (tmp_path / "t.xml").write_text(track_xml("low", "X", items), "utf-8")
+    (tmp_path / "r.xml").write_text(flat_race("low", ["v0", "v1", "v2", "v3"], 1), "utf-8")
+    geom = load_track_geometry(tmp_path / "t.xml", tmp_path / "r.xml")
+    c = convert_liftoff(geom, props, ConversionConfig.from_dict(None), with_cells=False)
+    assert c.frame.origin[2] == pytest.approx(1.0)  # the crate top is the support
+    for p in c.passages:
+        top = p.center[2] + float(np.abs(p.vol_rot[2]) @ p.vol_half)  # the volume's highest z
+        assert top == pytest.approx(0.5 - 1.0)
+        assert top > c.floor_z + FLOOR_KILL_M, (p.center, c.floor_z)
