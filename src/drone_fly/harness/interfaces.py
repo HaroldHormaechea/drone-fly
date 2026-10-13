@@ -245,6 +245,9 @@ class BuildContext:
     dry_run: bool = False
     #: Shared objects a factory hands to the parts it builds (e.g. the loopback plant/course).
     resources: dict[str, Any] = field(default_factory=dict)
+    #: Why the parts are built (``harness run``: ``"eval"``). ``None`` = unstated; the oracle gate
+    #: source refuses anything but ``eval`` / ``diagnostic`` (UC69 AC7, fail-closed).
+    purpose: str | None = None
 
 
 @dataclass

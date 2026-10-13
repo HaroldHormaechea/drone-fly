@@ -53,6 +53,37 @@ class PerceptionCoverageError(HarnessError):
         )
 
 
+class EstimatorStop(HarnessError):
+    """A gate source ends the attempt on purpose (not a fault): the runner stops with ``reason``.
+
+    Raised from :meth:`~drone_fly.harness.interfaces.GateEstimator.update` (the oracle's
+    episode monitor, UC69). The runner records the partial tick and stops before anything is
+    sent on that tick; the fail-safe still runs.
+    """
+
+    def __init__(self, reason: str, detail: str | None = None) -> None:
+        self.reason = reason
+        self.detail = detail
+        super().__init__(f"{reason}: {detail}" if detail else reason)
+
+
+class StartMisalignedError(EstimatorStop):
+    """The telemetry spawn does not match the track's start (UC69 AC3): exit 6, never armed."""
+
+    REASON = "start_misaligned"
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(self.REASON, detail)
+
+
+class OracleLeakageError(HarnessError):
+    """The oracle gate source was requested outside an evaluation / diagnostic purpose."""
+
+
+class TeacherSchemaError(HarnessConfigError):
+    """A teacher checkpoint's observation schema / provenance does not match this build."""
+
+
 def lazy_import(
     module: str, *, package: str | None = None, purpose: str = "", hint: str = INSTALL_HINT
 ) -> ModuleType:

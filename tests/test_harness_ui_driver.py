@@ -575,3 +575,269 @@ def test_cli_select_drone_unknown_name_exit_2(monkeypatch, capsys):
     monkeypatch.setattr(anticheat, "running_process_names", lambda: ["Liftoff.exe"])
     assert main(["harness", "ui", "select-drone", "--name", "Nope"]) == 2
     assert "unknown Liftoff drone" in capsys.readouterr().err
+
+
+# -------------------------------------------------------------------------- post-race Retry (UC69)
+# The post-race button probe on synthetic screens, the restart check, and retry()'s control flow
+# with every game-touching call replaced (``_block_real_input`` still guards the rest). After a
+# finished race Liftoff streams position (0, 0, 0), which once made a plain at-rest check pass.
+
+RED = ui_driver.BUTTON_RED
+SPAWN = ui_driver.QUICK_SETUP_LEVELS["infinity-loop"]["spawn"]
+ZERO = (0.0, 0.0, 0.0)
+
+
+def _post_race(states=None, size=(2560, 1080), mixed=()):
+    """A screen with the post-race buttons drawn: ``states`` maps a button to "plain" (default),
+    "selected" or None (not drawn); buttons in ``mixed`` get a different colour per probe column."""
+    states = states or {}
+    w, h = size
+    img = np.full((h, w, 3), 30, np.uint8)
+    for name, y_ref in ui_driver.POST_RACE_BUTTONS:
+        state = states.get(name, "plain")
+        y = round(y_ref * h / ui_driver.REFERENCE[1])
+        xs = [round(x * w / ui_driver.REFERENCE[0]) for x in ui_driver.POST_RACE_XS]
+        for i, x in enumerate(xs):
+            if name in mixed:
+                colour = (240, 240, 240) if i == 0 else RED
+            elif state == "plain":
+                colour = (240, 240, 240)
+            elif state == "selected":
+                colour = RED
+            else:
+                continue
+            img[max(0, y - 3) : y + 4, max(0, x - 3) : x + 4] = colour
+    return img
+
+
+def test_post_race_constants_shape():
+    names = [n for n, _ in ui_driver.POST_RACE_BUTTONS]
+    assert names == ["save_recording", "retry", "random_race", "level_selection", "main_menu"]
+    ys = [y for _, y in ui_driver.POST_RACE_BUTTONS]
+    assert ys == sorted(ys) and all(0 < y < ui_driver.REFERENCE[1] for y in ys)
+    assert dict(ui_driver.POST_RACE_BUTTONS)["retry"] == ui_driver.POINTS["race_retry"][1]
+    assert all(0 < x < ui_driver.REFERENCE[0] for x in ui_driver.POST_RACE_XS)
+    assert ui_driver.scaled("race_retry", (2560, 1080)) == (2438, 888)
+    assert ui_driver.scaled("race_retry", (1280, 540)) == (1219, 444)
+    assert issubclass(ui_driver.RetryError, HarnessConfigError)
+    assert ui_driver.ACTIONS["retry"] is ui_driver.retry
+
+
+def test_post_race_buttons_plain_selected_and_absent():
+    img = _post_race({"retry": "selected", "main_menu": None})
+    assert ui_driver.post_race_buttons(img) == {
+        "save_recording": "plain",
+        "retry": "selected",
+        "random_race": "plain",
+        "level_selection": "plain",
+        "main_menu": None,
+    }
+    assert not ui_driver.post_race_screen(img)  # one button missing
+
+
+def test_hovered_grey_counts_as_plain_and_off_grey_does_not():
+    img = _post_race()
+    y = dict(ui_driver.POST_RACE_BUTTONS)["random_race"]
+    for x in ui_driver.POST_RACE_XS:
+        img[y - 3 : y + 4, x - 3 : x + 4] = 231  # hovered (measured ~231)
+    assert ui_driver.post_race_buttons(img)["random_race"] == "plain"
+    for x in ui_driver.POST_RACE_XS:
+        img[y - 3 : y + 4, x - 3 : x + 4] = (240, 225, 240)  # not neutral grey
+    assert ui_driver.post_race_buttons(img)["random_race"] is None
+
+
+def test_a_mixed_column_is_none():
+    img = _post_race(mixed=("retry",))
+    assert ui_driver.post_race_buttons(img)["retry"] is None
+    assert not ui_driver.post_race_screen(img)
+
+
+def test_post_race_screen_true_and_false():
+    assert ui_driver.post_race_screen(_post_race())
+    assert ui_driver.post_race_screen(_post_race({"random_race": "selected"}))
+    blank = np.full((1080, 2560, 3), 30, np.uint8)
+    assert not ui_driver.post_race_screen(blank)
+    assert set(ui_driver.post_race_buttons(blank).values()) == {None}
+
+
+@pytest.mark.parametrize("size", [(1920, 1080), (1280, 540), (3840, 1620)])
+def test_post_race_probe_scales_to_any_resolution(size):
+    img = _post_race({"retry": "selected"}, size=size)
+    state = ui_driver.post_race_buttons(img)
+    assert state["retry"] == "selected" and state["main_menu"] == "plain"
+    assert ui_driver.post_race_screen(img)
+
+
+def test_restart_ok_accepts_at_spawn_and_at_rest():
+    b = (SPAWN[0] + 0.5, SPAWN[1], SPAWN[2] - 0.3)
+    a = (b[0] + 0.02, b[1], b[2])
+    assert ui_driver.restart_ok(a, b, SPAWN) == (True, "at the spawn, at rest")
+    assert ui_driver.restart_ok(b, b, None) == (True, "at the spawn, at rest")  # no spawn check
+
+
+def test_restart_ok_refuses_the_post_race_zero_position():
+    ok, why = ui_driver.restart_ok(ZERO, ZERO, SPAWN)
+    assert not ok and "(0, 0, 0)" in why
+    assert not ui_driver.restart_ok(ZERO, ZERO, None)[0]  # even without a spawn check
+
+
+@pytest.mark.parametrize("dx", [0.051, 0.3, 2.0])
+def test_restart_ok_refuses_a_moving_drone(dx):
+    a = (SPAWN[0] - dx, SPAWN[1], SPAWN[2])
+    ok, why = ui_driver.restart_ok(a, SPAWN, SPAWN)
+    assert not ok and why.startswith("moving")
+    assert ui_driver.restart_ok((SPAWN[0] - 0.049, SPAWN[1], SPAWN[2]), SPAWN, SPAWN)[0]
+
+
+def test_restart_ok_refuses_off_the_spawn():
+    far = (SPAWN[0] + 10.0, SPAWN[1], SPAWN[2])
+    ok, why = ui_driver.restart_ok(far, far, SPAWN)
+    assert not ok and "not the spawn" in why
+
+
+@pytest.mark.parametrize("a, b", [(None, SPAWN), (SPAWN, None), (None, None)])
+def test_restart_ok_refuses_a_missing_sample(a, b):
+    assert ui_driver.restart_ok(a, b, SPAWN) == (False, "no telemetry")
+
+
+class FakeClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def monotonic(self):
+        return self.t
+
+    def sleep(self, s):
+        self.t += s
+
+
+class FakeCursor:
+    def __init__(self, rec):
+        self.rec = rec
+
+    def SetCursorPos(self, x, y):  # noqa: N802 (the user32 name)
+        self.rec(("hover", x, y))
+
+
+class RetryGame:
+    """Fakes every call retry() makes: the screen (post-race when ``screen_ok``), telemetry
+    positions in order (a pair per try), clicks and the cursor; time advances only via sleep."""
+
+    def __init__(self, monkeypatch, positions, *, screen_ok=True, retry_state="selected"):
+        self.calls: list = []
+        self.positions = list(positions)
+        self.screen = (
+            _post_race({"retry": retry_state})
+            if screen_ok
+            else np.full((1080, 2560, 3), 30, np.uint8)
+        )
+        self.clock = FakeClock()
+        rec = self.calls.append
+        m = monkeypatch.setattr
+        m(ui_driver, "screen_size", lambda: (2560, 1080))
+        m(ui_driver, "_focused", lambda: rec("focus"))
+        m(ui_driver, "telemetry_streaming", lambda *a, **kw: True)
+        m(ui_driver, "_user32", lambda: FakeCursor(rec))
+        m(ui_driver, "_grab_screen", lambda: self.screen)
+        m(ui_driver, "click", lambda name, settle_s=1.0: rec(("click", name)))
+        m(ui_driver, "telemetry_position", lambda *a, **kw: self.positions.pop(0))
+        m(ui_driver.time, "sleep", self.clock.sleep)
+        m(ui_driver.time, "monotonic", self.clock.monotonic)
+
+    def clicks(self):
+        return [c for c in self.calls if isinstance(c, tuple) and c[0] == "click"]
+
+
+def test_retry_succeeds_on_the_first_try(monkeypatch):
+    g = RetryGame(monkeypatch, [SPAWN, SPAWN])
+    ui_driver.retry()
+    assert g.clicks() == [("click", "race_retry")]
+    assert ("hover", 2438, 888) in g.calls
+    assert g.calls[0] == "focus" and g.positions == []
+
+
+def test_retry_zero_position_then_success_on_the_second_try(monkeypatch):
+    g = RetryGame(monkeypatch, [ZERO, ZERO, SPAWN, SPAWN])
+    ui_driver.retry("infinity-loop")
+    assert len(g.clicks()) == 2 and g.positions == []
+
+
+def test_retry_gives_up_after_three_tries(monkeypatch):
+    g = RetryGame(monkeypatch, [ZERO] * 6 + [SPAWN, SPAWN])
+    with pytest.raises(ui_driver.RetryError, match=r"after 3 Retry clicks.*\(0, 0, 0\)"):
+        ui_driver.retry()
+    assert len(g.clicks()) == 3 and g.positions == [SPAWN, SPAWN]  # no 4th try
+
+
+def test_retry_error_is_a_harness_config_error(monkeypatch):
+    RetryGame(monkeypatch, [None, None] * 3)
+    with pytest.raises(HarnessConfigError, match="no telemetry"):
+        ui_driver.retry(tries=3)
+
+
+def test_retry_respects_the_tries_argument(monkeypatch):
+    g = RetryGame(monkeypatch, [ZERO] * 2)
+    with pytest.raises(ui_driver.RetryError, match="after 1 Retry clicks"):
+        ui_driver.retry(tries=1)
+    assert len(g.clicks()) == 1
+
+
+def test_retry_times_out_when_the_post_race_screen_never_appears(monkeypatch):
+    g = RetryGame(monkeypatch, [], screen_ok=False)
+    with pytest.raises(HarnessConfigError, match="the post-race screen") as exc:
+        ui_driver.retry(screen_timeout_s=10.0)
+    assert not isinstance(exc.value, ui_driver.RetryError)
+    assert g.clicks() == []  # never clicked blind
+    assert 10.0 <= g.clock.t <= 10.0 + ui_driver.retry.__kwdefaults__["appear_s"] + 1.0
+
+
+def test_retry_clicks_even_when_retry_is_not_shown_selected(monkeypatch, caplog):
+    g = RetryGame(monkeypatch, [SPAWN, SPAWN], retry_state="plain")
+    with caplog.at_level("INFO", logger=ui_driver.__name__):
+        ui_driver.retry()
+    assert g.clicks() == [("click", "race_retry")]
+    assert "clicking anyway" in caplog.text
+
+
+def test_retry_off_spawn_is_refused_but_level_none_skips_the_spawn_check(monkeypatch):
+    far = (SPAWN[0] + 10.0, SPAWN[1], SPAWN[2])
+    RetryGame(monkeypatch, [far] * 6)
+    with pytest.raises(ui_driver.RetryError, match="not the spawn"):
+        ui_driver.retry()
+    g = RetryGame(monkeypatch, [far, far])
+    ui_driver.retry(level=None)
+    assert len(g.clicks()) == 1
+
+
+def test_retry_unknown_level_is_refused_before_clicking(monkeypatch):
+    g = RetryGame(monkeypatch, [])
+    with pytest.raises(KeyError):
+        ui_driver.retry("no-such-level")
+    assert g.clicks() == []
+
+
+def test_cli_ui_retry_parser_and_default_level(monkeypatch, capsys):
+    from drone_fly.cli.main import build_parser, main
+
+    p = build_parser()
+    a = p.parse_args(["harness", "ui", "retry"])
+    assert a.action == "retry" and a.level is None
+    a = p.parse_args(["harness", "ui", "retry", "--level", "arena-freeflight"])
+    assert a.level == "arena-freeflight"
+    seen = []
+    monkeypatch.setattr(ui_driver, "retry", lambda level="x", **kw: seen.append(level))
+    assert main(["harness", "ui", "retry"]) == 0
+    assert main(["harness", "ui", "retry", "--level", "arena-freeflight"]) == 0
+    assert seen == ["infinity-loop", "arena-freeflight"]
+    assert "retry: ok" in capsys.readouterr().out
+
+
+def test_cli_ui_retry_failure_exits_2(monkeypatch, capsys):
+    from drone_fly.cli.main import main
+
+    def boom(level=None, **kw):
+        raise ui_driver.RetryError("the race did not restart after 3 Retry clicks: x")
+
+    monkeypatch.setattr(ui_driver, "retry", boom)
+    assert main(["harness", "ui", "retry"]) == 2
+    assert "did not restart" in capsys.readouterr().err

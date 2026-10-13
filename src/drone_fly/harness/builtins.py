@@ -92,6 +92,15 @@ _BUILTINS: list[tuple[str, str, str, dict]] = [
         {"description": "HSV quads + PnP gate pose", "requires": ("cv2",), "packages": _CV2},
     ),
     (
+        "gate_estimator",
+        "oracle",
+        f"{_PKG}.oracle:OracleGateSource",
+        {
+            "description": "UC69 diagnostic: exact gate poses from the catalogue track + "
+            "telemetry (harness run --teacher ... --perception oracle; never for training)",
+        },
+    ),
+    (
         "free_space_estimator",
         "none",
         f"{_PKG}.estimators:NoObstacleFreeSpaceEstimator",

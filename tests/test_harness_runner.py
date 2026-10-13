@@ -462,3 +462,93 @@ def test_vk_codes_and_bad_key():
         vk_for("NOPE")
     sig = HotkeyAbortSignal.from_config({"key": "F9", "poll_s": 0.05}, None)
     assert sig.vk == 0x78 and sig.poll_s == 0.05
+
+
+# ----------------------------------------------------------------------------- UC69 estimator stop
+
+
+class _StoppingGate(FakeGateEstimator):
+    """Raises an EstimatorStop on update number ``at`` (1-based)."""
+
+    def __init__(self, at: int, stop: BaseException) -> None:
+        super().__init__()
+        self.at = at
+        self.stop = stop
+
+    def update(self, frame, state, now):
+        if self.calls + 1 == self.at:
+            self.calls += 1
+            raise self.stop
+        return super().update(frame, state, now)
+
+
+def test_estimator_stop_records_reason_sends_nothing_that_tick_and_fails_safe():
+    from drone_fly.harness.errors import EstimatorStop
+
+    rec = ListRecorder()
+    sink = FakeSink()
+    r = _runner(
+        gate=_StoppingGate(4, EstimatorStop("episode_end:crash_settled", "settled at 0.1 m")),
+        sink=sink, recorder=rec, settings=RunnerSettings(max_ticks=20),
+    )  # fmt: skip
+    result = r.run()
+    assert result.reason == "episode_end:crash_settled"
+    assert result.error == "settled at 0.1 m"
+    assert len(sink.sent) == 3  # ticks 0-2 sent; nothing on the stopping tick
+    assert sink.failsafe_calls == 1  # the fail-safe still runs
+    assert _stop_events(rec) == ["stop:episode_end:crash_settled"]
+    last = rec.ticks[-1]
+    assert last.tick == 3 and last.command is None and last.sink_output is None
+    assert result.is_failsafe_stop  # an episode end is not a normal stop (CLI exit 5)
+
+
+def test_estimator_stop_is_not_reported_as_a_perception_error():
+    from drone_fly.harness.errors import EstimatorStop
+
+    r = _runner(gate=_StoppingGate(1, EstimatorStop("episode_end:respawn")))
+    result = r.run()
+    assert result.reason == "episode_end:respawn" and result.reason != STOP_PERCEPTION_ERROR
+
+
+def test_oracle_start_misaligned_before_the_first_send():
+    """The real oracle refuses at tick 0: no command ever reaches the sink (never armed)."""
+    from drone_fly.harness.errors import StartMisalignedError
+    from drone_fly.harness.oracle import OracleGateSource
+    from tests.oracle_support import make_course, state
+
+    course = make_course()
+    src = OracleGateSource(course, purpose="eval")
+    sink = FakeSink()
+    rec = ListRecorder()
+    r = _runner(
+        state=FakeStateSource(state(course, [2.5, 0.0, 0.03])), gate=src, sink=sink, recorder=rec,
+        fs=None, settings=RunnerSettings(max_ticks=5),
+    )  # fmt: skip
+    result = r.run()
+    assert result.reason == StartMisalignedError.REASON
+    assert sink.sent == [] and sink.failsafe_calls == 1
+    assert len(rec.ticks) == 1 and rec.ticks[0].command is None
+
+
+def test_oracle_course_finished_stops_normally():
+    from drone_fly.harness.oracle import OracleGateSource, StartTolerance
+    from drone_fly.harness.runner import STOP_COURSE_FINISHED
+    from tests.oracle_support import make_course, state
+
+    course = make_course()
+    src = OracleGateSource(
+        course, purpose="eval", start_tolerance=StartTolerance(50.0, 50.0, 180.0, 100.0)
+    )
+    ss = FakeStateSource(state(course, [0.0, 0.0, 1.5]))
+    path = iter(np.linspace([0.0, 0.0, 1.5], [11.0, 0.0, 1.5], 60))
+
+    class Moving(FakeStateSource):
+        def latest(self):
+            return state(course, next(path), vel=[9.0, 0.0, 0.0])
+
+    sink = FakeSink()
+    r = _runner(state=Moving(ss.state), gate=src, sink=sink, fs=None,
+                settings=RunnerSettings(max_ticks=100))  # fmt: skip
+    result = r.run()
+    assert result.reason == STOP_COURSE_FINISHED and not result.is_failsafe_stop
+    assert src.progress.finished and len(sink.sent) == result.ticks

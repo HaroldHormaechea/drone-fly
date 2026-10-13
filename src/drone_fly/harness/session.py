@@ -39,7 +39,14 @@ from drone_fly.harness.overlay import (
 )
 from drone_fly.harness.policy import ContractPolicyRunner, validate_extra_dim
 from drone_fly.harness.recording import RunRecorder
-from drone_fly.harness.runner import HarnessRunner, RunnerSettings, RunResult, SimClock, WallClock
+from drone_fly.harness.runner import (
+    HarnessRunner,
+    RecordingOnlySink,
+    RunnerSettings,
+    RunResult,
+    SimClock,
+    WallClock,
+)
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +61,8 @@ class SessionResult:
     config: HarnessConfig
     #: the overlay process this run launched (still showing the stop reason), else None
     overlay_process: Any = None
+    #: UC69 teacher runs: the session folder (frozen checkpoint, attempts/, report)
+    session_dir: Path | None = None
 
 
 def build_harness(config: HarnessConfig, ctx: BuildContext) -> Harness:
@@ -184,10 +193,56 @@ def stop_overlay(process: Any, timeout_s: float = 5.0) -> None:
         process.kill()
 
 
+def require_no_anticheat_default() -> None:
+    from drone_fly.harness.liftoff.anticheat import require_no_anticheat
+
+    require_no_anticheat()
+
+
+class _TickObserver:
+    """Forwards to the recorder and notes the first tick and the arm confirmation (UC69 meta)."""
+
+    def __init__(self, recorder: Any) -> None:
+        self._recorder = recorder
+        self.first_tick_s: float | None = None
+        self.armed_s: float | None = None
+
+    def record_tick(self, record: Any) -> None:
+        if self.first_tick_s is None:
+            self.first_tick_s = record.sim_time
+        if self.armed_s is None and "armed" in record.events:
+            self.armed_s = record.sim_time
+        self._recorder.record_tick(record)
+
+    @property
+    def arm_confirm_delay_s(self) -> float | None:
+        """Arm press (the first tick's command) to the first tick with motor RPM."""
+        if self.first_tick_s is None or self.armed_s is None:
+            return None
+        return float(self.armed_s - self.first_tick_s)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._recorder, name)
+
+
+@dataclass
+class _TeacherPlan:
+    """The teacher / oracle side of one run (UC69), resolved before anything is built."""
+
+    checkpoint: Any  # harness.teacher.TeacherCheckpoint
+    track: str | None
+    perception: str
+    guard: dict[str, Any]
+    session_dir: Path | None = None
+    course: Any = None
+    course_info: dict[str, Any] | None = None
+    preset_world_scale: float | None = None
+
+
 def run_harness(
     harness: str,
-    checkpoint: str | os.PathLike[str],
-    extra_dim: int,
+    checkpoint: str | os.PathLike[str] | None = None,
+    extra_dim: int | None = None,
     *,
     config: str | os.PathLike[str] | dict[str, Any] | None = None,
     k1_path: str | None = None,
@@ -203,6 +258,16 @@ def run_harness(
     launcher: OverlayLauncher | None = None,
     recordable: bool | None = None,
     save_recording: str | None = None,
+    teacher: str | os.PathLike[str] | None = None,
+    track: str | None = None,
+    perception: str | None = None,
+    trackdata_root: str | None = None,
+    scenes_root: str | None = None,
+    allow_concurrent_training: bool = False,
+    session_dir: str | os.PathLike[str] | None = None,
+    session_stamp: str | None = None,
+    anticheat: Callable[[], None] | None = None,
+    process_lister: Callable[[], Any] | None | str = "default",
 ) -> SessionResult:
     """Run ``harness`` with ``checkpoint``; CLI-style arguments override the YAML config.
 
@@ -213,8 +278,39 @@ def run_harness(
     and the run masks the overlay's panels out of its own frame capture.
     ``save_recording`` (Liftoff): right after the stop, save the game's recording of this attempt
     under that name (pause menu -> Save recording), before Liftoff can auto-restart the course.
+
+    UC69: ``teacher`` (a UC68 teacher run folder or ``.pt``; exclusive with ``checkpoint`` /
+    ``extra_dim``) flies the teacher with ``perception`` ``oracle`` (the default; ``detector``
+    keeps the preset's estimator, which the teacher's coverage check refuses) on catalogue
+    ``track``. The oracle forces ``frame_source: null``, ``free_space_estimator: none``,
+    ``contract.device: cpu`` and ``world_scale`` 1.0. The checkpoint is frozen into the session
+    folder (``session_dir``; default ``artifacts/eval/<drone>/<run>/oracle/<track>/sessions/
+    <session_stamp>-<sha8>``) and the attempt is recorded under its ``attempts/``. A training run
+    still writing the teacher refuses (exit 2) unless ``allow_concurrent_training``;
+    ``process_lister`` replaces the guard's process listing (None = skip it).
+
+    ``anticheat`` (default :func:`~drone_fly.harness.liftoff.anticheat.require_no_anticheat`)
+    runs before arming on every live Liftoff run whose sink actuates (dry runs skip it).
     """
-    extra_dim = validate_extra_dim(extra_dim)
+    if teacher is None:
+        if perception == "oracle":
+            raise HarnessConfigError(
+                "--perception oracle needs --teacher: the oracle converts the track exactly as "
+                "the teacher's sidecar records"
+            )
+        if checkpoint is None or extra_dim is None:
+            raise HarnessConfigError("--checkpoint and --extra-dim are required (or --teacher)")
+        extra_dim = validate_extra_dim(extra_dim)
+    else:
+        if checkpoint is not None or extra_dim is not None:
+            raise HarnessConfigError("--teacher is exclusive with --checkpoint / --extra-dim")
+        if overlay or overlay_launch or recordable:
+            raise HarnessConfigError("--overlay is not supported with --teacher (no K1 brain)")
+        if perception not in (None, "oracle", "detector"):
+            raise HarnessConfigError(f"--perception must be oracle or detector, not {perception!r}")
+        perception = perception or "oracle"
+        if perception == "oracle" and not track:
+            raise HarnessConfigError("--perception oracle needs --track <catalogue id>")
     if overlay_launch and overlay is None:
         overlay = True
     overrides: dict[str, Any] = {}
@@ -230,6 +326,32 @@ def run_harness(
     ):
         if value is not None:
             overrides[key] = value
+
+    plan: _TeacherPlan | None = None
+    if teacher is not None:
+        lister = None if process_lister == "default" else process_lister
+        plan = _plan_teacher(
+            teacher, track, str(perception), allow_concurrent_training, lister,
+            default_lister=process_lister == "default",
+        )  # fmt: skip
+        overrides["contract.device"] = "cpu"
+        if perception == "oracle":
+            base = load_config(harness, config, overrides, preset=preset)
+            plan.preset_world_scale = base.world_scale
+            overrides.update(
+                {
+                    "parts.frame_source": None,
+                    "parts.free_space_estimator": "none",
+                    "parts.gate_estimator": "oracle",
+                    "scaling.world_scale": 1.0,
+                }
+            )
+            log.info(
+                "oracle perception: world_scale 1.0 (the configured %s is ignored), no frame "
+                "capture, contract on the CPU",
+                plan.preset_world_scale,
+            )
+
     cfg = load_config(harness, config, overrides, preset=preset)
     overlay_cfg = OverlayConfig.from_config(cfg)
     if overlay_cfg.enabled and overlay_cfg.recordable:
@@ -240,29 +362,80 @@ def run_harness(
             cfg = load_config(harness, config, overrides, preset=preset)
     if overlay_launch and not overlay_cfg.enabled:
         raise HarnessConfigError("--overlay-launch needs the overlay enabled")
+    if plan is not None and overlay_cfg.enabled:
+        raise HarnessConfigError("--overlay is not supported with --teacher (no K1 brain)")
 
     contract = load_contract(
         cfg.contract.gpu_prototype_dir, cfg.contract.k1_path, cfg.contract.device
     )
-    ctx = BuildContext(config=cfg, contract=contract, extra_dim=extra_dim, dry_run=dry_run)
+    ctx = BuildContext(
+        config=cfg, contract=contract, extra_dim=extra_dim, dry_run=dry_run, purpose="eval"
+    )
+    step: Any = None
+    if plan is not None:
+        step = _prepare_teacher(plan, cfg, contract, ctx, trackdata_root, scenes_root)
     h = build_harness(cfg, ctx)
-    policy = ContractPolicyRunner(contract, checkpoint, extra_dim)
+    assembler: Any
+    policy: Any
+    if plan is not None:
+        from drone_fly.harness import teacher as tch
+
+        step.sink = h.action_sink
+        step.state_source = h.state_source
+        version = tch.obs_version_of(plan.checkpoint.sidecar)
+        assembler = tch.TeacherObservationAssembler(contract, ctx.resources, step, version)
+        try:
+            # refuse a detector before anything is written (the teacher needs the oracle block)
+            assembler.check_coverage(ctx.extra_dim, h.provided_blocks())
+            plan.session_dir = (
+                Path(session_dir)
+                if session_dir is not None
+                else tch.session_dir_for(
+                    tch.default_eval_root(),
+                    str(cfg.data.get("drone")),
+                    plan.checkpoint,
+                    plan.track or "detector",
+                    session_stamp,
+                )  # fmt: skip
+            )
+            frozen = plan.checkpoint.freeze(plan.session_dir)
+            if output_root is None:
+                overrides["recording.output_root"] = str(plan.session_dir / "attempts")
+                cfg = load_config(harness, config, overrides, preset=preset)
+                ctx.config = cfg
+        except BaseException:
+            h.action_sink.close()
+            raise
+        policy = tch.TeacherPolicyRunner(
+            frozen, step, contract=contract, drone=cfg.data.get("drone"), device="cpu"
+        )
+    else:
+        assembler = ContractObservationAssembler(contract)
+        policy = ContractPolicyRunner(contract, checkpoint, extra_dim)  # type: ignore[arg-type]
     runner = HarnessRunner(
         h,
         policy,
-        ContractObservationAssembler(contract),
+        assembler,
         contract,
         RunnerSettings.from_config(cfg),
         clock=h.clock,
     )
     recorder = None
+    observer: _TickObserver | None = None
     publisher: OverlayPublisher | None = None
     try:
         # Everything that can refuse the run happens before the sink is armed: coverage, model
-        # load, and the recording root / run folder. Any failure up to and including arming
-        # shuts the harness down (sink closed), so a refused run never leaves the device armed.
+        # load, the anti-cheat check and the recording root / run folder. Any failure up to and
+        # including arming shuts the harness down (sink closed), so a refused run never leaves
+        # the device armed.
         runner.prepare(arm=False)
         policy.warm_up()  # first forward pass off the live loop (CUDA init)
+        if (
+            not dry_run
+            and cfg.harness == "liftoff"
+            and not isinstance(h.action_sink, RecordingOnlySink)
+        ):
+            (anticheat or require_no_anticheat_default)()
         if overlay_cfg.enabled:
             publisher = OverlayPublisher(
                 overlay_cfg.port,
@@ -270,7 +443,7 @@ def run_harness(
                 brain_scale=overlay_cfg.brain_scale,
                 run_info={
                     "harness": cfg.harness,
-                    "checkpoint": Path(checkpoint).name,
+                    "checkpoint": Path(checkpoint).name,  # type: ignore[arg-type]
                     "sha8": (policy.sha256 or "")[:8],
                     "extra_dim": extra_dim,
                     "contract_version": policy.contract_version,
@@ -291,9 +464,9 @@ def run_harness(
                 cfg.harness,
                 cfg.data,
                 {
-                    "checkpoint": str(Path(checkpoint).resolve()),
+                    "checkpoint": str(Path(policy.checkpoint).resolve()),
                     "checkpoint_sha256": policy.sha256,
-                    "extra_dim": extra_dim,
+                    "extra_dim": policy.extra_dim,
                     "contract_version": policy.contract_version,
                     "action_contract": None
                     if policy.action_spec is None
@@ -306,17 +479,21 @@ def run_harness(
                     "dry_run": dry_run,
                     "provided_blocks": sorted(h.provided_blocks()),
                     "harness_info": h.info,
+                    **({} if plan is None else _teacher_meta(plan, policy, cfg)),
                 },
                 queue_size=cfg.recording.queue_size,
                 repo_root=find_repo_root(),
                 rate_hz=cfg.runner.rate_hz,
             )
-            runner.recorder = recorder
+            if plan is not None:
+                observer = _TickObserver(recorder)
+            runner.recorder = observer or recorder
         runner.arm()
     except BaseException:
         runner.shutdown()
         if recorder is not None:
-            recorder.close(stop_reason="refused")
+            extra = {} if plan is None else {"stop_class": "refused"}
+            recorder.close(stop_reason="refused", **extra)
         if publisher is not None:
             publisher.close()
         raise
@@ -372,6 +549,9 @@ def run_harness(
             publisher.close()
         run_dir = None
         if recorder is not None:
+            final: dict[str, Any] = {}
+            if plan is not None:
+                final = _teacher_final_meta(result, observer, ctx, step)
             run_dir = recorder.close(
                 stop_reason=None if result is None else result.reason,
                 stop_error=None if result is None else result.error,
@@ -379,6 +559,7 @@ def run_harness(
                 missed_deadlines=None if result is None else result.missed_deadlines,
                 failsafe_ok=None if result is None else result.failsafe_ok,
                 failsafe_output=None if result is None else result.failsafe_output,
+                **final,
             )
     log.info("harness run finished: %s (%d ticks)", result.reason, result.ticks)
     if ready_file is not None:
@@ -388,4 +569,117 @@ def run_harness(
         run_dir=run_dir,
         config=cfg,
         overlay_process=launched[0] if launched else None,
+        session_dir=None if plan is None else plan.session_dir,
     )
+
+
+# ----------------------------------------------------------------------------- UC69 teacher
+
+
+def _plan_teacher(
+    teacher: str | os.PathLike[str],
+    track: str | None,
+    perception: str,
+    allow_concurrent_training: bool,
+    process_lister: Any,
+    *,
+    default_lister: bool,
+) -> _TeacherPlan:
+    """The concurrent-training guard (first), then the checkpoint resolution (UC69 P2)."""
+    from drone_fly.harness import teacher as tch
+    from drone_fly.training.evaluate import resolve_run
+
+    p = Path(teacher).expanduser()
+    if not p.exists():
+        raise HarnessConfigError(f"--teacher {p}: no such run folder or checkpoint")
+    run, _ = resolve_run(p)
+    lister = tch.default_process_lister if default_lister else process_lister
+    guard = tch.check_concurrent_training(run, allow_concurrent_training, process_lister=lister)
+    ck = tch.TeacherCheckpoint.resolve(p)
+    log.info("teacher %s: %s (%s), sha %s", ck.run_id, ck.source.name, ck.label, ck.sha256[:8])
+    return _TeacherPlan(ck, track, perception, guard)
+
+
+def _prepare_teacher(
+    plan: _TeacherPlan,
+    cfg: HarnessConfig,
+    contract: Any,
+    ctx: BuildContext,
+    trackdata_root: str | None,
+    scenes_root: str | None,
+) -> Any:
+    """Schema guard, the oracle course and the shared step state (into ``ctx.resources``)."""
+    from drone_fly.harness import teacher as tch
+
+    controls = cfg.get("controls") or {}
+    tch.require_rate_scale_one(controls)
+    # refuse a schema / provenance mismatch before anything is loaded or written
+    tch.validate_teacher_sidecar(
+        plan.checkpoint.sidecar,
+        contract=contract,
+        drone=cfg.data.get("drone"),
+        ckpt=plan.checkpoint.source,
+    )
+    if plan.perception == "oracle":
+        from drone_fly.harness.oracle import load_oracle_course
+
+        plan.course, plan.course_info = load_oracle_course(
+            str(plan.track), plan.checkpoint.sidecar, root=trackdata_root, scenes_root=scenes_root
+        )
+        ctx.resources["oracle_course"] = plan.course
+        ctx.resources["oracle_course_info"] = plan.course_info
+    step = tch.TeacherStepState(arm_total_s=tch.arm_total_s(controls))
+    if tch.obs_version_of(plan.checkpoint.sidecar) >= 2:  # the battery block: refuse up front
+        battery = (plan.checkpoint.sidecar.get("obs_schema") or {}).get("battery") or {}
+        step.cells = tch.require_battery_telemetry(
+            cfg, cfg.data.get("drone"), plan.checkpoint.source, battery.get("cells")
+        )
+    ctx.resources["teacher_step"] = step
+    ctx.extra_dim = tch.obs_dim_of(plan.checkpoint.sidecar)
+    return step
+
+
+def _teacher_meta(plan: _TeacherPlan, policy: Any, cfg: HarnessConfig) -> dict[str, Any]:
+    from drone_fly.harness.oracle import ORACLE_LABEL
+    from drone_fly.harness.teacher import CONCURRENT_LABEL, drone_provenance
+
+    ck = plan.checkpoint
+    info = dict(plan.course_info or {})
+    files = info.pop("files", {})
+    labels = [ORACLE_LABEL] if plan.perception == "oracle" else []
+    if plan.guard["training_active"]:
+        labels.append(CONCURRENT_LABEL)
+    return {
+        "perception": plan.perception,
+        "track_id": plan.track,
+        "session_dir": None if plan.session_dir is None else str(plan.session_dir),
+        "teacher": {
+            **ck.record(),
+            **policy.provenance,
+            "drone": drone_provenance(ck.run_dir, cfg.data.get("drone")),
+            "world_scale_effective": cfg.world_scale,
+            "preset_world_scale_ignored": plan.preset_world_scale,
+            "conversion_fingerprint": (ck.sidecar.get("course_conversion") or {}).get(
+                "fingerprint"
+            ),
+            "course": info,
+            "course_files": files,
+        },
+        "training_active": plan.guard["training_active"],
+        "training_conditions": plan.guard["conditions"],
+        "labels": labels,
+    }
+
+
+def _teacher_final_meta(
+    result: RunResult | None, observer: _TickObserver | None, ctx: BuildContext, step: Any
+) -> dict[str, Any]:
+    from drone_fly.harness.teacher import stop_class
+
+    oracle = ctx.resources.get("oracle")
+    return {
+        "stop_class": stop_class(None if result is None else result.reason),
+        "arm_confirm_delay_s": None if observer is None else observer.arm_confirm_delay_s,
+        "oracle": None if oracle is None else oracle.summary(),
+        "teacher_timing_ms": None if step is None else step.timing_summary(),
+    }
