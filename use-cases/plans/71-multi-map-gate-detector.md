@@ -33,6 +33,12 @@ Docs ownership (`docs/`, `tracks/README.md`) is outside both path globs. The orc
 
 ## Decisions for the user on return (answer when accepting the plan)
 
+**Resolved 2026-10-13 by the user:**
+- D-U1 accepted as proposed.
+- D-U2: publish v2 if it beats v1 on held-out maps and stays within 5 pp of v1 on the Infinity window; record the miss. Switching the preset default to v2 needs the user's explicit OK.
+- D-U3: moot. No AI-attempt recordings exist.
+- D-U4: done. The user hand-flew AutumnFields 04, which cleared G1.
+
 **D-U1. AC7 pass rule.**
 - **Proposed:** the held-out targets (≥ 70 % detection, median position error ≤ 20 % of range, 4–25 m) are judged per gate type, pooled over held-out maps.
 - A type is judged only if it was seen in training AND has n ≥ 30 in-range gate-frames.

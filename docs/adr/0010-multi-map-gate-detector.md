@@ -143,8 +143,8 @@ until the score is revised. The result is recorded here.
 held-out-map captures (refusing any capture the weights trained or selected on), per map x type and
 per type pooled, with range bins 4-8 / 8-15 / 15-25 m, the ADR 0003 metrics on matched-by-centre
 detections (median signed range error, keypoint-spread ratio), yaw error, false detections per frame
-and latency (CPU-measured latency is flagged). Targets 70 % / 20 % under the D-U1 rule (pending the
-user's acceptance); `--compare` scores both detectors on v1's protected Infinity Loop window and
+and latency (CPU-measured latency is flagged). Targets 70 % / 20 % under the D-U1 rule (accepted,
+§ User decisions); `--compare` scores both detectors on v1's protected Infinity Loop window and
 passes when the new arch detection at 4-25 m is >= v1 - 5 pp (the 4-8 m bin is tracked, not gated).
 
 **v1 diagnosis (P0b, CPU)**: `gates diagnose --weights liftoff-gates.pt --captures
@@ -191,6 +191,22 @@ misses are `pnp_range`); beyond 15 m most misses are no centre peak at all (52 o
   favouring maps with few preset captures.
 - **Gate classes.** A capture whose track has no class of the gate-type table (most non-arena
   maps today) cannot be verified until P3 grows the table; it is captured now and verified then.
+
+## User decisions (2026-10-13)
+
+The user answered the plan's open decisions:
+
+- **D-U1, the AC7 pass rule: accepted as proposed.** The held-out targets (>= 70 % detection,
+  median position error <= 20 % of range, 4-25 m) are judged per gate type pooled over held-out
+  maps, only for types seen in training with n >= 30 in-range gate-frames. Types only on held-out
+  maps are reported as `unseen type`, types with n < 30 as `insufficient n`, neither judged
+  (`evaluate.D_U1_RULE`). This narrows AC7's wording.
+- **D-U2, targets missed after R3:** publish v2 anyway if it beats v1 on the held-out maps (pooled
+  detection and median relative error) and stays within 5 pp of v1 on the Infinity Loop window;
+  record the miss here. Switching the preset default (`gates.learned.release`) to v2 still needs
+  the user's explicit OK.
+- **D-U3, AI-attempt recordings:** moot - none exist among the stored recordings.
+- **D-U4, hand-flown maps:** done - the user flew AutumnFields race 04, which cleared G1 (§ Results).
 
 ## Results
 

@@ -553,7 +553,7 @@ HELDOUT_TARGET_REL_ERROR = 0.20
 JUDGE_MIN_N = 30
 COMPARE_MAX_DROP = 0.05
 D_U1_RULE = (
-    "D-U1 (proposed, pending the user's acceptance): judged per gate type pooled over held-out "
+    "D-U1 (accepted by the user 2026-10-13): judged per gate type pooled over held-out "
     "maps at 4-25 m; a type is judged only if it was seen in training and has n >= 30; types only "
     "on held-out maps are reported as 'unseen type', types with n < 30 as 'insufficient n'."
 )
