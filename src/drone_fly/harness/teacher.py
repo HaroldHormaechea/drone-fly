@@ -58,6 +58,8 @@ TEACHER_OBS_VERSION = 1
 TEACHER_OBS_DIM = 148
 #: A teacher run counts as still training when its checkpoints / progress changed this recently.
 TRAINING_ACTIVE_WINDOW_S = 15 * 60
+#: A training process command line (``drone-fly train teacher ...``).
+TRAINING_COMMAND = re.compile(r"\btrain\s+teacher\b", re.IGNORECASE)
 CONCURRENT_LABEL = "CONCURRENT TRAINING: timing not representative; does not count toward AC9"
 #: Stop classes recorded in meta (``stop_class``).
 STOP_CLASSES = ("episode_end", "course_finished", "failsafe", "refused")
@@ -130,7 +132,7 @@ def training_activity(
       shows the budget reached (the main signal);
     * ``progress.json`` written less than ``window_s`` ago with its steps below the budget (a run
       that stopped early ages out of this);
-    * a Python process running ``train teacher`` with this run id (best effort).
+    * a process running ``train teacher`` with this run id (best effort).
     """
     run = Path(run_dir)
     t = time.time() if now is None else float(now)
@@ -155,8 +157,9 @@ def training_activity(
     if process_lister is not None:
         try:
             for cmd in process_lister():
-                low = cmd.lower()
-                if "python" in low and "train" in low and "teacher" in low and run.name in cmd:
+                # ``train teacher`` (or ``--resume``) only: ``train eval <run>`` must not match, and
+                # the run id itself usually contains "teacher".
+                if TRAINING_COMMAND.search(cmd) and run.name in cmd:
                     out.append(f"a process is training it: {cmd[:120]}")
                     break
         except Exception:  # noqa: BLE001 - best effort
