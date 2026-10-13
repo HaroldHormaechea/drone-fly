@@ -153,11 +153,31 @@ class ConversionConfig:
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
+#: UC71 (H1): the gate classes the sim conversion uses, with exactly the keys they had before the
+#: gate table moved to its own file and grew. Adding a class or a key here changes the default
+#: :meth:`ConversionConfig.fingerprint` (every converted course): a deliberate CONVERSION_VERSION
+#: bump.
+CONVERSION_GATE_CLASSES = ("inflatable_arch",)
+CONVERSION_GATE_KEYS = ("class", "match", "aperture", "outer", "center_offset", "keypoints",
+                        "flip_pairs", "outline", "tube_radius")  # fmt: skip
+
+
 def harness_tables(preset: str = "liftoff") -> tuple[tuple[Any, ...], tuple[Any, ...]]:
-    """``(gate_types, offline.item_table)`` of the packaged harness config ``<preset>.yaml``."""
+    """``(gate_types, offline.item_table)`` of the packaged harness config ``<preset>.yaml``.
+
+    A gate-types file reference is resolved; only :data:`CONVERSION_GATE_CLASSES` are kept, each
+    projected to :data:`CONVERSION_GATE_KEYS` (the table's new ``bottom`` / ``family`` keys never
+    reach the conversion).
+    """
+    from drone_fly.harness.gate_types import resolve_gate_types
+
     f = resources.files("drone_fly.harness").joinpath("configs", f"{preset}.yaml")
     data = yaml.safe_load(f.read_text("utf-8")) or {}
-    gt = tuple(data.get("gate_types") or ())
+    gt = tuple(
+        {k: e[k] for k in CONVERSION_GATE_KEYS if k in e}
+        for e in resolve_gate_types(data.get("gate_types")) or ()
+        if e.get("class") in CONVERSION_GATE_CLASSES
+    )
     it = tuple((data.get("offline") or {}).get("item_table") or ())
     return gt, it
 

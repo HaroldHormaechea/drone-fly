@@ -1,0 +1,49 @@
+# Liftoff gate-type table (UC71, ADR 0010): itemID regex -> gate class + dimensions + keypoints.
+# Referenced by the `liftoff` preset (`gate_types: gate_types/liftoff.yaml`). Field meanings:
+# drone_fly/harness/gate_types.py. Unity-local Liftoff metres (x right, y up, gate plane z = 0).
+#
+# * One class per gate GEOMETRY; `match` covers the branding variants of that geometry.
+# * `bottom` (open | closed) is required here; `family` is for reports only. Neither changes the
+#   table hash a trained detector is checked against.
+# * Dimensions come from the props.json colliders (`harness gates draft-types` prints candidates);
+#   every class is checked with label previews before it is trained on.
+# * Every itemID in a captured catalogue track must be a class here, a checkpoint volume
+#   (Checkpoint* / TriggerBox*, never labelled) or listed in `not_gates`; anything else that is on
+#   the route or looks like a gate is UNKNOWN (`drone-fly tracks check --gate-coverage`).
+#
+# The sim conversion uses only `inflatable_arch` (tracks/liftoff.py CONVERSION_GATE_CLASSES), with
+# the keys it had before UC71: changing it changes the conversion fingerprint (a deliberate
+# conversion_version bump).
+
+gate_types:
+  # Infinity Loop gate style. props.json (liftoff-flight-analyzer `props`, InflatableArchBrandless01):
+  # leg capsules r 0.5 at x +-3.5 (centre y 1.58, height 3.521), bar capsule r 0.5 at y 3.958,
+  # chamfer capsules at (+-2.937, 3.399) rotated 45 deg, trigger box centre (0, 1.74, 0) half-size
+  # (3.09, 1.847).
+  - class: inflatable_arch
+    match: "^InflatableArch"
+    aperture: [6.18, 3.69]          # trigger box 2 x (3.09, 1.847)
+    outer: [8.0, 4.46]              # legs' outer faces x +-4.0; bar top 3.958 + 0.5
+    center_offset: [0.0, 1.74, 0.0] # trigger box centre; the arch is open at the bottom
+    bottom: open
+    family: inflatable
+    # All on the visible tube surface (props.json colliders), left/right pairs first.
+    keypoints:
+      - [-4.0, 0.0]      # 0 foot outer L
+      - [4.0, 0.0]       # 1 foot outer R
+      - [-4.0, 1.5]      # 2 leg outer, mid-height L
+      - [4.0, 1.5]       # 3 leg outer, mid-height R
+      - [-3.0, 1.5]      # 4 leg inner, mid-height L
+      - [3.0, 1.5]       # 5 leg inner, mid-height R
+      - [-3.29, 3.753]   # 6 chamfer outer midpoint L: (-2.937, 3.399) + 0.5 along (-0.707, 0.707)
+      - [3.29, 3.753]    # 7 chamfer outer midpoint R
+      - [0.0, 4.458]     # 8 bar top
+      - [0.0, 3.458]     # 9 bar underside
+    flip_pairs: [[0, 1], [2, 3], [4, 5], [6, 7]]
+    # Tube centre line (legs -> chamfers -> bar), props.json capsule end points; depth-fit only.
+    outline: [[-3.5, 0.0], [-3.5, 2.84], [-2.378, 3.958], [2.378, 3.958], [3.5, 2.84], [3.5, 0.0]]
+    tube_radius: 0.5
+
+# ItemIDs that match the gate-like pattern but are not gates to fly through (set dressing,
+# landmarks). Regexes, matched with re.search.
+not_gates: []

@@ -357,6 +357,24 @@ def draw_preview(image: np.ndarray, row: dict[str, Any], masks: FrameMasks) -> n
     return cv2.resize(img, (w // 2, h // 2))
 
 
+def refuse_unknown_items(
+    items: list[PlacedItem], table: GateTypeTable, not_gates: Any, route: Any, track: Any
+) -> None:
+    """UC71 AC5: refuse a track with itemIDs the gate-type table does not cover (never guessed)."""
+    from drone_fly.tracks.gate_coverage import unknown_items
+
+    by_instance = {it.instance_id: it.item_id for it in items if it.instance_id}
+    checkpoints = route.checkpoint_ids if route else ()
+    route_ids = [by_instance[c] for c in checkpoints if c in by_instance]
+    unknown = unknown_items(items, table, not_gates, route_ids)
+    if unknown:
+        raise HarnessConfigError(
+            f"{track} has itemIDs that are not a gate_types class, a checkpoint volume or a "
+            f"not_gates entry: {unknown}; add them to the gate-types file (see "
+            "`drone-fly tracks check --gate-coverage`)"
+        )
+
+
 def run_autolabel(
     capture: str | Path,
     track: str | Path,
@@ -384,6 +402,7 @@ def run_autolabel(
     cap = load_capture(capture, cfg.section("telemetry"), 1.0, lag_ms)
     items = parse_track_items(track)
     route = parse_race_route(race) if race is not None else None
+    refuse_unknown_items(items, table, cfg.not_gates, route, track)
     gates = placed_gates(items, table)
     if not gates:
         raise HarnessConfigError(
