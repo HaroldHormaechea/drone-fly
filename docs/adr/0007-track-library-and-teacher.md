@@ -183,7 +183,7 @@ There is no in-training validation.
 | `v_ref_mps`, time limit | 4.0 m/s; 10 s + route / v_ref, at most 240 s | a priori |
 | rewards | see D8 | a priori (rebalanced before the pilot) |
 | route-start clearance | 0.3 m beyond `drone_radius_m` and above the floor | a priori (fixed after the pilot, see D9) |
-| PPO γ (run 2, power model on) | 0.999 (was 0.995) | a priori: the pack's timescale ≫ the old horizon (see D11) |
+| PPO γ (run 2, power model on) | 0.999 to 360M steps, then 0.9995 (was 0.995) | a priori: the pack's timescale and the Liftoff route durations ≫ the horizon (see D11) |
 
 The conversion rules necessarily saw every XML and prop: they decode geometry, they do not tune the
 policy. Any later change is driven by val only.
@@ -449,6 +449,35 @@ other remedies considered were rejected:
 - there is no material alive bonus to remove;
 - the pack already outlasts the time limit at sustainable speeds;
 - sag-potential shaping is too weak inside the old horizon.
+
+**Discount γ 0.9995 from 360M steps (a priori, warm-continued).** At γ 0.999 the run stopped
+sprinting into the cutoff, but it drifted toward faster pacing and plateaued. The data is from the
+episode log, in 40k-episode windows:
+
+| window | power_loss share | median length | sprint share (< 22 s) | completed | collision | completed beats power_loss (matched courses) |
+|---|---|---|---|---|---|---|
+| 183M | 27.7 % | 40.1 s | 1.2 % | 19.6 % | 44.3 % | 160 / 160 |
+| about 300M | 34.0 % | 32.4 s | 11.8 % | 18.3 % | 39.6 % | 172 / 172 |
+| | 35.2 % | 28.6 s | 20.8 % | 16.7 % | 39.9 % | 151 / 151 |
+| | 37.1 % | 28.4 s | 21.2 % | 18.3 % | 36.6 % | 159 / 159 |
+| | 37.5 % | 29.3 s | 18.6 % | 19.7 % | 34.4 % | 183 / 183 |
+| | 37.6 % | 29.7 s | 19.4 % | 21.1 % | 34.1 % | 191 / 191 |
+| about 362M | 38.1 % | 29.0 s | 23.5 % | 20.3 % | 33.6 % | 202 / 202 |
+
+In the last window, Liftoff completion was 3.8 %. Collisions were being traded for power_loss:
+Liftoff collisions fell from 65 % to 50 % while power_loss rose from 18 % to 35 %.
+
+The cause is that a horizon of about 28 s is still short of how long Liftoff routes take: 60–240 s
+at a sustainable 15–18 m/s. Flying at 24 m/s instead of 18 gains about +170 of progress within the
+horizon. Only about +140 of the progress forfeited after a cutoff about 30 s out is visible.
+
+γ 0.9995 (a horizon of about 57 s) weights that forfeited future at about 0.6 instead of 0.34.
+
+Run 2 continued from `teacher_it687.pt`, the policy and critic including the learned `log_std`, with
+`--continue-from`. The optimizer starts fresh. The step counter continues at 360.2M of the 2e9
+budget, so the run ends at 2e9 total. The slack curriculum follows the step counter, so it is
+continuous (0.32 m at it687). The lineage is in `lineage.json` and the sidecars, and the run is
+still run 2.
 
 Follow-up, not done in this run: timeouts are treated as true terminals in GAE. They should
 bootstrap as truncations, but they are about 0 % of outcomes.
