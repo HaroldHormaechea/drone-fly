@@ -195,7 +195,7 @@ def check_student_config(
     plan: StudentPlan, cfg: Any, contract: Any, *, allow_slow_cpu: bool = False
 ) -> None:
     """The live config against the checkpoint: estimator, camera, device, detector sha."""
-    from drone_fly.harness.liftoff.gate_learned import resolve_weights_path
+    from drone_fly.harness.liftoff.gate_learned import configured_weights, resolve_weights_path
     from drone_fly.harness.policy import sha256_file
 
     meta = plan.meta
@@ -234,9 +234,10 @@ def check_student_config(
             "CUDA. Pass --allow-slow-cpu to run it anyway (dry runs / debugging)"
         )
     want_sha = (meta.get("requires") or {}).get("detector_sha256")
-    weights = (cfg.section("gates").get("learned") or {}).get("weights")
     try:
-        live_sha = sha256_file(resolve_weights_path(weights)) if weights else None
+        weights = configured_weights(cfg.section("gates").get("learned"))
+        # never downloads here: a missing released file is fetched when the estimator is built
+        live_sha = sha256_file(resolve_weights_path(weights, fetch=False)) if weights else None
     except HarnessConfigError:
         live_sha = None
     if want_sha and live_sha and want_sha != live_sha:

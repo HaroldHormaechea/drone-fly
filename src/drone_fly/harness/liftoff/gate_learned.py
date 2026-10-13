@@ -64,14 +64,55 @@ TRAIN_HINT = (
 )
 
 
-RELEASE_URL = "https://github.com/HaroldHormaechea/drone-fly/releases/download/liftoff-gates-v1"
+RELEASE_BASE = "https://github.com/HaroldHormaechea/drone-fly/releases/download"
 
-# Published weights (GitHub release ``liftoff-gates-v1``): file name -> sha256. A configured weights
-# path whose file name is listed here is downloaded from the release on first use when missing.
-RELEASED_WEIGHTS = {
-    "liftoff-gates-deploy.pt": "753452e742973bfe666f30c3c91bfce74bf7108f04d54930c0bcc7e623d94e00",
-    "liftoff-gates.pt": "161f7a83aa2a2866b5efd3c34b096ccda6ba87e201ecffece2833a5a4be5c111",
+# Published weights per GitHub release tag: file name -> sha256 (UC71: one table per release).
+# File names are unique across releases, so a configured path is still matched by its file name; a
+# missing file listed here is downloaded from its owning release on first use.
+# fmt: off
+RELEASES: dict[str, dict[str, str]] = {
+    "liftoff-gates-v1": {
+        "liftoff-gates-deploy.pt":
+            "753452e742973bfe666f30c3c91bfce74bf7108f04d54930c0bcc7e623d94e00",
+        "liftoff-gates.pt": "161f7a83aa2a2866b5efd3c34b096ccda6ba87e201ecffece2833a5a4be5c111",
+    },
 }
+# fmt: on
+# ``gates.learned.release`` -> (tag, the weights file it selects when ``weights`` is unset).
+RELEASE_ALIASES = {"v1": ("liftoff-gates-v1", "liftoff-gates.pt")}
+# Where a release's weights live when ``gates.learned.weights`` is unset (repo-root relative).
+MODELS_DIR = "artifacts/harness/liftoff/models"
+
+RELEASE_URL = f"{RELEASE_BASE}/liftoff-gates-v1"  # the v1 release (kept for existing callers)
+# Flat view (file name -> sha256) over every release; :func:`release_of` gives the owning tag.
+RELEASED_WEIGHTS = {name: sha for files in RELEASES.values() for name, sha in files.items()}
+
+
+def release_of(name: str) -> str | None:
+    """The release tag that publishes the weights file ``name`` (``None`` if none does)."""
+    for tag, files in RELEASES.items():
+        if name in files:
+            return tag
+    return None
+
+
+def configured_weights(learned: dict[str, Any] | None) -> str | None:
+    """The weights path a ``gates.learned`` block selects (not resolved, never downloaded).
+
+    An explicit ``weights`` always wins; otherwise ``release`` (``v1`` ...) selects that release's
+    weights under :data:`MODELS_DIR`; neither -> ``None``.
+    """
+    lc = learned or {}
+    if lc.get("weights"):
+        return str(lc["weights"])
+    release = lc.get("release")
+    if release is None:
+        return None
+    if release not in RELEASE_ALIASES:
+        raise HarnessConfigError(
+            f"gates.learned.release must be one of {sorted(RELEASE_ALIASES)}, got {release!r}"
+        )
+    return f"{MODELS_DIR}/{RELEASE_ALIASES[release][1]}"
 
 
 def _urlretrieve(url: str, dest: Path) -> None:
@@ -99,7 +140,7 @@ def download_released_weights(dest: Path, download: Any = None) -> Path:
     expected = RELEASED_WEIGHTS.get(dest.name)
     if expected is None:
         raise HarnessConfigError(f"no published gate weights named {dest.name!r}; {TRAIN_HINT}")
-    url = f"{RELEASE_URL}/{dest.name}"
+    url = f"{RELEASE_BASE}/{release_of(dest.name)}/{dest.name}"
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".part")
     log.info("downloading gate weights %s -> %s", url, dest)
@@ -123,35 +164,60 @@ def download_released_weights(dest: Path, download: Any = None) -> Path:
     return dest
 
 
-def resolve_weights_path(path: str | Path | None, download: Any = None) -> Path:
+def resolve_weights_path(
+    path: str | Path | None, download: Any = None, *, fetch: bool = True
+) -> Path:
     """``gates.learned.weights``: absolute, or relative to the repo root (else the cwd).
 
-    A missing file whose name is one of :data:`RELEASED_WEIGHTS` is downloaded from the GitHub
-    release (sha256-verified) into that path; any other missing file is a config error.
+    A missing file whose name is one of :data:`RELEASED_WEIGHTS` is downloaded from its GitHub
+    release (sha256-verified) into that path unless ``fetch`` is false; any other missing file is
+    a config error.
     """
     if not path:
-        raise HarnessConfigError(f"gates.learned.weights is not set; {TRAIN_HINT}")
+        raise HarnessConfigError(
+            f"gates.learned.weights (or gates.learned.release) is not set; {TRAIN_HINT}"
+        )
     p = Path(path).expanduser()
     if not p.is_absolute():
         root = find_repo_root()
         p = (root if root is not None else Path.cwd()) / p
     if p.is_file():
         return p
-    if p.name in RELEASED_WEIGHTS:
+    if fetch and p.name in RELEASED_WEIGHTS:
         return download_released_weights(p, download=download)
     raise HarnessConfigError(f"gate weights not found: {p}; {TRAIN_HINT}")
 
 
-def load_weights(path: Path, table: GateTypeTable, device: str = "cpu") -> tuple[Any, dict]:
-    """Load + validate a weights file against ``table``; returns ``(net, meta)`` (eval mode)."""
-    torch = lazy_import("torch", purpose="the learned gate estimator")
-    from drone_fly.harness.liftoff.gate_net import build_from_meta
+def weights_table(meta: dict[str, Any], table: GateTypeTable, path: Path | str) -> GateTypeTable:
+    """The gate-type table a weights file was trained with (UC71 H2).
 
-    try:
-        blob = torch.load(path, map_location="cpu", weights_only=False)
-        meta, state = blob["meta"], blob["state_dict"]
-    except Exception as exc:  # noqa: BLE001 - any unreadable file is a config problem
-        raise HarnessConfigError(f"cannot read gate weights {path}: {exc}; {TRAIN_HINT}") from exc
+    Weights that embed ``meta.gate_types`` (v1 does) are self-describing: their own table is
+    rebuilt, checked against ``meta.gate_types_hash`` and used for decoding + PnP, so the
+    configured table may grow without making older weights unloadable. A class whose physical
+    dimensions differ from the configured entry of the same name only warns. Weights without an
+    embedded table keep the strict check: the configured classes and hash must equal theirs.
+    """
+    embedded = meta.get("gate_types")
+    if embedded:
+        own = GateTypeTable.from_config(embedded)
+        if meta.get("gate_types_hash") != own.hash():
+            raise HarnessConfigError(
+                f"gate weights {path} embed gate_types whose hash {own.hash()} != their recorded "
+                f"gate_types_hash {meta.get('gate_types_hash')}; the file is inconsistent "
+                f"({TRAIN_HINT})"
+            )
+        configured = {t.cls: t for t in table.types}
+        for t in own.types:
+            c = configured.get(t.cls)
+            if c is None:
+                log.warning("gate weights %s detect class %r, absent from gate_types", path, t.cls)
+            elif (c.aperture, c.outer, c.center_offset) != (t.aperture, t.outer, t.center_offset):
+                log.warning(
+                    "gate weights %s: class %r dimensions differ from gate_types (aperture %s vs "
+                    "%s, outer %s vs %s); using the weights' own",
+                    path, t.cls, t.aperture, c.aperture, t.outer, c.outer,
+                )  # fmt: skip
+        return own
     sig = table.signature()
     if meta.get("classes") != sig["classes"]:
         raise HarnessConfigError(
@@ -164,6 +230,23 @@ def load_weights(path: Path, table: GateTypeTable, device: str = "cpu") -> tuple
             f"changed: hash {meta.get('gate_types_hash')} != {table.hash()}); "
             f"retrain ({TRAIN_HINT})"
         )
+    return table
+
+
+def load_weights(path: Path, table: GateTypeTable, device: str = "cpu") -> tuple[Any, dict]:
+    """Load + validate a weights file against ``table``; returns ``(net, meta)`` (eval mode).
+
+    The table the network decodes with is :func:`weights_table` ``(meta, table, path)``.
+    """
+    torch = lazy_import("torch", purpose="the learned gate estimator")
+    from drone_fly.harness.liftoff.gate_net import build_from_meta
+
+    try:
+        blob = torch.load(path, map_location="cpu", weights_only=False)
+        meta, state = blob["meta"], blob["state_dict"]
+    except Exception as exc:  # noqa: BLE001 - any unreadable file is a config problem
+        raise HarnessConfigError(f"cannot read gate weights {path}: {exc}; {TRAIN_HINT}") from exc
+    weights_table(meta, table, path)
     net = build_from_meta(meta)
     net.load_state_dict(state)
     net.to(device).eval()
@@ -236,8 +319,9 @@ class LearnedGateEstimator(TrackingGateEstimator):
         )
         if dev == "auto":
             dev = "cuda" if torch.cuda.is_available() else "cpu"
-        weights_path = resolve_weights_path(lc.get("weights"))
+        weights_path = resolve_weights_path(configured_weights(lc))
         net, meta = load_weights(weights_path, table, dev)
+        table = weights_table(meta, table, weights_path)
         cam = conf.section("camera")
         gpl = cfg.get("gates_per_lap")
         num = lambda k, d, **kw: float(require_number(cfg.get(k, d), f"gates.{k}", **kw))  # noqa: E731
