@@ -462,11 +462,33 @@ def _gate_captures(args: argparse.Namespace) -> list[Path]:
     return resolve_captures(args.captures, args.captures_root)
 
 
+def _trainable_captures(args: argparse.Namespace) -> list[Path]:
+    """``--all-captures`` leaves out held-out-map captures (by name they still raise)."""
+    caps = _gate_captures(args)
+    if not args.all_captures:
+        return caps
+    from drone_fly.harness.offline.capture_index import CaptureMetaError, link_entry, read_meta
+    from drone_fly.tracks import catalogue as cat
+
+    catalogue = cat.load_catalogue(args.split_source) if args.split_source else cat.load_named(
+        "liftoff")  # fmt: skip
+    out = []
+    for d in caps:
+        try:
+            if link_entry(read_meta(d), catalogue)["split"] == "held-out":
+                logging.getLogger(__name__).info("held-out map: %s left out", d.name)
+                continue
+        except CaptureMetaError:
+            pass  # assemble records the refusal
+        out.append(d)
+    return out
+
+
 def _cmd_gates_train(args: argparse.Namespace) -> int:
     from drone_fly.harness.offline.gate_train import train_multi
 
     meta = train_multi(
-        _gate_captures(args),
+        _trainable_captures(args),
         trackdata_root=args.trackdata_root,
         split_source=args.split_source,
         detector_id=args.detector_id,
