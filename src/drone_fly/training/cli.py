@@ -558,6 +558,31 @@ def cmd_bench(args: argparse.Namespace) -> int:
     return 0
 
 
+# ----------------------------------------------------------------------------- detector noise
+
+
+def cmd_detector_noise(args: argparse.Namespace) -> int:
+    from drone_fly.harness.offline.detector_noise import run_detector_noise, summary
+
+    res = run_detector_noise(
+        args.detector,
+        args.captures,
+        labels=args.labels,
+        live_runs=args.live_runs,
+        preset=args.preset,
+        device=args.device,
+        out=args.out,
+        latency_only=args.latency_only,
+    )
+    if args.latency_only:
+        lat = res["latency"]
+        print(f"latency ({lat['device']}): p50 {lat['p50_ms']:.1f} ms, p95 {lat['p95_ms']:.1f} ms")
+        print(f"updated: {res['model_path']}")
+        return 0
+    print(summary(res))
+    return 0
+
+
 # ----------------------------------------------------------------------------- parser
 
 
@@ -619,3 +644,17 @@ def add_parser(sub: Any) -> None:
     p_b.add_argument("--device", help="auto | cpu | cuda")
     p_b.add_argument("--json", action="store_true")
     p_b.set_defaults(func=cmd_bench)
+    p_dn = tsub.add_parser(
+        "detector-noise", help="measure the gate detector's errors on held-out captures (UC70)"
+    )
+    p_dn.add_argument("--detector", required=True, help="gate weights (.pt)")
+    p_dn.add_argument("--captures", nargs="+", required=True, help="capture folder(s)")
+    p_dn.add_argument("--labels", nargs="+", help="label folder per capture (default: beside)")
+    p_dn.add_argument("--live-runs", nargs="+", dest="live_runs", help="harness run folders")
+    p_dn.add_argument("--preset", default="liftoff")
+    p_dn.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"))
+    p_dn.add_argument("--out", help="output folder (default: <weights dir>/<detector-id>/)")
+    p_dn.add_argument(
+        "--latency-only", action="store_true", help="only re-measure the inference latency"
+    )
+    p_dn.set_defaults(func=cmd_detector_noise)

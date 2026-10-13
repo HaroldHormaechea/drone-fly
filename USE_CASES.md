@@ -79,6 +79,6 @@ Statuses:
 | 67 | [use-cases/67-profile-driven-batched-sim.md](use-cases/67-profile-driven-batched-sim.md) | Profile-driven batched sim with dynamics/latency randomization, hover-relative throttle, ground starts | done | 2026-10-12 |
 | 68 | [use-cases/68-track-library-multi-track-teacher.md](use-cases/68-track-library-multi-track-teacher.md) | Track library + multi-track privileged teacher | in-progress | 2026-10-12 |
 | 69 | [use-cases/69-teacher-in-liftoff-with-oracle-gates.md](use-cases/69-teacher-in-liftoff-with-oracle-gates.md) | Fly the teacher in Liftoff with exact gate poses (oracle perception) | in-progress | 2026-10-13 |
-| 70 | [use-cases/70-student-distillation-detector-noise.md](use-cases/70-student-distillation-detector-noise.md) | Deployable student distilled under a measured detector-noise model | pending | 2026-10-12 |
+| 70 | [use-cases/70-student-distillation-detector-noise.md](use-cases/70-student-distillation-detector-noise.md) | Deployable student distilled under a measured detector-noise model | in-progress | 2026-10-13 |
 | 71 | [use-cases/71-multi-map-gate-detector.md](use-cases/71-multi-map-gate-detector.md) | Gate detector generalization across Liftoff maps and gate types | pending | 2026-10-12 |
 | 72 | [use-cases/72-liftoff-eval-and-fine-tuning.md](use-cases/72-liftoff-eval-and-fine-tuning.md) | Liftoff evaluation on held-out tracks + fine-tuning from Liftoff episodes | pending | 2026-10-12 |

@@ -97,3 +97,19 @@ def lazy_import(
         return importlib.import_module(module)
     except ImportError as exc:
         raise HarnessDependencyError(package or module.split(".")[0], purpose, hint) from exc
+
+
+class NoiseLeakageError(HarnessConfigError):
+    """A detector-noise fit would use frames the detector trained on (UC70: held-out only)."""
+
+
+class StudentSchemaError(HarnessConfigError):
+    """A student checkpoint's observation schema / action contract / camera does not match."""
+
+
+class StudentDeviceError(HarnessConfigError):
+    """A K1 student would run on the CPU (too slow live) without ``--allow-slow-cpu``."""
+
+
+class ExportError(HarnessConfigError):
+    """``train export`` refused (e.g. a baseline actor without ``--baseline-export``)."""
