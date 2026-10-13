@@ -170,7 +170,7 @@ Windows whose experiment span (window + recovery) is shorter than the horizon ar
 ## Power model (UC68)
 
 <!-- uc68-power:start -->
-The UC69 live flights on Infinity Loop all ended about 20 s after spin-up, when the 3S pack hit
+The UC69 live flights on Infinity Loop all ended about 18.3 s after spin-up, when the 3S pack hit
 Liftoff's low-voltage cutoff: 8.10 V, or 2.70 V per cell, at about 74 % charge. The motors then
 dropped to idle. The plant's optional power model (`sim/power.py`, the `power` block of
 `drone.yaml`, plant config `power: true`) reproduces this.
@@ -198,7 +198,10 @@ the pack voltage, until the cutoff.
 | 16–22 | 3.14 | 3.05 |
 | 22–30 | 2.83 | 2.83 |
 
-At racing speed (24 m/s, v_axial ≈ 17 m/s) full stick gives about 2.8 g, not the profile's 4.23 g.
+At racing speed (24 m/s, v_axial ≈ 17 m/s) full stick gives about 2.8 g of thrust, not the
+profile's 4.23 g. Subtracting the profile drag gives the body-z specific force an accelerometer
+would read. At full stick above 22 m/s this is p50 1.66 g / p95 2.89 g, against UC69's measured
+`f_bodyz_g` of 1.67 g / 2.91 g.
 
 **Battery.**
 
@@ -224,19 +227,20 @@ UC69 and 0.013 on micro-full.
 attempt are replayed open loop through the full plant (power on, nominal, float64), starting from a
 ground start:
 
-| | measured (from spin-up) | replay |
+| | measured (from spin-up: first motor above 20000 rpm) | replay |
 |---|---|---|
-| cutoff, all 10 attempts | 20.0–20.3 s | 19.7–19.9 s |
+| cutoff, all 10 attempts | 18.0–18.3 s | 17.7–17.9 s |
 | full-stick thrust per speed band | | within 4 % (table above) |
 
 **Randomization.**
 
 | parameter | range |
 |---|---|
-| `drain_scale` | 0.9–1.1 |
-| `sag_scale` | 0.8–1.2 |
+| `drain_scale` (capacity) | 0.9–1.1 |
+| `sag_scale` (internal resistance, persistent part) | 0.8–1.2 |
+| `ir_scale` (internal resistance, instantaneous part) | 0.8–1.2 |
 | `inflow_scale` | 0.85–1.15 |
-| `initial_charge` | 0.95–1.0 |
+| `initial_charge` | 0.85–1.0 |
 
 **Limits.** The fit covers effort up to 4.23 g and charge between 0.42 and 1. Below 0.42 the
 open-circuit voltage is extrapolated linearly. The meteor75 profile has no power block, and every

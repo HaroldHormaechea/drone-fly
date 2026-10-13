@@ -447,6 +447,8 @@ class MultiCourseEnv:
     ) -> None:
         self.cfg = config
         self.n = n = int(n_envs)
+        #: ``teacher-obs`` version :meth:`teacher_obs` builds (set by the trainer / evaluator).
+        self.obs_version = 2
         self.device = dev = torch.device(device)
         self.action_spec = action_spec
         self.timing_config = timing or TimingConfig()
@@ -779,7 +781,7 @@ class MultiCourseEnv:
     def teacher_obs(self) -> torch.Tensor:
         from drone_fly.sim.teacher_obs import build_teacher_obs
 
-        return build_teacher_obs(self)
+        return build_teacher_obs(self, self.obs_version)
 
     def critic_extra(self) -> torch.Tensor:
         tl = self.P["time_limit"][self.cid]

@@ -21,7 +21,8 @@ velocity, quaternion, ``in_*`` sticks, ``batt_charge``, ``batt_volts``, ``rpm_0.
 **Validate** (the profile's fitted block, nominal, float64, CPU):
 
 * *open loop*: each live attempt's sticks drive the full plant (``power: true``) from a level
-  ground start; reported: the cutoff time vs the logged one (spin-up based);
+  ground start; reported: the cutoff time vs the logged one, both from spin-up (the first sample
+  with a motor above 20000 rpm, UC69's convention);
 * *thrust at speed*: the power model alone, driven by the logged effort and axial speed, against
   the measured full-stick specific thrust per speed band.
 """
@@ -183,8 +184,11 @@ def validate(profile: Any, paths: list[str]) -> dict[str, Any]:
             continue
         d = d.iloc[on[0] :].reset_index(drop=True)
         t = d.t.to_numpy() - d.t.iloc[0]
-        cut_meas = float(t[np.argmax(d.batt_volts.to_numpy() <= v_cut + 0.02)]) if (
-            d.batt_volts.to_numpy() <= v_cut + 0.02).any() else None  # fmt: skip
+        # report on UC69's clock: spin-up = the first sample with a motor above 20000 rpm
+        hot = d[["rpm_0", "rpm_1", "rpm_2", "rpm_3"]].max(axis=1).to_numpy() > 20000
+        t_spin = float(t[np.argmax(hot)]) if hot.any() else 0.0
+        low = d.batt_volts.to_numpy() <= v_cut + 0.02
+        cut_meas = float(t[np.argmax(low)]) - t_spin if low.any() else None
         plant = Plant(profile, 1, "cpu", seed=0,
                       config=PlantConfig(dtype="float64", power=True, substeps=1))  # fmt: skip
         plant.reset(torch.ones(1, dtype=torch.bool), grounded=True, motor_g=0.0)
@@ -196,7 +200,7 @@ def validate(profile: Any, paths: list[str]) -> dict[str, Any]:
         for i in range(1, len(t)):
             plant.step_sticks(thr[i - 1 : i], sticks[i - 1 : i], float(t[i] - t[i - 1]))
             if cut_t is None and bool(plant.power.cutoff[0]):
-                cut_t = float(t[i])
+                cut_t = float(t[i]) - t_spin
         rows.append({"attempt": path, "cutoff_meas_s": cut_meas, "cutoff_replay_s": cut_t})
     # thrust at speed: power model alone, driven by the logged effort and axial speed
     k1, k2 = profile.drag.linear_per_s, profile.drag.quadratic_per_m

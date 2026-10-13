@@ -386,11 +386,11 @@ train kept rising, and most val failures were early collisions on unseen maps.
 
 **D. Power and thrust at speed (D11), added after the UC69 live test.** In Liftoff, run 1's
 it1920 flew a full lap of Infinity Loop plus 3 gates on all 10 attempts. Every attempt then lost
-power about 20 s after spin-up: the pack reached the 2.70 V/cell cutoff.
+power about 18.3 s after spin-up: the pack reached the 2.70 V/cell cutoff.
 
 The teacher held collective at max_g almost all the time, because the sim never charged it for
 doing so. Full stick also delivers only about 2.8 g at racing speed, not 4.23 g. A teacher trained
-without a power model would always floor it and die at about 20 s. See D11.
+without a power model would always floor it and die at about 18 s. See D11.
 
 **From scratch.** The approved plan had been a warm start from it1920. Because D changes the
 dynamics, run 2 trains from scratch on v4 + D, and a full-throttle policy is a poor prior. A and B
@@ -415,14 +415,28 @@ model"), and `python -m drone_fly.sysid.power_fit` reproduces both.
 | persistent sag | `ds/dt = 1.13e-4 · E^5.28`; it never recovers, and is negligible below about 2.5 g |
 | voltage | `V = OCV(q) − s − 0.545 · E^0.687` |
 | cutoff | V < 8.10 V latches the motors at idle; the env ends the episode with the new outcome `power_loss` (a crash) |
-| randomization | drain ±10 %, sag ±20 %, inflow ±15 %, initial charge 0.95–1 |
+| randomization | capacity (drain) ±10 %, internal resistance (sag and IR) ±20 %, inflow ±15 %, initial charge 0.85–1 |
 
-Validation: open-loop replay of the live sticks gives a cutoff at 19.7–19.9 s against 20.0–20.3 s
-measured, and the model's full-stick thrust is within 4 % in every speed band.
+Validation: open-loop replay of the live sticks gives a cutoff at 17.7–17.9 s against 18.0–18.3 s
+measured (from spin-up), and the model's full-stick thrust is within 4 % in every speed band.
 
-The rewards are unchanged: losing power ends the episode, so managing the throttle is learned. The
-critic also gets the battery state (charge and volts/cell; a full pack when the power model is
-off).
+The thrust model is consistent with UC69's measured body-z specific force. At full stick above
+22 m/s, the model thrust (2.83 g) minus the plant's drag gives a p50 of 1.66 g and a p95 of 2.89 g;
+UC69's export measured 1.67 g and 2.91 g. UC69 quoted about 2.4 g, but that figure is specific
+force, which includes drag.
+
+The rewards are unchanged: losing power ends the episode, so managing the throttle is learned.
+
+**`teacher-obs` v2.** The actor and the critic both observe the battery: 2 values at [148:150),
+`batt_charge` and `batt_volts / cells`, defined exactly as Liftoff's live telemetry provides them,
+with input scales 1 and 1/4.2. Without this, the policy could only learn a fixed habit of not
+flooring it, never "charge is low, ease off". The UC69 harness builds the block with
+`tracks.teacher_obs_ref.battery_from_telemetry`.
+
+v1 checkpoints still evaluate on their 148 values: the evaluator builds the version named in the
+sidecar. `teacher-liftoff` (run 1) stays on v1, and `teacher-liftoff-aug` (run 2) uses v2. The
+critic's extras include the battery in both cases; it reads as a full pack when the power model is
+off.
 
 ## Consequences
 

@@ -221,8 +221,9 @@ power:
   randomization:
     drain_scale: {min: 0.9, max: 1.1}
     sag_scale: {min: 0.8, max: 1.2}
+    ir_scale: {min: 0.8, max: 1.2}
     inflow_scale: {min: 0.85, max: 1.15}
-    initial_charge: {min: 0.95, max: 1.0}
+    initial_charge: {min: 0.85, max: 1.0}
   fit:
     sessions: [micro-full, uc69-liftoff-arena-04 (10 attempts)]
     effort: "E = max_g * rpm / 33087 (hover rpm -> 1 g)"
@@ -230,5 +231,5 @@ power:
     volts_rmse_v: {micro-full: 0.178, uc69: 0.118}
     effort_exponent_fit: "least squares of log(E_rpm / T) on -log(inflow), full stick"
     validation:
-      open_loop_cutoff_s: {measured: 20.0-20.3, replay: 19.7-19.9, from: spin-up, attempts: 10}
+      open_loop_cutoff_s: {measured: 18.0-18.3, replay: 17.7-17.9, from: "spin-up (first motor > 20000 rpm)", attempts: 10}
       full_stick_thrust_g: {"0-8 m/s": [3.60, 3.67], "8-16": [3.11, 2.99], "16-22": [3.14, 3.05], "22-30": [2.83, 2.83]}

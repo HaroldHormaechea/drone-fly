@@ -22,12 +22,13 @@ and ``v_axial`` the body-z velocity (the flow into the props):
 * **drain** ``dq/dt = -drain_scale * (drain_idle + drain_load * E ** drain_exponent)``;
 * **persistent sag** ``ds/dt = sag_scale * sag_rate * E ** sag_exponent`` (never recovers within
   an episode: Liftoff's pack voltage stays down after a hard push);
-* **voltage** ``V = OCV(q) - s - ir_v * E ** ir_exponent``;
+* **voltage** ``V = OCV(q) - s - ir_scale * ir_v * E ** ir_exponent``;
 * **cutoff**: once ``V < cutoff_v_per_cell * cells`` the motors go to idle for good
   (``T_avail = 0``), Liftoff's low-voltage cutoff (the env ends the episode: ``power_loss``).
 
 The voltage uses the previous substep's effort (no algebraic loop). The per-env randomization
-(``drain_scale``, ``sag_scale``, ``inflow_scale``, ``initial_charge``) has its own generator, so
+(``drain_scale`` = capacity, ``sag_scale`` and ``ir_scale`` = internal resistance,
+``inflow_scale``, ``initial_charge``) has its own generator, so
 the UC67 dynamics samples are unchanged.
 """
 
@@ -38,7 +39,7 @@ from typing import Any
 import torch
 
 #: Randomizable power parameters (multipliers with nominal 1.0; ``initial_charge`` is a charge).
-POWER_RANDOMIZABLE = ("drain_scale", "sag_scale", "inflow_scale", "initial_charge")
+POWER_RANDOMIZABLE = ("drain_scale", "sag_scale", "ir_scale", "inflow_scale", "initial_charge")
 
 
 def _interp(x: torch.Tensor, xp: torch.Tensor, fp: torch.Tensor) -> torch.Tensor:
@@ -84,6 +85,7 @@ class PowerState:
         self.cutoff = torch.zeros(n, dtype=torch.bool, device=device)
         self.drain_scale = z + 1.0
         self.sag_scale = z + 1.0
+        self.ir_scale = z + 1.0
         self.inflow_scale = z + 1.0
         self.initial_charge = z + 1.0
         self.resample(torch.ones(n, dtype=torch.bool, device=device))
@@ -135,7 +137,7 @@ class PowerState:
         rate = s.drain_idle_per_s + s.drain_load_per_s * E**s.drain_exponent
         self.charge = (self.charge - self.drain_scale * rate * h).clamp(min=0.0)
         self.sag = self.sag + self.sag_scale * s.sag_rate_v_per_s * E**s.sag_exponent * h
-        self.volts = self.ocv(self.charge) - self.sag - s.ir_v * E**s.ir_exponent
+        self.volts = self.ocv(self.charge) - self.sag - self.ir_scale * s.ir_v * E**s.ir_exponent
         self.cutoff = self.cutoff | (self.volts < self.v_cut)
 
     def columns(self) -> torch.Tensor:

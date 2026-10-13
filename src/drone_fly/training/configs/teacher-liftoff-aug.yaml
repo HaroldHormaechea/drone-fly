@@ -3,6 +3,7 @@
 #   drone-fly train teacher --config teacher-liftoff-aug
 #  - power: pack drain, persistent voltage sag, low-voltage cutoff (episode outcome power_loss)
 #    and the full-stick thrust drop with axial inflow, fitted on UC66 sysid + UC69 live telemetry
+#  - obs teacher-obs v2: the actor (and critic) observe the battery (charge, volts per cell)
 #  - augmentation (training only): every Liftoff train course is also flown mirrored (y -> -y)
 #    and at 0.85x / 1.15x scale (all 6 combinations; geometry only, physics unchanged)
 #  - procedural share 0.5 (was 0.4)
@@ -10,6 +11,7 @@
 extends: teacher-liftoff
 name: teacher-liftoff-aug
 budget: 2.0e9
+obs: teacher-obs-v2
 plant:
   power: true
 tracks:

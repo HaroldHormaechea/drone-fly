@@ -35,7 +35,7 @@ File layout (``schema_version: 1``)::
       inflow: {coeff, v_ref_mps, min_factor, effort_exponent}  # thrust x (1 - coeff v_ax / v_ref);
                                                   # effort E = T inflow^-effort_exponent
       cutoff_v_per_cell: 2.7
-      randomization: {drain_scale|sag_scale|inflow_scale|initial_charge: {min, max}}
+      randomization: {drain_scale|sag_scale|ir_scale|inflow_scale|initial_charge: {min, max}}
       fit: {...}                                  # provenance of the fit (free-form)
 
 Provenance: any nominal leaf may be a bare value or ``{value, session, residual, sigma}`` /
