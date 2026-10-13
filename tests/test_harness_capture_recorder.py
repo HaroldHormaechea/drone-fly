@@ -375,15 +375,23 @@ def test_select_recording_picks_dropdowns_and_the_row(ui):
     fx, fy = P("filter_environment")
     assert ui.clicks == [
         (fx, fy),  # open the Environment dropdown
-        (fx - 14, fy + 32 + 2 * 30),  # its entry 2 (no scroll needed)
+        (fx - 14, fy + 32 + 2 * 30),  # its entry 2 (within the first rows)
         (P("list_tick_x0")[0], ui_replay.list_row_y(3)),  # tick row 3
     ]
-    assert ("shot", "cap/browser.png") in ui.calls and not any(c[0] == "scroll" for c in ui.calls)
+    # only the to-top scroll (+30, reference coordinates), before the entry click; nothing down
+    assert scrolls(ui) == [("scroll", fx, fy + 90, 30)]
+    assert ui.calls.index(("scroll", fx, fy + 90, 30)) < ui.calls.index(("click", fx - 14, fy + 92))
+    assert ("shot", "cap/browser.png") in ui.calls
     ui.calls.clear()
     ui_replay.select_recording(None, 1, 0)  # keep the environment; race entry 1
     rx, ry = P("filter_race")
     assert ui.clicks == [(rx, ry), (rx - 14, ry + 32 + 30), P("list_tick_x0")]
+    assert scrolls(ui) == [("scroll", rx, ry + 90, 30)]
     assert not any(c[0] == "shot" for c in ui.calls)
+
+
+def scrolls(ui):
+    return [c for c in ui.calls if c[0] == "scroll"]
 
 
 def test_select_recording_refuses_a_row_outside_the_list_before_clicking_it(ui):
@@ -393,20 +401,16 @@ def test_select_recording_refuses_a_row_outside_the_list_before_clicking_it(ui):
     assert ui.clicks == []
 
 
-DROPDOWN_SCROLL_BUG = (
-    "UC71 QA P1 finding: ui_replay._pick_dropdown passes the positive 'notches down' of "
-    "ui_driver.dropdown_scroll straight to ui_driver._scroll, whose positive direction scrolls UP "
-    "(quick setup scrolls to the top with +30, then down with -notches), and passes screen pixels "
-    "where _scroll expects reference coordinates: a dropdown entry >= 4 picks the wrong row"
-)
-
-
-@pytest.mark.xfail(strict=True, reason=DROPDOWN_SCROLL_BUG)
 def test_a_deep_dropdown_entry_scrolls_the_list_down(ui):
+    """QA P1 finding, fixed: the scroll went up and in screen pixels (entries >= 4 misclicked)."""
     ui.screens = [screen(browser=True)]
     ui_replay.select_recording(6, None, 0)  # dropdown_scroll(6) == (1 notch, 80 px)
-    scrolls = [c for c in ui.calls if c[0] == "scroll"]
-    assert scrolls and scrolls[-1][3] < 0  # down the list
+    fx, fy = P("filter_environment")
+    assert scrolls(ui) == [("scroll", fx, fy + 90, 30), ("scroll", fx, fy + 90, -1)]  # top, down
+    assert ui.clicks[1] == (fx - 14, fy + 32 + 80)  # the entry, 80 px into the visible rows
+    assert ui.calls.index(("scroll", fx, fy + 90, -1)) < ui.calls.index(
+        ("click", fx - 14, fy + 112)
+    )
 
 
 def test_play_waits_for_the_paused_bar_then_plays(ui):
