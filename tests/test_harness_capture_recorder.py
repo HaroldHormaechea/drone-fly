@@ -203,17 +203,9 @@ def test_pose_rows_time_mapping_repeats_interpolation_and_velocity():
         pose_rows(np.array([1.0, 1.0]), pos[:2], q[:2], None, t0_frame_s=0.0)
 
 
-RATE_BUG = (
-    "UC71 QA P0b-9 finding: pose_rows resamples at 1 / (hz * rate) seconds of RECORDING time, "
-    "i.e. 1 / (hz * rate^2) on the frame clock: hz * rate^2 rows per frame second instead of hz "
-    "(rate 2 -> 4x too dense; rate 0.25 -> 160 ms steps, beyond the 30 ms frame pairing). The "
-    "recording-time step should be rate / hz."
-)
-
-
-@pytest.mark.xfail(strict=True, reason=RATE_BUG)
 @pytest.mark.parametrize("rate", [2.0, 0.5])
 def test_pose_rows_sample_at_hz_on_the_frame_clock_for_any_rate(rate):
+    """QA P0b-9 finding, fixed: the step was 1 / (hz * rate) in recording time (hz * rate^2)."""
     t = np.arange(0.0, 3.0, 0.1)
     pos = np.stack([t, 0 * t, 0 * t], axis=1)
     q = np.tile([0.0, 0.0, 0.0, 1.0], (len(t), 1))
