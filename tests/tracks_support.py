@@ -192,6 +192,7 @@ def make_env(
     timing: Any = None,
     log_capacity: int | None = 64,
     env: dict[str, Any] | None = None,
+    plant_config: Any = None,
 ) -> Any:
     from drone_fly import drones
     from drone_fly.sim.multi_course import MultiCourseConfig, MultiCourseEnv
@@ -210,6 +211,7 @@ def make_env(
         device="cpu",
         seed=seed,
         config=cfg,
+        plant_config=plant_config,
         timing=timing or TimingConfig.fixed(50.0),
         randomization_scale=randomization_scale,
         action_spec=action_spec(),

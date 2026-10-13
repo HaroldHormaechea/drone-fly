@@ -37,9 +37,10 @@ up. About 1000 route passages go through invisible checkpoint volumes rather tha
 - There is no warm start: the connectome belongs to the UC70 student. `k1-reservoir-aug` remains
   selectable for ablations.
 
-### D2. Observation `teacher-obs` v1
+### D2. Observation `teacher-obs` (v1; v2 adds the battery)
 
-148 raw float32 values in the course frame. The layout, the CourseFrame and the sidecar keys are
+v1 is 148 raw float32 values in the course frame. v2 appends 2 battery values (charge and volts per
+cell, see D11), making 150; run 2 trains on v2. The layout, the CourseFrame and the sidecar keys are
 specified in [INFERENCE_CONTRACT.md §7](../INFERENCE_CONTRACT.md).
 
 - The first 30 values are exactly what the live harness assembles, so the student and the UC69
@@ -183,6 +184,7 @@ There is no in-training validation.
 | `v_ref_mps`, time limit | 4.0 m/s; 10 s + route / v_ref, at most 240 s | a priori |
 | rewards | see D8 | a priori (rebalanced before the pilot) |
 | route-start clearance | 0.3 m beyond `drone_radius_m` and above the floor | a priori (fixed after the pilot, see D9) |
+| PPO γ (run 2, power model on) | 0.999 to 360M steps, then 0.9995 (was 0.995) | a priori: the pack's timescale and the Liftoff route durations ≫ the horizon (see D11) |
 
 The conversion rules necessarily saw every XML and prop: they decode geometry, they do not tune the
 policy. Any later change is driven by val only.
@@ -256,6 +258,7 @@ were changed to **0.005 / 0.005** before any training run, so this is not val tu
 | pilot 1 (`…211653Z…-INVALID-gatebug`) | 42M | the torch pass rule's intersection parameter had the wrong sign under its clamp, so no `opening` passage could ever count (only volumes did). Fixed and parity-tested against the NumPy reference: 0 mismatches in 53,520 random segments. | procedural completion 0; 37 % of episodes timed out with no crossing |
 | pilot 2 (`…213404Z…-pilot2-INVALID-gateblock`) | 100M | gate frames filled their openings (54 train passages), and procedural obstacles were 35–66 m blocks (D4 v2, D8) | completion plateaued at about 5 % with 79 % collisions; procedural episodes ended in collision 93.5 % of the time |
 | run 1, first attempt (`…221026Z…-INVALID-gateblock`) | 108M | same as pilot 2 | same plateau |
+| run 2, first attempt (`…061143Z-teacher-liftoff-aug-INVALID-horizon`) | 300M | γ 0.995's ~5 s horizon is shorter than the pack's timescale (D11) | sprinted until the battery cutoff: power_loss rose from 16 % to 45 % |
 
 A training-only fix was made at the same time. About 10 % of route starts spawned inside or against geometry and crashed on their first tick. They now need 0.3 m of clearance, or they fall back to an air start (`ROUTE_START_CLEARANCE_M`).
 
@@ -427,6 +430,122 @@ force, which includes drag.
 
 The rewards are unchanged: losing power ends the episode, so managing the throttle is learned.
 
+**Discount γ 0.999 (a priori).** The first run-2 attempt (`…061143Z…-INVALID-horizon`, stopped at
+about 0.3e9 steps) used γ 0.995. At 20–50 Hz that is a horizon of about 200 steps, or 4–10 s. The
+pack, though, dies about 20 s into full stick, and the persistent sag that kills it builds up
+earlier.
+
+The policy therefore converged on sprinting until the cutoff. power_loss rose from 16 % to 45 % of
+episodes, and those episodes had a higher median return (432 over 20.7 s) than completed ones (377).
+The cost of flooring it, the −10 plus all progress forfeited after the cutoff, was discounted to
+about 0.07.
+
+Cruising at 15–18 m/s lasts the whole 240 s time limit even with the worst randomized pack. That is
+enough to finish 61–62 of the 63 train tracks: only hannover-01 needs 26 m/s, which is out of reach
+under the power model and caps the train ceiling at about 98 %.
+
+γ 0.999 is a horizon of about 1000 steps, about 28 s, which matches the pack's full-stick life. The
+other remedies considered were rejected:
+- the crash penalty already equals the power_loss one;
+- a time penalty would push toward more speed;
+- there is no material alive bonus to remove;
+- the pack already outlasts the time limit at sustainable speeds;
+- sag-potential shaping is too weak inside the old horizon.
+
+**Discount γ 0.9995 from 360M steps (a priori, warm-continued).** At γ 0.999 the run stopped
+sprinting into the cutoff, but it drifted toward faster pacing and plateaued. The data is from the
+episode log, in 40k-episode windows:
+
+| window | power_loss share | median length | sprint share (< 22 s) | completed | collision | completed beats power_loss (matched courses) |
+|---|---|---|---|---|---|---|
+| 183M | 27.7 % | 40.1 s | 1.2 % | 19.6 % | 44.3 % | 160 / 160 |
+| about 300M | 34.0 % | 32.4 s | 11.8 % | 18.3 % | 39.6 % | 172 / 172 |
+| | 35.2 % | 28.6 s | 20.8 % | 16.7 % | 39.9 % | 151 / 151 |
+| | 37.1 % | 28.4 s | 21.2 % | 18.3 % | 36.6 % | 159 / 159 |
+| | 37.5 % | 29.3 s | 18.6 % | 19.7 % | 34.4 % | 183 / 183 |
+| | 37.6 % | 29.7 s | 19.4 % | 21.1 % | 34.1 % | 191 / 191 |
+| about 362M | 38.1 % | 29.0 s | 23.5 % | 20.3 % | 33.6 % | 202 / 202 |
+
+In the last window, Liftoff completion was 3.8 %. Collisions were being traded for power_loss:
+Liftoff collisions fell from 65 % to 50 % while power_loss rose from 18 % to 35 %.
+
+The cause is that a horizon of about 28 s is still short of how long Liftoff routes take: 60–240 s
+at a sustainable 15–18 m/s. Flying at 24 m/s instead of 18 gains about +170 of progress within the
+horizon. Only about +140 of the progress forfeited after a cutoff about 30 s out is visible.
+
+γ 0.9995 (a horizon of about 57 s) weights that forfeited future at about 0.6 instead of 0.34.
+
+Run 2 continued from `teacher_it687.pt`, the policy and critic including the learned `log_std`, with
+`--continue-from`. The optimizer starts fresh. The step counter continues at 360.2M of the 2e9
+budget, so the run ends at 2e9 total. The slack curriculum follows the step counter, so it is
+continuous (0.32 m at it687). The lineage is in `lineage.json` and the sidecars, and the run is
+still run 2.
+
+**power_loss is an expected outcome (user decision, 2026-10-13).** A battery cutoff is acceptable
+when the drone was flying the course until the pack emptied. Battery management and recharge were
+left out of the original model on purpose and are deferred to a later use case. A cutoff is not
+acceptable if the drone loitered until empty, and that was checked.
+
+*Loitering check.* A CPU rollout of it1603 (190 episodes: 63 Liftoff train tracks ×2 plus 64
+procedural, randomized dynamics, ground starts, slack 0) found no loitering:
+
+| | Liftoff power_loss (n = 43) | completed |
+|---|---|---|
+| speed, final 10 s | 12.4 m/s | 12.7 m/s |
+| distance, final 10 s | 124 m | 127 m |
+| crossings, final 10 s | 3 | 3 |
+| minimum altitude | 2.1 m | 1.4 m |
+| time below 1 m/s | 0 % | 0 % |
+
+- The longest stall below 1 m/s anywhere in an episode is 0.1 s.
+- 2 of 48 power_loss episodes match the loitering flag, both because they made no route progress
+  in their final 30 s while still flying at speed.
+
+*Why the drone cannot loiter into a cutoff.*
+- It cannot land or perch: any contact with an upward face ends the episode as `floor`, any other
+  contact as `collision`, and nothing holds the drone up after lift-off.
+- Hovering (about 1 g of effort) or cruising at up to 18 m/s never reaches the cutoff within 600 s,
+  even with the worst randomized pack. A power_loss inside the 240 s limit therefore requires a
+  sustained effort of at least about 2 g.
+
+**Battery-model calibration: a known question to revisit next session (not a run-2 change).** The
+user flies Infinity Loop "easily" on one pack. We validated the model on the user's hand-flown
+capture of that track (`artifacts/harness/captures/2026-10-11-infinity-manual`), which the fit
+never saw:
+
+| | value |
+|---|---|
+| flight | 175.5 s, about 4.6 laps, about 38 s per lap at a mean 8 m/s |
+| mean effort | 1.28 g |
+| voltage | 12.42 → 8.06 V |
+| charge | 1.00 → 0.11 |
+| end of flight | the cutoff, reached by depletion |
+
+Replayed on that trace, the model:
+- tracks the voltage within about ±0.6 V through mid-flight, slightly pessimistic (−0.6 V at
+  132 s);
+- is optimistic at the end: it misses the near-empty knee (the measured voltage falls 1.9 V in the
+  last 9 s at charge below about 0.15), so it predicts no cutoff at 175.5 s.
+
+The fit set covered hover (UC66) and full stick (UC69), but not cruise effort of 1.5–2.5 g or
+charge below 0.4.
+
+**The model is not pessimistic at cruise.** Infinity Loop is marginal for the teacher because it
+flies about 2× the user's pace. The teacher laps in about 20 s at about 2.5 g, where the pack lasts
+about 85–140 s (65–100 s at the worst randomized corner). The user laps in about 38 s at about
+1.3 g.
+
+**Proposed refit (deferred):**
+- a 5–6 knot OCV curve with the low-charge knee;
+- the user's capture added to the fit set, so cruise and near-empty are covered.
+
+Expected effect: about +0.3–0.5 V mid-flight at cruise effort, and a correct depletion cutoff on the
+user's trace. At the teacher's current pace it changes almost nothing, because the teacher cuts out
+by sag at a charge of about 0.6–0.7.
+
+Follow-up, not done in this run: timeouts are treated as true terminals in GAE. They should
+bootstrap as truncations, but they are about 0 % of outcomes.
+
 **`teacher-obs` v2.** The actor and the critic both observe the battery: 2 values at [148:150),
 `batt_charge` and `batt_volts / cells`, defined exactly as Liftoff's live telemetry provides them,
 with input scales 1 and 1/4.2. Without this, the policy could only learn a fixed habit of not
@@ -437,6 +556,162 @@ v1 checkpoints still evaluate on their 148 values: the evaluator builds the vers
 sidecar. `teacher-liftoff` (run 1) stays on v1, and `teacher-liftoff-aug` (run 2) uses v2. The
 critic's extras include the battery in both cases; it reads as a full pack when the power model is
 off.
+
+## Results under the AC8 protocol (run 2, final)
+
+**The targets were missed after the 2 full runs D9 allows.** In line with AC8's own clause, the
+result is reported per track with its blocking failure modes, and nothing was tuned on held-out.
+UC68 merges with this documented shortfall.
+
+### Run 2 lineage
+
+| phase | run | steps | conversion | γ |
+|---|---|---|---|---|
+| 1 | `20261013T065649Z-teacher-liftoff-aug` | 0 → 0.36B (it687) | v4, power model on, obs v2, augmentation | 0.999 |
+| 2 | `20261013T075647Z-teacher-liftoff-aug` (`--continue-from` it687) | 0.36B → 2.0B | same | 0.9995 |
+
+### Checkpoint selection
+
+Val, randomized, seed 4321, N = 32, 14 tracks:
+
+| checkpoint | steps | val | | checkpoint | steps | val |
+|---|---|---|---|---|---|---|
+| it916 | 0.48B | 17.9 % | | it2519 | 1.32B | 19.0 % |
+| it1145 | 0.60B | 15.6 % | | it2748 | 1.44B | 20.3 % |
+| **it1374** | **0.72B** | **22.3 %** | | it2977 | 1.56B | 12.5 % |
+| it1603 | 0.84B | 12.7 % | | it3206 | 1.68B | 17.6 % |
+| it1832 | 0.96B | 18.1 % | | it3435 | 1.80B | 8.5 % |
+| it2061 | 1.08B | 14.5 % | | it3664 | 1.92B | 16.3 % |
+| it2290 | 1.20B | 15.0 % | | final | 2.0B | 13.8 % |
+
+The curve has no trend: it oscillates between 8.5 % and 22.3 % across checkpoints, on a small val
+set where 2 tracks dominate the swings. it1374 was selected as the maximum, so its val number
+carries some winner's-curse optimism. The train and held-out numbers below are fresh evaluations on
+seed 1234.
+
+### Results
+
+Randomized mode counts; nominal is given in brackets.
+
+| split | run 1 (no power model) | **run 2 (power model)** | run 2 route fraction | run 2 per-passage success |
+|---|---|---|---|---|
+| train (63 tracks) | 68.9 % [75.8 %] | **27.8 %** [28.8 %] | 0.53 (run 1: 0.82) | 0.94 (run 1: 0.98) |
+| val (14) | 32.1 % | **22.3 %** | 0.44 | 0.93 |
+| held-out (15) | 21.2 % [22.5 %] | **11.0 %** [3.1 %] | 0.29 | 0.83 |
+
+Outcomes for run 2, as the mean share over tracks:
+
+| outcome | train | val | held-out |
+|---|---|---|---|
+| completed | 27.8 % | 22.3 % | 11.0 % |
+| collision | 43.7 % | 52.7 % | 55.2 % |
+| power_loss | 18.0 % | 17.4 % | 14.4 % |
+| floor | 7.1 % | 3.6 % | 13.5 % |
+| out-of-bounds | 1.8 % | 1.1 % | 4.4 % |
+| timeout | 1.6 % | 2.9 % | 1.5 % |
+
+By stratum:
+
+| split | scene | no-scene (optimistic) | flagged |
+|---|---|---|---|
+| train | 26.9 % (30 tracks) | 28.6 % (33) | 34.7 % (17) |
+| val | 5.5 % (4) | 29.1 % (10) | 0 % (3) |
+| held-out | 0 % (2, HangarC03) | 12.7 % (13) | 0 % (2) |
+
+The held-out nominal number (3.1 %) is below the randomized one. The policy seems to rely on the
+randomized timing distribution; this is a follow-up item.
+
+**Infinity Loop** (`liftoff-arena-04`, a train track with scene geometry): **93.8 % randomized,
+100 % nominal**. Run 1 scored 100 %, but with no power model. Run 2 completes the 4 laps in about
+80 s; run 1's full-stick 43 s is what hit the cutoff in Liftoff. UC69 is flying it1374 live on
+this track, and the live result is reported in UC69. It finished the course on all 3 valid
+attempts in Liftoff: the first finish placed 1st, in 1:13.8, with laps of 14.1, 18.2, 20.3 and
+21.2 s. The remaining attempts were deferred because of a post-race reset issue in the harness.
+
+### Where the drop from run 1 comes from
+
+Ablation evaluations on the same v4 train courses (randomized, N = 32):
+
+| policy | power model | train completion | main outcomes |
+|---|---|---|---|
+| run 1 it1920 | off | 68.9 % | identical to run 1's own eval |
+| run 1 it1920 | **on** | **0.5 %** | power_loss 73 %, collision 15 %, floor 9 % |
+| **run 2 it1374** | **on** | **27.8 %** | AC8 |
+| run 2 it1374 | off | 19.8 % | collision 65 % |
+
+- **The v3 → v4 conversion changes cost nothing.** On v4 courses, run 1 scores exactly its own
+  68.9 %.
+- **The whole drop is the power model.** Under Liftoff's battery physics, run 1's policy finishes
+  almost nothing. Run 2 is the first teacher that completes races on a real pack.
+- **Run 2 is adapted to the power dynamics.** It relies on the thrust cap at speed and on its
+  battery observations. Without the power model it overdrives and collides, so removing the
+  battery is not a free gain for it.
+
+### Per track
+
+On the 25 train tracks that run 1 completed at least 95 % of the time, run 2 completes **46.6 %**,
+and its finished races take **2.1×** as long.
+
+| run 2 behaviour | tracks | completion | detail |
+|---|---|---|---|
+| **power-bound**: long, high-altitude, fast | marina-bay-01 to -04 | 0 % | power_loss 72–100 % at 19–41 % of the route |
+| | permafrost-02 to -05 | 0–3 % | power_loss 16–94 % |
+| | short-circuit-01 | 34 % | needs 230 s, against run 1's 89 s |
+| **completes**: short and medium | liftoff-arena-02 / -03 / -04 / -05, bardwells-yard-04 / -05, hall26-03 / -04, the-green-04 / -05, bando-city-04, short-circuit-02 | 56–100 % | |
+| **collision-bound**: downhill | bando-city-02 | 0 % | collision 72 % at 7 % of the route |
+| | hannover-01 | 0 % | collision 62 %; also energy-infeasible within its 240 s limit |
+
+Held-out per track (completion, route fraction, per-passage success, collision / floor /
+power_loss):
+
+| track | scene | completion | route | per-passage | coll / floor / power |
+|---|---|---|---|---|---|
+| minus-two-04 | no-scene | 75 % | 0.89 | 0.99 | 12 / 0 / 12 |
+| the-russian-woodpecker-02 | no-scene | 56 % | 0.58 | 0.98 | 44 / 0 / 0 |
+| minus-two-05 | no-scene | 34 % | 0.47 | 0.95 | 0 / 3 / 62 |
+| the-pit-04 | no-scene | 0 % | 0.68 | 0.97 | 66 / 16 / 19 |
+| minus-two-03 | no-scene | 0 % | 0.43 | 0.92 | 97 / 3 / 0 |
+| the-pit-03 | no-scene | 0 % | 0.22 | 0.92 | 100 / 0 / 0 |
+| the-russian-woodpecker-01 | no-scene | 0 % | 0.20 | 0.84 | 0 / 0 / 75 |
+| the-pit-01 | no-scene | 0 % | 0.18 | 0.82 | 0 / 12 / 25 |
+| the-pit-05 | no-scene | 0 % | 0.18 | 0.93 | 75 / 3 / 22 |
+| minus-two-02 | no-scene | 0 % | 0.15 | 0.89 | 100 / 0 / 0 |
+| the-pit-02 | no-scene | 0 % | 0.14 | 0.89 | 84 / 16 / 0 |
+| hangar-c03-02 | stale-build | 0 % | 0.12 | 0.77 | 47 / 53 / 0 |
+| minus-two-01 | no-scene | 0 % | 0.08 | 0.82 | 91 / 9 / 0 |
+| hangar-c03-01 | stale-build | 0 % | 0.06 | 0.67 | 50 / 50 / 0 |
+| the-pit-06 | no-scene | 0 % | 0.00 | 0.09 | 62 / 38 / 0 |
+
+minus-two-01 now leaves the pad and passes gates (v4's grounded spawn); under run 1 it reached no
+gates at all. the-pit-06 still fails at the start, a dive from a raised spawn.
+
+Val per track: autumn-fields-01 / -03 / -06 complete 81–88 % of the time. dubai-legends-01 and
+autumn-fields-04 / -05 complete 19–22 %. Rustline, Surtur and autumn-fields-02 are at 0 %:
+collision-bound on rustline and autumn-fields-02, power-bound on surtur-02 / -03 / -04.
+
+### Blocking failure modes
+
+1. **Pace against endurance, under the fitted battery model.** Long, high-altitude or fast routes
+   are feasible only at a near-optimal pace. hannover-01 cannot be finished within its time limit
+   on one pack, so the train ceiling is about 98 %. A power_loss is a flight that ran until the pack
+   emptied, never loitering (see D11). Battery management is deferred to a later use case.
+2. **A collision-bound generalization gap.** Held-out per-passage success is 0.83, against 0.94 on
+   train, and that compounds over 25–80 crossings per race. Scene-geometry tracks are at 0 % on
+   held-out and 5.5 % on val; held-out floor crashes are concentrated on the-pit's and
+   the-russian-woodpecker's large-altitude dive and descent routes. Flying slower does not fix it:
+   run 2 flies at about half run 1's speed and collides about as often. The causes are map
+   diversity (12 train maps, 6 with scene geometry) and an obstacle look-ahead of 12 m, about 0.9 s
+   at cruise speed.
+
+### Follow-ups
+
+1. **Battery-model refit:** the low-charge OCV knee, with the user's Infinity Loop capture added to
+   the fit set (see D11).
+2. **Battery management and recharge**, as its own use case (the user deferred it).
+3. **Generalization:** more maps with scene geometry (extract more caches); an obstacle look-ahead
+   scaled with speed, or a longer one; possibly scene-like clutter in the procedural courses.
+4. **GAE:** bootstrap timeouts as truncations.
+5. **Nominal vs randomized:** investigate the gap on held-out (fixed-timing robustness).
 
 ## Consequences
 
@@ -449,4 +724,8 @@ off.
 - UC69 reuses `CourseFrame`, `tracks.teacher_obs_ref`, `gate_crossed` and the sidecar's
   `course_conversion` to run the teacher live with oracle gates.
 - For UC70, the student should get `attitude6` and `vel_body` as well, because the live 30-value
-  observation has no heading.
+  observation has no heading. It should also get the same battery senses as teacher-obs v2.
+- The live harness must build teacher-obs v2 for v2 checkpoints. It takes the battery block from
+  telemetry via `battery_from_telemetry`, and the sidecar records `cells` and `power_model`.
+- Any teacher meant to fly in Liftoff has to be trained with the power model. Without it, a policy
+  learns to hold full stick, which the real pack cuts off at about 18 s.
