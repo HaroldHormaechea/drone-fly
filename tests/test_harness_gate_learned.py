@@ -26,8 +26,11 @@ from drone_fly.harness.interfaces import BuildContext  # noqa: E402
 from drone_fly.harness.liftoff import gate_learned, gate_net  # noqa: E402
 from drone_fly.harness.liftoff.gate_learned import (  # noqa: E402
     LearnedGateEstimator,
+    configured_weights,
     load_weights,
+    release_of,
     resolve_weights_path,
+    weights_table,
 )
 from drone_fly.harness.liftoff.masks import FrameMasks, MaskRegion  # noqa: E402
 from drone_fly.harness.scale import WorldScale  # noqa: E402
@@ -313,12 +316,12 @@ def test_warmup_runs_at_the_camera_resolution_and_clears_the_timing():
 # ----------------------------------------------------------------------------- weights + registry
 
 
-def _ctx(weights, **gates):
-    cfg = load_config(
-        "liftoff",
-        {**SMALL_CAMERA, "gates": {"learned": {"weights": str(weights), "device": "cpu", **gates}}},
-        preset=PRESET,
-    )
+def _ctx(weights, gate_types=None, **gates):
+    learned = {"weights": str(weights), "device": "cpu", **gates}
+    user = {**SMALL_CAMERA, "gates": {"learned": learned}}
+    if gate_types is not None:
+        user["gate_types"] = gate_types
+    cfg = load_config("liftoff", user, preset=PRESET)
     return cfg, BuildContext(config=cfg)
 
 
@@ -420,6 +423,109 @@ def test_weights_for_other_classes_or_keypoints_are_refused(tmp_path):
     broken.write_bytes(b"not a torch file")
     with pytest.raises(HarnessConfigError, match="cannot read gate weights"):
         load_weights(broken, TABLE)
+
+
+# ----------------------------------------------------------------------------- UC71 H2 + releases
+
+# A v1-style arch entry (synthetic copy, independent of the preset) and a second, new class.
+ARCH_RAW = {
+    "class": "inflatable_arch", "match": "^InflatableArch", "aperture": [6.18, 3.69],
+    "outer": [8.0, 4.46], "center_offset": [0.0, 1.74, 0.0],
+    "keypoints": [[-4.0, 0.0], [4.0, 0.0], [-4.0, 1.5], [4.0, 1.5], [-3.0, 1.5], [3.0, 1.5],
+                  [-3.29, 3.753], [3.29, 3.753], [0.0, 4.458], [0.0, 3.458]],
+    "flip_pairs": [[0, 1], [2, 3], [4, 5], [6, 7]],
+}  # fmt: skip
+SQUARE_RAW = {"class": "square_gate", "match": "^Square", "aperture": [1.5, 1.5], "outer": [2, 2]}
+V1_TABLE = GateTypeTable.from_config([ARCH_RAW])
+GROWN = [ARCH_RAW, SQUARE_RAW]
+
+
+def _v1_weights(path: Path, **meta) -> Path:
+    """Self-describing weights: v1 embeds its own gate_types next to their hash."""
+    meta.setdefault("gate_types", [ARCH_RAW])
+    return make_weights(path, V1_TABLE, **meta)
+
+
+def test_self_describing_weights_load_against_a_grown_table(tmp_path):
+    grown = GateTypeTable.from_config(GROWN)
+    assert grown.hash() != V1_TABLE.hash()
+    w = _v1_weights(tmp_path / "v1.pt")
+    _net, meta = load_weights(w, grown)  # the strict check would refuse the grown table
+    own = weights_table(meta, grown, w)
+    assert own.classes == ["inflatable_arch"] and own.hash() == V1_TABLE.hash()
+    cfg, ctx = _ctx(w, gate_types=GROWN, input_width=128)
+    assert cfg.data["gate_types"][1]["class"] == "square_gate"
+    est = registry.build_part("gate_estimator", "learned", cfg.section("gates"), ctx)
+    assert est.table.classes == ["inflatable_arch"]  # decodes + PnP with the weights' own table
+    assert est.table.hash() == V1_TABLE.hash()
+
+
+def test_embedded_table_inconsistent_with_its_hash_is_refused(tmp_path):
+    tampered = {**ARCH_RAW, "keypoints": [[x + 0.5, y] for x, y in ARCH_RAW["keypoints"]]}
+    w = _v1_weights(tmp_path / "t.pt", gate_types=[tampered])  # hash still V1_TABLE's
+    with pytest.raises(HarnessConfigError, match="embed gate_types whose hash"):
+        load_weights(w, V1_TABLE)
+
+
+def test_dimension_mismatch_on_the_same_class_only_warns(tmp_path, caplog):
+    w = _v1_weights(tmp_path / "v1.pt")
+    resized = GateTypeTable.from_config([{**ARCH_RAW, "aperture": [5.0, 3.0]}])
+    with caplog.at_level("WARNING"):
+        _net, meta = load_weights(w, resized)
+        own = weights_table(meta, resized, w)
+    assert "dimensions differ" in caplog.text
+    assert own["inflatable_arch"].aperture == pytest.approx((6.18, 3.69))  # the weights' own
+
+
+def test_weights_without_an_embedded_table_keep_the_strict_check(tmp_path):
+    w = make_weights(tmp_path / "old.pt", V1_TABLE)  # no meta.gate_types
+    grown = GateTypeTable.from_config(GROWN)
+    with pytest.raises(HarnessConfigError, match="classes"):
+        load_weights(w, grown)
+    moved = GateTypeTable.from_config([{**ARCH_RAW, "keypoints": ARCH_RAW["keypoints"][::-1]}])
+    with pytest.raises(HarnessConfigError, match="gate_types"):
+        load_weights(w, moved)
+    _net, meta = load_weights(w, V1_TABLE)
+    assert weights_table(meta, V1_TABLE, w) is V1_TABLE
+
+
+def test_release_of_and_the_download_url_of_the_owning_release(tmp_path, monkeypatch):
+    assert release_of("liftoff-gates.pt") == "liftoff-gates-v1"
+    assert release_of("liftoff-gates-deploy.pt") == "liftoff-gates-v1"
+    assert release_of("my-own.pt") is None
+    assert gate_learned.RELEASE_URL == f"{gate_learned.RELEASE_BASE}/liftoff-gates-v1"
+    payload = b"v9 weights"
+    sha = hashlib.sha256(payload).hexdigest()
+    monkeypatch.setitem(gate_learned.RELEASES, "liftoff-gates-v9", {"gates-v9.pt": sha})
+    monkeypatch.setitem(gate_learned.RELEASED_WEIGHTS, "gates-v9.pt", sha)
+    assert release_of("gates-v9.pt") == "liftoff-gates-v9"
+    calls: list = []
+    dest = tmp_path / "gates-v9.pt"
+    assert resolve_weights_path(dest, download=_fake_download(payload, calls)) == dest
+    assert calls == [f"{gate_learned.RELEASE_BASE}/liftoff-gates-v9/gates-v9.pt"]
+
+
+def test_configured_weights_explicit_path_wins_then_release(tmp_path):
+    std = f"{gate_learned.MODELS_DIR}/liftoff-gates.pt"
+    assert configured_weights({"release": "v1"}) == std
+    assert configured_weights({"weights": "my/own.pt", "release": "v1"}) == "my/own.pt"
+    assert configured_weights({"weights": "my/own.pt"}) == "my/own.pt"
+    assert configured_weights({}) is None and configured_weights(None) is None
+    assert configured_weights({"release": None, "weights": None}) is None
+    with pytest.raises(HarnessConfigError, match="gates.learned.release must be one of"):
+        configured_weights({"release": "v7"})
+
+
+def test_resolve_without_fetch_never_downloads(tmp_path):
+    def never(url, dest):
+        raise AssertionError("must not download")
+
+    dest = tmp_path / "liftoff-gates.pt"  # a published name, missing
+    with pytest.raises(HarnessConfigError, match="not found"):
+        resolve_weights_path(dest, download=never, fetch=False)
+    assert not dest.exists()
+    with pytest.raises(HarnessConfigError, match=r"not set"):
+        resolve_weights_path(configured_weights({}), download=never, fetch=False)
 
 
 def test_config_validation_of_learned_keys(tmp_path):

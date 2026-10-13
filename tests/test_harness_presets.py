@@ -17,6 +17,7 @@ import pytest
 from drone_fly.harness.config import list_presets, load_config, load_preset
 from drone_fly.harness.errors import HarnessConfigError
 from drone_fly.harness.gate_types import GateTypeTable
+from drone_fly.harness.liftoff.gate_learned import configured_weights
 from drone_fly.harness.liftoff.telemetry import GyroMap
 
 PRESET = "liftoff"
@@ -127,9 +128,9 @@ def test_preset_values(cfg):
     assert c.get("hover_stick") is None and c.get("rates") is None
     assert cfg.world_scale == 4.0
     assert cfg.parts.gate_estimator == "learned"
-    assert cfg.section("gates")["learned"]["weights"] == (
-        "artifacts/harness/liftoff/models/liftoff-gates.pt"
-    )
+    learned = cfg.section("gates")["learned"]
+    assert learned.get("weights") is None and learned["release"] == "v1"  # UC71: by release
+    assert configured_weights(learned) == "artifacts/harness/liftoff/models/liftoff-gates.pt"
     d = cfg.section("depth")
     assert d["inverse"] is True
     assert d["calibration"]["scale"] == pytest.approx(-0.00535155)
