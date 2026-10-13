@@ -193,3 +193,42 @@ randomization:
   latency.control_to_gyro_s:
     min: 0.00887483
     max: 0.010847
+# Battery + thrust-at-speed model (UC68 run 2; sim/power.py). Fitted by
+# `python -m drone_fly.sysid.power_fit fit` on UC66 micro-full + the 10 UC69 live attempts
+# (Infinity Loop, 2026-10-13); see sysid.md "Power model". Used only with plant `power: true`.
+power:
+  cells: 3
+  ocv:
+    charge: [0.0, 1.0]
+    volts: [10.358, 12.607]
+  sag:
+    rate_v_per_s: 0.000113113
+    exponent: 5.27866
+  ir:
+    v: 0.545063
+    exponent: 0.686932
+  drain:
+    idle_per_s: 0.0
+    load_per_s: 0.00388696
+    exponent: 0.946225
+  thrust_voltage_exponent: 0.05
+  inflow:
+    coeff: 0.38
+    v_ref_mps: 20.0
+    min_factor: 0.2
+    effort_exponent: 0.805
+  cutoff_v_per_cell: 2.70
+  randomization:
+    drain_scale: {min: 0.9, max: 1.1}
+    sag_scale: {min: 0.8, max: 1.2}
+    inflow_scale: {min: 0.85, max: 1.15}
+    initial_charge: {min: 0.95, max: 1.0}
+  fit:
+    sessions: [micro-full, uc69-liftoff-arena-04 (10 attempts)]
+    effort: "E = max_g * rpm / 33087 (hover rpm -> 1 g)"
+    thrust_rmse_g: 0.197
+    volts_rmse_v: {micro-full: 0.178, uc69: 0.118}
+    effort_exponent_fit: "least squares of log(E_rpm / T) on -log(inflow), full stick"
+    validation:
+      open_loop_cutoff_s: {measured: 20.0-20.3, replay: 19.7-19.9, from: spin-up, attempts: 10}
+      full_stick_thrust_g: {"0-8 m/s": [3.60, 3.67], "8-16": [3.11, 2.99], "16-22": [3.14, 3.05], "22-30": [2.83, 2.83]}

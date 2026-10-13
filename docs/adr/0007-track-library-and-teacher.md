@@ -384,15 +384,45 @@ train kept rising, and most val failures were early collisions on unseen maps.
   early peak.
 - An obstacle curriculum for procedural courses was not adopted.
 
-**Warm start.** Run 2 continues from run 1's val-selected `teacher_it1920.pt` (conversion v3) on v4
-courses with augmentation on, for 1.2e9 more steps (budget 2.2066e9), config `teacher-liftoff-aug`.
-`--continue-from` now also accepts a `teacher_it<N>.pt`: it loads the weights, starts a fresh
-optimizer, and continues the step counter at N × n_envs × roll. The pass-slack curriculum was
-already over, so its `init_m` is 0. The lineage is in `lineage.json` and the sidecar.
+**D. Power and thrust at speed (D11), added after the UC69 live test.** In Liftoff, run 1's
+it1920 flew a full lap of Infinity Loop plus 3 gates on all 10 attempts. Every attempt then lost
+power about 20 s after spin-up: the pack reached the 2.70 V/cell cutoff.
 
-The choice was made for the user's need of a usable teacher today, and because val had already
-peaked at about 1e9. **Caveat:** with a warm start, the effect of the augmentation cannot be
-separated from that of the extra steps.
+The teacher held collective at max_g almost all the time, because the sim never charged it for
+doing so. Full stick also delivers only about 2.8 g at racing speed, not 4.23 g. A teacher trained
+without a power model would always floor it and die at about 20 s. See D11.
+
+**From scratch.** The approved plan had been a warm start from it1920. Because D changes the
+dynamics, run 2 trains from scratch on v4 + D, and a full-throttle policy is a poor prior. A and B
+are unchanged; C is still not adopted.
+
+The config is `teacher-liftoff-aug`: `plant.power: true`, a 2e9 budget, and the default slack
+curriculum. `--continue-from` (a run folder, or a `teacher_it<N>.pt`, with its lineage recorded)
+stays available but is not used for run 2.
+
+### D11. Battery and thrust-at-speed model (optional plant extension)
+
+`sim/power.py` is enabled only by a profile `power` block AND plant `power: true`, so meteor75 and
+every UC67 path are unchanged. It is fitted on the UC66 micro-full sysid session and the 10 UC69
+live attempts. The fit and validation are in `drones/liftoff-gremlin-micro/sysid.md` ("Power
+model"), and `python -m drone_fly.sysid.power_fit` reproduces both.
+
+| part | model |
+|---|---|
+| full-stick thrust | `max_g · (V / V_full)^0.05 · max(0.2, 1 − 0.38 · v_axial / 20)`; voltage barely matters, inflow does. The applied thrust and the motor state are capped at it. |
+| motor effort | `E = T · inflow^−0.805`, in the units of Liftoff's RPM |
+| drain | `dq/dt = −0.00389 · E^0.946` |
+| persistent sag | `ds/dt = 1.13e-4 · E^5.28`; it never recovers, and is negligible below about 2.5 g |
+| voltage | `V = OCV(q) − s − 0.545 · E^0.687` |
+| cutoff | V < 8.10 V latches the motors at idle; the env ends the episode with the new outcome `power_loss` (a crash) |
+| randomization | drain ±10 %, sag ±20 %, inflow ±15 %, initial charge 0.95–1 |
+
+Validation: open-loop replay of the live sticks gives a cutoff at 19.7–19.9 s against 20.0–20.3 s
+measured, and the model's full-stick thrust is within 4 % in every speed band.
+
+The rewards are unchanged: losing power ends the episode, so managing the throttle is learned. The
+critic also gets the battery state (charge and volts/cell; a full pack when the power model is
+off).
 
 ## Consequences
 

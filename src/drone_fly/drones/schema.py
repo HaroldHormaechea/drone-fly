@@ -25,6 +25,18 @@ File layout (``schema_version: 1``)::
       camera: {hfov_deg, uptilt_deg} | null
     randomization:
       <path>: {min, max}                          # see RANDOMIZABLE
+    power:                                        # optional battery + thrust-at-speed model
+      cells: 3                                    # (UC68; see sim/power.py and PowerSpec)
+      ocv: {charge: [..], volts: [..]}            # pack open-circuit volts vs charge (1 = full)
+      sag: {rate_v_per_s, exponent}               # persistent sag s' = rate E^exponent
+      ir: {v, exponent}                           # V = OCV(q) - s - v E^exponent
+      drain: {idle_per_s, load_per_s, exponent}   # dq/dt = -(idle + load E^exponent), E = effort
+      thrust_voltage_exponent: 2.0                # full-stick thrust x (V / V_full)^n
+      inflow: {coeff, v_ref_mps, min_factor, effort_exponent}  # thrust x (1 - coeff v_ax / v_ref);
+                                                  # effort E = T inflow^-effort_exponent
+      cutoff_v_per_cell: 2.7
+      randomization: {drain_scale|sag_scale|inflow_scale|initial_charge: {min, max}}
+      fit: {...}                                  # provenance of the fit (free-form)
 
 Provenance: any nominal leaf may be a bare value or ``{value, session, residual, sigma}`` /
 ``{value, ref}``; a block (``thrust_curve``, ``rates.roll``, ``drag``, ...) may carry the same
@@ -57,6 +69,7 @@ TOP_KEYS = (
     "analog",
     "nominal",
     "randomization",
+    "power",
 )
 NOMINAL_KEYS = (
     "hover_throttle",
@@ -152,6 +165,30 @@ class Range:
 
 
 @dataclass(frozen=True)
+class PowerSpec:
+    """The optional ``power`` block (battery + thrust at speed; :mod:`drone_fly.sim.power`)."""
+
+    cells: int
+    ocv_charge: tuple[float, ...]
+    ocv_volts: tuple[float, ...]
+    sag_rate_v_per_s: float
+    sag_exponent: float
+    ir_v: float
+    ir_exponent: float
+    drain_idle_per_s: float
+    drain_load_per_s: float
+    drain_exponent: float
+    thrust_voltage_exponent: float
+    inflow_coeff: float
+    inflow_v_ref: float
+    inflow_min_factor: float
+    effort_inflow_exponent: float
+    cutoff_v_per_cell: float
+    randomization: dict[str, Range] = field(default_factory=dict)
+    fit: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
 class DroneProfile:
     schema_version: int
     id: str
@@ -172,6 +209,7 @@ class DroneProfile:
     #: Dotted nominal path (``nominal.rates.roll.tau_s``) -> provenance dict.
     provenance_map: dict[str, dict[str, Any]] = field(default_factory=dict)
     path: str | None = None
+    power: PowerSpec | None = None
 
     def thrust_g(self, throttle: float) -> float:
         return self.thrust_curve.g_at(throttle)
@@ -480,6 +518,7 @@ def parse_profile(
             if not _covered(p.prov, leaf):
                 raise p.err(leaf, "measured value needs provenance: (session and residual) or ref")
 
+    power = _parse_power(p, top["power"]) if top.get("power") is not None else None
     notes = top.get("notes")
     return DroneProfile(
         schema_version=SCHEMA_VERSION,
@@ -500,4 +539,67 @@ def parse_profile(
         analog=analog,
         provenance_map=dict(p.prov),
         path=file,
+        power=power,
+    )
+
+
+def _parse_power(p: _Parser, data: Any) -> PowerSpec:
+    from drone_fly.sim.power import POWER_RANDOMIZABLE
+
+    f = "power"
+    d = p.mapping(data, f)
+    p.keys(d, f, ("cells", "ocv", "sag", "ir", "drain", "thrust_voltage_exponent", "inflow",
+                  "cutoff_v_per_cell", "randomization", "fit"))  # fmt: skip
+
+    def block(key: str, keys: tuple[str, ...]) -> dict[str, Any]:
+        b = p.mapping(p.required(d, key, f"{f}.{key}"), f"{f}.{key}")
+        p.keys(b, f"{f}.{key}", keys)
+        return b
+
+    def num(b: dict[str, Any], key: str, field: str, **kw: Any) -> float:
+        return p.number(p.required(b, key, field), field, **kw)
+
+    cells = int(num(d, "cells", f"{f}.cells", lo=1.0))
+    ocv = block("ocv", ("charge", "volts"))
+    q = [float(x) for x in p.required(ocv, "charge", f"{f}.ocv.charge")]
+    v = [float(x) for x in p.required(ocv, "volts", f"{f}.ocv.volts")]
+    if len(q) != len(v) or len(q) < 2 or any(b <= a for a, b in zip(q, q[1:], strict=False)):
+        raise p.err(f"{f}.ocv", "charge must be increasing with one volts value per knot")
+    sag = block("sag", ("rate_v_per_s", "exponent"))
+    ir = block("ir", ("v", "exponent"))
+    drain = block("drain", ("idle_per_s", "load_per_s", "exponent"))
+    inflow = block("inflow", ("coeff", "v_ref_mps", "min_factor", "effort_exponent"))
+    rnd: dict[str, Range] = {}
+    for key, spec in (d.get("randomization") or {}).items():
+        fr = f"{f}.randomization.{key}"
+        if key not in POWER_RANDOMIZABLE:
+            raise p.err(fr, f"not a power randomization key (allowed: {list(POWER_RANDOMIZABLE)})")
+        spec = p.mapping(spec, fr)
+        lo, hi = num(spec, "min", f"{fr}.min", lo=0.0), num(spec, "max", f"{fr}.max", lo=0.0)
+        if hi < lo or not lo <= 1.0 <= hi:
+            raise p.err(fr, f"range [{lo}, {hi}] must contain the nominal 1.0")
+        rnd[key] = Range(lo, hi)
+    return PowerSpec(
+        cells=cells,
+        ocv_charge=tuple(q),
+        ocv_volts=tuple(v),
+        sag_rate_v_per_s=num(sag, "rate_v_per_s", f"{f}.sag.rate_v_per_s", lo=0.0),
+        sag_exponent=num(sag, "exponent", f"{f}.sag.exponent", lo=0.0),
+        ir_v=num(ir, "v", f"{f}.ir.v", lo=0.0),
+        ir_exponent=num(ir, "exponent", f"{f}.ir.exponent", lo=0.0),
+        drain_idle_per_s=num(drain, "idle_per_s", f"{f}.drain.idle_per_s", lo=0.0),
+        drain_load_per_s=num(drain, "load_per_s", f"{f}.drain.load_per_s", lo=0.0),
+        drain_exponent=num(drain, "exponent", f"{f}.drain.exponent", lo=0.0),
+        thrust_voltage_exponent=num(
+            d, "thrust_voltage_exponent", f"{f}.thrust_voltage_exponent", lo=0.0
+        ),  # fmt: skip
+        inflow_coeff=num(inflow, "coeff", f"{f}.inflow.coeff", lo=0.0),
+        inflow_v_ref=num(inflow, "v_ref_mps", f"{f}.inflow.v_ref_mps", lo=0.0, lo_open=True),
+        inflow_min_factor=num(inflow, "min_factor", f"{f}.inflow.min_factor", lo=0.0, hi=1.0),
+        effort_inflow_exponent=num(
+            inflow, "effort_exponent", f"{f}.inflow.effort_exponent", lo=0.0, hi=1.0
+        ),  # fmt: skip
+        cutoff_v_per_cell=num(d, "cutoff_v_per_cell", f"{f}.cutoff_v_per_cell", lo=0.0),
+        randomization=rnd,
+        fit=dict(d["fit"]) if isinstance(d.get("fit"), dict) else None,
     )

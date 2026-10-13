@@ -59,7 +59,7 @@ from drone_fly.sim.timing import TIMING_LOG_COLUMNS, ControlTiming, TimingConfig
 
 START_GROUND, START_AIR, START_ROUTE = 1, 2, 3
 #: Outcome codes in the episode log and the evaluation report.
-OUTCOMES = ("none", "floor", "collision", "out-of-bounds", "timeout", "completed")
+OUTCOMES = ("none", "floor", "collision", "out-of-bounds", "timeout", "completed", "power_loss")
 EPISODE_HEADER = (
     "env",
     "episode",
@@ -74,8 +74,11 @@ EPISODE_HEADER = (
 )
 EPISODE_TAIL = ("return", "length_s", "steps", "completed", "outcome", "crossings")
 EPISODE_COLUMNS = EPISODE_HEADER + EPISODE_TAIL
-#: Width of :meth:`MultiCourseEnv.critic_extra`: dynamics, timing, t / limit, progress.
-CRITIC_EXTRA_DIM = len(LOG_COLUMNS) + len(TIMING_LOG_COLUMNS) + 2
+#: Width of :meth:`MultiCourseEnv.critic_extra`: dynamics, timing, t / limit, progress, then the
+#: battery (charge, volts per cell; a full pack when the plant has no power model).
+CRITIC_EXTRA_DIM = len(LOG_COLUMNS) + len(TIMING_LOG_COLUMNS) + 2 + 2
+#: Volts per cell of a full LiPo (the battery features without a power model).
+FULL_CELL_V = 4.2
 #: Minimum clearance (m, beyond ``drone_radius_m`` / above the floor) of a route start.
 ROUTE_START_CLEARANCE_M = 0.3
 
@@ -788,9 +791,18 @@ class MultiCourseEnv:
                 self.timing.columns().to(self.dtype),
                 frac_t.unsqueeze(-1),
                 prog.unsqueeze(-1),
+                self.battery().to(self.dtype),
             ],
             dim=-1,
         )
+
+    def battery(self) -> torch.Tensor:
+        """``(n, 2)``: charge fraction and volts per cell (a full pack without a power model)."""
+        pw = self.plant.power
+        if pw is None:
+            full = torch.tensor([1.0, FULL_CELL_V], dtype=self.dtype, device=self.device)
+            return full.expand(self.n, 2)
+        return pw.columns()
 
     def metric(self) -> str:
         return f"compl {float(self.comp_rate) * 100:4.1f}%"
@@ -846,7 +858,9 @@ class MultiCourseEnv:
         oob = ((pos < lo) | (pos > hi)).any(dim=-1)
         corr = polyline_distance_torch(pos, self.poly[self.cid], self.poly_mask[self.cid])
         oob = oob | (corr > self.P["corridor"][self.cid])
-        crashed = (hit_floor | collision | oob) & ~completed
+        pw = self.plant.power
+        power_loss = pw.cutoff & ~completed if pw is not None else torch.zeros_like(oob)
+        crashed = (hit_floor | collision | oob | power_loss) & ~completed
         timeout = (t >= self.P["time_limit"][self.cid] - 1e-6) & ~completed & ~crashed
         done = completed | crashed | timeout
 
@@ -868,6 +882,7 @@ class MultiCourseEnv:
         self.prev_action = action.detach().clone()
         self.ep_return = self.ep_return + reward
         outcome = torch.full_like(self.k, OUTCOMES.index("timeout"))
+        outcome = torch.where(power_loss, OUTCOMES.index("power_loss"), outcome)
         outcome = torch.where(oob, OUTCOMES.index("out-of-bounds"), outcome)
         outcome = torch.where(collision, OUTCOMES.index("collision"), outcome)
         outcome = torch.where(hit_floor, OUTCOMES.index("floor"), outcome)
