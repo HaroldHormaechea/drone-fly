@@ -11,7 +11,8 @@
 * :func:`check_concurrent_training` refuses (exit 2) while the teacher's run is still training
   (``--allow-concurrent-training`` overrides; the report then labels the session).
 * :class:`TeacherObservationAssembler` needs the ``oracle`` block (a teacher paired with a vision
-  detector is refused by the coverage check) and builds the 148 values with
+  detector is refused by the coverage check) and builds the checkpoint's ``teacher-obs`` version
+  (v1: 148 values; v2: + the pack reading from the newest telemetry sample, 150) with
   :func:`drone_fly.tracks.teacher_obs_ref.build_teacher_obs` from the oracle's course-frame state
   and route progress, the previous tick's RAW policy output and the sink's arming time left.
 * :class:`TeacherPolicyRunner` runs ``MLPTeacher.mean_action`` on the CPU; its sidecar's v2
@@ -52,10 +53,12 @@ from drone_fly.harness.types import FlightState, FreeSpaceEstimate, GateEstimate
 
 log = logging.getLogger(__name__)
 
-#: The checkpoint observation this build deploys (``drone_fly.sim.teacher_obs``).
+#: The checkpoint observations this build deploys (``drone_fly.sim.teacher_obs``): v1 (148
+#: values) and v2 (+ the battery block, 150). The width of a run is its checkpoint's.
 TEACHER_OBS_NAME = "teacher-obs"
-TEACHER_OBS_VERSION = 1
-TEACHER_OBS_DIM = 148
+TEACHER_OBS_DIM_V1 = 148
+#: A v2 battery reading outside this volts-per-cell band means the cell count is wrong.
+CELL_VOLTS_BAND = (2.5, 4.45)
 #: A teacher run counts as still training when its checkpoints / progress changed this recently.
 TRAINING_ACTIVE_WINDOW_S = 15 * 60
 #: A training process command line (``drone-fly train teacher ...``).
@@ -361,25 +364,32 @@ def contract_obs_source(contract: Any) -> str:
 def validate_teacher_sidecar(
     side: dict[str, Any], *, contract: Any, drone: str | None, ckpt: Path | str = "checkpoint"
 ) -> dict[str, Any]:
-    """The schema / provenance guard (module docstring); returns the provenance record."""
-    from drone_fly.sim.teacher_obs import DIM, NAME, VERSION, schema
+    """The schema / provenance guard (module docstring); returns the provenance record.
+
+    Every version this build knows (``sim.teacher_obs.VERSIONS``) is accepted; the sidecar's
+    ``obs_schema`` must deep-equal that version's :func:`~drone_fly.sim.teacher_obs.schema`.
+    """
+    from drone_fly.sim.teacher_obs import NAME, VERSIONS, dim, schema
 
     sch = side.get("obs_schema") or {}
     have = (sch.get("name"), sch.get("version"), sch.get("dim"))
-    want = (NAME, VERSION, DIM)
-    if have != want:
+    known = ", ".join(f"{NAME} v{v} ({dim(v)} values)" for v in VERSIONS)
+    if have[0] != NAME or have[1] not in VERSIONS or have[2] != dim(int(have[1])):
         raise TeacherSchemaError(
-            f"{ckpt}: observation schema {have[0]} v{have[1]} ({have[2]} values) is not this "
-            f"build's {want[0]} v{want[1]} ({want[2]} values)"
+            f"{ckpt}: observation schema {have[0]} v{have[1]} ({have[2]} values) is not one "
+            f"this build knows ({known})"
         )
+    version = int(have[1])
+    width = dim(version)
     if side.get("actor") != "mlp-teacher":
         raise TeacherSchemaError(f"{ckpt}: actor {side.get('actor')!r} is not an mlp-teacher")
-    if int(side.get("extra_dim") or DIM) != DIM:
-        raise TeacherSchemaError(f"{ckpt}: sidecar extra_dim {side.get('extra_dim')} != {DIM}")
-    if json.loads(json.dumps(sch)) != json.loads(json.dumps(schema())):
-        diff = sorted(k for k in set(sch) | set(schema()) if sch.get(k) != schema().get(k))
+    if int(side.get("extra_dim") or width) != width:
+        raise TeacherSchemaError(f"{ckpt}: sidecar extra_dim {side.get('extra_dim')} != {width}")
+    want = json.loads(json.dumps(schema(version)))
+    if json.loads(json.dumps(sch)) != want:
+        diff = sorted(k for k in set(sch) | set(want) if sch.get(k) != want.get(k))
         raise TeacherSchemaError(
-            f"{ckpt}: obs_schema differs from this build's teacher-obs v{VERSION} in {diff} "
+            f"{ckpt}: obs_schema differs from this build's {NAME} v{version} in {diff} "
             "(the checkpoint was trained on a different observation)"
         )
     src = (sch.get("harness30") or {}).get("obs_source")
@@ -405,8 +415,9 @@ def validate_teacher_sidecar(
 
     inf = Path(getattr(contract.inference, "__file__", gdir / "inference.py"))
     return {
-        "obs_schema": f"{NAME} v{VERSION}",
-        "obs_dim": DIM,
+        "obs_schema": f"{NAME} v{version}",
+        "obs_version": version,
+        "obs_dim": width,
         "obs_source": live,
         "gpu_prototype_dir": str(gdir),
         "inference_sha256": _sha(inf) if inf.is_file() else None,
@@ -451,6 +462,10 @@ class TeacherStepState:
 
     arm_total_s: float = 0.5
     sink: Any = None
+    #: v2: the cell count (drone profile ``power.cells``) and the telemetry source whose
+    #: ``latest_sample()`` carries the pack reading.
+    cells: int | None = None
+    state_source: Any = None
     prev_action: np.ndarray = field(default_factory=lambda: np.zeros(4, np.float32))
     timings: dict[str, list[float]] = field(default_factory=lambda: {"assemble": [], "policy": []})
     _t0: float | None = None
@@ -462,6 +477,37 @@ class TeacherStepState:
         if self._t0 is None:
             self._t0 = float(now)
         return float(max(0.0, self.arm_total_s - (float(now) - self._t0)))
+
+    def battery(self) -> tuple[float, float]:
+        """``(charge, volts_per_cell)`` of the newest telemetry sample (teacher-obs v2).
+
+        Refuses a sample without a battery block, and a volts-per-cell reading outside
+        :data:`CELL_VOLTS_BAND` (a wrong cell count).
+        """
+        from drone_fly.tracks.teacher_obs_ref import battery_from_telemetry
+
+        if self.state_source is None and self.cells is None:
+            # no pack wired (a hermetic / sim-side use): the schema's no-power-model value. A
+            # live session always wires both and refuses a stream without a battery block.
+            from drone_fly.sim.teacher_obs import FULL_CELL_V
+
+            return 1.0, float(FULL_CELL_V)
+        latest = getattr(self.state_source, "latest_sample", None)
+        sample = latest() if callable(latest) else None
+        if sample is None or sample.battery is None or self.cells is None:
+            raise TeacherSchemaError(
+                "teacher-obs v2 needs the pack reading: telemetry without a battery block "
+                f"(sample {'missing' if sample is None else 'has none'}, cells {self.cells})"
+            )
+        charge, volts = (float(x) for x in sample.battery[:2])
+        bat = battery_from_telemetry(charge, volts, self.cells)
+        lo, hi = CELL_VOLTS_BAND
+        if not lo <= bat[1] <= hi:
+            raise TeacherSchemaError(
+                f"pack {volts:.2f} V over {self.cells} cells is {bat[1]:.2f} V per cell, outside "
+                f"{lo}-{hi} V: the drone profile's power.cells does not match this pack"
+            )
+        return bat
 
     def timing_summary(self) -> dict[str, Any]:
         out = {}
@@ -485,10 +531,19 @@ def arm_total_s(controls: dict[str, Any]) -> float:
 class TeacherObservationAssembler(ObservationAssembler):
     """``teacher-obs`` v1 from the oracle (see the module docstring)."""
 
-    def __init__(self, contract: Any, resources: dict[str, Any], step: TeacherStepState) -> None:
+    def __init__(
+        self,
+        contract: Any,
+        resources: dict[str, Any],
+        step: TeacherStepState,
+        version: int | None = None,
+    ) -> None:
         self.contract = contract
         self.resources = resources
         self.step = step
+        #: The checkpoint's ``teacher-obs`` version (1: 148 values; 2: + battery, 150); None =
+        #: the version whose width is the ``extra_dim`` the runner asks for.
+        self.version = None if version is None else int(version)
 
     def required_blocks(self, extra_dim: int) -> tuple[str, ...]:
         return ("oracle",)
@@ -511,6 +566,8 @@ class TeacherObservationAssembler(ObservationAssembler):
         if oracle is None or oracle.state_course is None:
             raise PerceptionCoverageError(["oracle"], extra_dim)
         t0 = time.perf_counter()
+        version = self.version or _version_for_dim(extra_dim)
+        battery = self.step.battery() if version >= 2 else None
         extra = build_teacher_obs(
             oracle.state_course,
             oracle.course,
@@ -519,6 +576,8 @@ class TeacherObservationAssembler(ObservationAssembler):
             self.step.arm_remaining_s(gate.stamp),
             contract=self.contract,
             harness_course=oracle.harness_course,
+            battery=battery,
+            version=version,
         )
         self.step.timings["assemble"].append(time.perf_counter() - t0)
         if extra.shape[0] != extra_dim:
@@ -548,10 +607,12 @@ class TeacherPolicyRunner(PolicyRunner):
         self.sha256: str | None = None
         self.action_spec: Any = None
         self.provenance: dict[str, Any] = {}
+        #: The checkpoint's observation width (148 / 150), from its sidecar.
+        self._dim = obs_dim_of(checkpoint)
 
     @property
     def extra_dim(self) -> int:
-        return TEACHER_OBS_DIM
+        return self._dim
 
     @property
     def contract_version(self) -> int | None:
@@ -575,9 +636,9 @@ class TeacherPolicyRunner(PolicyRunner):
                 f"{self.checkpoint}: action contract v{self.action_spec.version}, expected v2"
             )
         self._actor, self.sidecar = load_teacher(self.checkpoint, "cpu")
-        if getattr(self._actor, "obs_dim", TEACHER_OBS_DIM) != TEACHER_OBS_DIM:
+        if getattr(self._actor, "obs_dim", self._dim) != self._dim:
             raise TeacherSchemaError(
-                f"{self.checkpoint}: actor input {self._actor.obs_dim} != {TEACHER_OBS_DIM}"
+                f"{self.checkpoint}: actor input {self._actor.obs_dim} != {self._dim}"
             )
         self.sha256 = sha256_file(self.checkpoint)
 
@@ -585,7 +646,7 @@ class TeacherPolicyRunner(PolicyRunner):
         """A few forward passes off the live loop (``prev_action`` is not touched)."""
         import torch
 
-        x = torch.zeros(1, TEACHER_OBS_DIM)
+        x = torch.zeros(1, self._dim)
         with torch.no_grad():
             for _ in range(passes):
                 self._actor.mean_action(x)
@@ -602,6 +663,63 @@ class TeacherPolicyRunner(PolicyRunner):
         self.step.prev_action = raw.copy()
         self.step.timings["policy"].append(time.perf_counter() - t0)
         return raw
+
+
+def _version_for_dim(extra_dim: int) -> int:
+    from drone_fly.sim.teacher_obs import VERSIONS, dim
+
+    for v in VERSIONS:
+        if dim(v) == extra_dim:
+            return v
+    raise ValueError(f"no teacher-obs version has {extra_dim} values")
+
+
+def obs_version_of(side_or_checkpoint: dict[str, Any] | str | Path) -> int:
+    """The ``teacher-obs`` version of a sidecar mapping or a checkpoint path (1 when unstated)."""
+    side = side_or_checkpoint
+    if not isinstance(side, dict):
+        from drone_fly.sim.action import read_sidecar
+
+        side = read_sidecar(side_or_checkpoint) or {}
+    return int((side.get("obs_schema") or {}).get("version") or 1)
+
+
+def obs_dim_of(side_or_checkpoint: dict[str, Any] | str | Path) -> int:
+    """The observation width of a sidecar mapping or a checkpoint path (148 for v1)."""
+    side = side_or_checkpoint
+    if not isinstance(side, dict):
+        from drone_fly.sim.action import read_sidecar
+
+        side = read_sidecar(side_or_checkpoint) or {}
+    return int((side.get("obs_schema") or {}).get("dim") or TEACHER_OBS_DIM_V1)
+
+
+def battery_cells(drone: str | None) -> int | None:
+    """The drone profile's ``power.cells`` (None without a profile or a power block)."""
+    if drone is None:
+        return None
+    from drone_fly import drones
+
+    power = getattr(drones.load(drone), "power", None)
+    return None if power is None else int(power.cells)
+
+
+def require_battery_telemetry(cfg: Any, drone: str | None, ckpt: Any) -> int:
+    """A v2 checkpoint needs the pack reading: ``battery`` in the telemetry stream and the
+    profile's ``power.cells``. Returns the cell count."""
+    tel = cfg.get("telemetry") or {}
+    stream = tel.get("stream_format") or []
+    if tel.get("replay_csv") is None and "battery" not in stream:
+        raise TeacherSchemaError(
+            f"{ckpt} is teacher-obs v2 (battery): telemetry.stream_format {list(stream)} has no "
+            "battery block (enable Battery in Liftoff's TelemetryConfiguration.json StreamFormat)"
+        )
+    cells = battery_cells(drone)
+    if cells is None:
+        raise TeacherSchemaError(
+            f"{ckpt} is teacher-obs v2 (battery): drone profile {drone!r} has no power.cells"
+        )
+    return cells
 
 
 def require_rate_scale_one(controls: dict[str, Any]) -> None:

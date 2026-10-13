@@ -381,10 +381,12 @@ def run_harness(
         from drone_fly.harness import teacher as tch
 
         step.sink = h.action_sink
-        assembler = tch.TeacherObservationAssembler(contract, ctx.resources, step)
+        step.state_source = h.state_source
+        version = tch.obs_version_of(plan.checkpoint.sidecar)
+        assembler = tch.TeacherObservationAssembler(contract, ctx.resources, step, version)
         try:
             # refuse a detector before anything is written (the teacher needs the oracle block)
-            assembler.check_coverage(tch.TEACHER_OBS_DIM, h.provided_blocks())
+            assembler.check_coverage(ctx.extra_dim, h.provided_blocks())
             plan.session_dir = (
                 Path(session_dir)
                 if session_dir is not None
@@ -627,8 +629,12 @@ def _prepare_teacher(
         ctx.resources["oracle_course"] = plan.course
         ctx.resources["oracle_course_info"] = plan.course_info
     step = tch.TeacherStepState(arm_total_s=tch.arm_total_s(controls))
+    if tch.obs_version_of(plan.checkpoint.sidecar) >= 2:  # the battery block: refuse up front
+        step.cells = tch.require_battery_telemetry(
+            cfg, cfg.data.get("drone"), plan.checkpoint.source
+        )
     ctx.resources["teacher_step"] = step
-    ctx.extra_dim = tch.TEACHER_OBS_DIM
+    ctx.extra_dim = tch.obs_dim_of(plan.checkpoint.sidecar)
     return step
 
 
