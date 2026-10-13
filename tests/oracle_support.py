@@ -386,3 +386,106 @@ def age_files(run: Path, seconds: float = 3600.0) -> None:
     for p in run.rglob("*"):
         if p.is_file():
             os.utime(p, (t, t))
+
+
+# ----------------------------------------------------------------------------- recorded attempts
+
+
+def path_samples(
+    course: SimCourse,
+    points: list[Any],
+    *,
+    dt: float = 0.01,
+    t0: float = 0.0,
+    quats: list[Any] | None = None,
+    gyros: list[Any] | None = None,
+) -> list[TelemetrySample]:
+    """One sample per course-frame point every ``dt`` (velocity by central differences)."""
+    pts = np.asarray(points, np.float64)
+    vel = np.gradient(pts, dt, axis=0) if len(pts) > 1 else np.zeros_like(pts)
+    out = []
+    for i, p in enumerate(pts):
+        out.append(
+            unity_sample(
+                course, p, t=t0 + i * dt, vel=vel[i],
+                quat=(1.0, 0.0, 0.0, 0.0) if quats is None else quats[i],
+                gyro=(0.0, 0.0, 0.0) if gyros is None else gyros[i],
+            )
+        )  # fmt: skip
+    return out
+
+
+def segments(*legs: tuple[Any, Any, int]) -> list[np.ndarray]:
+    """Concatenated straight legs ``(a, b, n_points)`` (shared endpoints dropped)."""
+    out: list[np.ndarray] = []
+    for a, b, n in legs:
+        a, b = np.asarray(a, np.float64), np.asarray(b, np.float64)
+        pts = [a + (b - a) * i / (n - 1) for i in range(n)]
+        out += pts[1:] if out else pts
+    return out
+
+
+def write_attempt(
+    root: Path,
+    name: str,
+    samples: list[TelemetrySample],
+    *,
+    stop_reason: str,
+    stop_class: str,
+    arm_end_clock: float | None = 0.5,
+    live_crossings: list[dict[str, Any]] | None = None,
+    meta_extra: dict[str, Any] | None = None,
+    latency: dict[str, Any] | None = None,
+    tick_dt: float = 0.02,
+) -> Path:
+    """A recorded run folder as the session writes it (meta, config, telemetry, ticks)."""
+    import yaml
+
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    write_telemetry_csv(d / "telemetry.csv", samples)
+    (d / "config.yaml").write_text(
+        yaml.safe_dump({"telemetry": {"gyro_units": "deg_s", "max_position_jump_m": 5.0}}),
+        encoding="utf-8",
+    )
+    c0 = samples[0].received_at
+    c1 = samples[-1].received_at
+    n = int(round((c1 - c0) / tick_dt)) + 1
+    # each live crossing lands on its nearest tick
+    at_tick = {
+        min(n - 1, max(0, int(round((e["clock"] - c0) / tick_dt)))): e
+        for e in (live_crossings or [])
+    }
+    lines = []
+    for i in range(n):
+        clock = c0 + i * tick_dt
+        arm = 0.0 if arm_end_clock is None else max(0.0, arm_end_clock - clock)
+        info: dict[str, Any] = {"perception": "oracle", "arm_remaining_s": arm}
+        gate: dict[str, Any] = {"passed": False, "info": info}
+        if i in at_tick:
+            gate["passed"] = True
+            info.update(k=int(at_tick[i]["k"]), crossed=at_tick[i]["passage"])
+        lines.append(json.dumps({"tick": i, "sim_time": clock, "gate": gate}))
+    (d / "ticks.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    meta = {
+        "stop_reason": stop_reason,
+        "stop_class": stop_class,
+        "stop_error": None,
+        "ticks": n,
+        "perception": "oracle",
+        "track_id": "synthetic-01",
+        "arm_confirm_delay_s": 0.1,
+        "training_active": False,
+        "oracle": {"episode_rules": {"respawn_jump_m": 5.0}},
+        "teacher_timing_ms": {"assemble": {"p95": 1.0, "p99": 2.0},
+                              "policy": {"p95": 0.5, "p99": 0.9}},
+    }  # fmt: skip
+    meta.update(meta_extra or {})
+    (d / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    lat = latency if latency is not None else {
+        "effective_rate_hz": 49.5, "missed_deadlines": 1, "ticks": n,
+        "latency_ms": {"total": {"p95": 6.0, "p99": 9.0}, "gate_detector": {"p95": 1.0, "p99": 1.5},
+                       "policy": {"p95": 3.0, "p99": 4.0}},
+    }  # fmt: skip
+    (d / "latency_summary.json").write_text(json.dumps(lat), encoding="utf-8")
+    return d
