@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Synthetic UC68 fixture (generate_fixtures.py); Unity metres, Y-up. -->
+<Track xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <name>Fake Desert 02 v2</name>
+  <environment>FakeDesert</environment>
+  <blueprints>
+    <TrackBlueprint xsi:type="TrackBlueprintSpawnpoint">
+      <itemID>SpawnPointSingle</itemID>
+      <instanceID>d0</instanceID>
+      <position><x>0</x><y>0</y><z>0</z></position>
+      <rotation><x>0</x><y>0</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>FakeGateZ01</itemID>
+      <instanceID>d1</instanceID>
+      <position><x>0</x><y>0</y><z>10</z></position>
+      <rotation><x>0</x><y>0</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>FakeGateX01</itemID>
+      <instanceID>d2</instanceID>
+      <position><x>10</x><y>0</y><z>20</z></position>
+      <rotation><x>0</x><y>90</y><z>0</z></rotation>
+    </TrackBlueprint>
+    <TrackBlueprint>
+      <itemID>FakeGateZ01</itemID>
+      <instanceID>d3</instanceID>
+      <position><x>0</x><y>0</y><z>30</z></position>
+      <rotation><x>0</x><y>180</y><z>0</z></rotation>
+    </TrackBlueprint>
+  </blueprints>
+</Track>

@@ -1,0 +1,37 @@
+{
+ "format": 1,
+ "environment": "FakeHall",
+ "source": {
+  "bundle": "fakehall.bundle",
+  "build_id": "1000"
+ },
+ "counts": {
+  "box": 1,
+  "capsule": 0,
+  "sphere": 0,
+  "mesh": 0,
+  "terrain": 0,
+  "trigger": 0
+ },
+ "colliders": [
+  {
+   "t": "box",
+   "p": [
+    0,
+    0,
+    0
+   ],
+   "q": [
+    0.0,
+    0.0,
+    0.0,
+    1.0
+   ],
+   "s": [
+    200,
+    200,
+    200
+   ]
+  }
+ ]
+}

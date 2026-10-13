@@ -243,6 +243,7 @@ def write_sidecar(
     obs_schema: dict[str, Any] | None = None,
     world_scale: float | None = None,
     course_conversion: dict[str, Any] | None = None,
+    lineage: dict[str, Any] | None = None,
 ) -> Path:
     data: dict[str, Any] = {
         "contract_version": spec.version,
@@ -257,6 +258,7 @@ def write_sidecar(
         ("obs_schema", obs_schema),
         ("world_scale", world_scale),
         ("course_conversion", course_conversion),
+        ("lineage", lineage),
     ):
         if value is not None:
             data[key] = value

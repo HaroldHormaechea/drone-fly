@@ -442,11 +442,18 @@ def train_teacher(
     run_root: str | Path | None = None,
     run_id: str | None = None,
     resume: str | Path | None = None,
+    continue_from: str | Path | None = None,
     device: str | None = None,
     max_iterations: int | None = None,
     k1_path: str | None = None,
 ) -> TrainResult:
-    """Train the UC68 teacher (``drone-fly train teacher``); see ADR 0007."""
+    """Train the UC68 teacher (``drone-fly train teacher``); see ADR 0007.
+
+    ``continue_from`` starts a NEW run folder (``cfg``, the current course conversion) from
+    another run's ``resume.pt``: weights, optimizer, step / iteration counters (so ``budget`` and
+    the slack curriculum continue) and RNG. The source run is never modified; the lineage goes
+    into ``lineage.json`` and every checkpoint sidecar.
+    """
     dev = resolve_device(device or cfg.device)
     torch.manual_seed(cfg.seed)
     if resume is not None:
@@ -456,6 +463,8 @@ def train_teacher(
             stop.unlink()
     else:
         run = RunDir(cfg, profile, root=run_root, run_id=run_id)
+        if continue_from is not None:
+            _write_lineage(run, Path(continue_from))
     log.addHandler(run.log_handler)
     log.setLevel(logging.INFO)
     try:
@@ -463,6 +472,36 @@ def train_teacher(
     finally:
         log.removeHandler(run.log_handler)
         run.log_handler.close()
+
+
+LINEAGE_FILE = "lineage.json"
+
+
+def _write_lineage(run: RunDir, source: Path) -> None:
+    import json
+
+    src_resume = source / "checkpoints" / "resume.pt"
+    if not src_resume.is_file():
+        src_resume = source / "resume.pt"
+    if not src_resume.is_file():
+        raise FileNotFoundError(f"{source}: no resume.pt to continue from")
+    st = torch.load(src_resume, map_location="cpu", weights_only=False)
+    conv = None
+    side = source / "checkpoints" / "teacher.contract.json"
+    if side.is_file():
+        conv = (json.loads(side.read_text(encoding="utf-8")).get("course_conversion") or {}).get(
+            "version"
+        )
+    lineage = {
+        "continued_from": {
+            "run": source.name,
+            "resume": str(src_resume),
+            "it": int(st["it"]),
+            "steps": int(st["steps"]),
+            "course_conversion_version": conv,
+        }
+    }
+    (run.path / LINEAGE_FILE).write_text(json.dumps(lineage, indent=2) + "\n", encoding="utf-8")
 
 
 class _TeacherCheckpoints:
@@ -528,6 +567,12 @@ def _train_teacher(
         "world_scale": float(cfg.tracks.world_scale),
         "course_conversion": conversion_record(pool, teacher_conversion(cfg)),
     }
+    lineage_path = run.path / LINEAGE_FILE
+    lineage = None
+    if lineage_path.is_file():
+        lineage = json.loads(lineage_path.read_text(encoding="utf-8"))
+    if lineage is not None:
+        sidecar["lineage"] = lineage
     run.write_tracks_snapshot(pool)
     env = build_teacher_env(cfg, profile, dev, pool)
     ac = build_teacher_actor(cfg, dev, k1_path=k1_path)
@@ -540,8 +585,11 @@ def _train_teacher(
     opt = torch.optim.Adam(params, lr=p.lr)
     ck = _TeacherCheckpoints(run, cfg, ac, opt, env, sidecar)
     steps, it, elapsed0 = 0, 0, 0.0
-    if resuming and run.resume_path.is_file():
-        st = torch.load(run.resume_path, map_location="cpu", weights_only=False)
+    state_path = run.resume_path if resuming else None
+    if lineage is not None and not run.resume_path.is_file():  # a fresh continuation
+        state_path = Path(lineage["continued_from"]["resume"])
+    if state_path is not None and state_path.is_file():
+        st = torch.load(state_path, map_location="cpu", weights_only=False)
         ac.load_state_dict(st["actor"])
         opt.load_state_dict(st["optimizer"])
         steps, it, elapsed0 = int(st["steps"]), int(st["it"]), float(st.get("elapsed_s", 0.0))
@@ -552,7 +600,7 @@ def _train_teacher(
             env.gen.set_state(st["env_rng"])
         except (RuntimeError, TypeError):  # another device: the envs are reset anyway
             log.warning("RNG state not fully restored (device changed)")
-        log.info("resumed %s at it %d, %.3g steps", run.run_id, it, steps)
+        log.info("resumed %s at it %d, %.3g steps (from %s)", run.run_id, it, steps, state_path)
     n, roll = env.n, p.roll
     feat_dim = int(getattr(ac, "feat_dim", 0))
     log.info(

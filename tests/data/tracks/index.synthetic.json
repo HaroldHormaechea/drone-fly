@@ -1,0 +1,63 @@
+{
+ "source": {
+  "build_id": "1000"
+ },
+ "tracks": {
+  "track-uuid-0": {
+   "file": "FakeArenaTrack01_0001.xml",
+   "race": "race-uuid-0",
+   "environment": "FakeArena",
+   "name": "FakeArena 01"
+  },
+  "track-uuid-1": {
+   "file": "FakeArenaTrack02_0001.xml",
+   "race": "race-uuid-1",
+   "environment": "FakeArena",
+   "name": "FakeArena 02"
+  },
+  "track-uuid-2": {
+   "file": "FakeFieldTrack01_0001.xml",
+   "race": "race-uuid-2",
+   "environment": "FakeField",
+   "name": "FakeField 01"
+  },
+  "track-uuid-3": {
+   "file": "FakeFieldTrack02_0001.xml",
+   "race": "race-uuid-3",
+   "environment": "FakeField",
+   "name": "FakeField 02"
+  },
+  "track-uuid-4": {
+   "file": "FakeHallTrack01_0001.xml",
+   "race": "race-uuid-4",
+   "environment": "FakeHall",
+   "name": "FakeHall 01"
+  },
+  "track-uuid-5": {
+   "file": "FakeHallTrack02_0001.xml",
+   "race": "race-uuid-5",
+   "environment": "FakeHall",
+   "name": "FakeHall 02"
+  }
+ },
+ "races": {
+  "race-uuid-0": {
+   "file": "FakeArenaRace01_0001.xml"
+  },
+  "race-uuid-1": {
+   "file": "FakeArenaRace02_0001.xml"
+  },
+  "race-uuid-2": {
+   "file": "FakeFieldRace01_0001.xml"
+  },
+  "race-uuid-3": {
+   "file": "FakeFieldRace02_0001.xml"
+  },
+  "race-uuid-4": {
+   "file": "FakeHallRace01_0001.xml"
+  },
+  "race-uuid-5": {
+   "file": "FakeHallRace02_0001.xml"
+  }
+ }
+}
