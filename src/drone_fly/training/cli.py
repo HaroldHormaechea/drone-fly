@@ -296,7 +296,9 @@ def evaluate(
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
-    if args.tracks or args.select_val:
+    from drone_fly.training.distill import is_student_run
+
+    if args.tracks or args.select_val or is_student_run(args.checkpoint):
         from drone_fly.training.evaluate import cmd_teacher_eval
 
         return cmd_teacher_eval(args)
@@ -749,6 +751,7 @@ def add_parser(sub: Any) -> None:
     )
     p_ev.add_argument("--seed", type=int, default=EVAL_SEED, help="1234 (val selection: 4321)")
     p_ev.add_argument("--legacy-v1", action="store_true", help="decode as contract v1")
+    p_ev.add_argument("--baseline", help="UC70 student report: the MLP baseline run")
     p_ev.add_argument("--compare-prototype", action="store_true", help="paired gpu_prototype run")
     p_ev.add_argument("--k1-path", help="K1 connectome")
     p_ev.add_argument("--device", help="auto | cpu | cuda")

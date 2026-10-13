@@ -1268,3 +1268,251 @@ def ppo_finetune(
             )
     sr.save_student()
     return {"iterations": it, "steps": steps, "seconds": time.time() - t0, "best": best}
+
+
+# ----------------------------------------------------------------------------- report (D8)
+
+REPORT_EPISODES = 32
+REPORT_SEED = 1234
+#: AC7 absolute and relative targets.
+TARGET_COMPLETION = 0.70
+TARGET_TEACHER_RATIO = 0.85
+
+
+def is_student_run(path: str | Path) -> bool:
+    import yaml
+
+    p = Path(path)
+    cfg = p / "config.yaml" if p.is_dir() else p.parent.parent / "config.yaml"
+    if not cfg.is_file():
+        return False
+    try:
+        return (yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}).get("kind") == "student"
+    except yaml.YAMLError:
+        return False
+
+
+def load_student_run(path: str | Path, which: str = "val", k1_path: Any = None) -> dict[str, Any]:
+    """``{run, cfg, checkpoint, sidecar, actor, teacher, noise_model, conversion}``."""
+    import yaml
+
+    from drone_fly.controller.student import student_from_state
+    from drone_fly.harness.teacher import TeacherCheckpoint
+    from drone_fly.sim.action import read_sidecar
+    from drone_fly.sim.noise_model import NoiseModel
+    from drone_fly.training.cli import student_raw_from_snapshot
+    from drone_fly.training.config import student_from_mapping
+    from drone_fly.training.evaluate import conversion_from_sidecar
+    from drone_fly.training.export import resolve_student_checkpoint
+
+    p = Path(path)
+    run = p if p.is_dir() else p.parent.parent
+    snap = yaml.safe_load((run / "config.yaml").read_text(encoding="utf-8"))
+    cfg = student_from_mapping(student_raw_from_snapshot(snap), validate_tracks=False)
+    try:
+        ck = resolve_student_checkpoint(p, which)
+    except HarnessConfigError:
+        ck = resolve_student_checkpoint(p, "final")
+    side = read_sidecar(ck) or {}
+    state = torch.load(ck, map_location="cpu", weights_only=True)
+    actor = student_from_state(side["actor"], side.get("actor_arch") or {}, state, k1_path=k1_path)
+    tinfo = json.loads((run / "inputs" / "teacher.json").read_text(encoding="utf-8"))
+    teacher = TeacherCheckpoint.resolve(tinfo["checkpoint"])
+    model = NoiseModel.load(run / "inputs" / "noise_model.yaml")
+    return {
+        "run": run,
+        "cfg": cfg,
+        "checkpoint": ck,
+        "sidecar": side,
+        "actor": actor,
+        "teacher": teacher,
+        "noise_model": model,
+        "conversion": conversion_from_sidecar(side),
+    }
+
+
+def evaluate_student_run(
+    path: str | Path,
+    *,
+    baseline: str | Path | None = None,
+    selectors: tuple[str, ...] = ("liftoff:held-out",),
+    episodes: int = REPORT_EPISODES,
+    seed: int = REPORT_SEED,
+    device: str | None = None,
+    which: str = "val",
+    k1_path: Any = None,
+    write: bool = True,
+) -> dict[str, Any]:
+    """The AC7 report: student noise (headline) + exact, the teacher (exact) on the same tracks
+    and seeds, the MLP baseline, outcome shares, strata, bounds and the gap attribution."""
+    from drone_fly import drones
+    from drone_fly.training.evaluate import load_teacher
+    from drone_fly.training.ppo import resolve_device
+
+    s = load_student_run(path, which, k1_path)
+    cfg, model = s["cfg"], s["noise_model"]
+    dev = resolve_device(device or cfg.base.device)
+    profile = drones.load(cfg.base.drone)
+    pool = eval_pool(cfg, s["conversion"], list(selectors), model)
+    actor = s["actor"].to(dev).eval()
+    teacher, _ = load_teacher(s["teacher"].checkpoint, dev)
+    kw = {"episodes": episodes, "seed": seed}
+    rows: dict[str, Any] = {
+        "student_noise": evaluate_policy(actor, cfg, profile, pool, model, dev, mode="noise", **kw),
+        "student_exact": evaluate_policy(actor, cfg, profile, pool, model, dev, mode="exact", **kw),
+        "teacher_exact": evaluate_policy(
+            teacher, cfg, profile, pool, model, dev, mode="exact", teacher=True, **kw
+        ),
+    }
+    if baseline is not None:
+        b = load_student_run(baseline, which, k1_path)
+        ba = b["actor"].to(dev).eval()
+        rows["baseline_noise"] = evaluate_policy(
+            ba, cfg, profile, pool, model, dev, mode="noise", **kw
+        )
+        rows["baseline_exact"] = evaluate_policy(
+            ba, cfg, profile, pool, model, dev, mode="exact", **kw
+        )
+    teach = {t["id"]: t["completion"] for t in rows["teacher_exact"]["per_track"]}
+    per_track = []
+    for t in rows["student_noise"]["per_track"]:
+        ex = next((x for x in rows["student_exact"]["per_track"] if x["id"] == t["id"]), {})
+        tc = teach.get(t["id"])
+        per_track.append(
+            {
+                "id": t["id"],
+                "map": t["map"],
+                "stratum": t["stratum"],
+                "student_noise": t["completion"],
+                "student_exact": ex.get("completion"),
+                "teacher_exact": tc,
+                "ratio": None if not tc else t["completion"] / tc,
+                "outcomes_noise": t["outcomes"],
+            }
+        )
+    m = {k: v["macro_completion"] for k, v in rows.items()}
+    tm = m["teacher_exact"] or 0.0
+    feas_p = s["run"] / "eval" / "feasibility.json"
+    feas = json.loads(feas_p.read_text(encoding="utf-8")) if feas_p.is_file() else None
+    gaps = {
+        "teacher_limit": 1.0 - tm,
+        "capacity_gap": None
+        if "baseline_exact" not in m
+        else (m["baseline_exact"] - (m["student_exact"] or 0.0)) / max(tm, 1e-9),
+        "perception_gap": ((m["student_exact"] or 0.0) - (m["student_noise"] or 0.0))
+        / max(tm, 1e-9),
+    }
+    ratio = (m["student_noise"] or 0.0) / max(tm, 1e-9)
+    res = {
+        "run": str(s["run"]),
+        "checkpoint": str(s["checkpoint"]),
+        "actor": s["sidecar"]["actor"],
+        "world_scale": s["sidecar"].get("world_scale"),
+        "selectors": list(selectors),
+        "episodes": episodes,
+        "seed": seed,
+        "device": str(dev),
+        "settings": "randomization 1, measured random timing, ground starts, slack 0",
+        "teacher": s["teacher"].record(),
+        "noise_model": s["sidecar"].get("noise_model"),
+        "macro": m,
+        "teacher_ratio": ratio,
+        "per_track": per_track,
+        "strata": {k: v["strata"] for k, v in rows.items()},
+        "outcomes": {k: v["outcomes"] for k, v in rows.items()},
+        "gate_lost_fraction_noise": rows["student_noise"]["outcomes"].get("gate_lost", 0.0),
+        "lost_timeout_s": (s["sidecar"].get("perception") or {}).get("lost_timeout_s"),
+        "miss_burst_s_mean": (
+            model.data["classes"][model.classes[0]]["temporal"].get("miss_burst_s_mean")
+        ),
+        "miss_burst_s_p99_below_25m": (
+            model.data["classes"][model.classes[0]]["temporal"].get("miss_burst_s_p99_below_25m")
+        ),
+        "gaps": gaps,
+        "feasibility": feas,
+        "targets": {
+            "completion": TARGET_COMPLETION,
+            "teacher_ratio": TARGET_TEACHER_RATIO,
+            "meets_completion": (m["student_noise"] or 0.0) >= TARGET_COMPLETION,
+            "meets_teacher_ratio": ratio >= TARGET_TEACHER_RATIO,
+        },
+        "banner": (feas or {}).get("banner"),
+    }
+    if write:
+        d = s["run"] / "eval"
+        d.mkdir(parents=True, exist_ok=True)
+        name = "+".join(x.split(":", 1)[1] for x in selectors)
+        (d / f"student-{name}.json").write_text(json.dumps(res, indent=2) + "\n", "utf-8")
+        (d / f"student-{name}.md").write_text(student_markdown(res), encoding="utf-8")
+        res["written"] = str(d / f"student-{name}.json")
+    return res
+
+
+def _p(x: Any) -> str:
+    return "-" if x is None else f"{100 * float(x):.1f} %"
+
+
+def student_markdown(res: dict[str, Any]) -> str:
+    m = res["macro"]
+    L = [f"# Student report — {Path(res['run']).name}", ""]
+    if res.get("banner"):
+        L += [
+            f"> **{res['banner']}** (teacher held-out completion "
+            f"{_p((res.get('feasibility') or {}).get('held_out_completion'))}); the operative "
+            "gates are >= 85 % of the teacher and the exact-vs-noise comparison.",
+            "",
+        ]
+    t = res["targets"]
+    L += [
+        f"- Actor `{res['actor']}`, k {res['world_scale']}, checkpoint "
+        f"`{Path(res['checkpoint']).name}`; {res['selectors']}, {res['episodes']} episodes per "
+        f"track, seed {res['seed']}; {res['settings']}",
+        f"- Teacher {res['teacher'].get('run_id')} ({res['teacher'].get('selection_label')}); "
+        f"noise model {(res.get('noise_model') or {}).get('detector_id')} "
+        f"r{(res.get('noise_model') or {}).get('revision')}",
+        "",
+        "| bound | macro completion |",
+        "|---|---|",
+    ]
+    for k in (
+        "teacher_exact",
+        "baseline_exact",
+        "baseline_noise",
+        "student_exact",
+        "student_noise",
+    ):
+        if k in m:
+            L.append(f"| {k.replace('_', ' ')} | {_p(m[k])} |")
+    L += [
+        "",
+        f"**Headline (noise): {_p(m['student_noise'])}** — target >= 70 %: "
+        f"{'met' if t['meets_completion'] else 'NOT met'}; {_p(res['teacher_ratio'])} of the "
+        f"teacher — target >= 85 %: {'met' if t['meets_teacher_ratio'] else 'NOT met'}",
+        "",
+        "Gap attribution (fractions of the teacher): teacher limit "
+        f"{_p(res['gaps']['teacher_limit'])}, "
+        f"K1 capacity (MLP exact - K1 exact) {_p(res['gaps']['capacity_gap'])}, perception "
+        f"(K1 exact - K1 noise) {_p(res['gaps']['perception_gap'])}.",
+        "",
+        f"gate_lost share (noise) {_p(res['gate_lost_fraction_noise'])}; lost_timeout_s "
+        f"{res['lost_timeout_s']}; measured miss bursts mean {res['miss_burst_s_mean']} s, p99 "
+        f"(< 25 m) {res['miss_burst_s_p99_below_25m']} s.",
+        "",
+        "| track | stratum | student noise | student exact | teacher exact | ratio |",
+        "|---|---|---|---|---|---|",
+    ]
+    for r in res["per_track"]:
+        L.append(
+            f"| {r['id']} | {r['stratum']} | {_p(r['student_noise'])} | "
+            f"{_p(r['student_exact'])} | {_p(r['teacher_exact'])} | {_p(r['ratio'])} |"
+        )
+    L += ["", "Strata (macro completion):", ""]
+    for k, st in res["strata"].items():
+        L.append(
+            f"- {k}: "
+            + ", ".join(f"{name} {_p(v['completion'])} ({v['tracks']})" for name, v in st.items())
+        )
+    L += ["", "Outcome shares:", ""]
+    for k, oc in res["outcomes"].items():
+        L.append(f"- {k}: " + ", ".join(f"{o} {_p(v)}" for o, v in oc.items()))
+    return "\n".join(L) + "\n"

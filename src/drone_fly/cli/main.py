@@ -8,6 +8,8 @@
     drone-fly harness run --harness liftoff --teacher <run|teacher.pt> --track <id>
                           [--perception oracle|detector] [--trackdata-root] [--scenes-root]
                           [--allow-concurrent-training] [--session <dir> | --session-stamp S]
+    drone-fly harness run --harness liftoff --checkpoint <student.pt> [--preset liftoff]
+                          [--allow-baseline] [--allow-slow-cpu] [--overlay] [--dry-run]
     drone-fly harness oracle-report --session <dir> [--sim-episodes 32] [--no-sim]
     drone-fly harness eval --session <run dir> --track <xml> --race <xml> --config <yaml>
                           [--report <json>]
@@ -42,6 +44,16 @@
     drone-fly train teacher --drone <id> --tracks <selector> [--procedural F] [--config]
                           [--resume <run>] [--budget] [--n-envs] [--device] [--max-iterations]
     drone-fly train eval <run|teacher.pt> --tracks <selector> [--episodes] [--mode] [--seed]
+    drone-fly train detector-noise --detector <weights> --captures <dir>... [--labels <dir>...]
+                          [--live-runs <run>...] [--preset] [--device] [--out] [--latency-only]
+    drone-fly train student --teacher <run> --noise <noise_model.yaml> [--drone] [--tracks S]
+                          [--procedural F] [--actor k1-student|mlp-student] [--config]
+                          [--world-scale K] [--residual] [--budget] [--n-envs] [--resume <run>]
+                          [--ppo-steps N] [--feasibility-only] [--allow-gpu-contention]
+                          [--k1-path] [--device] | --scale-report [--trackdata-root] [--out]
+    drone-fly train export <student run> [--checkpoint val|final|it<N>] --out <path>
+                          [--baseline-export] [--bench|--no-bench]
+    drone-fly train eval <student run> [--tracks liftoff:held-out] [--baseline <mlp run>]
     drone-fly tracks list [--split S] [--source S] | check [--root] [--scenes-root]
                           [--require-scenes] | scan --source liftoff [--root] [--scenes-root]
                           [--seed] | stats --split S | extract-scenes [--map M] [--bundle M=B]
@@ -103,8 +115,19 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     if args.teacher is not None and (args.checkpoint is not None or args.extra_dim is not None):
         raise HarnessConfigError("--teacher is exclusive with --checkpoint / --extra-dim")
-    if args.teacher is None and (args.checkpoint is None or args.extra_dim is None):
-        raise HarnessConfigError("pass --checkpoint and --extra-dim, or --teacher")
+    student = False
+    if args.teacher is None and args.checkpoint is not None:
+        from drone_fly.student.checkpoint import is_student_checkpoint
+
+        student = is_student_checkpoint(args.checkpoint)
+        if student and args.extra_dim is not None:
+            raise HarnessConfigError(
+                "--extra-dim is not allowed with a student checkpoint (the export records it)"
+            )
+    if args.teacher is None and not student and (args.checkpoint is None or args.extra_dim is None):
+        raise HarnessConfigError(
+            "pass --checkpoint and --extra-dim, a student export (--checkpoint), or --teacher"
+        )
     teacher_kw = {}
     if args.teacher is not None:
         teacher_kw = {
@@ -137,6 +160,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         and not args.no_overlay_launch,
         recordable=True if args.recordable else None,
         save_recording=args.save_recording,
+        allow_baseline=args.allow_baseline,
+        allow_slow_cpu=args.allow_slow_cpu,
         **teacher_kw,
     )
     r = session.result
@@ -550,6 +575,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="UC69: a UC68 teacher run folder or .pt (exclusive with --checkpoint/--extra-dim)",
     )
     p_run.add_argument("--track", help="UC69: catalogue track id, e.g. liftoff-arena-04")
+    p_run.add_argument(
+        "--allow-baseline",
+        action="store_true",
+        help="UC70: fly a deployable: false (baseline) student export",
+    )
+    p_run.add_argument(
+        "--allow-slow-cpu",
+        action="store_true",
+        help="UC70: run a K1 student on the CPU (~220 ms per tick; debugging only)",
+    )
     p_run.add_argument(
         "--perception",
         choices=("oracle", "detector"),

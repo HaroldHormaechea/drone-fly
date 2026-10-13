@@ -25,7 +25,7 @@ slack:
   frac: 0.5
 student:
   actor: k1-student
-  world_scale: null          # set from the scale report (k in {4, 6, 10})
+  world_scale: 6.0           # k: scale report 2026-10-13 near-tie 6 vs 10, overridden to 6 (ADR 0009)
   encoder: true
   residual: false
   logstd_init: -1.5

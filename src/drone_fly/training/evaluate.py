@@ -403,6 +403,22 @@ def cmd_teacher_eval(args: argparse.Namespace) -> int:
 
     # the parser's legacy defaults mean "unset" here
     episodes = DEFAULT_EPISODES if args.episodes in (None, LEGACY_EPISODES) else args.episodes
+    from drone_fly.training.distill import evaluate_student_run, is_student_run
+
+    if is_student_run(args.checkpoint):  # UC70: the student report (D8)
+        sel = tuple(args.tracks or ("liftoff:held-out",))
+        res = evaluate_student_run(
+            args.checkpoint, baseline=getattr(args, "baseline", None), selectors=sel,
+            episodes=episodes, seed=EVAL_SEED if args.seed is None else args.seed,
+            device=args.device, k1_path=getattr(args, "k1_path", None),
+        )  # fmt: skip
+        m = res["macro"]
+        print(f"student noise {_pct(m['student_noise'])}, exact {_pct(m['student_exact'])}; "
+              f"teacher exact {_pct(m['teacher_exact'])}; ratio {_pct(res['teacher_ratio'])}")
+        if res.get("banner"):
+            print(res["banner"])
+        print(f"report: {res.get('written')}")
+        return 0
     if args.select_val:
         sel = select_val(args.checkpoint, episodes=episodes,
                          seed=VAL_SEED if args.seed in (None, CLI_SEED) else args.seed,

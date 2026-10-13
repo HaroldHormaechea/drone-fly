@@ -268,6 +268,8 @@ def run_harness(
     session_stamp: str | None = None,
     anticheat: Callable[[], None] | None = None,
     process_lister: Callable[[], Any] | None | str = "default",
+    allow_baseline: bool = False,
+    allow_slow_cpu: bool = False,
 ) -> SessionResult:
     """Run ``harness`` with ``checkpoint``; CLI-style arguments override the YAML config.
 
@@ -291,8 +293,30 @@ def run_harness(
 
     ``anticheat`` (default :func:`~drone_fly.harness.liftoff.anticheat.require_no_anticheat`)
     runs before arming on every live Liftoff run whose sink actuates (dry runs skip it).
+
+    UC70: a ``checkpoint`` in the ``drone-fly-student`` export format takes the student path
+    (:mod:`drone_fly.harness.student`): ``extra_dim`` is forbidden (the export carries it), the
+    version guard and the live-config checks refuse before arming, the export's world scale /
+    tracker timeouts / free-space settings override the config, ``allow_baseline`` permits a
+    ``deployable: false`` export and ``allow_slow_cpu`` a K1 student on the CPU.
     """
-    if teacher is None:
+    student_plan = None
+    if teacher is None and checkpoint is not None:
+        from drone_fly.harness.student import plan_student
+
+        student_plan = plan_student(checkpoint, allow_baseline=allow_baseline)
+        if student_plan is not None:
+            if extra_dim is not None:
+                raise HarnessConfigError(
+                    "--extra-dim is not allowed with a student checkpoint (the export records "
+                    f"its own observation: {student_plan.meta['obs_schema']['name']} "
+                    f"v{student_plan.meta['obs_schema']['version']})"
+                )
+            extra_dim = int(student_plan.meta["obs_schema"]["dim"])
+    if student_plan is not None:
+        if perception == "oracle":
+            raise HarnessConfigError("--perception oracle is for --teacher, not a student")
+    elif teacher is None:
         if perception == "oracle":
             raise HarnessConfigError(
                 "--perception oracle needs --teacher: the oracle converts the track exactly as "
@@ -327,6 +351,10 @@ def run_harness(
         if value is not None:
             overrides[key] = value
 
+    if student_plan is not None:
+        overrides.update(student_plan.overrides)
+        log.info("student checkpoint %s: config overrides %s", student_plan.path.name,
+                 student_plan.overrides)  # fmt: skip
     plan: _TeacherPlan | None = None
     if teacher is not None:
         lister = None if process_lister == "default" else process_lister
@@ -342,6 +370,8 @@ def run_harness(
                 {
                     "parts.frame_source": None,
                     "parts.free_space_estimator": "none",
+                    # the teacher reads no free space; UC70's preset default must not add a block
+                    "free_space.assume_no_obstacles": False,
                     "parts.gate_estimator": "oracle",
                     "scaling.world_scale": 1.0,
                 }
@@ -368,6 +398,10 @@ def run_harness(
     contract = load_contract(
         cfg.contract.gpu_prototype_dir, cfg.contract.k1_path, cfg.contract.device
     )
+    if student_plan is not None:
+        from drone_fly.harness.student import check_student_config
+
+        check_student_config(student_plan, cfg, contract, allow_slow_cpu=allow_slow_cpu)
     ctx = BuildContext(
         config=cfg, contract=contract, extra_dim=extra_dim, dry_run=dry_run, purpose="eval"
     )
@@ -407,6 +441,16 @@ def run_harness(
         policy = tch.TeacherPolicyRunner(
             frozen, step, contract=contract, drone=cfg.data.get("drone"), device="cpu"
         )
+    elif student_plan is not None:
+        from drone_fly.harness import student as stu
+        from drone_fly.harness.teacher import arm_total_s
+
+        step = stu.StudentStepState(arm_total_s=arm_total_s(cfg.get("controls") or {}))
+        step.sink = h.action_sink
+        assembler = stu.StudentObservationAssembler(
+            contract, step, lost_timeout_s=student_plan.lost_timeout_s
+        )
+        policy = stu.StudentPolicyRunner(student_plan, step, contract=contract)
     else:
         assembler = ContractObservationAssembler(contract)
         policy = ContractPolicyRunner(contract, checkpoint, extra_dim)  # type: ignore[arg-type]
@@ -478,6 +522,7 @@ def run_harness(
                     "provided_blocks": sorted(h.provided_blocks()),
                     "harness_info": h.info,
                     **({} if plan is None else _teacher_meta(plan, policy, cfg)),
+                    **({} if student_plan is None else _student_meta(student_plan)),
                 },
                 queue_size=cfg.recording.queue_size,
                 repo_root=find_repo_root(),
@@ -569,6 +614,15 @@ def run_harness(
         overlay_process=launched[0] if launched else None,
         session_dir=None if plan is None else plan.session_dir,
     )
+
+
+# ----------------------------------------------------------------------------- UC70 student
+
+
+def _student_meta(plan: Any) -> dict[str, Any]:
+    from drone_fly.harness.student import student_meta
+
+    return student_meta(plan)
 
 
 # ----------------------------------------------------------------------------- UC69 teacher

@@ -52,13 +52,10 @@ TOP_KEYS = (
     "obs",
     "slack",
     "checkpoint_every_s",
-    # UC70 student configs
-    "student",
-    "perception",
-    "distill",
-    "finetune",
-    "feasibility",
 )
+#: UC70 student-only sections (accepted by ``student_from_mapping`` only; a teacher or legacy
+#: config still refuses them, e.g. the UC69 leakage guard on ``perception``).
+STUDENT_KEYS = ("student", "perception", "distill", "finetune", "feasibility")
 #: Keys a teacher config inherits from ``proc-course-dr`` but does not use.
 TEACHER_IGNORED = ("course", "curriculum", "k1_path")
 ACTOR_KINDS = ("k1-reservoir-aug", "mlp-teacher")
@@ -555,7 +552,8 @@ class StudentConfig:
 
 
 def student_from_mapping(data: dict[str, Any], *, validate_tracks: bool = True) -> StudentConfig:
-    base = teacher_from_mapping(data, validate_tracks=validate_tracks)
+    base = teacher_from_mapping({k: v for k, v in data.items() if k not in STUDENT_KEYS},
+                                validate_tracks=validate_tracks)  # fmt: skip
     feas = dict(data.get("feasibility") or {})
     if "selectors" in feas:
         feas["selectors"] = tuple(feas["selectors"])
