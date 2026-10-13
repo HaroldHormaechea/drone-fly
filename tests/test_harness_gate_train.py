@@ -8,6 +8,7 @@ best-validation selection and early stopping are recorded, deploy models carry n
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -736,16 +737,23 @@ def test_cli_roll_flags_and_rotated_val(tmp_path, monkeypatch, capsys):
     # R1 defaults: no roll, no rotated val
     assert main(base) == 0
     assert got["roll"] == gate_train.RollAug() and not got["roll"].enabled
-    assert got["rotated_val"] == ()
+    assert got["rotated_val"] == () and got["live_roll_val"] is False
     got.clear()
     flags = ["--aug-roll-p", "0.7", "--aug-roll-edges", "0,20,135", "--aug-roll-weights",
              "0.8,0.2", "--aug-roll-fallback-weights", "0.5,0.5", "--aug-roll-fill", "reflect",
-             "--aug-shift", "0.02", "--rotated-val", "0,30,60,90,135"]  # fmt: skip
+             "--aug-roll-keep-sign-p", "0.6", "--aug-shift", "0.02",
+             "--rotated-val", "0,30,60,90,135", "--live-roll-val"]  # fmt: skip
     assert main([*base, *flags]) == 0
     assert got["roll"] == gate_train.RollAug(p=0.7, edges=(0.0, 20.0, 135.0), weights=(0.8, 0.2),
                                              fallback_weights=(0.5, 0.5), shift=0.02,
-                                             fill="reflect")  # fmt: skip
-    assert got["rotated_val"] == (0.0, 30.0, 60.0, 90.0, 135.0)
+                                             fill="reflect", keep_sign_p=0.6)  # fmt: skip
+    assert got["rotated_val"] == (0.0, 30.0, 60.0, 90.0, 135.0) and got["live_roll_val"] is True
+    got.clear()
+    d = build_parser().parse_args(base)
+    assert (d.aug_roll_edges, d.aug_roll_weights, d.aug_roll_fallback_weights) == (
+        "0,15,35,60,90,135", "0.15,0.35,0.40,0.07,0.03", "0.10,0.25,0.35,0.25,0.05")  # fmt: skip
+    assert (d.aug_roll_p, d.aug_roll_keep_sign_p, d.live_roll_val) == (0.0, 0.8, False)
+    assert main([*base, "--aug-roll-p", "0.5", "--aug-roll-keep-sign-p", "1.5"]) == 2
     got.clear()
     capsys.readouterr()
     too_far = ["--aug-roll-p", "0.5", "--aug-roll-edges", "0,90,140", "--aug-roll-weights", "1,1",
@@ -756,3 +764,386 @@ def test_cli_roll_flags_and_rotated_val(tmp_path, monkeypatch, capsys):
     assert "--rotated-val must be comma-separated numbers" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         build_parser().parse_args([*base, "--aug-roll-fill", "wrap"])
+
+
+# ----------------------------------------------------------------------------- roll.py (b66d509)
+
+
+def _roll_mod():
+    from drone_fly.harness.offline import roll
+
+    return roll
+
+
+def _cam():
+    from drone_fly.harness.geometry import CameraModel
+
+    return CameraModel(1280, 540, 120.0, 20.0)
+
+
+def _quat(yaw_deg=0.0, pitch_deg=0.0, roll_deg=0.0):
+    """A body -> world attitude [w, x, y, z] (FLU body, z up world): yaw, then pitch, then roll."""
+
+    def q(axis, deg):
+        h = np.radians(deg) / 2
+        return np.array([np.cos(h), *(np.sin(h) * np.asarray(axis, float))])
+
+    def mul(a, b):
+        w1, x1, y1, z1 = a
+        w2, x2, y2, z2 = b
+        return np.array(
+            [
+                w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+                w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+                w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+            ]
+        )
+
+    return mul(mul(q([0, 0, 1], yaw_deg), q([0, 1, 0], pitch_deg)), q([1, 0, 0], roll_deg))
+
+
+def test_roll_constants_are_the_measured_live_mix():
+    rm = _roll_mod()
+    assert rm.LIVE_ROLL_EDGES == (0.0, 15.0, 35.0, 60.0, 90.0, 135.0)
+    assert rm.LIVE_ROLL_WEIGHTS == (0.15, 0.35, 0.40, 0.07, 0.03)
+    assert rm.FALLBACK_ROLL_WEIGHTS == (0.10, 0.25, 0.35, 0.25, 0.05)
+    assert (rm.ROLL_MAX_DEG, rm.KEEP_SIGN_P, rm.LEVEL_DEG) == (135.0, 0.8, 2.0)
+    assert sum(rm.LIVE_ROLL_WEIGHTS) == pytest.approx(1.0)
+    assert sum(rm.FALLBACK_ROLL_WEIGHTS) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("base", [(0.0, 0.0, 0.0), (30.0, -10.0, 0.0), (-75.0, 15.0, 25.0)])
+@pytest.mark.parametrize("delta", [40.0, -40.0, 120.0, -120.0, 135.0])
+def test_camera_roll_and_rolled_quat(base, delta):
+    rm = _roll_mod()
+    cam = _cam()
+    q = _quat(*base)
+    r0 = rm.camera_roll_deg(cam, q)
+    if base == (0.0, 0.0, 0.0):
+        assert r0 == pytest.approx(0.0, abs=1e-9)  # level
+    q2 = rm.rolled_quat(cam, q, delta)
+    assert np.linalg.norm(q2) == pytest.approx(1.0)
+    r1 = rm.camera_roll_deg(cam, q2)
+    assert ((r1 - r0 - delta + 180.0) % 360.0) - 180.0 == pytest.approx(0.0, abs=1e-6)
+    # projection through the rolled attitude == the rolled image (roll_affine about the principal)
+    gt = _gt()
+    rng = np.random.default_rng(3)
+    pos = np.array([1.0, -2.0, 3.0])
+    fwd = np.linalg.inv(cam.world_to_camera(q)) @ [0.0, 0.0, 1.0]  # the optical axis, world
+    pts = pos + 10.0 * fwd + rng.uniform(-3.0, 3.0, (12, 3))
+    px0, f0 = cam.project((pts - pos) @ cam.world_to_camera(q).T)
+    px1, f1 = cam.project((pts - pos) @ cam.world_to_camera(q2).T)
+    assert f0.all() and f1.all()
+    want = gt.apply_affine(gt.roll_affine(delta, np.array([cam.cx, cam.cy]), [0, 0]), px0)
+    assert np.abs(px1 - want).max() < 1e-6
+
+
+@pytest.mark.parametrize("delta", [25.0, -60.0, 135.0])
+def test_a_white_dot_above_the_axis_turns_with_the_roll_sign(delta):
+    """Positive camera roll = world-up leans clockwise on screen = a positive roll_affine."""
+    rm = _roll_mod()
+    gt = _gt()
+    cam = _cam()
+    q = _quat()
+    c = np.array([cam.cx, cam.cy])
+    rot = cam.world_to_camera(q)
+    ahead = np.linalg.inv(rot) @ [0.0, 0.0, 1.0]
+    dot = 10.0 * ahead + np.array([0.0, 0.0, 1.0])  # a white dot 1 m above the line of sight
+    centre = 10.0 * ahead
+    (p_dot, p_c), _ = cam.project(np.stack([dot, centre]) @ rot.T)
+    up = p_dot - p_c
+    assert up[1] < 0 and abs(up[0]) < 1e-6  # level: straight up on screen
+    (r_dot, r_c) = gt.apply_affine(gt.roll_affine(delta, c, [0, 0]), np.stack([p_dot, p_c]))
+    v = r_dot - r_c
+    screen_angle = np.degrees(np.arctan2(v[0], -v[1]))  # clockwise from screen-up
+    assert screen_angle == pytest.approx(delta, abs=1e-6)
+    assert rm.camera_roll_deg(cam, rm.rolled_quat(cam, q, delta)) == pytest.approx(delta)
+
+
+def _final_roll(r, d):
+    return (np.asarray(r) + np.asarray(d) + 180.0) % 360.0 - 180.0
+
+
+def test_sample_target_deltas_lands_frames_in_the_target_buckets():
+    rm = _roll_mod()
+    rng = np.random.default_rng(0)
+    rolls = rng.uniform(-170.0, 170.0, 20000)  # frames of every roll, wrap-around included
+    d = rm.sample_target_deltas(np.random.default_rng(1), rolls)
+    assert np.all((d >= -180.0) & (d < 180.0))  # wrapped
+    final = _final_roll(rolls, d)
+    mag = np.abs(final)
+    assert mag.max() <= rm.ROLL_MAX_DEG + 1e-9
+    e = np.asarray(rm.LIVE_ROLL_EDGES)
+    shares = [np.mean((mag >= lo) & (mag < hi)) for lo, hi in zip(e[:-1], e[1:], strict=True)]
+    assert shares == pytest.approx(list(rm.LIVE_ROLL_WEIGHTS), abs=0.02)
+
+
+def test_sample_target_deltas_uses_the_fallback_for_unknown_rolls():
+    rm = _roll_mod()
+    d = rm.sample_target_deltas(np.random.default_rng(2), np.full(20000, np.nan))
+    mag = np.abs(d)
+    e = np.asarray(rm.LIVE_ROLL_EDGES)
+    shares = [np.mean((mag >= lo) & (mag < hi)) for lo, hi in zip(e[:-1], e[1:], strict=True)]
+    assert shares == pytest.approx(list(rm.FALLBACK_ROLL_WEIGHTS), abs=0.02)
+    assert np.mean(d > 0) == pytest.approx(0.5, abs=0.02)
+    mixed = np.array([np.nan, 10.0, np.nan, -50.0])
+    md = rm.sample_target_deltas(np.random.default_rng(3), mixed)
+    assert np.all(np.isfinite(md)) and np.all(np.abs(_final_roll(mixed[1::2], md[1::2])) <= 135)
+
+
+@pytest.mark.parametrize(
+    ("roll", "keep", "same_sign"),
+    [(60.0, 0.8, 0.9), (-60.0, 0.8, 0.9), (60.0, 0.0, 0.5), (60.0, 1.0, 1.0), (0.5, 0.8, None),
+     (-1.9, 1.0, None)],
+)  # fmt: skip
+def test_sample_target_deltas_keeps_the_frame_sign(roll, keep, same_sign):
+    rm = _roll_mod()
+    rolls = np.full(20000, roll)
+    d = rm.sample_target_deltas(np.random.default_rng(4), rolls, keep_sign_p=keep)
+    final = _final_roll(rolls, d)
+    if same_sign is None:  # a level frame (|roll| < LEVEL_DEG = 2): a random sign
+        assert np.mean(final > 0) == pytest.approx(0.5, abs=0.02)
+    else:  # keep + (1 - keep) x 0.5
+        assert np.mean(np.sign(final) == np.sign(roll)) == pytest.approx(same_sign, abs=0.02)
+    if (roll, keep) == (60.0, 0.8):
+        assert np.median(np.abs(d)) == pytest.approx(30.0, abs=5.0)  # the developer's check
+
+
+def test_sample_target_deltas_draw_order_is_fixed():
+    """sign, keep uniforms, target magnitudes, then fallback sign and magnitudes."""
+    rm = _roll_mod()
+    rolls = np.array([60.0, -20.0, 0.5, np.nan, 170.0])
+    got = rm.sample_target_deltas(np.random.default_rng(9), rolls)
+    rng = np.random.default_rng(9)
+    n = len(rolls)
+    sign = rng.choice([-1.0, 1.0], size=n)
+    keep = (rng.random(n) < 0.8) & np.isfinite(rolls) & (np.abs(np.nan_to_num(rolls)) >= 2.0)
+    sign = np.where(keep, np.sign(np.nan_to_num(rolls)), sign)
+    edges = rm.LIVE_ROLL_EDGES
+    target = np.clip(sign * rm.sample_magnitudes(rng, n, edges, rm.LIVE_ROLL_WEIGHTS), -135, 135)
+    raw_sign = rng.choice([-1.0, 1.0], size=n)
+    raw = raw_sign * rm.sample_magnitudes(rng, n, edges, rm.FALLBACK_ROLL_WEIGHTS)
+    want = np.where(np.isfinite(rolls), target - np.nan_to_num(rolls), raw)
+    assert np.allclose(got, (want + 180.0) % 360.0 - 180.0)
+
+
+def test_sample_magnitudes_is_uniform_inside_its_bucket():
+    rm = _roll_mod()
+    m = rm.sample_magnitudes(np.random.default_rng(5), 20000, (0.0, 10.0, 50.0), (0.0, 1.0))
+    assert np.all((m >= 10.0) & (m <= 50.0))  # the 0-weight bucket is never drawn
+    assert np.mean(m < 30.0) == pytest.approx(0.5, abs=0.02)
+
+
+def test_roll_aug_defaults_are_the_live_constants_and_frame_rolls_reach_the_sampler():
+    rm, gt = _roll_mod(), _gt()
+    d = gt.RollAug()
+    assert (d.edges, d.weights, d.fallback_weights) == (
+        rm.LIVE_ROLL_EDGES, rm.LIVE_ROLL_WEIGHTS, rm.FALLBACK_ROLL_WEIGHTS)  # fmt: skip
+    assert (d.p, d.shift, d.fill, d.keep_sign_p) == (0.0, 0.0, "mean", rm.KEEP_SIGN_P)
+    for bad in (-0.1, 1.1):
+        with pytest.raises(HarnessConfigError, match="roll augmentation"):
+            gt.RollAug(keep_sign_p=bad).validate()
+    aug = gt.RollAug(p=0.5, keep_sign_p=0.7).validate()
+    rolls = np.array([40.0, -10.0, np.nan, 3.0, 90.0, -120.0])
+    ang, sh = aug.sample(np.random.default_rng(6), 6, W, rolls)
+    rng = np.random.default_rng(6)
+    on = rng.random(6) < 0.5
+    want = np.zeros(6)
+    want[on] = rm.sample_target_deltas(rng, rolls[on], keep_sign_p=0.7)
+    assert np.allclose(ang, want) and np.all(sh == 0)
+    assert np.all(ang[~on] == 0)  # not drawn: no rotation
+    ang, _ = gt.RollAug(p=0.0).sample(np.random.default_rng(6), 6, W, rolls)
+    assert np.all(ang == 0)
+
+
+def test_augment_roll_collects_the_applied_rotations():
+    torch = pytest.importorskip("torch")
+    gt = _gt()
+    applied = []
+    x = torch.zeros(4, 3, H, W)
+    rolls = np.array([30.0, np.nan, -45.0, 10.0])
+    aug = gt.RollAug(p=1.0).validate()
+    gt._augment_roll(torch, x, [[], [], [], []], np.random.default_rng(8), aug, CENTER, H, rolls,
+                     applied)  # fmt: skip
+    want, _ = aug.sample(np.random.default_rng(8), 4, W, rolls)
+    assert applied == pytest.approx([a for a in want if a != 0]) and len(applied) == 4
+    none = []
+    gt._augment_roll(torch, x, [[]] * 4, np.random.default_rng(8), gt.RollAug(), CENTER, H, rolls,
+                     none)  # fmt: skip
+    assert none == []
+
+
+# ----------------------------------------------------------------------------- score(deltas)
+
+
+def _deltas_scorer(monkeypatch, rows, cam):
+    """A SelectionScorer over ``rows`` with a stub estimator and score_capture_frame that marks
+    every scored gate (center_in_image) as detected and records the attitude it was given."""
+    from types import SimpleNamespace
+
+    from drone_fly.harness.gate_types import GateTypeTable
+    from drone_fly.harness.liftoff import gate_learned
+    from drone_fly.harness.offline import evaluate
+
+    gt = _gt()
+    seen = {"quats": [], "gates": []}
+
+    class Est:
+        def __init__(self, *a, **k):
+            pass
+
+        def detect(self, blank, state):
+            seen["quats"].append(np.asarray(state.quat))
+            return []
+
+    def score_frame(found, gates, scale):
+        seen["gates"].append([dict(g) for g in gates])
+        hit = {"detected": True, "position_error_rel": 0.1}
+        scored = [dict(hit) for g in gates if g["center_in_image"]]
+        return {"scored": scored, "false_detections": []}
+
+    monkeypatch.setattr(gate_learned, "LearnedGateEstimator", Est)
+    monkeypatch.setattr(evaluate, "score_capture_frame", score_frame)
+    table = GateTypeTable.from_config(
+        [{"class": "arch", "match": "^A", "aperture": [1, 1], "outer": [1, 1]}]
+    )
+    s = object.__new__(gt.SelectionScorer)
+    items = [SimpleNamespace(capture="cap", row={"gates": g}) for g in rows]
+    s.ds = SimpleNamespace(items=items)
+    s.idx = np.arange(len(rows))
+    s.table, s.device, s.score_threshold, s.min_keypoints = table, "cpu", 0.3, 4
+    s.cams, s.masks = {"cap": cam}, {"cap": None}
+    import dataclasses
+
+    state = dataclasses.make_dataclass("State", ["quat"])  # replace()-able, as FlightState
+    s.states = {k: state(quat=_quat(10.0 * k)) for k in range(len(rows))}
+    in_w = 128
+    scale = in_w / cam.width
+    s.geometry = (in_w, round(cam.height * scale), 64, scale)
+    return s, seen
+
+
+def test_score_with_deltas(monkeypatch):
+    pytest.importorskip("torch")
+    from drone_fly.harness.liftoff import gate_net
+
+    rm = _roll_mod()
+    cam = _cam()
+    monkeypatch.setattr(gate_net, "decode", lambda out, score_threshold=0.3: [[] for _ in out])
+    centre = {"cls": "arch", "range_m": 10.0, "center_in_image": True,
+              "center_px": [cam.cx + 10.0, cam.cy]}  # fmt: skip
+    edge = {**centre, "center_px": [cam.width - 20.0, cam.cy]}  # rolls out of the 1280 x 540 frame
+    unseen = {**centre, "center_in_image": False}
+    rows = [[centre, edge], [centre, unseen]]
+    s, seen = _deltas_scorer(monkeypatch, rows, cam)
+    data = np.zeros((2, 3, s.geometry[1], s.geometry[0]), np.uint8)
+    net = _IdentityNet()
+    principal = np.array([cam.cx, cam.cy]) * s.geometry[3]
+    plain = s.score(net, data, batch_size=2)
+    zero = s.score(net, data, batch_size=2, deltas={0: 0.0, 1: 0.0}, principal=principal)
+    assert plain == zero == {"n": 3, "detection_rate": 1.0, "position_error_rel_median": 0.1}
+    assert np.allclose(seen["quats"][2], seen["quats"][0])  # delta 0: the same attitude
+    seen["quats"].clear()
+    seen["gates"].clear()
+    rolled = s.score(net, data, batch_size=2, deltas={0: 90.0, 1: -40.0}, principal=principal)
+    assert rolled["n"] == 2  # the edge gate rolled out of the frame: no longer scored
+    (g0, g1) = seen["gates"]
+    assert [g["center_in_image"] for g in g0] == [True, False]
+    assert [g["center_in_image"] for g in g1] == [True, False]  # unseen stays unseen
+    for k, d in ((0, 90.0), (1, -40.0)):  # the scorer saw the rolled attitudes
+        assert np.allclose(seen["quats"][k], rm.rolled_quat(cam, _quat(10.0 * k), d))
+    assert net.training
+
+
+# ----------------------------------------------------------------------------- train_multi
+
+
+@pytest.fixture(scope="module")
+def roll_world(tmp_path_factory):
+    from tests.test_harness_gate_dataset import World
+
+    w = World(tmp_path_factory.mktemp("roll-world"))
+    w.a, w.b, w.c = w.add("FakeA"), w.add("FakeB"), w.add("FakeC")
+    return w
+
+
+def test_train_multi_flips_negate_the_roll_and_records_the_roll_metrics(
+    roll_world, tmp_path, monkeypatch
+):
+    """hflip first and the frame roll negated for a flipped image; roll_applied_deg each epoch;
+    val_det_live_roll on val steps (fixed re-roll); selection stays plain val detection."""
+    from drone_fly.harness.offline import gate_dataset as gd
+    from drone_fly.harness.offline import roll as roll_mod
+    from drone_fly.tracks import catalogue as cat
+
+    gt = _gt()
+    w = roll_world
+    monkeypatch.setattr(gd, "models_root", lambda: w.models)
+    monkeypatch.setattr(cat, "load_catalogue", lambda path: w.catalogue)
+    monkeypatch.setattr(roll_mod, "item_camera_rolls",
+                        lambda ds, tel, cam: np.full(len(ds.items), 30.0))  # fmt: skip
+    monkeypatch.setattr(gt, "item_camera_rolls", lambda ds, tel, cam: np.full(len(ds.items), 30.0),
+                        raising=False)  # fmt: skip
+    seen = {"flips": 0, "rolls": []}
+    real_flip, real_roll = gt._flip_gates, gt._augment_roll
+
+    def flip(*a, **k):
+        seen["flips"] += 1
+        return real_flip(*a, **k)
+
+    def roll(torch, x, gates, rng, aug, center, height, fr=None, applied=None):
+        seen["rolls"].extend(np.asarray(fr).tolist())
+        return real_roll(torch, x, gates, rng, aug, center, height, fr, applied)
+
+    monkeypatch.setattr(gt, "_flip_gates", flip)
+    monkeypatch.setattr(gt, "_augment_roll", roll)
+    meta = gt.train_multi(
+        [w.a, w.b, w.c], trackdata_root=w.root, split_source=w.catalogue.path,
+        config=SMALL_CAMERA, epochs=2, backbone="tiny-cnn", batch_size=4, input_width=128,
+        max_frames_per_capture=8, val_every=1, protect_holdout_of=None, device="cpu",
+        out_root=tmp_path, detector_id="roll", roll=gt.RollAug(p=1.0).validate(),
+        rotated_val=(0.0, 90.0), live_roll_val=True,
+    )  # fmt: skip
+    rolls = np.asarray(seen["rolls"])
+    assert set(np.round(rolls, 6)) <= {30.0, -30.0} and len(rolls) > 0
+    assert int(np.sum(rolls < 0)) == seen["flips"]  # one negated roll per flipped image
+    log = json.loads(Path(meta["training_log"]).read_text("utf-8"))
+    for h in log["history"]:
+        ra = h["roll_applied_deg"]
+        assert ra["n"] > 0 and 0 <= ra["p50"] <= ra["p90"] <= ra["max"] <= 180.0
+        assert set(h["val_det_live_roll"]) >= {"n", "detection_rate"}
+        assert set(h["rotated_val"]) == {"0", "90"}
+    assert meta["chosen_val_detection"] is not None
+    params = json.loads((tmp_path / "roll" / "data_manifest.json").read_text("utf-8"))["params"]
+    assert params["roll_aug"]["p"] == 1.0 and params["rotated_val"] == [0.0, 90.0]
+    assert params["live_roll_val"] is True
+
+
+def test_train_multi_without_roll_computes_no_rolls(roll_world, tmp_path, monkeypatch):
+    from drone_fly.harness.offline import gate_dataset as gd
+    from drone_fly.harness.offline import roll as roll_mod
+    from drone_fly.tracks import catalogue as cat
+
+    gt = _gt()
+    w = roll_world
+    monkeypatch.setattr(gd, "models_root", lambda: w.models)
+    monkeypatch.setattr(cat, "load_catalogue", lambda path: w.catalogue)
+
+    def never(*a, **k):
+        raise AssertionError("rolls are computed only when roll is enabled or live_roll_val")
+
+    monkeypatch.setattr(roll_mod, "item_camera_rolls", never)
+    monkeypatch.setattr(gt, "item_camera_rolls", never, raising=False)
+    monkeypatch.setattr(gt, "_augment_roll", never)
+    meta = gt.train_multi(
+        [w.a, w.b, w.c], trackdata_root=w.root, split_source=w.catalogue.path,
+        config=SMALL_CAMERA, epochs=1, backbone="tiny-cnn", batch_size=4, input_width=128,
+        max_frames_per_capture=4, val_every=1, protect_holdout_of=None, device="cpu",
+        out_root=tmp_path, detector_id="plain", roll=gt.RollAug(),
+    )  # fmt: skip
+    log = json.loads(Path(meta["training_log"]).read_text("utf-8"))
+    assert all("roll_applied_deg" not in h and "val_det_live_roll" not in h
+               for h in log["history"])  # fmt: skip
+    params = json.loads((tmp_path / "plain" / "data_manifest.json").read_text("utf-8"))["params"]
+    assert params["roll_aug"] is None and params["live_roll_val"] is False
