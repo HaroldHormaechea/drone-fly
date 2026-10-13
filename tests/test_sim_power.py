@@ -506,11 +506,21 @@ def _hover(env):
     return torch.zeros(env.n, 4, dtype=env.dtype)
 
 
-def test_power_loss_is_the_last_outcome_and_counts_as_a_crash():
+def test_power_loss_is_an_appended_outcome_and_counts_as_a_crash(field_course):
     from drone_fly.sim.multi_course import OUTCOMES
 
-    assert OUTCOMES[-1] == "power_loss"
+    # appended after "completed" (other UCs may append further outcomes): the original codes keep
+    # their indices in old episode logs and reports
     assert OUTCOMES[:6] == ("none", "floor", "collision", "out-of-bounds", "timeout", "completed")
+    assert "power_loss" in OUTCOMES and OUTCOMES.count("power_loss") == 1
+    assert OUTCOMES.index("power_loss") > OUTCOMES.index("completed")
+    # and it is a crash, not a completion
+    env = _env(field_course, power=True)
+    _place_before_first_gate(env, field_course)
+    env.plant.power.sag = torch.full_like(env.plant.power.sag, 100.0)
+    _, done = env.step(_hover(env))
+    assert bool(done[0]) and OUTCOMES[int(env.last_outcome[0])] == "power_loss"
+    assert bool(env.last_crashed[0]) and not bool(env.last_completed[0])
 
 
 def test_cutoff_ends_the_episode_with_power_loss(field_course):

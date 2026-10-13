@@ -15,15 +15,20 @@ The UC68 teacher sees exact gate poses; the live harness only has the learned ga
    - The student's observation is assembled by the same code path as the live harness (`ContractObservationAssembler`) or a tested equivalent.
    - A test feeds identical inputs through both and asserts bit-identical vectors.
    - Observation-schema and action-contract versions are written into the checkpoint, and `harness run` refuses a mismatch with a clear error.
-4. **Distillation:**
+4. **Student architecture (user's goal):**
+   - The deployable student is the user's own connectome model lineage: the K1 reservoir actor (`controller/reservoir.py`, `K1ReservoirAug`), warm-started from the trained `training/07-proc-course-flight` readout via the UC67 v1→v2 conversion.
+   - Its frozen K1 connectome body is kept; distillation trains the readout and any added input layers.
+   - A plain-MLP student may be trained only as a comparison baseline and is reported next to it.
+   - The report states the connectome student's held-out completion against the baseline's.
+5. **Distillation:**
    - `drone-fly train student --teacher <run> --noise <noise_model.yaml> --drone <id> --tracks liftoff:train --procedural 0.4` trains by DAgger: the student acts, the teacher labels.
    - The teacher-forcing ratio follows a configurable decay schedule.
    - An optional PPO fine-tune phase follows.
    - Outputs go to `artifacts/training/<drone-id>/<run-id>/` with the same structure as the teacher.
-5. **Deployable export:** `drone-fly train export <run> --out <path>` writes a checkpoint loadable by `harness run --checkpoint`. A test loads it through the harness policy loader with fakes and runs one tick.
-6. **Targets:** in the simulator with the noise model, dynamics and timing randomization, and ground starts, the student reaches **≥ 70% completion on held-out tracks**, and at least 85% of the teacher's completion on the same tracks. The report includes per-track numbers and a noise ablation: student without noise vs. with noise.
-7. **Latency fit:** the student's control rate during training matches what the live harness achieves (from the UC67 timing defaults). The live harness's tick-deadline settings are aligned with it in the `liftoff` preset.
-8. **Tests:** hermetic tests cover noise-model fitting on synthetic detector errors (recovered within tolerance), batch application statistics, observation parity, the checkpoint version guard, and the export round-trip.
+6. **Deployable export:** `drone-fly train export <run> --out <path>` writes a checkpoint loadable by `harness run --checkpoint`. A test loads it through the harness policy loader with fakes and runs one tick.
+7. **Targets:** in the simulator with the noise model, dynamics and timing randomization, and ground starts, the student reaches **≥ 70% completion on held-out tracks**, and at least 85% of the teacher's completion on the same tracks. The report includes per-track numbers and a noise ablation: student without noise vs. with noise.
+8. **Latency fit:** the student's control rate during training matches what the live harness achieves (from the UC67 timing defaults). The live harness's tick-deadline settings are aligned with it in the `liftoff` preset.
+9. **Tests:** hermetic tests cover noise-model fitting on synthetic detector errors (recovered within tolerance), batch application statistics, observation parity, the checkpoint version guard, and the export round-trip.
 
 ## Potential Pitfalls & Open Questions
 - **Missing input** — Labelled captures exist only for Infinity Loop (UC64). The noise model is first fitted on Infinity Loop and refitted when UC71 adds more maps; the report states which maps it covers.
@@ -39,3 +44,7 @@ The UC68 teacher sees exact gate poses; the live harness only has the learned ga
 > Ideas?
 
 > Prepare everything as use cases. Once they are set-up, and we validate them together, wait for me to give you the go ahead (I'll be out of home for a couple hours so that's good time to use, but i'll leave after we have set this up). When doing the analysis, make sure whateve rwe create fits in a good understandable folder structure, and is scalable in case we need to train more drones and such.
+
+## Clarifications
+- Q: Which model is the end goal?
+  A: The user's own trained connectome model (the 07 K1-reservoir lineage) must end up flying in Liftoff, after fine-tuning or whatever else it takes. The student is therefore the K1 reservoir actor warm-started from 07, distilled from the teacher (added 2026-10-13).

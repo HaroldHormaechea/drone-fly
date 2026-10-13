@@ -1,10 +1,13 @@
-"""UC68 AC6 (D2): the ``teacher-obs`` v1 observation (148 float32, raw and exact).
+"""UC68 AC6 (D2): the ``teacher-obs`` observation (v2: 150 float32, raw; v1: the first 148).
 
-* Layout and schema: block order / widths, the harness30 pins (``course_senses`` constants, the
-  assembler's extra layout), the recorded ``input_scale``.
+* Layout and schema of v1 and v2: block order / widths, the harness30 pins (``course_senses``
+  constants, the assembler's extra layout), the recorded ``input_scale``. v2's battery block
+  [148:150) is ``(charge, volts / cells)`` of the power model, a full pack ``(1.0, 4.2)`` without
+  one; ``battery_from_telemetry`` maps Liftoff's telemetry the same way.
 * The batched torch builder (``MultiCourseEnv.teacher_obs``) equals the NumPy single-drone
   reference (``tracks.teacher_obs_ref``) on random states over Liftoff and procedural courses,
-  including the route end (invalid lookahead rows) and the lap wrap.
+  including the route end (invalid lookahead rows) and the lap wrap, at v1 and at v2 (with and
+  without a power model).
 * The reference's harness30 goes through the REAL ``ContractObservationAssembler`` and
   ``course_senses`` over the course's harness list.
 * Occlusion: a big floor box under a gate (a scene collider) does not occlude the lookahead; a
@@ -54,24 +57,48 @@ def _to_course(c, p_unity):
 # ----------------------------------------------------------------------------- layout
 
 
+V1_NAMES = ["harness30", "attitude6", "vel_body", "gates", "obstacles", "altitude",
+            "prev_action", "arm_remaining_s"]  # fmt: skip
+V1_WIDTHS = [30, 6, 3, 39, 64, 1, 4, 1]
+V1_STARTS = [0, 30, 36, 39, 78, 142, 143, 147]
+
+
 def test_layout_and_schema():
-    assert to.DIM == 148
-    assert [n for n, _ in to.BLOCKS] == ["harness30", "attitude6", "vel_body", "gates",
-                                         "obstacles", "altitude", "prev_action",
-                                         "arm_remaining_s"]  # fmt: skip
-    assert [w for _, w in to.BLOCKS] == [30, 6, 3, 39, 64, 1, 4, 1]
+    import json
+
+    assert to.VERSION == 2 and to.VERSIONS == (1, 2)
+    assert (to.dim(1), to.dim(2), to.DIM_V1, to.DIM) == (148, 150, 148, 150)
+    assert [n for n, _ in to.blocks(1)] == V1_NAMES and [w for _, w in to.blocks(1)] == V1_WIDTHS
+    assert [n for n, _ in to.blocks(2)] == [*V1_NAMES, "battery"]
+    assert [w for _, w in to.blocks(2)] == [*V1_WIDTHS, 2]
+    assert to.blocks() == to.BLOCKS == to.blocks(2)
     assert to.block_slice("gates") == slice(39, 78) and to.block_slice("obstacles") == slice(78, 142)
     assert to.block_slice("altitude") == slice(142, 143)
     assert to.block_slice("prev_action") == slice(143, 147)
     assert to.block_slice("arm_remaining_s") == slice(147, 148)
-    s = to.schema()
-    assert (s["name"], s["version"], s["dim"], s["dtype"]) == ("teacher-obs", 1, 148, "float32")
-    assert [b["start"] for b in s["blocks"]] == [0, 30, 36, 39, 78, 142, 143, 147]
-    assert len(s["input_scale"]) == 148 and len(s["gates"]["features"]) == 13
-    assert len(s["obstacles"]["features"]) == 8 and s["obstacles"]["range_m"] == 12.0
-    import json
+    assert to.block_slice("battery") == slice(148, 150)
+    for v, d, starts in ((1, 148, V1_STARTS), (2, 150, [*V1_STARTS, 148])):
+        s = to.schema(v)
+        assert (s["name"], s["version"], s["dim"], s["dtype"]) == ("teacher-obs", v, d, "float32")
+        assert [b["start"] for b in s["blocks"]] == starts
+        assert len(s["input_scale"]) == d == len(to.input_scale(v))
+        assert len(s["gates"]["features"]) == 13
+        assert len(s["obstacles"]["features"]) == 8 and s["obstacles"]["range_m"] == 12.0
+        json.dumps(s)  # JSON-able (it goes into the sidecar)
+    assert "battery" not in to.schema(1)
+    assert to.schema() == to.schema(2)
+    assert to.input_scale(2)[:148] == to.input_scale(1)  # v1 is exactly the v2 prefix
+    for bad in (0, 3):
+        with pytest.raises(ValueError, match="unknown teacher-obs version"):
+            to.dim(bad)
 
-    json.dumps(s)  # JSON-able (it goes into the sidecar)
+
+def test_v2_battery_block_schema():
+    b = to.schema(2)["battery"]
+    assert b["features"] == ["charge", "volts_per_cell"]
+    assert b["no_power_model"] == [1.0, 4.2]
+    assert "batt_charge" in b["charge"] and "batt_volts / cells" in b["volts_per_cell"]
+    assert to.input_scale(2)[148:] == pytest.approx([1.0, 1 / 4.2])
 
 
 def test_harness30_pins_match_the_harness_code():
@@ -127,7 +154,7 @@ def _set_random_states(env, courses, rng):
     return cid, k
 
 
-def _ref_obs(env, courses, cid, k, i, contract):
+def _ref_obs(env, courses, cid, k, i, contract, version=2, battery=None):
     c = courses[cid[i]]
     rp = RouteProgress(c.n_passages, c.laps, c.circuit)
     rp.reset(int(k[i]))
@@ -135,20 +162,107 @@ def _ref_obs(env, courses, cid, k, i, contract):
           "quat": env.quat[i].double().numpy(), "omega": env.omega[i].double().numpy()}  # fmt: skip
     arm = max(0.0, float(env.arm_until[i] - env.t[i]))
     return ref.build_teacher_obs(st, c, rp, env.prev_action[i].double().numpy(), arm,
-                                 contract=contract)  # fmt: skip
+                                 contract=contract, battery=battery,
+                                 version=version)  # fmt: skip
 
 
-def test_batched_teacher_obs_equals_the_numpy_reference(courses, harness_contract):
+def _set_random_battery(env, rng):
+    """Random (charge, volts) on the power model; returns the per-env (charge, volts / cell)."""
+    pw = env.plant.power
+    n = env.n
+    pw.charge = torch.as_tensor(rng.uniform(0.05, 1.0, n), dtype=pw.charge.dtype)
+    pw.volts = torch.as_tensor(rng.uniform(9.5, 12.6, n), dtype=pw.volts.dtype)
+    cells = pw.spec.cells
+    return [ref.battery_from_telemetry(float(pw.charge[i]), float(pw.volts[i]), cells)
+            for i in range(n)]  # fmt: skip
+
+
+@pytest.mark.parametrize("version, power", [(1, False), (2, False), (2, True)])
+def test_batched_teacher_obs_equals_the_numpy_reference(courses, harness_contract, version,
+                                                        power):  # fmt: skip
+    from drone_fly.sim.plant import PlantConfig
+
     rng = np.random.default_rng(11)
-    env = make_env(courses, n_envs=96, start={"ground_fraction": 0.0}, log_capacity=None)
+    env = make_env(courses, n_envs=96, start={"ground_fraction": 0.0}, log_capacity=None,
+                   plant_config=PlantConfig(power=power))  # fmt: skip
+    env.obs_version = version
     for _ in range(3):
         cid, k = _set_random_states(env, courses, rng)
+        bats = _set_random_battery(env, rng) if power else [None] * env.n
         got = env.teacher_obs().double().numpy()
-        assert got.shape == (96, 148) and np.isfinite(got).all()
+        assert got.shape == (96, to.dim(version)) and np.isfinite(got).all()
         for i in range(env.n):
-            want = _ref_obs(env, courses, cid, k, i, harness_contract)
+            want = _ref_obs(env, courses, cid, k, i, harness_contract, version, bats[i])
             bad = np.flatnonzero(~np.isclose(got[i], want, rtol=1e-4, atol=2e-4))
             assert not len(bad), (courses[cid[i]].id, int(k[i]), bad, got[i][bad], want[bad])
+        if power:
+            np.testing.assert_allclose(got[:, 148:], np.array(bats), rtol=1e-6, atol=1e-6)
+
+
+def test_v1_is_exactly_the_v2_prefix(courses):
+    from drone_fly.sim.plant import PlantConfig
+
+    env = make_env(courses, n_envs=8, start={"ground_fraction": 0.0},
+                   plant_config=PlantConfig(power=True))  # fmt: skip
+    env.reset_all(torch.arange(8) % len(courses))
+    v2 = to.build_teacher_obs(env, 2)
+    v1 = to.build_teacher_obs(env, 1)
+    assert v1.shape == (8, 148) and v2.shape == (8, 150)
+    torch.testing.assert_close(v2[:, :148], v1)
+    env.obs_version = 1
+    assert env.teacher_obs().shape == (8, 148)
+
+
+def test_v2_battery_block_is_the_power_model_or_a_full_pack(courses):
+    from drone_fly.sim.plant import PlantConfig
+
+    off = make_env([courses[0]], n_envs=2, start={"ground_fraction": 0.0})
+    off.reset_all(torch.zeros(2, dtype=torch.long))
+    assert off.obs_version == 2 and off.plant.power is None
+    obs = off.teacher_obs()
+    torch.testing.assert_close(obs[:, 148:], torch.tensor([[1.0, 4.2]] * 2, dtype=obs.dtype))
+    scale = torch.tensor(to.input_scale(2)[148:], dtype=obs.dtype)
+    torch.testing.assert_close(obs[:, 148:] * scale, torch.ones(2, 2, dtype=obs.dtype))
+
+    on = make_env([courses[0]], n_envs=2, start={"ground_fraction": 0.0},
+                  plant_config=PlantConfig(power=True))  # fmt: skip
+    on.reset_all(torch.zeros(2, dtype=torch.long))
+    pw = on.plant.power
+    assert pw.spec.cells == 3
+    pw.charge = torch.tensor([0.75, 0.2], dtype=pw.charge.dtype)
+    pw.volts = torch.tensor([11.4, 10.2], dtype=pw.volts.dtype)
+    obs = on.teacher_obs()
+    want = torch.tensor([[0.75, 3.8], [0.2, 3.4]], dtype=obs.dtype)
+    torch.testing.assert_close(obs[:, 148:], want)
+    torch.testing.assert_close(obs[:, 148:] * scale,
+                               want * torch.tensor([1.0, 1 / 4.2], dtype=obs.dtype))  # fmt: skip
+    on.step(torch.zeros(2, 4))  # the block follows the power model as it updates
+    torch.testing.assert_close(on.teacher_obs()[:, 148:], pw.columns().to(obs.dtype))
+
+
+def test_battery_from_telemetry_for_a_3_cell_pack():
+    assert ref.battery_from_telemetry(0.8, 11.7, 3) == pytest.approx((0.8, 3.9))
+    assert ref.battery_from_telemetry(1.0, 12.6, 3) == pytest.approx((1.0, 4.2))
+    charge, vpc = ref.battery_from_telemetry(0, 10, 3)
+    assert isinstance(charge, float) and isinstance(vpc, float)
+    assert (charge, vpc) == pytest.approx((0.0, 10 / 3))
+
+
+def test_reference_battery_block(courses, harness_contract):
+    c = courses[0]
+    rp = RouteProgress(c.n_passages, c.laps, c.circuit)
+    st = {"pos": np.array([0.0, 0.0, 1.0]), "vel": np.zeros(3), "quat": np.array([1.0, 0, 0, 0]),
+          "omega": np.zeros(3)}  # fmt: skip
+    args = (st, c, rp, np.zeros(4), 0.0)
+    v1 = ref.build_teacher_obs(*args, contract=harness_contract, version=1)
+    full = ref.build_teacher_obs(*args, contract=harness_contract)  # default v2, no battery
+    bat = ref.battery_from_telemetry(0.6, 11.1, 3)
+    v2 = ref.build_teacher_obs(*args, contract=harness_contract, battery=bat, version=2)
+    assert v1.shape == (148,) and full.shape == (150,) and v2.shape == (150,)
+    np.testing.assert_array_equal(full[:148], v1)
+    np.testing.assert_array_equal(v2[:148], v1)
+    np.testing.assert_allclose(full[148:], [1.0, 4.2], rtol=1e-6)
+    np.testing.assert_allclose(v2[148:], [0.6, 3.7], rtol=1e-6)
 
 
 def test_gate_rows_are_zero_past_the_finish(courses):
