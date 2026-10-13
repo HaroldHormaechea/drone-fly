@@ -106,6 +106,45 @@ def test_csr_cache_is_not_in_the_state_dict_and_state_round_trips(harness_k1_dir
         assert torch.equal(back.mean_action(x), want)
 
 
+@pytest.mark.parametrize("kernel", ["csr32", "csr16"])
+def test_deepcopy_and_pickle_drop_the_csr_cache(harness_k1_dir, kernel):
+    import io
+    import pickle
+
+    s = student(harness_k1_dir, kernel)
+    x = obs(seed=5)
+    with torch.no_grad():
+        want = s.mean_action(x)  # builds the cache
+    cache, key = s._csr, s._csr_key
+    assert cache is not None and key == ("cpu", torch.float32)
+    buf = io.BytesIO()
+    torch.save(s, buf)  # whole-module torch.save pickles too
+    buf.seek(0)
+    copies = {
+        "deepcopy": copy.deepcopy(s),
+        "pickle": pickle.loads(pickle.dumps(s)),
+        "torch.save": torch.load(buf, weights_only=False),
+    }
+    for how, c in copies.items():
+        assert c is not s and c.body_kernel == kernel, how
+        assert c._csr is None and c._csr_key is None, how  # dropped, not copied
+        assert c.k1.body.layer is not s.k1.body.layer, how  # a real deep copy
+        with torch.no_grad():
+            got = c.mean_action(x)
+        assert torch.equal(got, want), how
+        assert c._csr is not None and c._csr is not cache and c._csr_key == key, how  # rebuilt
+        assert torch.equal(c._csr.values(), cache.values()), how
+    # the original keeps its cache and stays usable
+    assert s._csr is cache
+    with torch.no_grad():
+        assert torch.equal(s.mean_action(x), want)
+    # independent: training the copy's readout leaves the original alone
+    c = copies["deepcopy"]
+    with torch.no_grad():
+        c.k1.pi[0].weight.add_(1.0)
+        assert torch.equal(s.mean_action(x), want) and not torch.equal(c.mean_action(x), want)
+
+
 def test_a_pre_kernel_state_loads_as_coo_and_reproduces_the_old_output(harness_k1_dir):
     s = student(harness_k1_dir, "coo")
     arch = {k: v for k, v in s.arch().items() if k != "body_kernel"}  # an old sidecar
@@ -132,14 +171,18 @@ def test_body_kernel_is_recorded_in_arch(trio):
 
 def test_build_actor_follows_the_config(harness_k1_dir, tmp_path):
     from drone_fly.training import distill
+    from drone_fly.training.config import load_raw
     from tests.student_support import tiny_student_config, write_07
 
     k07 = write_07(tmp_path / "07" / "model_readout.pt", harness_k1_dir)
     cfg = tiny_student_config(k07)
-    assert cfg.student.body_kernel == StudentSection().body_kernel == "csr16"
+    # the shipped config's kernel (ADR 0009), else the dataclass default
+    shipped = load_raw("student-liftoff")["student"].get("body_kernel")
+    shipped = shipped or StudentSection().body_kernel
+    assert cfg.student.body_kernel == shipped and shipped in BODY_KERNELS
     a = distill.build_actor(cfg, torch.device("cpu"), k1_path=harness_k1_dir)
-    assert a.body_kernel == "csr16" and a.arch()["body_kernel"] == "csr16"
-    for k in ("csr32", "coo"):
+    assert a.body_kernel == shipped and a.arch()["body_kernel"] == shipped
+    for k in BODY_KERNELS:
         cfg = tiny_student_config(k07, student={"body_kernel": k})
         a = distill.build_actor(cfg, torch.device("cpu"), k1_path=harness_k1_dir)
         assert a.body_kernel == k
@@ -175,8 +218,6 @@ def test_an_unknown_kernel_is_refused(harness_k1_dir):
                            s.readout_state_dict(), k1_path=harness_k1_dir)  # fmt: skip
 
 
-@pytest.mark.xfail(strict=True, reason="student.body_kernel is not validated at config load "
-                                       "(only when build_actor builds the student)")  # fmt: skip
 def test_the_config_refuses_an_unknown_kernel(harness_k1_dir, tmp_path):
     from drone_fly.training.config import TrainConfigError
     from tests.student_support import tiny_student_config
