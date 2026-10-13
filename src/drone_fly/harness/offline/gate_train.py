@@ -53,6 +53,7 @@ import json
 import logging
 import math
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -979,6 +980,16 @@ def train_multi(
         # train-map captures only: val-map captures (selection) count as never trained
         "captures": trained,
         "selection_captures": selection,
+        # in-range gate-frames per class in the training data ("seen" types for the D-U1 rule)
+        "trained_types": dict(
+            Counter(
+                g["cls"]
+                for it in ds.items
+                if it.role == gd.ROLE_TRAIN
+                for g in it.row["gates"]
+                if gd.in_range(g)
+            )
+        ),
         "split_source": str(getattr(catalogue, "path", split_source)),
         "catalogue_sha256": ds.catalogue_sha256,
         "data_manifest_sha256": ds.manifest_sha(),

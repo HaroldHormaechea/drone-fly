@@ -117,6 +117,53 @@ on the first P1 replay capture (replay HUD masks may shift the baseline); if the
 not clear 1.25 with the wrong poses clearly below, or the camera check fails, strategy B is not used
 until the score is revised. The result is recorded here.
 
+### 5. Dataset and training (`harness gates train`, `gates dataset-report`)
+
+- **Split routing from the catalogue, one choke point.** `gate_dataset.assemble` routes train-map
+  captures to training and val-map captures to model selection; a held-out-map capture raises
+  `TrackLeakageError` (never silently filtered). Captures without a catalogue id, with unverified
+  alignment, uncovered items, no labels or labels from another gate table are refused with the
+  reason.
+- **v1's held-out window stays held out.** Frames inside the window recorded by
+  `--protect-holdout-of` (default the v1 release weights) are never loaded; the new weights record
+  the same window (`splits` / `holdout`), so `detector_noise.heldout_window` and the Infinity Loop
+  regression keep using it. Val-map captures go into `selection_captures`, not `captures`, so they
+  count as never trained.
+- **Selection by val-map detection rate** (`--select val-detection`, every `--val-every` 2 epochs:
+  decode + PnP + the eval matching rule; ties to the lower median relative error), not val loss (the
+  focal term dominated the v1 val loss, ADR 0003). Map x class balanced sampling; a static-trim drop
+  reason; a `uint8` memmap frame cache keyed by the data manifest's sha.
+- **G1** (`gates dataset-report`, exit 0 only on GO). On the reference capture alone: NO-GO on every
+  data criterion (291 in-range arch gate-frames, 36 at 4-8 m, one map), protected window OK (324
+  frames, 148 in-range arch gate-frames: exactly v1's window).
+
+### 6. Evaluation and miss attribution (`harness eval --detector`, `gates diagnose`)
+
+`harness eval --detector <weights|dir> --split held-out [--compare <v1>]` scores every frame of the
+held-out-map captures (refusing any capture the weights trained or selected on), per map x type and
+per type pooled, with range bins 4-8 / 8-15 / 15-25 m, the ADR 0003 metrics on matched-by-centre
+detections (median signed range error, keypoint-spread ratio), yaw error, false detections per frame
+and latency (CPU-measured latency is flagged). Targets 70 % / 20 % under the D-U1 rule (pending the
+user's acceptance); `--compare` scores both detectors on v1's protected Infinity Loop window and
+passes when the new arch detection at 4-25 m is >= v1 - 5 pp (the 4-8 m bin is tracked, not gated).
+
+**v1 diagnosis (P0b, CPU)**: `gates diagnose --weights liftoff-gates.pt --captures
+2026-10-11-infinity-manual` on v1's held-out window (324 frames). It reproduces ADR 0009's 19.6 % and
+ADR 0003's 0.72 spread ratio:
+
+| range m | n | detected | no centre peak | class confusion | few keypoints | PnP range | signed range err | spread ratio |
+|---|---|---|---|---|---|---|---|---|
+| 4-8 | 15 | 0.0 % | 3 | 0 | 0 | 12 | +147.5 % | 0.40 |
+| 8-15 | 38 | 26.3 % | 9 | 0 | 0 | 19 | +37.8 % | 0.72 |
+| 15-25 | 95 | 20.0 % | 52 | 0 | 0 | 24 | +25.5 % | 0.80 |
+| 4-25 | 148 | 19.6 % | 64 | 0 | 0 | 55 | +37.9 % | 0.72 |
+
+Reading: below 15 m v1 finds the gate (a centre peak with enough keypoints) but squeezes the
+keypoints (spread 0.40-0.72), so PnP places it 38-148 % too far and the world match fails (31 of 53
+misses are `pnp_range`); beyond 15 m most misses are no centre peak at all (52 of 76). The R2 rung
+(keypoint-heatmap refinement) targets the first, more and nearer data the second. No scene cache:
+`occluded` is not available on this capture.
+
 ## Results
 
-Pending (P0b checkpoints 5-9, P1-P6).
+Pending (P0b checkpoint 9, P1-P6).

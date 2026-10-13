@@ -14,6 +14,8 @@
     drone-fly harness eval --session <run dir> --track <xml> --race <xml> --config <yaml>
                           [--report <json>]
     drone-fly harness eval --capture <dir> --labels <dir> [--preset] [--gate-weights] [--device]
+    drone-fly harness eval --detector <weights|dir> --split held-out [--captures ...]
+                          [--compare <weights>] [--protected-capture <dir>] [--device]
     drone-fly harness label --capture <dir> --track <xml> [--race] [--props] [--preset] [--out]
                           [--preview N] [--lag-ms]
     drone-fly harness captures register <dir> --track <catalogue-id> [--trackdata-root] [--force]
@@ -25,6 +27,8 @@
                           [--val-every 2] [--protect-holdout-of <weights>] [--deploy]
     drone-fly harness gates dataset-report (--captures ... | --all-captures) [--json out]
     drone-fly harness gates draft-types --props <props.json> --items <itemID>...
+    drone-fly harness gates diagnose --weights <weights|dir> --captures <dir>... [--all-frames]
+                          [--json out] [--device]
     drone-fly harness train-gates --labels <dir>... [--out] [--preset] [--epochs] [--backbone]
                           [--holdout-frac 0.2 | --holdout t0:t1]
     drone-fly harness depth-fit --capture <dir> --track <xml> [--race] [--props] [--preset]
@@ -240,6 +244,24 @@ def _hold_until_ctrl_c(overlay_process: object = None) -> None:
 
 
 def _cmd_eval(args: argparse.Namespace) -> int:
+    if args.detector is not None:
+        from drone_fly.harness.offline.evaluate import heldout_eval_summary, run_heldout_eval
+
+        rep = run_heldout_eval(
+            args.detector,
+            captures=args.captures,
+            split=args.split,
+            compare=args.compare,
+            protected_capture=args.protected_capture,
+            config=args.config,
+            preset=args.preset or "liftoff",
+            device=None if args.device in (None, "auto") else args.device,
+            split_source=args.split_source,
+            report_path=args.report,
+        )
+        print(heldout_eval_summary(rep))
+        print(f"report: {rep['report_path']}")
+        return EXIT_OK
     if args.capture is not None:
         from drone_fly.harness.offline.evaluate import capture_eval_summary, run_capture_eval
 
@@ -433,6 +455,25 @@ def _cmd_gates_dataset_report(args: argparse.Namespace) -> int:
         Path(args.json).write_text(json.dumps(rep, indent=2), encoding="utf-8")
         print(f"report: {args.json}")
     return EXIT_OK if rep["g1"]["go"] else EXIT_COVERAGE
+
+
+def _cmd_gates_diagnose(args: argparse.Namespace) -> int:
+    from drone_fly.harness.offline.gate_diagnose import diagnose, diagnose_table
+
+    rep = diagnose(
+        args.weights,
+        args.captures,
+        config=args.config,
+        preset=args.preset or "liftoff",
+        device=None if args.device in (None, "auto") else args.device,
+        all_frames=args.all_frames,
+    )
+    print(diagnose_table(rep))
+    if args.json:
+        Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.json).write_text(json.dumps(rep, indent=2), encoding="utf-8")
+        print(f"report: {args.json}")
+    return EXIT_OK
 
 
 def _cmd_gates_draft_types(args: argparse.Namespace) -> int:
@@ -820,6 +861,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument(
         "--all-frames", action="store_true", help="score every frame, not only the held-out split"
     )
+    p_eval.add_argument("--detector", help="UC71: weights file or models/<detector-id>/ folder")
+    p_eval.add_argument("--split", choices=("held-out", "val"), default="held-out",
+                        help="maps to score (catalogue split) with --detector")  # fmt: skip
+    p_eval.add_argument("--captures", nargs="+", help="with --detector: these captures only")
+    p_eval.add_argument("--compare", help="with --detector: the weights to compare against (v1)")
+    p_eval.add_argument("--protected-capture", help="the Infinity Loop reference capture folder")
+    p_eval.add_argument("--split-source", help="track catalogue (default tracks/liftoff.yaml)")
     _common(p_eval)
     p_eval.add_argument(
         "--report", help="eval_report.json path (default: <session>/ or artifacts/...)"
@@ -900,6 +948,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_gd.add_argument("--props", required=True, help="props.json (liftoff-flight-analyzer)")
     p_gd.add_argument("--items", nargs="+", required=True, help="itemIDs")
     p_gd.set_defaults(func=_cmd_gates_draft_types)
+    p_gx = gsub.add_parser("diagnose", help="attribute detector misses per range bin")
+    p_gx.add_argument("--weights", required=True, help="weights file or models/<detector-id>/")
+    p_gx.add_argument("--captures", nargs="+", required=True, help="labelled capture folders")
+    p_gx.add_argument("--all-frames", action="store_true",
+                      help="also score frames the weights trained on")  # fmt: skip
+    p_gx.add_argument("--json", help="write the full report JSON here")
+    p_gx.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    _common(p_gx)
+    p_gx.set_defaults(func=_cmd_gates_diagnose)
 
     p_train = hsub.add_parser(
         "train-gates", help="train the learned gate detector on labels (alias, single-map UC64)"
