@@ -610,8 +610,14 @@ def speed_stats_07(
             if not bool(alive.any()):
                 break
     a = np.concatenate(speeds) if speeds else np.zeros(0)
-    return {"checkpoint": str(ck), "config": cfg.name, "drone": cfg.drone, "episodes": episodes,
-            "seed": seed, "speed_mps": _pcts(a)}  # fmt: skip
+    return {
+        "checkpoint": str(ck),
+        "config": cfg.name,
+        "drone": cfg.drone,
+        "episodes": episodes,
+        "seed": seed,
+        "speed_mps": _pcts(a),
+    }
 
 
 def teacher_speed_stats(
@@ -639,13 +645,25 @@ def teacher_speed_stats(
     cfg = teacher_from_mapping(teacher_raw_from_snapshot(snap), validate_tracks=False)
     dev = resolve_device(device)
     actor, side = load_teacher(ck.checkpoint, dev)
-    pool = build_pool([{"select": s} for s in selectors], "eval",
-                      conversion=conversion_from_sidecar(side), root=cfg.tracks.root,
-                      scenes_root=cfg.tracks.scenes_root)  # fmt: skip
+    pool = build_pool(
+        [{"select": s} for s in selectors],
+        "eval",
+        conversion=conversion_from_sidecar(side),
+        root=cfg.tracks.root,
+        scenes_root=cfg.tracks.scenes_root,
+    )
     keep = [i for i, c in enumerate(pool.courses) if c.meta.get("source") == "liftoff-xml"]
     ids = np.repeat(np.asarray(keep, np.int64), episodes)
-    env = build_teacher_env(cfg, drones.load(cfg.drone), dev, pool, n_envs=len(ids), seed=seed,
-                            episode_log=False, **_mode_env(cfg, "randomized"))  # fmt: skip
+    env = build_teacher_env(
+        cfg,
+        drones.load(cfg.drone),
+        dev,
+        pool,
+        n_envs=len(ids),
+        seed=seed,
+        episode_log=False,
+        **_mode_env(cfg, "randomized"),
+    )
     env.obs_version = teacher_obs_version_of(side)
     env.route_starts = False
     env.slack = 0.0
@@ -665,8 +683,14 @@ def teacher_speed_stats(
             if not bool(alive.any()):
                 break
     a = np.concatenate(speeds) if speeds else np.zeros(0)
-    return {"teacher": ck.record(), "selectors": list(selectors), "tracks": len(keep),
-            "episodes_per_track": episodes, "seed": seed, "speed_mps": _pcts(a)}  # fmt: skip
+    return {
+        "teacher": ck.record(),
+        "selectors": list(selectors),
+        "tracks": len(keep),
+        "episodes_per_track": episodes,
+        "seed": seed,
+        "speed_mps": _pcts(a),
+    }
 
 
 def scale_report(
@@ -1147,10 +1171,15 @@ def _train_student(
                 run.episodes(EPISODE_COLUMNS, rows)
                 ep_rows.append(rows)
             stop_file = (run.path / "STOP").exists()
-            finished = steps >= cfg.base.budget or (
-                max_iterations is not None and it >= max_iterations
-            )
             wall = time.time() - t0
+            capped = d.max_hours is not None and wall >= 3600.0 * float(d.max_hours)
+            if capped:
+                log.info("wall-clock cap of %.2f h reached", float(d.max_hours))
+            finished = (
+                steps >= cfg.base.budget
+                or (max_iterations is not None and it >= max_iterations)
+                or capped
+            )
             fps = (steps - steps0) / max(wall, 1e-9)
             if it % cfg.base.log_every_iters == 0 or finished or stop_file:
                 eps = np.concatenate(ep_rows) if ep_rows else np.zeros((0, len(EPISODE_COLUMNS)))
@@ -1349,7 +1378,11 @@ def ppo_finetune(
     steps, it = 0, 0
     best = None
     t0 = time.time()
-    while steps < f.steps and (max_iterations is None or it < max_iterations):
+    while (
+        steps < f.steps
+        and (max_iterations is None or it < max_iterations)
+        and (f.max_hours is None or time.time() - t0 < 3600.0 * float(f.max_hours))
+    ):
         it += 1
         warm = it <= f.critic_warmup_iters
         bc = f.bc_lambda * max(0.0, 1.0 - steps / max(f.bc_decay_frac * f.steps, 1.0))
@@ -1690,3 +1723,109 @@ def student_markdown(res: dict[str, Any]) -> str:
     for k, oc in res["outcomes"].items():
         L.append(f"- {k}: " + ", ".join(f"{o} {_p(v)}" for o, v in oc.items()))
     return "\n".join(L) + "\n"
+
+
+# ----------------------------------------------------------------------------- bench
+
+
+def bench_student(
+    cfg: Any,
+    profile: Any,
+    *,
+    teacher: str | Path,
+    noise: str | Path | None,
+    n_envs: int,
+    steps: int = 50,
+    warmup: int = 5,
+    device: str | None = None,
+    k1_path: Any = None,
+) -> dict[str, Any]:
+    """Env-steps/s of the DAgger rollout (student features + act, teacher act on its own obs,
+    ``StudentCourseEnv.step`` incl. perception + both observations) with a per-part breakdown and
+    the peak GPU memory. Sets ``n_envs`` (D9 step 3)."""
+    from drone_fly.tracks.loader import build_pool
+    from drone_fly.training.evaluate import load_teacher
+    from drone_fly.training.ppo import resolve_device
+
+    ck, model, conv = resolve_inputs(cfg, teacher, noise)
+    dev = resolve_device(device or cfg.base.device)
+    cuda = dev.type == "cuda"
+    if cuda:
+        torch.cuda.reset_peak_memory_stats(dev)
+    sync = torch.cuda.synchronize if cuda else (lambda: None)
+    t0 = time.time()
+    pool = build_pool(
+        list(cfg.base.tracks.mix),
+        "train",
+        conversion=conv,
+        root=cfg.base.tracks.root,
+        scenes_root=cfg.base.tracks.scenes_root,
+    )
+    if cfg.base.tracks.augment:
+        from drone_fly.tracks.augment import augment_pool
+
+        pool = augment_pool(pool, dict(cfg.base.tracks.augment), conv)
+    t_pool = time.time() - t0
+    senv = build_student_env(
+        cfg,
+        profile,
+        dev,
+        pool,
+        model,
+        n_envs=n_envs,
+        teacher_obs_version=teacher_obs_version_of(ck.sidecar),
+    )
+    tch, _ = load_teacher(ck.checkpoint, dev)
+    actor = build_actor(cfg, dev, k1_path=k1_path).eval()
+    spec = cfg.base.action
+    max_g = float(spec.max_g or profile.max_g)
+
+    def timeit(fn: Any) -> float:
+        for _ in range(warmup):
+            fn()
+        sync()
+        t = time.perf_counter()
+        for _ in range(steps):
+            fn()
+        sync()
+        return (time.perf_counter() - t) / steps
+
+    zero = torch.zeros(senv.n, 4, device=dev)
+
+    def full() -> None:
+        with torch.no_grad():
+            obs_s = senv.student_obs().float()
+            obs_t = senv.teacher_obs().float()
+            feats = actor.features(obs_s)
+            s_mean, _ = actor.act(feats, obs_s)
+            decoded_label(tch.mean_action(obs_t), spec, max_g)
+            senv.step(s_mean.to(senv.dtype))
+
+    def student_only() -> None:
+        with torch.no_grad():
+            obs_s = senv.student_obs().float()
+            actor.act(actor.features(obs_s), obs_s)
+
+    def teacher_only() -> None:
+        with torch.no_grad():
+            tch.mean_action(senv.teacher_obs().float())
+
+    row = {
+        "full_step_s": timeit(full),
+        "env_step_s": timeit(lambda: senv.step(zero.to(senv.dtype))),
+        "student_s": timeit(student_only),
+        "teacher_s": timeit(teacher_only),
+    }
+    row["env_steps_per_s"] = senv.n / row["full_step_s"]
+    out = {
+        "n_envs": senv.n,
+        "device": str(dev),
+        "actor": cfg.student.actor,
+        "gpu": torch.cuda.get_device_name(dev) if cuda else None,
+        "courses": len(pool.courses),
+        "pool_build_s": round(t_pool, 1),
+        **row,
+        "peak_gpu_mb": round(torch.cuda.max_memory_allocated(dev) / 1e6, 1) if cuda else None,
+        "steps_per_hour": row["env_steps_per_s"] * 3600.0,
+    }
+    return out

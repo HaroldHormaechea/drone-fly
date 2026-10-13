@@ -29,7 +29,7 @@ slack:
   frac: 0.5
 student:
   actor: k1-student
-  world_scale: 6.0           # k: scale report 2026-10-13 near-tie 6 vs 10, overridden to 6 (ADR 0009)
+  world_scale: 10.0          # k: scale report with it1374 + 07 speeds picks 10 (ADR 0009 parameter row)
   encoder: true
   residual: false
   logstd_init: -1.5

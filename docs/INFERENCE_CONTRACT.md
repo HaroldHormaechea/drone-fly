@@ -267,7 +267,7 @@ what the live harness can assemble.
 ### Units
 
 **Student units**: Liftoff metres divided by the student's world scale `k`, exactly the harness's
-`WorldScale(k)` (the checkpoint's `world_scale`; 6 for the first student). Rates, quaternions and
+`WorldScale(k)` (the checkpoint's `world_scale`; 10 for the first student). Rates, quaternions and
 times are not scaled.
 
 ### Layout (61 float32, `drone_fly.sim.student_obs`, v2)
@@ -306,12 +306,12 @@ The gate tracker's `GateEstimate.info` carries the ages: `target_age_s`, `next_a
  "state_dict": {"...": "the readout only (k1.body.layer.* is rebuilt from the K1 connectome)"},
  "meta": {"contract_version": 2, "action": {"collective_scale_g": 1.0, "max_rate_rad_s": 4.0, "max_g": 4.23},
           "actor": "k1-student", "actor_arch": {"encoder": true, "residual": false, "...": "..."},
-          "obs_schema": {"name": "student-obs", "version": 2, "dim": 61, "world_scale": 6.0,
+          "obs_schema": {"name": "student-obs", "version": 2, "dim": 61, "world_scale": 10.0,
                          "tracker": {"lost_timeout_s": 1.3, "acquire_timeout_s": 3.0, "assoc_radius": 1.0},
                          "camera": {"resolution": [2560, 1080], "hfov_deg": 120.0, "uptilt_deg": 20.0},
                          "battery": {"features": ["charge", "volts_per_cell"], "cells": 3, "...": "..."},
                          "...": "..."},
-          "world_scale": 6.0, "teacher": {"...": "..."}, "noise_model": {"sha256": "...", "detector_id": "..."},
+          "world_scale": 10.0, "teacher": {"...": "..."}, "noise_model": {"sha256": "...", "detector_id": "..."},
           "perception": {"...": "..."}, "camera": {"...": "..."}, "timing": {"...": "..."},
           "course_conversion": {"...": "..."}, "k1": {"prune_provenance_sha256": "..."},
           "latency": {"p50_ms": 0.0, "p99_ms": 0.0, "budget_ms": 10, "pass": true},

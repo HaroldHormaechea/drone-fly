@@ -487,6 +487,8 @@ class DistillSection:
     val_every_iters: int = 200
     val_episodes: int = 8
     val_seed: int = 4321
+    #: Wall-clock cap of the DAgger phase (hours; None = budget only). D9: 2.5 h per run.
+    max_hours: float | None = None
 
 
 @dataclass(frozen=True)
@@ -507,6 +509,8 @@ class FinetuneSection:
     bc_lambda: float = 0.1
     bc_decay_frac: float = 0.5
     logstd: float = -1.5
+    #: Wall-clock cap of the PPO phase (hours; None = steps only). D9: 3 h.
+    max_hours: float | None = None
 
 
 @dataclass(frozen=True)

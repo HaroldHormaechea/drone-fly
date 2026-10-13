@@ -644,6 +644,9 @@ def cmd_student(args: argparse.Namespace) -> int:
         overrides["student"] = student
     if args.ppo_steps is not None:
         overrides["finetune"] = {"steps": float(args.ppo_steps)}
+    if args.max_hours is not None:
+        overrides.setdefault("distill", {})["max_hours"] = float(args.max_hours)
+        overrides.setdefault("finetune", {})["max_hours"] = float(args.max_hours)
     from drone_fly.training.config import load_raw, student_from_mapping
 
     if args.resume:
@@ -660,6 +663,19 @@ def cmd_student(args: argparse.Namespace) -> int:
         if args.tracks or args.procedural is not None:
             data = teacher_mix(data, args.tracks, args.procedural)
         cfg = student_from_mapping(data)
+    if args.bench:
+        from drone_fly.training.distill import bench_student
+
+        res = bench_student(cfg, _profile(cfg.drone), teacher=args.teacher, noise=args.noise,
+                            n_envs=int(args.n_envs or cfg.base.n_envs), steps=args.bench_steps,
+                            device=args.device, k1_path=args.k1_path)  # fmt: skip
+        print(f"{res['actor']} @ {res['n_envs']} envs on {res['gpu'] or res['device']}: "
+              f"{res['env_steps_per_s']:,.0f} env-steps/s ({res['steps_per_hour']:.3g}/h); per "
+              f"step: full {1e3 * res['full_step_s']:.1f} ms, env {1e3 * res['env_step_s']:.1f} "
+              f"ms, student {1e3 * res['student_s']:.1f} ms, teacher "
+              f"{1e3 * res['teacher_s']:.1f} ms; peak GPU {res['peak_gpu_mb']} MB")  # fmt: skip
+        print(json.dumps(res, indent=2))
+        return 0
     try:
         res = train_student(
             cfg,
@@ -822,6 +838,9 @@ def add_parser(sub: Any) -> None:
     p_s.add_argument("--trackdata-root", dest="trackdata_root")
     p_s.add_argument("--out", help="--scale-report output (.json)")
     p_s.add_argument("--allow-gpu-contention", action="store_true", dest="allow_gpu_contention")
+    p_s.add_argument("--max-hours", type=float, dest="max_hours", help="wall-clock cap per phase")
+    p_s.add_argument("--bench", action="store_true", help="env-steps/s of the DAgger rollout")
+    p_s.add_argument("--bench-steps", type=int, default=50, dest="bench_steps")
     p_s.add_argument("--k1-path", help="K1 connectome")
     p_s.add_argument("--device", help="auto | cpu | cuda")
     p_s.add_argument("--seed", type=int)
