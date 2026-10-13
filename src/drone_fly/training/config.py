@@ -537,6 +537,13 @@ class StudentConfig:
     def __post_init__(self) -> None:
         if self.student.actor not in STUDENT_ACTORS:
             raise TrainConfigError(f"student.actor must be one of {STUDENT_ACTORS}")
+        from drone_fly.controller.student import BODY_KERNELS
+
+        if self.student.body_kernel not in BODY_KERNELS:
+            raise TrainConfigError(
+                f"student.body_kernel must be one of {BODY_KERNELS}, got "
+                f"{self.student.body_kernel!r}"
+            )
         if self.perception.mode not in ("noise", "exact"):
             raise TrainConfigError("perception.mode must be noise or exact")
         if self.perception.uncovered not in ("proxy", "exclude"):

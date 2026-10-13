@@ -112,6 +112,23 @@ class K1Student(nn.Module):
                 self.log_std.fill_(keep)
 
     # ---- the frozen body ----
+    def __getstate__(self) -> dict[str, Any]:
+        """The CSR cache is derived (rebuilt on first use): never pickled or deep-copied."""
+        state = self.__dict__.copy()
+        state["_csr"] = None
+        state["_csr_key"] = None
+        return state
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> K1Student:
+        import copy
+
+        cls = self.__class__
+        new = cls.__new__(cls)
+        memo[id(self)] = new
+        for k, v in self.__getstate__().items():
+            new.__dict__[k] = copy.deepcopy(v, memo)
+        return new
+
     def kernel_in_use(self, device: Any) -> str:
         if self.body_kernel == "csr16" and torch.device(device).type != "cuda":
             return "csr32"
