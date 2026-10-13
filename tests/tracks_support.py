@@ -1,8 +1,10 @@
 """Shared helpers for the UC68 track-library / multi-course / teacher tests.
 
-* :data:`FIXTURE_DIR` is the synthetic trackdata tree under ``tests/data/tracks/`` (see its
+* :data:`SOURCE_DIR` is the synthetic trackdata tree under ``tests/data/tracks/`` (see its
   ``generate_fixtures.py``): four fake maps, eight track/race pairs, ``index.json``,
-  ``props.json`` (build 1000) and three scene caches. No game data.
+  ``props.json`` (build 1000) and three scene caches. No game data. Its files are committed with
+  a ``.synthetic`` infix (the UC64 no-game-data guard); :func:`copy_fixtures` restores the real
+  names and :func:`fixture_tree` is one such read-only copy per session.
 * :func:`build_library` copies it to a temp folder and runs the real ``tracks scan`` over it
   with the map splits pinned by a pre-existing catalogue (:data:`SPLITS`: FakeArena + FakeDesert
   train, FakeField val, FakeHall held-out), plus a tiny procedural catalogue. The fixture scene
@@ -18,14 +20,16 @@
 
 from __future__ import annotations
 
+import functools
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-FIXTURE_DIR = Path(__file__).parent / "data" / "tracks"
+SOURCE_DIR = Path(__file__).parent / "data" / "tracks"
 SPLITS = {"FakeArena": "train", "FakeDesert": "train", "FakeField": "val", "FakeHall": "held-out"}
 TRAIN_IDS = {"fake-arena-01", "fake-arena-02", "fake-desert-01", "fake-desert-02-v2"}
 PROC_SPEC = {
@@ -54,8 +58,17 @@ class Library:
 
 
 def copy_fixtures(dst: Path) -> Path:
-    shutil.copytree(FIXTURE_DIR, dst, ignore=shutil.ignore_patterns("*.py", "__pycache__"))
+    """The fixture tree under its real Liftoff names (``*.synthetic.*`` -> ``*.*``)."""
+    shutil.copytree(SOURCE_DIR, dst, ignore=shutil.ignore_patterns("*.py", "__pycache__"))
+    for p in list(dst.rglob("*.synthetic.*")):
+        p.rename(p.with_name(p.name.replace(".synthetic.", ".")))
     return dst
+
+
+@functools.cache
+def fixture_tree() -> Path:
+    """One session-wide copy of the fixture tree (treat it as read-only)."""
+    return copy_fixtures(Path(tempfile.mkdtemp(prefix="uc68-tracks-")) / "trackdata")
 
 
 def write_split_header(path: Path, splits: dict[str, str], seed: int = 68) -> Path:

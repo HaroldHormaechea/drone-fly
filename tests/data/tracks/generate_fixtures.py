@@ -22,6 +22,11 @@ three scene caches. Unity frame throughout (x right, y up, z forward, metres).
   pattern pairs ``Track01_0001`` (3-lap circuit, spawn on the scene floor box) and
   ``Track02_0002`` (version 2).
 
+Committed names carry a ``.synthetic`` infix (``FakeArenaTrack01_0001.synthetic.xml``,
+``props.synthetic.json``, ``index.synthetic.json``) so the UC64 guard against committed game data
+(``test_no_liftoff_game_data_under_tests``) keeps holding; ``tests/tracks_support.py`` copies the
+tree to a temp folder under the real names (:func:`real_name`).
+
     uv run python tests/data/tracks/generate_fixtures.py
 """
 
@@ -333,9 +338,27 @@ def files() -> dict[str, str]:
     return out
 
 
+SYNTHETIC = ".synthetic"
+
+
+def committed_name(rel: str) -> str:
+    """``FakeArenaTrack01_0001.xml`` -> ``FakeArenaTrack01_0001.synthetic.xml`` (not scenes)."""
+    if rel.startswith("scenes/"):
+        return rel
+    stem, dot, ext = rel.rpartition(".")
+    return f"{stem}{SYNTHETIC}.{ext}"
+
+
+def real_name(name: str) -> str:
+    """The inverse of :func:`committed_name` for one file name."""
+    return name.replace(SYNTHETIC + ".", ".")
+
+
 def main() -> None:
+    for old in HERE.glob("*.xml"):
+        old.unlink()
     for rel, text in files().items():
-        p = HERE / rel
+        p = HERE / committed_name(rel)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text, encoding="utf-8", newline="\n")
         print(f"wrote {p.relative_to(HERE)}")

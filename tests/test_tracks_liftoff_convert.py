@@ -54,7 +54,7 @@ from drone_fly.tracks.liftoff import (
 )
 from drone_fly.tracks.liftoff_extract.transforms import contains_point, qmul, qrot, reach
 from drone_fly.tracks.scenes import load_scene
-from tests.tracks_support import FIXTURE_DIR, build_library, load
+from tests.tracks_support import fixture_tree, build_library, load
 
 M = np.asarray(UNITY_TO_CONTRACT, np.float64)
 
@@ -66,7 +66,7 @@ def lib(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def props():
-    return PropsTable.load(FIXTURE_DIR / "props.json")
+    return PropsTable.load(fixture_tree() / "props.json")
 
 
 @pytest.fixture(scope="module")
@@ -132,16 +132,16 @@ def test_point_to_point_route(lib):
 
 
 def test_route_over_the_passage_cap_is_unconvertible(props):
-    geom = load_track_geometry(FIXTURE_DIR / "FakeHallTrack01_0001.xml",
-                               FIXTURE_DIR / "FakeHallRace01_0001.xml")  # fmt: skip
+    geom = load_track_geometry(fixture_tree() / "FakeHallTrack01_0001.xml",
+                               fixture_tree() / "FakeHallRace01_0001.xml")  # fmt: skip
     assert len(geom.passages) == 129
     with pytest.raises(UnconvertibleError, match=r"too many passages \(129\)"):
         convert_liftoff(geom, props, ConversionConfig.from_dict(None))
 
 
 def test_unknown_checkpoint_is_unconvertible(props):
-    geom = load_track_geometry(FIXTURE_DIR / "FakeFieldTrack02_0001.xml",
-                               FIXTURE_DIR / "FakeFieldRace02_0001.xml")  # fmt: skip
+    geom = load_track_geometry(fixture_tree() / "FakeFieldTrack02_0001.xml",
+                               fixture_tree() / "FakeFieldRace02_0001.xml")  # fmt: skip
     with pytest.raises(UnconvertibleError, match="unknown checkpoint CheckpointWeird01"):
         convert_liftoff(geom, props, ConversionConfig.from_dict(None))
 
@@ -211,7 +211,7 @@ def test_asymmetric_outline_keeps_its_handedness(hall):
 
 
 def test_unity_to_contract_scene_primitives_by_point_containment():
-    sc = load_scene(FIXTURE_DIR / "scenes" / "FakeArena.json")
+    sc = load_scene(fixture_tree() / "scenes" / "FakeArena.json")
     cols = [c for c in sc.colliders if c["t"] != "box" or max(c["s"]) < 5]  # skip the floor box
     prims = scene_primitives(cols)
     assert len(prims) == len(cols) == 6
@@ -439,9 +439,9 @@ def test_unsupported_and_synthetic_spawns(hall, field):
 
 
 def test_spawn_support_window(props):
-    geom = load_track_geometry(FIXTURE_DIR / "FakeDesertTrack01_0001.xml",
-                               FIXTURE_DIR / "FakeDesertRace01_0001.xml")  # fmt: skip
-    cols = load_scene(FIXTURE_DIR / "scenes" / "FakeDesert.json").colliders
+    geom = load_track_geometry(fixture_tree() / "FakeDesertTrack01_0001.xml",
+                               fixture_tree() / "FakeDesertRace01_0001.xml")  # fmt: skip
+    cols = load_scene(fixture_tree() / "scenes" / "FakeDesert.json").colliders
     lowered = [dict(c, p=[c["p"][0], c["p"][1] - 2.0, c["p"][2]]) for c in cols]
     conv = ConversionConfig.from_dict(None)
     c = convert_liftoff(geom, props, conv, scene_colliders=lowered, with_cells=False)

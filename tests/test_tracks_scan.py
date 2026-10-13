@@ -31,7 +31,7 @@ from drone_fly.tracks.scan import (
     outlier_flags,
     pair_files,
 )
-from tests.tracks_support import FIXTURE_DIR, SPLITS, build_library, copy_fixtures, scan, use_library
+from tests.tracks_support import fixture_tree, SPLITS, build_library, copy_fixtures, scan, use_library
 
 ALL_IDS = {
     "fake-arena-01", "fake-arena-02", "fake-field-01", "fake-field-02", "fake-hall-01",
@@ -48,7 +48,7 @@ def lib(tmp_path_factory):
 
 
 def test_pairing_uses_the_index_then_the_file_name_pattern():
-    pairs = {p["track"]: p for p in pair_files(FIXTURE_DIR)}
+    pairs = {p["track"]: p for p in pair_files(fixture_tree())}
     assert len(pairs) == 8
     a = pairs["FakeArenaTrack01_0001.xml"]
     assert a["race"] == "FakeArenaRace01_0001.xml" and a["map"] == "FakeArena"
