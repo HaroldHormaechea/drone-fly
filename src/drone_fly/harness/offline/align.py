@@ -3,10 +3,11 @@
 For a set of sampled frames, every gate of the track (the gate-type table's classes) is projected
 through the pose at ``frame stamp + offset`` and the capture's camera. Its visible edges -- the
 outline polyline, offset by +-``tube_radius`` in the gate plane for tube gates -- are sampled
-densely, and the **score** is the mean Sobel gradient magnitude of the (per-frame mean-normalised,
-downscaled) image along those points. The **baseline** is the same score with the pose displaced
-by seeded random offsets (2-4 m, 5-15 deg yaw): a wrong pose still lands on some edges, so the
-ratio ``margin = best / baseline`` is what tells a correct pose from a wrong one.
+densely, and the **score** is the mean Sobel gradient component ACROSS the projected edge
+(``|g . n|``, per-frame mean-normalised, downscaled image) along those points. The **baseline**
+is the same score with the pose displaced by seeded random offsets (2-4 m, 5-15 deg yaw): a wrong
+pose still lands on some edges, so the ratio ``margin = best / baseline`` is what tells a correct
+pose from a wrong one.
 
 A grid search covers the time offset (default +-1.5 s in 20 ms steps) and optionally the camera
 uptilt (+-5 deg in 1 deg steps). ``verified`` requires all of:
@@ -15,11 +16,20 @@ uptilt (+-5 deg in 1 deg steps). ``verified`` requires all of:
   scores 1.40, a 3 deg uptilt error 1.09-1.15, a 0.5 s clock error 1.03-1.05; ADR 0010);
 * the best offset is not on the edge of the searched range (an edge optimum means the true
   offset may lie outside it);
-* at least ``MIN_FRAMES`` (50) sampled frames with a gate in view.
+* at least ``MIN_FRAMES`` (50) sampled frames with a gate in view;
+* **the configured camera is where the score peaks** (CP6b): at the best offset the score is
+  re-evaluated over uptilt +-``CAM_UPTILT_RANGE`` (1 deg steps) x hfov +-``CAM_HFOV_RANGE``
+  (5 deg steps) around the capture's camera; a best cell more than one step away on either axis
+  means the camera is wrong ("camera off: best uptilt 12 vs meta 20"). It runs only when the
+  margin passes (below it the score carries no camera signal). With ``--search-uptilt`` the
+  camera under test has the searched uptilt, which ``verify_capture`` then writes to
+  ``meta.camera`` (``source: align``). The absolute margin alone
+  does not reject a wrong camera: the arch legs are vertical, so a pitch or scale error keeps
+  many edge samples on them (QA, synthetic: a 10 deg hfov / uptilt error still scored 1.4-1.6).
 
 Uses: time alignment (mandatory for a recording-XML pose), lag estimation (``lag_ms = -offset``,
 replacing the hand-set ``--lag-ms``), and verifying the FPV camera and its parameters (a chase cam
-or a wrong FOV / uptilt never reaches the margin). CPU + OpenCV only.
+or a wrong FOV / uptilt fails the margin or the camera check). CPU + OpenCV only.
 """
 
 from __future__ import annotations
@@ -36,6 +46,8 @@ from drone_fly.harness.geometry import CameraModel
 
 MARGIN_MIN = 1.25  # calibrated 2026-10-13 on the reference capture (ADR 0010)
 MIN_FRAMES = 50
+CAM_UPTILT_RANGE, CAM_UPTILT_STEP = 6.0, 1.0
+CAM_HFOV_RANGE, CAM_HFOV_STEP = 10.0, 5.0
 MAX_RANGE_M = 25.0
 WORK_WIDTH = 640  # gradient images are computed at this width
 SAMPLE_STEP_M = 0.1  # outline sampling step (gate-local metres)
@@ -56,6 +68,7 @@ class AlignResult:
     offsets_s: list[float] = field(default_factory=list)
     uptilts_deg: list[float] = field(default_factory=list)
     grid: list[list[float]] = field(default_factory=list)  # [uptilt][offset] scores
+    camera: dict[str, Any] | None = None  # the camera check (see camera_check)
 
     @property
     def lag_ms(self) -> float:
@@ -74,7 +87,20 @@ class AlignResult:
             "frames": self.frames,
             "on_edge": self.on_edge,
             "reasons": list(self.reasons),
-            "method": f"edge-gradient margin >= {MARGIN_MIN}, >= {MIN_FRAMES} frames, no edge",
+            "camera_check": None
+            if self.camera is None
+            else {
+                k: self.camera[k]
+                for k in (
+                    "ok",
+                    "best_uptilt_deg",
+                    "best_hfov_deg",
+                    "meta_uptilt_deg",
+                    "meta_hfov_deg",
+                )
+            },  # fmt: skip
+            "method": f"edge-gradient margin >= {MARGIN_MIN}, >= {MIN_FRAMES} frames, no edge, "
+            "camera at the score peak",
         }
 
     def as_dict(self) -> dict[str, Any]:
@@ -357,6 +383,45 @@ def search(
     )
 
 
+def camera_check(
+    frames: list[AlignFrame],
+    track: PoseTrack,
+    camera: CameraModel,
+    masks: Any,
+    edges: list[GateEdges],
+    offset_s: float,
+) -> dict[str, Any]:
+    """Re-score at ``offset_s`` over uptilt x hfov around ``camera``; ``ok`` when the peak is
+    within one step of it on both axes (see the module docstring)."""
+    poses = [track.at(fr.stamp + offset_s) for fr in frames]
+    ups = camera.uptilt_deg + _grid(CAM_UPTILT_RANGE, CAM_UPTILT_STEP, True)
+    hfs = camera.hfov_deg + _grid(CAM_HFOV_RANGE, CAM_HFOV_STEP, True)
+    hfs = hfs[(hfs > 1.0) & (hfs < 179.0)]
+    grid = np.zeros((len(ups), len(hfs)))
+    for i, u in enumerate(ups):
+        for j, h in enumerate(hfs):
+            cam = CameraModel(camera.width, camera.height, float(h), float(u))
+            grid[i, j] = score_pose_set(frames, poses, cam, masks, edges)[0]
+    i, j = np.unravel_index(int(np.argmax(grid)), grid.shape)
+    bu, bh = float(ups[i]), float(hfs[j])
+    reasons = []
+    if abs(bu - camera.uptilt_deg) > CAM_UPTILT_STEP + 1e-9:
+        reasons.append(f"camera off: best uptilt {bu:g} vs meta {camera.uptilt_deg:g}")
+    if abs(bh - camera.hfov_deg) > CAM_HFOV_STEP + 1e-9:
+        reasons.append(f"camera off: best hfov {bh:g} vs meta {camera.hfov_deg:g}")
+    return {
+        "ok": not reasons,
+        "reasons": reasons,
+        "best_uptilt_deg": bu,
+        "best_hfov_deg": bh,
+        "meta_uptilt_deg": camera.uptilt_deg,
+        "meta_hfov_deg": camera.hfov_deg,
+        "uptilts_deg": [float(v) for v in ups],
+        "hfovs_deg": [float(v) for v in hfs],
+        "grid": np.round(grid, 5).tolist(),
+    }
+
+
 # ----------------------------------------------------------------------------- capture level
 
 
@@ -417,12 +482,14 @@ def align_capture(
     seed: int = 0,
     uptilt_bias_deg: float = 0.0,
     offset_bias_s: float = 0.0,
+    check_camera: bool = True,
 ) -> AlignResult:
     """Score a capture's alignment (see the module docstring).
 
     The capture's ``meta.json`` gives the track and camera when present; ``track_xml`` overrides
     the track (e.g. an unregistered capture). ``uptilt_bias_deg`` / ``offset_bias_s`` shift the
     evaluated camera / clock (threshold calibration: score deliberately wrong poses).
+    ``check_camera`` runs :func:`camera_check` at the best offset (part of the verdict).
     """
     from drone_fly.harness.config import load_config
     from drone_fly.harness.gate_types import GateTypeTable
@@ -459,8 +526,16 @@ def align_capture(
     frames = load_align_frames(cap, track, edges, camera, masks, max_frames, centre_off)
     offsets = _grid(lag_range_s, lag_step_s, search_lag, centre_off)
     uptilts = camera.uptilt_deg + _grid(uptilt_range_deg, uptilt_step_deg, search_uptilt)
-    return search(frames, track, camera, masks, edges, offsets_s=offsets, uptilts_deg=uptilts,
-                  seed=seed)  # fmt: skip
+    res = search(frames, track, camera, masks, edges, offsets_s=offsets, uptilts_deg=uptilts,
+                 seed=seed)  # fmt: skip
+    if check_camera and frames and res.margin >= MARGIN_MIN:
+        # the camera under test: the capture's, with the searched uptilt when --search-uptilt
+        # measured it (verify_capture then records that uptilt in meta.camera)
+        tested = CameraModel(camera.width, camera.height, camera.hfov_deg, res.uptilt_deg)
+        res.camera = camera_check(frames, track, tested, masks, edges, res.offset_s)
+        res.reasons += res.camera["reasons"]
+        res.verified = not res.reasons
+    return res
 
 
 def verify_capture(capture_dir: str | Path, *, write: bool = True, **kw: Any) -> AlignResult:
@@ -473,6 +548,9 @@ def verify_capture(capture_dir: str | Path, *, write: bool = True, **kw: Any) ->
         meta["alignment"] = res.alignment_block()
         if kw.get("search_uptilt"):
             meta["alignment"]["uptilt_searched"] = True
+            if res.verified and res.uptilt_deg != meta["camera"]["uptilt_deg"]:
+                meta["camera"]["uptilt_deg"] = res.uptilt_deg  # measured; was the preset's
+                meta["camera"]["source"] = "align"
         write_meta(capture_dir, meta)
     return res
 
@@ -495,7 +573,7 @@ def calibration_report(
         (f"lag-{lag_error_s:g}", 0.0, -lag_error_s),
     ):
         r = align_capture(capture_dir, search_lag=False, uptilt_bias_deg=du,
-                          offset_bias_s=best.offset_s + dt, **kw)  # fmt: skip
+                          offset_bias_s=best.offset_s + dt, check_camera=False, **kw)  # fmt: skip
         rows[name] = r.margin
     return {"best_offset_s": best.offset_s, "frames": best.frames, "margins": rows,
             "margin_min": MARGIN_MIN}  # fmt: skip

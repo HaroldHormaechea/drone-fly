@@ -91,8 +91,25 @@ inside the search step. `verified` also requires >= 50 frames with a gate in vie
 that is not on the edge of the search range. The reference capture is `verified: true` (margin
 1.40, offset +0.06 s).
 
-Per the challenger's note, the margin is rechecked on the first P1 replay capture (replay HUD masks
-may shift the baseline) before strategy B is trusted; the result is recorded here.
+**Camera check (CP6b, a fix of the CP6 design).** QA showed on synthetic renders that the absolute
+margin does not reject a wrong camera: with the correct camera at margin 2.2-2.6, an hfov error of
+-10 deg still scored 1.53 (-20 deg: 1.37) and an uptilt error of -10 / +10 deg 1.38 / 1.60, all above
+1.25 - the arch legs are vertical, so pitch and scale errors keep many edge samples on them, and
+hfov was never searched. `verify` therefore also re-scores, at the best offset only (no lag x camera
+grid), an uptilt +-6 deg (1 deg steps) x hfov +-10 deg (5 deg steps) grid around the camera under
+test, and the capture is unverified when the peak is more than one step away on either axis, with
+its own reason (`camera off: best hfov 130 vs meta 120`). The check runs only when the margin
+passes (without signal the peak location is noise). With `--search-uptilt` the camera under test
+carries the searched uptilt, which `verify` then writes to `meta.camera` (`source: align`). The
+absolute margin and the edge rule stay. On the reference capture the peak is exactly the preset
+camera (uptilt 20, hfov 120): still `verified: true`, margin 1.40. Runtime: 65 extra re-scores,
+about 11 s per `verify --search-lag` in total on the CPU (was about 12 s; frame loading dominates).
+
+**P1 gate (mandatory).** The gap between the correct pose (1.40) and the nearest wrong one (1.15)
+is thin. Before strategy B (recording-XML pose) is trusted, `captures verify --calibrate` is re-run
+on the first P1 replay capture (replay HUD masks may shift the baseline); if the correct pose does
+not clear 1.25 with the wrong poses clearly below, or the camera check fails, strategy B is not used
+until the score is revised. The result is recorded here.
 
 ## Results
 
