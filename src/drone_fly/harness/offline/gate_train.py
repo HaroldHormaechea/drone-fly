@@ -857,8 +857,18 @@ class SelectionScorer:
                         for g in item.row["gates"]:
                             c = apply_affine(m, g["center_px"])[0]
                             inside = 0 <= c[0] <= cam.width - 1 and 0 <= c[1] <= cam.height - 1
+                            fm = self.masks[item.capture]
+                            masked = (
+                                bool(fm.contains(c[None], cam.width, cam.height)[0])
+                                if fm
+                                else False
+                            )
                             gates.append(
-                                {**g, "center_in_image": bool(g["center_in_image"]) and inside}
+                                {
+                                    **g,
+                                    "center_in_image": bool(g["center_in_image"]) and inside,
+                                    "center_masked": masked,  # the fixed OSD masks don't roll
+                                }
                             )
                     if est is None:
                         est = LearnedGateEstimator(

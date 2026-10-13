@@ -376,7 +376,8 @@ estimator's TL/TR/BR/BL corner order is the only such assumption and it is not o
 **`val_det_live_roll`** (`--live-roll-val`, report only; `val_det` stays the selection metric for
 comparability with R1): every val frame is re-rolled once to a live-mix target (fixed seed 71,
 the same every epoch) and scored with the attitude whose camera sees the rolled image
-(`roll.rolled_quat`) and each gate's in-image test re-judged at its rolled centre, so the eval
+(`roll.rolled_quat`) and each gate's in-image and HUD-mask tests (`center_in_image`,
+`center_masked`; the OSD masks stay fixed on screen) re-judged at its rolled centre, so the eval
 rule is unchanged. **Limitation:** a rolled frame is not a real banked frame - the corners are
 padded (mean colour) and the scene, lighting and motion blur are those of the level flight - so
 it measures roll robustness, not live accuracy. `--rotated-val 0,30,...` reports image-space
