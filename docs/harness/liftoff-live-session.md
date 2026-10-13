@@ -358,3 +358,41 @@ per drone (about 7 minutes of flight plus two level resets for the default 3-pas
 7. Commit **only** `drones/<id>/`. The raw session under `artifacts/` stays local.
 8. Restore your usual drone and map so the Last Session is right for the next run. For the
    reference setup: `harness ui select-drone --name "Test small drone" --level infinity-loop`.
+
+## Student session (UC70)
+
+The deployable student ([ADR 0009](../adr/0009-student-distillation-and-detector-noise.md)) flies on
+the learned gate detector, like the 07 models, but with an observation that includes perception
+ages and a short history. Its export carries everything the harness needs.
+
+1. **Preset changes** (the `liftoff` preset, for every model):
+   - `runner.rate_hz: 40` (inside the student's training control range, 26.7-51.2 Hz). Legacy 07 /
+     K1 runs now tick at 40 Hz too; to restore 50 Hz pass `--config` with a YAML containing
+     `runner: {rate_hz: 50}`.
+   - `free_space.assume_no_obstacles: true` (the student's obstacle senses are zeros, as trained).
+   - `gates.lost_timeout_s: 1.3` (the detector's fitted miss-burst p99 below 25 m).
+2. **Fly it** (CUDA; the K1 student is ~220 ms per tick on the CPU):
+   ```
+   .venv-cuda\Scripts\drone-fly.exe harness run --harness liftoff --preset liftoff --checkpoint artifacts\training\<drone>\<run>\export\student.pt [--overlay]
+   ```
+   No `--extra-dim`. The run logs the checkpoint's overrides: world scale `k`, the tracker
+   timeouts and association radius, `free_space: none` + `assume_no_obstacles`.
+3. **Refusals before arming (exit 2):** a schema / action-contract / format version this build does
+   not deploy; a baseline export (`deployable: false`) without `--allow-baseline`; a gate estimator
+   other than `learned`; a camera (resolution, FOV, uptilt) different from the trained one; a K1
+   student on the CPU without `--allow-slow-cpu`.
+4. **Warning only:** a detector whose sha differs from the one the student's noise model describes
+   (`noise_model_detector_mismatch` in `meta.json`). Refit the noise model for that detector
+   (`train detector-noise`) and retrain the student before trusting the result.
+5. `meta.json` records the student's provenance (`student`: checkpoint sha, actor, role, k, the
+   teacher, the noise model, the export latency, the overrides).
+
+### Refitting the detector noise model
+
+After a new held-out capture (never trained on) or a new detector:
+```
+.venv-cuda\Scripts\drone-fly.exe train detector-noise --detector artifacts\harness\liftoff\models\liftoff-gates.pt --captures artifacts\harness\captures\<capture> [<capture> ...] --live-runs artifacts\harness\liftoff\runs\<run> ... --device cuda
+```
+It refits `artifacts\harness\liftoff\models\<stem>-<sha8>\noise_model.yaml` in place (the previous
+one is kept as `noise_model.r<N>.yaml`) and rewrites `noise_report.md`. `--latency-only --device
+cuda` only re-measures the inference latency. Deploy weights (trained on every frame) are refused.
