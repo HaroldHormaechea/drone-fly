@@ -41,14 +41,14 @@ from drone_fly.harness.errors import (
     StudentSchemaError,
 )
 from drone_fly.harness.interfaces import ObservationAssembler, PolicyRunner
-from drone_fly.harness.teacher import TeacherStepState
+from drone_fly.harness.teacher import CELL_VOLTS_BAND, TeacherStepState
 from drone_fly.harness.types import FlightState, FreeSpaceEstimate, GateEstimate
 
 log = logging.getLogger(__name__)
 
-#: Plausible live pack voltage per cell (V), as the UC69 teacher path: outside it the cell count
-#: (or the telemetry's battery block) is wrong.
-CELL_V_BAND = (2.5, 4.45)
+#: Plausible live pack voltage per cell (V): UC69's single source. Outside it the cell count (or
+#: the telemetry's battery block) is wrong.
+CELL_V_BAND = CELL_VOLTS_BAND
 
 
 @dataclass
