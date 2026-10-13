@@ -163,8 +163,32 @@ def dagger_loss(
     return loss, {"mse": float(mse.detach()), "raw_penalty": float(pen.detach())}
 
 
+#: ``distill.pin_memory: null`` pins the buffer only below this size.
+AUTO_PIN_MAX_BYTES = 1 << 30
+
+
+def strip_pool_geometry(pool: Any) -> int:
+    """Drop each course's host-side geometry (primitives, contact cells, harness list,
+    heightfield) once the env holds the packed copy on the device; returns the bytes released
+    (approximate). Names, metadata, passages and groups stay (``tracks/`` is written before)."""
+    freed = 0
+    for c in pool.courses:
+        for name in ("prims", "cells", "harness", "heightfield"):
+            obj = getattr(c, name, None)
+            if obj is None:
+                continue
+            for v in vars(obj).values() if hasattr(obj, "__dict__") else ():
+                freed += int(getattr(v, "nbytes", 0) or 0)
+            setattr(c, name, None)
+    return freed
+
+
 class ReplayBuffer:
-    """FIFO of ``(taps fp16, obs, label)`` on the CPU (pinned when the device is CUDA)."""
+    """FIFO of ``(taps fp16, obs, label)`` on the CPU (optionally pinned)."""
+
+    @staticmethod
+    def nbytes(capacity: int, obs_dim: int, feat_dim: int) -> int:
+        return int(capacity) * (4 * int(obs_dim) + 4 * 4 + 2 * int(feat_dim))
 
     def __init__(self, capacity: int, obs_dim: int, feat_dim: int, pin: bool = False) -> None:
         self.capacity = int(capacity)
@@ -1106,9 +1130,20 @@ def _train_student(
         log.info(
             "resumed %s at it %d, %.3g steps (the buffer restarts empty)", run.run_id, it, steps
         )
+    freed = strip_pool_geometry(pool)  # the env holds the packed copy; tracks/ is written
+    log.info("released %.2f GB of host course geometry after packing", freed / float(1 << 30))
     n = senv.n
     feat_dim = int(getattr(actor, "feat_dim", 0))
-    buf = ReplayBuffer(d.buffer, senv.student_obs().shape[1], feat_dim, pin=dev.type == "cuda")
+    obs_dim = senv.student_obs().shape[1]
+    buf_bytes = ReplayBuffer.nbytes(d.buffer, obs_dim, feat_dim)
+    pin = (buf_bytes < AUTO_PIN_MAX_BYTES) if d.pin_memory is None else bool(d.pin_memory)
+    pin = pin and dev.type == "cuda"
+    from drone_fly.training.memcheck import preflight
+
+    mem = preflight(buf_bytes, f"the DAgger buffer ({d.buffer:.0f} samples)")
+    buf = ReplayBuffer(d.buffer, obs_dim, feat_dim, pin=pin)
+    sr.sidecar["replay_buffer"] = {"samples": int(d.buffer), "bytes": buf_bytes, "pinned": pin,
+                                   "memory_preflight": mem}  # fmt: skip
     gen = torch.Generator().manual_seed(cfg.base.seed + 17)
     val_pool = eval_pool(cfg, conv, ["liftoff:val"], model)
     log.info(

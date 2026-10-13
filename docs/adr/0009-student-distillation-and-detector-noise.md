@@ -85,8 +85,8 @@ matches to 1e-5.
 
 Teacher frozen, mean action on its exact observation; beta 1 -> 0 linearly over half the budget;
 labels clipped to the decode range; the loss on DECODED quantities with a straight-through
-collective clip plus `0.01 x relu(out of range)^2`, so student gradients never die; a 2e6-sample
-CPU FIFO (K1 stores fp16 taps); 8 x 8192 updates per 64-tick rollout. Checkpoint selection on val
+collective clip plus `0.01 x relu(out of range)^2`, so student gradients never die; a 1e6-sample
+CPU FIFO (K1 stores fp16 taps; 2e6 before the host-memory amendment below); 8 x 8192 updates per 64-tick rollout. Checkpoint selection on val
 in noise mode (seed 4321). A non-blocking feasibility stage evaluates the teacher on held-out and
 val first. A contention guard refuses (exit 2) while the teacher trains, Liftoff runs or a live
 harness run runs.
@@ -202,6 +202,29 @@ interrupt, the arm confirmation, `max_duration_s` / `max_ticks`; the student pat
 voltage outside 2.5-4.45 V per cell. (Out-of-bounds and crash / inverted monitoring exist only in
 the UC69 oracle episode monitor, which needs track geometry and is not on the vision-only student
 path.)
+
+## Amendment: host memory (2026-10-14)
+
+Run 1 under `reacquire` (`20261013T223451Z-student-liftoff`) ran on the 15.8 GB machine next to
+the user's game (about 9.8 GB private). Ten minutes in, the trainer held **11.3 GB private with a
+1.3-1.6 GB working set** and the machine had 0.5 GB free: the 2e6-sample buffer (about 2.3 KB per
+K1 sample, **about 4.6 GB, pinned**) plus the course pool and the CUDA context overcommitted the
+host, so the machine paged. Decided for the next run (run 1 itself is not restarted for this):
+
+- **`distill.buffer` 1e6** (about 2.3 GB). Halving rather than shrinking further keeps the DAgger
+  history long (the last ~1e6 labelled states, about 4 rollouts of 4096 envs x 64 ticks), so the
+  learning dynamics change little; DAgger's value is in revisiting older
+  student-induced states.
+- **`distill.pin_memory`** (`null` = auto): pin only when the buffer is below 1 GiB. Pinned pages
+  cannot be paged out, so a large pinned buffer forces everything else on the host out first.
+  The cost is a slower host -> GPU copy of each minibatch, small next to the update.
+- **Strip the host course geometry** after the env packs it on the device (primitives, contact
+  cells, harness list, heightfield; names, metadata and passages stay). `tracks/` is written
+  before the strip, so the run's record is unchanged.
+- **A memory preflight** (`training.memcheck`) logs physical, available and committed memory and
+  the process's private bytes before the buffer is allocated, and WARNS when the commit plus the
+  buffer exceeds physical memory. It never stops or kills anything. The sidecar records
+  `replay_buffer: {samples, bytes, pinned, memory_preflight}`.
 
 ## Known gap: the live tracker is worse than the simulated one
 

@@ -486,7 +486,11 @@ class DistillSection:
     beta_schedule: str = "linear"  # linear | exp
     beta_over: float = 0.5  # fraction of the budget
     explore_std: float = 0.05
-    buffer: int = 2_000_000
+    #: FIFO samples (K1: 1024 fp16 taps + obs + label each, ~2.3 KB): 1e6 ~ 2.3 GB (ADR 0009).
+    buffer: int = 1_000_000
+    #: Pin the buffer in host memory (faster host -> GPU copies; pinned pages cannot be paged
+    #: out). None = auto: pin only when the buffer is smaller than 1 GiB.
+    pin_memory: bool | None = None
     updates: int = 8
     minibatch: int = 8192
     lr: float = 3.0e-4
