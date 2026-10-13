@@ -24,12 +24,15 @@ Lengths are Liftoff (target) metres; angles in the YAML are degrees.
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 SCHEMA = "detector-noise"
 VERSION = 1
@@ -269,11 +272,25 @@ def sigmoid(x: Any) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-np.asarray(x, np.float64)))
 
 
-def markov_from(p_det: Any, burst_frames: Any) -> tuple[np.ndarray, np.ndarray]:
-    """Two-state dropout ``(P(miss | miss), P(miss | det))`` with stationary detection ``p_det``
-    and mean miss-burst length ``burst_frames`` (>= 1); clipped to valid probabilities."""
+def effective_burst(p_det: Any, burst_frames: Any) -> np.ndarray:
+    """The miss-burst length (frames) the dropout uses: ``max(L, (1 - p) / p, 1)``.
+
+    With mean burst ``L`` and stationary detection ``p``, ``P(miss | det) = (1 - p) / (p L)``,
+    which exceeds 1 when ``L < (1 - p) / p``; clipping it there would floor the detection rate at
+    ``1 / (1 + L)``. Lengthening the burst to ``(1 - p) / p`` keeps the stationary ``p`` exactly
+    (and every burst at least the measured ``L``).
+    """
     p = np.clip(np.asarray(p_det, np.float64), 1e-4, 1.0)
     L = np.maximum(np.asarray(burst_frames, np.float64), 1.0)
+    return np.maximum(L, (1.0 - p) / p)
+
+
+def markov_from(p_det: Any, burst_frames: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Two-state dropout ``(P(miss | miss), P(miss | det))`` with stationary detection ``p_det``
+    and mean miss-burst length ``burst_frames``, lengthened where needed
+    (:func:`effective_burst`) so both probabilities are valid without clipping."""
+    p = np.clip(np.asarray(p_det, np.float64), 1e-4, 1.0)
+    L = effective_burst(p, burst_frames)
     stay_miss = 1.0 - 1.0 / L
     # stationary: p * P(miss|det) = (1 - p) * (1 - stay_miss)
     det_to_miss = np.clip((1.0 - p) / p * (1.0 - stay_miss), 0.0, 1.0)
@@ -370,7 +387,38 @@ class NoiseModel:
             raise NoiseModelError(f"cannot parse noise model {p}: {exc}") from exc
         model = cls(data, p, sha256_file(p))
         model.validate()
+        model.warn_burst_adjustments()
         return model
+
+    def burst_adjustments(self, frame_period_s: float | None = None) -> list[dict[str, Any]]:
+        """Range bins whose measured miss burst is too short for their detection probability
+        (at the bin centre, mid-image) and is lengthened by :func:`effective_burst`."""
+        period = float(frame_period_s or self.timing()["frame_period_s"])
+        out = []
+        for cls in self.classes:
+            cn = self.class_noise(cls)
+            edges = cn.burst_s_edges
+            for i in range(len(cn.burst_s)):
+                lo = float(edges[i]) if i < len(edges) else 0.0
+                hi = float(edges[i + 1]) if i + 1 < len(edges) else lo
+                mid = np.array([0.5 * (lo + min(hi, 1e3))])
+                p = float(cn.p_det(mid, np.array([0.5]))[0])
+                L = float(cn.burst_frames(mid, period)[0])
+                eff = float(effective_burst(p, L))
+                if eff > L + 1e-9:
+                    out.append({"class": cls, "range_m": [lo, hi], "p_det": p,
+                                "burst_frames": L, "effective_frames": eff})  # fmt: skip
+        return out
+
+    def warn_burst_adjustments(self, frame_period_s: float | None = None) -> None:
+        for a in self.burst_adjustments(frame_period_s):
+            log.warning(
+                "noise model %s, class %s, %g-%g m: P(det) %.3f with %.1f-frame miss bursts is "
+                "inconsistent (detection would be floored at 1/(1+L)); bursts lengthened to "
+                "%.1f frames to keep P(det)",
+                self.detector_id, a["class"], a["range_m"][0], a["range_m"][1], a["p_det"],
+                a["burst_frames"], a["effective_frames"],
+            )  # fmt: skip
 
     def validate(self) -> None:
         d = self.data

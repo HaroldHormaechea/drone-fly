@@ -483,7 +483,8 @@ class GatePerception:
             e = torch.zeros(self.n, 4, dtype=self.dtype, device=self.device)
         else:
             p = self._p_det(rng, edge).clamp(1e-4, 1.0)
-            L = self._burst_frames(rng)
+            # lengthen bursts that are too short for p (noise_model.effective_burst)
+            L = torch.maximum(self._burst_frames(rng), (1.0 - p) / p)
             stay = 1.0 - 1.0 / L
             d2m = ((1.0 - p) / p * (1.0 - stay)).clamp(0.0, 1.0)
             p_miss = torch.where(miss_prev, stay, d2m)
