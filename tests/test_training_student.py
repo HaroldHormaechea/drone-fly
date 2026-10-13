@@ -217,7 +217,12 @@ def test_labels_come_from_teacher_obs_and_the_student_never_sees_them(inputs, tm
     monkeypatch.setattr(K1Student, "act", spy_act)
     monkeypatch.setattr(distill, "decoded_label", spy_label)
     train(inputs, tmp_path, max_iterations=1)
-    assert seen["teacher"] == {148}  # teacher-obs v1, exact
+    from drone_fly.sim.action import read_sidecar
+    from drone_fly.sim.teacher_obs import dim
+
+    sch = read_sidecar(inputs.teacher / "checkpoints" / "teacher.pt")["obs_schema"]
+    assert sch["dim"] == dim(sch["version"])
+    assert seen["teacher"] == {sch["dim"]}  # the teacher run's own teacher-obs width, exact
     assert seen["student"] == {59}  # student-obs v1 only
     labs = torch.cat(seen["labels"])
     assert float(labs[:, 0].min()) >= 0.0 and float(labs[:, 0].max()) <= 1.0

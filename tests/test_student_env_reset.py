@@ -64,7 +64,9 @@ def senv_of(env, model, **pc):
 
 def test_outcomes_are_appended_not_reordered():
     assert OUTCOMES[:6] == ("none", "floor", "collision", "out-of-bounds", "timeout", "completed")
-    assert OUTCOMES[-1] == "gate_lost" and len(OUTCOMES) == 7
+    # the UC68 / UC70 outcomes are appended after the original six (in whatever merge order)
+    assert {"power_loss", "gate_lost"} <= set(OUTCOMES[6:])
+    assert len(set(OUTCOMES)) == len(OUTCOMES)
 
 
 def test_terminate_none_and_a_silent_hook_leave_the_env_identical():
