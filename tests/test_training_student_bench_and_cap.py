@@ -138,8 +138,10 @@ def test_ppo_phase_stops_at_the_wall_clock_cap(inputs, tmp_path, tiny_val, monke
                                                     "max_hours": 2.5 / 3600.0})  # fmt: skip
     ppo = _spy_ppo(monkeypatch)
     res = train(inputs, tmp_path, cfg, max_iterations=1)
-    assert 1 <= ppo["iterations"] <= 2 and ppo["steps"] < 1.0e6
+    assert 1 <= ppo["iterations"] <= 2 and ppo["steps"] < 1.0e6 and ppo["capped"] is True
     run = res.run.path
+    hist = [json.loads(x) for x in (run / "eval" / "val_history.jsonl").read_text().splitlines()]
+    assert [h["it"] for h in hist if h["it"] >= 100000] == [100000 + ppo["iterations"]]
     resume = torch.load(run / "checkpoints" / "resume.pt", weights_only=False)["actor"]
     after = _readout(run / "checkpoints" / "student.pt")
     assert not torch.equal(after, resume["k1.pi.0.weight"])  # PPO ran and its result was saved
@@ -150,16 +152,38 @@ def test_ppo_phase_without_a_cap_stops_on_steps(inputs, tmp_path, tiny_val, monk
                                                     "max_hours": 1000.0})  # fmt: skip
     ppo = _spy_ppo(monkeypatch)
     train(inputs, tmp_path, cfg, max_iterations=1)
-    assert ppo["iterations"] == 2 and ppo["steps"] == 64
+    assert ppo["iterations"] == 2 and ppo["steps"] == 64 and ppo["capped"] is False
 
 
-@pytest.mark.xfail(strict=True, reason="ppo_finetune stops at max_hours without logging it")
 def test_ppo_phase_logs_the_cap(inputs, tmp_path, tiny_val, monkeypatch, caplog):
     cfg = tiny_student_config(inputs.k07, finetune={"steps": 1.0e6, "max_hours": 2.5 / 3600.0})
     _spy_ppo(monkeypatch)
     with caplog.at_level("INFO", logger=distill.log.name):
         train(inputs, tmp_path, cfg, max_iterations=1)
     assert caplog.text.count("wall-clock cap") == 1  # the PPO phase's (DAgger is uncapped)
+
+
+def test_resume_at_the_dagger_budget_goes_straight_to_ppo(inputs, tmp_path, tiny_val, monkeypatch,
+                                                          caplog):  # fmt: skip
+    cfg = tiny_student_config(inputs.k07, budget=32.0)  # one DAgger iteration of 4 x 8
+    res = train(inputs, tmp_path, cfg, max_iterations=5)
+    assert res.iterations == 1 and res.steps == 32  # finished on the budget, no PPO (steps 0)
+    run = res.run.path
+    n_rows = len((run / "logs" / "metrics.jsonl").read_text().splitlines())
+    ppo = _spy_ppo(monkeypatch)
+    cfg2 = tiny_student_config(inputs.k07, budget=32.0,
+                               finetune={"steps": 32.0, "critic_warmup_iters": 0})  # fmt: skip
+    with caplog.at_level("INFO", logger=distill.log.name):
+        res2 = train(inputs, tmp_path, cfg2, resume=run, max_iterations=5)
+    assert res2.run.path == run
+    assert res2.iterations == 1 and res2.steps == 32  # no extra DAgger iteration
+    assert "DAgger budget already reached" in caplog.text
+    assert len((run / "logs" / "metrics.jsonl").read_text().splitlines()) == n_rows
+    rs = torch.load(run / "checkpoints" / "resume.pt", weights_only=False)
+    assert rs["it"] == 1 and rs["steps"] == 32
+    assert ppo["iterations"] == 1 and ppo["steps"] == 32  # PPO ran its full 32 steps
+    assert not torch.equal(_readout(run / "checkpoints" / "student.pt"),
+                           rs["actor"]["k1.pi.0.weight"])  # fmt: skip
 
 
 # ----------------------------------------------------------------------------- bench
@@ -237,9 +261,6 @@ def test_cli_max_hours_reaches_both_phases(inputs, tmp_path, monkeypatch, capsys
     assert seen["cfg"].distill.max_hours is None and seen["cfg"].finetune.max_hours is None
 
 
-@pytest.mark.xfail(strict=True, reason="--resume rebuilds the config from the run's snapshot and "
-                                       "only re-applies --n-envs / --device: --max-hours is "
-                                       "dropped")  # fmt: skip
 def test_cli_max_hours_applies_on_resume(inputs, tmp_path, monkeypatch, tiny_val):
     from drone_fly.cli import main as cli
 
@@ -249,6 +270,28 @@ def test_cli_max_hours_applies_on_resume(inputs, tmp_path, monkeypatch, tiny_val
                    str(res.run.path), "--max-hours", "2.5"])  # fmt: skip
     assert rc == 0
     assert seen["cfg"].distill.max_hours == 2.5 and seen["cfg"].finetune.max_hours == 2.5
+
+
+def test_cli_resume_applies_ppo_steps_and_max_hours(inputs, tmp_path, monkeypatch, tiny_val):
+    from drone_fly.cli import main as cli
+
+    res = train(inputs, tmp_path, max_iterations=1)
+    snap = yaml.safe_load((res.run.path / "config.yaml").read_text("utf-8"))
+    seen = _capture(monkeypatch, "train_student", _fake_result(tmp_path))
+    rc = cli.main(["train", "student", "--teacher", str(inputs.teacher), "--resume",
+                   str(res.run.path), "--ppo-steps", "4096", "--max-hours", "1.5"])  # fmt: skip
+    assert rc == 0 and seen["resume"] == str(res.run.path)
+    cfg = seen["cfg"]
+    assert cfg.finetune.steps == 4096 and cfg.finetune.max_hours == 1.5
+    assert cfg.distill.max_hours == 1.5
+    # the rest of both sections still comes from the run's snapshot (merged, not replaced)
+    assert cfg.distill.rollout == snap["distill"]["rollout"] == 4
+    assert cfg.finetune.roll == snap["finetune"]["roll"] == 4
+    assert cfg.finetune.lr == snap["finetune"]["lr"]
+    # without the flags the snapshot's values stand
+    cli.main(["train", "student", "--teacher", str(inputs.teacher), "--resume", str(res.run.path)])
+    assert seen["cfg"].finetune.steps == snap["finetune"]["steps"]
+    assert seen["cfg"].finetune.max_hours is None and seen["cfg"].distill.max_hours is None
 
 
 def test_cli_bench_parses_and_skips_training(inputs, tmp_path, monkeypatch, capsys):
