@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -299,7 +300,34 @@ class FakeUI:
         monkeypatch.setattr(ui_driver, "shot", lambda p: self.calls.append(("shot", p)) or p)
         monkeypatch.setattr(ui_driver, "_grab_screen", self.grab)
         monkeypatch.setattr(ui_replay.time, "sleep", lambda s: None)
+        #: focus_liftoff results in order (the last repeats); never the real Win32 focus
+        self.focus = [True]
+        monkeypatch.setattr(ui_driver, "focus_liftoff", self.focus_liftoff)
+        #: has_focus() results of the fake foreground probe, in order (the last repeats)
+        self.has_focus = [True]
+        ui = self
+
+        class FakeProbe:
+            def __init__(self, process):
+                ui.calls.append(("probe", process))
+
+            def start(self):
+                ui.calls.append(("probe_start",))
+
+            def has_focus(self):
+                return ui.has_focus.pop(0) if len(ui.has_focus) > 1 else ui.has_focus[0]
+
+            def request_focus(self):
+                ui.calls.append(("request_focus",))
+
+        from drone_fly.harness.liftoff import focus
+
+        monkeypatch.setattr(focus, "Win32ForegroundFocusProbe", FakeProbe)
         monkeypatch.setattr(ui_replay, "failure_shot", lambda step, root=None: f"/shots/{step}.png")
+
+    def focus_liftoff(self):
+        self.calls.append(("focus_liftoff",))
+        return self.focus.pop(0) if len(self.focus) > 1 else self.focus[0]
 
     def grab(self):
         self.calls.append(("grab",))
@@ -394,6 +422,53 @@ def scrolls(ui):
     return [c for c in ui.calls if c[0] == "scroll"]
 
 
+def test_select_recording_refuses_outside_the_browser(ui):
+    ui.screens = [screen(bar="paused")]  # e.g. still in a replay
+    with pytest.raises(ui_replay.ReplayStepError, match="not in the replay browser") as exc:
+        ui_replay.select_recording(2, 1, 0)
+    assert exc.value.step == "select_recording"
+    assert exc.value.screenshot == "/shots/select_recording.png"
+    assert ui.clicks == [] and scrolls(ui) == []
+
+
+@pytest.mark.parametrize(
+    ("index", "count", "plan"),
+    [
+        ((4, 6), None, ("end", 0, 90)),
+        ((5, 6), None, ("end", 0, 120)),
+        ((1, 6), None, ("end", 0, 0)),
+        ((0, 6), None, ("top", 0, 0)),
+        ((2, 4), None, ("top", 0, 60)),
+        ((4, 5), None, ("top", 0, 120)),  # 5 entries fit: never scrolled
+        ((18, 21), None, ("end", 0, 60)),
+        ((16, 21), None, ("end", 0, 0)),  # the first of the last 5
+        ((15, 21), None, ("top", 4, 50)),
+        ((10, None), None, ("top", 3, 0)),
+        ((2, None), None, ("top", 0, 60)),
+    ],
+)
+def test_dropdown_plan(index, count, plan):
+    assert ui_replay.dropdown_plan(*index) == plan
+
+
+def test_dropdown_plan_rejects_entries_outside_the_list():
+    for index, count in ((6, 6), (-1, 6), (0, 0), (21, 21)):
+        with pytest.raises(HarnessConfigError, match=f"dropdown entry {index} outside its {count}"):
+            ui_replay.dropdown_plan(index, count)
+    with pytest.raises(HarnessConfigError, match="must be >= 0"):
+        ui_replay.dropdown_plan(-1, None)
+
+
+def test_an_entry_among_the_last_five_is_picked_from_the_end(ui):
+    ui.screens = [screen(browser=True)]
+    ui_replay.select_recording(4, 18, 0, env_count=6, race_count=21)
+    fx, fy = P("filter_environment")
+    rx, ry = P("filter_race")
+    assert scrolls(ui) == [("scroll", fx, fy + 90, -30), ("scroll", rx, ry + 90, -30)]  # to the end
+    assert ui.clicks == [(fx, fy), (fx - 14, fy + 32 + 90), (rx, ry), (rx - 14, ry + 32 + 60),
+                         P("list_tick_x0")]  # fmt: skip
+
+
 def test_select_recording_refuses_a_row_outside_the_list_before_clicking_it(ui):
     ui.screens = [screen(browser=True)]
     with pytest.raises(HarnessConfigError, match="outside the 10 visible rows"):
@@ -443,16 +518,67 @@ def test_play_refuses_strategy_a_before_any_click(ui):
 def test_stop_to_menu_and_force_fpv(ui):
     ui.screens = [screen(browser=True)]
     ui_replay.stop_to_menu()
-    assert ui.calls[0] == ("press_escape",)
+    assert ui.calls[:2] == [("focus_liftoff",), ("press_escape",)]  # Liftoff focused first
     assert ui.clicks == [P("pause_replay_selection"), P("confirm")]
     ui.calls.clear()
     ui_replay.force_fpv()  # the replay opens in the recording's FPV camera
     assert ui.calls == []
 
 
+def test_stop_to_menu_refocuses_and_retries_once(ui):
+    exits = [P("pause_replay_selection"), P("confirm")]
+    # focus not obtained on the first try: nothing is sent; the second try works
+    ui.focus = [False, True]
+    ui.screens = [screen(browser=True)]
+    ui_replay.stop_to_menu()
+    assert [c for c in ui.calls if c[0] in ("focus_liftoff", "press_escape")] == [
+        ("focus_liftoff",), ("focus_liftoff",), ("press_escape",)
+    ]  # fmt: skip
+    assert ui.clicks == exits
+    # focused, but the browser is not back after the first round: a second round
+    ui.calls.clear()
+    ui.focus = [True]
+    ui.screens = [screen(), screen(browser=True)]
+    ui_replay.stop_to_menu()
+    assert ui.calls.count(("press_escape",)) == 2 and ui.clicks == exits * 2
+
+
+def test_stop_to_menu_without_focus_never_sends_keys_and_fails(ui, monkeypatch):
+    ui.focus = [False]
+    seen = []
+
+    def verify(step, check, timeout_s, what):
+        seen.append((step, what))
+        raise ui_replay.ReplayStepError(step, f"timed out waiting for {what}", None)
+
+    monkeypatch.setattr(ui_replay, "_verify", verify)
+    with pytest.raises(ui_replay.ReplayStepError, match="stop_to_menu"):
+        ui_replay.stop_to_menu()
+    assert ui.calls.count(("focus_liftoff",)) == 2  # tries=2
+    assert ("press_escape",) not in ui.calls and ui.clicks == []
+    assert seen == [("stop_to_menu", "the replay browser")]
+
+
+def test_watch_focus_requests_focus_back_and_reports_the_losses(ui, monkeypatch):
+    clock = {"t": 1000.0}
+
+    def sleep(s):
+        clock["t"] += s
+
+    monkeypatch.setattr(ui_replay, "time", SimpleNamespace(time=lambda: clock["t"], sleep=sleep))
+    ui.has_focus = [True, False, True, False, True]
+    lost = ui_replay.watch_focus(1002.5, poll_s=0.5)
+    assert lost == [1001.0, 1002.0]
+    assert ui.calls.count(("request_focus",)) == 2
+    assert ("probe", ui_driver.PROCESS) in ui.calls and ("probe_start",) in ui.calls
+    clock["t"] = 0.0
+    ui.has_focus = [True]
+    assert ui_replay.watch_focus(3.0, poll_s=0.5) == []
+
+
 def test_start_replay_runs_the_steps_in_order(ui):
-    ui.screens = [screen(browser=True), screen(browser=True), screen(bar="paused"),
-                  screen(bar="paused"), screen(bar="playing")]  # fmt: skip
+    ui.screens = [screen(browser=True), screen(browser=True), screen(browser=True),
+                  screen(bar="paused"), screen(bar="paused"), screen(bar="playing")]  # fmt: skip
     t_play = ui_replay.start_replay(None, None, 0, shot_path="b.png")
     assert isinstance(t_play, float)
     assert ui.calls[:2] == [("launch",), ("_focused",)]
@@ -575,21 +701,23 @@ def test_a_preset_camera_recording_needs_the_browser_position(replay_env, ui):
     assert ui.touched == [] and not (replay_env.parent / "caps").exists()
 
 
-def test_record_replay_strategy_b_end_to_end_with_fakes(replay_env, monkeypatch, tmp_path):
-    """Every game-facing step faked: the flow, the browser screenshot, the pose capture and the
-    meta.json of an allowed other-camera recording on a train map."""
+def fake_replay_steps(monkeypatch, steps, t0_ns, lost=()):
+    """Every game-facing replay step faked; ``lost`` = the focus losses watch_focus reports."""
     from drone_fly.harness.offline import align
-    from drone_fly.harness.offline.capture_index import read_meta
 
-    steps, t0_ns = [], time.time_ns() - 100_000_000_000  # Play 100 s ago: the wait loop ends
     monkeypatch.setattr(ui_replay, "ensure_running", lambda: steps.append("ensure_running"))
     monkeypatch.setattr(ui_replay, "open_replays", lambda: steps.append("open_replays"))
 
-    def select(env, race, row, shot):
-        steps.append(("select", env, race, row, shot))
+    def select(env, race, row, shot, *, env_count=None, race_count=None):
+        steps.append(("select", env, race, row, shot, env_count, race_count))
+
+    def watch(until):
+        steps.append(("watch_focus", round(until - t0_ns / 1e9, 3)))
+        return list(lost)
 
     monkeypatch.setattr(ui_replay, "select_recording", select)
     monkeypatch.setattr(ui_replay, "play", lambda: steps.append("play") or t0_ns / 1e9)
+    monkeypatch.setattr(ui_replay, "watch_focus", watch)
     monkeypatch.setattr(ui_replay, "stop_to_menu", lambda: steps.append("stop_to_menu"))
 
     class FakeRecorder:
@@ -610,11 +738,21 @@ def test_record_replay_strategy_b_end_to_end_with_fakes(replay_env, monkeypatch,
             return {"verified": True}
 
     monkeypatch.setattr(align, "verify_capture", lambda out, **kw: Res())
+
+
+def test_record_replay_strategy_b_end_to_end_with_fakes(replay_env, monkeypatch, tmp_path):
+    """Every game-facing step faked: the flow, the browser screenshot, the pose capture and the
+    meta.json of an allowed other-camera recording on a train map."""
+    from drone_fly.harness.offline.capture_index import read_meta
+
+    steps, t0_ns = [], time.time_ns() - 100_000_000_000
+    fake_replay_steps(monkeypatch, steps, t0_ns)
     out, res = replay(replay_env, "borrum", allow_pending_camera=True, browser_pos=(2, None, 4),
-                      max_s=0.0)  # fmt: skip
+                      dropdown_counts=(21, None), max_s=3.0)  # fmt: skip
     assert steps == ["ensure_running", "open_replays",
-                     ("select", 2, None, 4, str(out / "browser.png")), ("recorder", False),
-                     "play", "stop_to_menu"]  # fmt: skip
+                     ("select", 2, None, 4, str(out / "browser.png"), 21, None),
+                     ("recorder", False), "play", ("watch_focus", 3.0),
+                     "stop_to_menu"]  # fmt: skip
     assert out.parent == replay_env.parent / "caps" / "FakeArena"
     assert out.name.endswith("-replay-01") and res["alignment"] == {"verified": True}
     assert res["match"] == "uuid" and res["stats"]["frames"] == 30
@@ -627,19 +765,41 @@ def test_record_replay_strategy_b_end_to_end_with_fakes(replay_env, monkeypatch,
     assert cap.layout == "run" and len(cap.frames) == 30  # the strategy B pose pairs every frame
 
 
+def test_record_replay_refuses_a_capture_that_lost_focus(replay_env, monkeypatch):
+    steps, t0_ns = [], time.time_ns() - 100_000_000_000
+    fake_replay_steps(monkeypatch, steps, t0_ns, lost=[t0_ns / 1e9 + 3.24, t0_ns / 1e9 + 7.0])
+    with pytest.raises(HarnessConfigError,
+                       match=r"another window took the focus during the replay at \[3\.2, 7\.0\] "
+                             "s: the frames in .* are not all Liftoff's; discard"):  # fmt: skip
+        replay(replay_env, "small", browser_pos=(None, None, 0), max_s=9.0)
+    assert steps[-2:] == [("watch_focus", 9.0), "stop_to_menu"]  # stopped and back to the menu
+    (out,) = (replay_env.parent / "caps" / "FakeArena").iterdir()
+    assert not (out / "meta.json").exists() and not (out / "telemetry.csv").exists()
+
+
 def test_browser_pos_parsing():
     from drone_fly.cli.main import _browser_pos
 
     assert _browser_pos(None) is None and _browser_pos("") is None
-    assert _browser_pos("2,-,3") == (2, None, 3)
-    assert _browser_pos("-,-,0") == (None, None, 0)
-    assert _browser_pos(" 1 , 2 ,9") == (1, 2, 9)
-    for bad in ("1,2", "1,2,3,4", "-"):
+    assert _browser_pos("2,-,3") == ((2, None, 3), (None, None))
+    assert _browser_pos("-,-,0") == ((None, None, 0), (None, None))
+    assert _browser_pos(" 1 , 2 ,9") == ((1, 2, 9), (None, None))
+    assert _browser_pos("4/6,18/21,0") == ((4, 18, 0), (6, 21))  # ENV/N, RACE/N
+    assert _browser_pos("-,3/6,2") == ((None, 3, 2), (None, 6))
+    for bad in ("1,2", "1,2,3,4", "-", "4/6,1"):
         with pytest.raises(HarnessConfigError, match="must be ENV,RACE,ROW"):
             _browser_pos(bad)
-    for bad in ("a,1,2", "1,2,-", "1.5,2,3"):
+    for bad in ("a,1,2", "1,2,-", "1.5,2,3", "4/x,1,2", "4/6/7,1,2", "1,2,3/4", "x/6,1,2"):
         with pytest.raises(HarnessConfigError, match="integers or '-'"):
             _browser_pos(bad)
+
+
+def test_browser_kwargs_feed_record_replay():
+    from drone_fly.cli.main import _browser_kwargs
+
+    assert _browser_kwargs(None) == {}
+    assert _browser_kwargs("4/6,-,1") == {"browser_pos": (4, None, 1),
+                                          "dropdown_counts": (6, None)}  # fmt: skip
 
 
 def test_find_recording(tmp_path):
