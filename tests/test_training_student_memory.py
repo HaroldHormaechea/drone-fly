@@ -216,10 +216,13 @@ def test_replay_pin_is_always_false_off_cuda(buf_bytes, device, pin_memory):
     assert distill.replay_pin(buf_bytes, pin_memory, device) is False
 
 
-@pytest.mark.xfail(strict=True, reason="replay_pin compares str(device) with 'cuda', so an "
-                   "indexed device string such as 'cuda:0' counts as off-CUDA")  # fmt: skip
-def test_replay_pin_with_an_indexed_device_string():
-    assert distill.replay_pin(1, True, "cuda:0") is True
+@pytest.mark.parametrize("dev", ["cuda:0", "cuda:1"])
+def test_replay_pin_with_an_indexed_device_string(dev):
+    assert distill.replay_pin(1, True, dev) is True
+    assert distill.replay_pin(ONE_GIB - 1, None, dev) is True
+    assert distill.replay_pin(ONE_GIB, None, dev) is False
+    assert distill.replay_pin(1, False, dev) is False
+    assert distill.replay_pin(1, True, "cpu:0") is False
 
 
 def test_the_run_uses_replay_pin(inputs, tmp_path, tiny_val, monkeypatch):
