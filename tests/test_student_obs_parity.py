@@ -10,7 +10,8 @@
 * ``k`` scaling equals the harness ``WorldScale(k)``.
 * v2's battery block [59:61) is ``battery_from_telemetry(batt_charge, batt_volts, cells)`` of the
   tick's ``FlightState.battery`` (Liftoff's raw ``(charge, volts)``); a tick without the pack
-  reading is a coverage error.
+  reading is a coverage error, and a reading outside 2.5-4.45 V per cell (a wrong cell count or a
+  broken battery block) is refused on every tick.
 """
 
 from __future__ import annotations
@@ -189,6 +190,45 @@ def test_harness_battery_block_from_liftoff_telemetry(harness_contract):
     np.testing.assert_allclose(extra[59:61], [0.8, 3.9], rtol=1e-6)  # (charge, 11.7 V / 3)
     # the schema's input scale makes a full pack (1.0, 4.2 V per cell) read as (1, 1)
     np.testing.assert_allclose(np.array(input_scale()[59:61]) * [1.0, 4.2], [1.0, 1.0])
+
+
+@pytest.mark.parametrize(
+    ("volts", "ok"),
+    [(12.0, True), (12.6, True), (7.5, True), (13.35, True), (11.1, True),
+     (16.4, False), (6.0, False), (7.49, False), (13.36, False), (4.2, False)],
+)  # fmt: skip
+def test_cell_voltage_band(volts, ok):
+    from drone_fly.harness.errors import StudentSchemaError
+    from drone_fly.harness.student import check_cell_voltage
+
+    if ok:  # the band edges 7.5 V (2.5 V/cell) and 13.35 V (4.45 V/cell) are inside
+        assert check_cell_voltage(volts, CELLS) == pytest.approx(volts / CELLS)
+    else:
+        with pytest.raises(StudentSchemaError, match=rf"{volts:.2f} V over 3 cells .* 2.5-4.45 V"):
+            check_cell_voltage(volts, CELLS)
+
+
+@pytest.mark.parametrize(("volts", "ok"), [(12.0, True), (7.5, True), (13.34, True),
+                                           (16.4, False), (6.0, False)])  # fmt: skip
+def test_assembler_applies_the_cell_voltage_band_every_tick(harness_contract, volts, ok):
+    from drone_fly.harness.errors import StudentSchemaError
+
+    step = StudentStepState(clock=Clock([0.0, 0.03]))
+    asm = StudentObservationAssembler(harness_contract, step, lost_timeout_s=LOST,
+                                      battery_cells=CELLS)  # fmt: skip
+    g = np.random.default_rng(7)
+    pos = np.zeros(3)
+    raw = raw_perception(g, pos, acquired=True, matched=True, hand_over=False)
+    state = scale_state({"pos": pos, "vel": np.zeros(3), "quat": [1, 0, 0, 0],
+                         "omega": np.zeros(3)}, K)  # fmt: skip
+    est = estimate_from_raw(raw, pos, cfg(), K, 0.0)
+    asm.assemble(with_pack(state, 1.0, 12.6), est, None, DIM)  # a healthy first tick
+    if ok:
+        extra = asm.assemble(with_pack(state, 0.5, volts), est, None, DIM)[1]
+        assert extra[60] == pytest.approx(volts / CELLS, rel=1e-6)
+    else:  # a later tick out of band is refused too, not only the first
+        with pytest.raises(StudentSchemaError, match="per cell, outside 2.5-4.45 V"):
+            asm.assemble(with_pack(state, 0.5, volts), est, None, DIM)
 
 
 def test_harness_tick_without_the_pack_reading_is_a_coverage_error(harness_contract):

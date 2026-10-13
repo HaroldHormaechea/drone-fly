@@ -11,7 +11,9 @@
   sha differs from the noise model's only warns (``noise_model_detector_mismatch``).
 * The checkpoint's world scale / tracker timeouts / free-space settings override the config.
 * ``student-obs`` v2 observes the pack: a ``telemetry.stream_format`` without ``battery`` is
-  refused (exit 2); the dry run's replayed telemetry carries a 3S pack.
+  refused (exit 2); the dry run's replayed telemetry carries a 3S pack. The export's
+  ``obs_schema.battery.cells`` must equal the config drone's ``power.cells`` (a mismatch or a
+  profile without a power block is refused, exit 2).
 Hermetic: the fixture connectome, a synthetic run folder, a fake detector, replayed telemetry.
 """
 
@@ -229,6 +231,41 @@ def test_a_stream_without_battery_is_refused(k1_export):
     with pytest.raises(StudentSchemaError, match="observes the battery"):
         check_student_config(plan, _cfg(**{"telemetry.stream_format": no_pack}), dev)
     check_student_config(plan, _cfg(**{"telemetry.stream_format": [*no_pack, "battery"]}), dev)
+
+
+def test_cell_count_matches_the_profile(k1_export):
+    from drone_fly.harness.student import check_cell_count
+
+    plan = plan_student(k1_export[1])
+    assert plan.battery_cells == 3
+    check_cell_count(plan, _cfg())  # gremlin micro: power.cells 3
+    check_student_config(plan, _cfg(), SimpleNamespace(device="cuda"))
+
+
+@pytest.mark.parametrize("cells", [4, 2, 6])
+def test_cell_count_unlike_the_profile_is_refused(k1_export, tmp_path, cells):
+    from drone_fly.harness.student import check_cell_count
+
+    bad = _with_meta(tmp_path, k1_export[1],
+                     lambda m: m["obs_schema"]["battery"].update(cells=cells))  # fmt: skip
+    plan = plan_student(bad)  # self-consistent: the schema guard alone accepts it
+    assert plan.battery_cells == cells
+    match = rf"trained for a {cells}-cell pack .* power.cells 3"
+    with pytest.raises(StudentSchemaError, match=match):
+        check_cell_count(plan, _cfg())
+    with pytest.raises(StudentSchemaError, match=match):  # wired into the config check (exit 2)
+        check_student_config(plan, _cfg(), SimpleNamespace(device="cuda"))
+
+
+def test_a_profile_without_a_power_block_is_refused(k1_export):
+    from drone_fly.harness.student import check_cell_count
+
+    plan = plan_student(k1_export[1])
+    cfg = _cfg(drone="meteor75")  # no power block
+    with pytest.raises(StudentSchemaError, match="no profile power block"):
+        check_cell_count(plan, cfg)
+    with pytest.raises(StudentSchemaError, match="'meteor75' has no profile power block"):
+        check_student_config(plan, cfg, SimpleNamespace(device="cuda"))
 
 
 def test_a_session_without_battery_telemetry_is_refused_before_ticking(
