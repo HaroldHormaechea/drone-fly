@@ -65,9 +65,19 @@ from drone_fly.harness.config import find_repo_root, load_config
 from drone_fly.harness.errors import HarnessConfigError, lazy_import
 from drone_fly.harness.gate_types import GateTypeTable
 from drone_fly.harness.liftoff.masks import FrameMasks
+from drone_fly.harness.offline.roll import (
+    FALLBACK_ROLL_WEIGHTS,
+    LIVE_ROLL_EDGES,
+    LIVE_ROLL_WEIGHTS,
+    ROLL_MAX_DEG,
+    item_camera_rolls,
+    sample_target_deltas,
+)
 from drone_fly.harness.recording import git_head
 
 log = logging.getLogger(__name__)
+
+LIVE_VAL_SEED = 71  # the fixed re-roll of the val frames for val_det_live_roll
 
 MAX_TRAIN_RANGE_M = 80.0
 IN_FLIGHT_GAP_S = 1.0
@@ -271,11 +281,6 @@ def _augment_colour(torch: Any, x: Any, rng: np.random.Generator) -> Any:
     return x.clamp(0, 255)
 
 
-#: PLACEHOLDER roll-magnitude buckets (deg) and their weights: the real split comes from the
-#: measured camera-roll distribution (UC69 live races, manual and replay captures).
-ROLL_EDGES = (0.0, 35.0, 90.0, 135.0)
-ROLL_WEIGHTS = (0.6, 0.3, 0.1)
-ROLL_MAX_DEG = 135.0
 FILLS = ("mean", "reflect")
 
 
@@ -285,21 +290,24 @@ class RollAug:
 
     A pure rotation about the optical axis keeps every keypoint's ray angle to the axis, so the
     PnP range of a gate is unchanged; zoom / scale / crop would change the apparent range and are
-    deliberately not offered. With probability ``p`` an image is rolled: a magnitude bucket
-    ``[edges[i], edges[i+1]]`` is drawn with ``weights[i]``, the magnitude uniformly inside it and
-    the sign at random (heavy-tailed: hard banks are rare), up to +-:data:`ROLL_MAX_DEG`.
-    Rotation is not a reflection: keypoint identity is kept (left stays left, top stays top even
-    when it ends up below on screen); ``flip_pairs`` belong to the horizontal flip only.
-    ``shift`` (fraction of the width, <= 0.05) adds a small translation the keypoints follow.
-    Keypoints rotated out of the frame become not-visible; a gate whose centre leaves it is
-    dropped. ``fill``: ``mean`` paints the uncovered corners in the ImageNet mean colour (0 after
-    ``normalize_pad``, like its bottom padding: no structure), ``reflect`` mirrors the image into
-    them (more natural texture, but it can mirror unlabelled gates in).
+    deliberately not offered. **Target-matched** (ADR 0010: the training frames are far more level
+    than live flight): with probability ``p`` a frame's camera roll is brought to a target drawn
+    from the live distribution - a random sign times a magnitude from the ``edges`` / ``weights``
+    buckets, clamped to +-135 deg - by rotating it ``target - frame_roll``
+    (:func:`~drone_fly.harness.offline.roll.sample_target_deltas`); a frame with an unknown roll
+    gets a raw angle from ``fallback_weights``. Rotation is not a reflection: keypoint identity
+    is kept (left stays left, top stays top even when it ends up below on screen); ``flip_pairs``
+    belong to the horizontal flip only. ``shift`` (fraction of the width, <= 0.05) adds a small
+    translation the keypoints follow. Keypoints rotated out of the frame become not-visible; a gate
+    whose centre leaves it is dropped. ``fill``: ``mean`` paints the uncovered corners in the
+    ImageNet mean colour (0 after ``normalize_pad``, like its bottom padding: no structure);
+    ``reflect`` mirrors the image into them (it can mirror unlabelled gates in).
     """
 
     p: float = 0.0
-    edges: tuple[float, ...] = ROLL_EDGES
-    weights: tuple[float, ...] = ROLL_WEIGHTS
+    edges: tuple[float, ...] = LIVE_ROLL_EDGES
+    weights: tuple[float, ...] = LIVE_ROLL_WEIGHTS
+    fallback_weights: tuple[float, ...] = FALLBACK_ROLL_WEIGHTS
     shift: float = 0.0
     fill: str = "mean"
 
@@ -308,36 +316,37 @@ class RollAug:
         return self.p > 0 or self.shift > 0
 
     def validate(self) -> RollAug:
-        e, w = np.asarray(self.edges, float), np.asarray(self.weights, float)
+        e = np.asarray(self.edges, float)
         ok = (
             len(e) >= 2
-            and len(w) == len(e) - 1
             and e[0] >= 0
             and bool((np.diff(e) > 0).all())
             and e[-1] <= ROLL_MAX_DEG
-            and bool((w >= 0).all())
-            and w.sum() > 0
             and 0 <= self.p <= 1
             and 0 <= self.shift <= 0.05
             and self.fill in FILLS
         )
+        for w in (self.weights, self.fallback_weights):
+            wa = np.asarray(w, float)
+            ok = ok and len(wa) == len(e) - 1 and bool((wa >= 0).all()) and wa.sum() > 0
         if not ok:
             raise HarnessConfigError(
                 f"roll augmentation: increasing bucket edges in [0, {ROLL_MAX_DEG:g}] deg with one "
-                f"non-negative weight per bucket, p in [0, 1], shift in [0, 0.05], fill in {FILLS}"
+                "non-negative weight per bucket (target and fallback), p in [0, 1], shift in "
+                f"[0, 0.05], fill in {FILLS}"
             )
         return self
 
-    def sample(self, rng: np.random.Generator, n: int, width: int) -> tuple[np.ndarray, np.ndarray]:
-        """Per image ``(angle_deg, shift_px (n, 2))``; 0 / (0, 0) when not augmented."""
-        e, w = np.asarray(self.edges, float), np.asarray(self.weights, float)
+    def sample(
+        self, rng: np.random.Generator, n: int, width: int, frame_roll: np.ndarray | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Per image ``(rotation_deg, shift_px (n, 2))``; 0 / (0, 0) when not augmented."""
         ang = np.zeros(n)
         on = rng.random(n) < self.p
-        k = int(on.sum())
-        if k:
-            b = rng.choice(len(w), size=k, p=w / w.sum())
-            mag = rng.uniform(e[b], e[b + 1])
-            ang[on] = mag * rng.choice([-1.0, 1.0], size=k)
+        if on.any():
+            r = np.full(n, np.nan) if frame_roll is None else np.asarray(frame_roll, float)
+            d = sample_target_deltas(rng, r[on], self.edges, self.weights, self.fallback_weights)
+            ang[on] = d
         sh = (
             rng.uniform(-1.0, 1.0, (n, 2)) * self.shift * width
             if self.shift > 0
@@ -408,11 +417,11 @@ def _sample_theta(m: np.ndarray, width: int, height: int) -> np.ndarray:
 
 def _augment_roll(
     torch: Any, x: Any, gates: list[list[dict]], rng: np.random.Generator, aug: RollAug,
-    center: np.ndarray, height: int,
+    center: np.ndarray, height: int, frame_roll: np.ndarray | None = None,
 ) -> tuple[Any, list[list[dict]]]:  # fmt: skip
     """:class:`RollAug` on a ``(B, 3, H, W)`` [0, 255] batch (GPU ``grid_sample``) + its targets."""
     b, _, h, w = x.shape
-    ang, sh = aug.sample(rng, b, w)
+    ang, sh = aug.sample(rng, b, w, frame_roll)
     moved = np.flatnonzero((ang != 0) | (np.abs(sh).sum(axis=1) > 0))
     if not len(moved):
         return x, gates
@@ -794,11 +803,23 @@ class SelectionScorer:
                 if f is not None:
                     self.states[k] = f.state
 
-    def score(self, net: Any, data: Any, batch_size: int = 8) -> dict[str, Any]:
+    def score(
+        self, net: Any, data: Any, batch_size: int = 8,
+        deltas: dict[int, float] | None = None, principal: np.ndarray | None = None,
+    ) -> dict[str, Any]:  # fmt: skip
+        """Val detection rate; with ``deltas`` (item -> roll, deg) on the rolled frames.
+
+        A rolled frame is scored with the attitude whose camera sees it
+        (:func:`~drone_fly.harness.offline.roll.rolled_quat`) and with each gate's
+        ``center_in_image`` re-judged at its rolled centre, so the same eval rule applies.
+        """
+        import dataclasses
+
         torch = lazy_import("torch", purpose="gate-net selection")
         from drone_fly.harness.liftoff.gate_learned import LearnedGateEstimator
         from drone_fly.harness.liftoff.gate_net import decode, normalize_pad
         from drone_fly.harness.offline.evaluate import score_capture_frame
+        from drone_fly.harness.offline.roll import rolled_quat
         from drone_fly.harness.scale import WorldScale
 
         _, _, padded, scale = self.geometry
@@ -811,10 +832,26 @@ class SelectionScorer:
             for b in range(0, len(ks), batch_size):
                 kk = ks[b : b + batch_size]
                 x = torch.as_tensor(np.stack([data[k] for k in kk])).to(self.device).float()
+                if deltas is not None:
+                    x = rotate_batch(torch, x, [roll_affine(deltas[k], principal, (0, 0))
+                                                for k in kk])  # fmt: skip
                 outs = decode(net(normalize_pad(x, padded)), score_threshold=self.score_threshold)
                 for k, dets in zip(kk, outs, strict=True):
                     item = self.ds.items[k]
                     cam = self.cams[item.capture]
+                    state, gates = self.states[k], item.row["gates"]
+                    if deltas is not None:
+                        state = dataclasses.replace(
+                            state, quat=rolled_quat(cam, state.quat, deltas[k])
+                        )
+                        m = roll_affine(deltas[k], np.array([cam.cx, cam.cy]), (0, 0))
+                        gates = []
+                        for g in item.row["gates"]:
+                            c = apply_affine(m, g["center_px"])[0]
+                            inside = 0 <= c[0] <= cam.width - 1 and 0 <= c[1] <= cam.height - 1
+                            gates.append(
+                                {**g, "center_in_image": bool(g["center_in_image"]) and inside}
+                            )
                     if est is None:
                         est = LearnedGateEstimator(
                             net, {}, self.table, cam, WorldScale(1.0),
@@ -826,8 +863,8 @@ class SelectionScorer:
                         d["keypoints"] = d["keypoints"] / scale
                     est._cache_index, est._cache, est._frame_index = k, dets, k
                     blank = np.empty((cam.height, cam.width, 3), np.uint8)
-                    found = est.detect(blank, self.states[k])
-                    res = score_capture_frame(found, item.row["gates"], WorldScale(1.0))
+                    found = est.detect(blank, state)
+                    res = score_capture_frame(found, gates, WorldScale(1.0))
                     for e in res["scored"]:
                         det.append(e["detected"])
                         if e["detected"]:
@@ -940,6 +977,7 @@ def train_multi(
     out_root: str | Path | None = None,
     roll: RollAug | None = None,
     rotated_val: tuple[float, ...] = (),
+    live_roll_val: bool = False,
 ) -> dict[str, Any]:
     """``drone-fly harness gates train`` (UC71 AC6): multi-capture, catalogue-split training.
 
@@ -998,6 +1036,7 @@ def train_multi(
         "protect_holdout_of": None if protect_holdout_of is None else str(protect_holdout_of),
         "roll_aug": None if roll is None or not roll.enabled else asdict(roll.validate()),
         "rotated_val": list(rotated_val),
+        "live_roll_val": live_roll_val,
     }
     ds = gd.assemble(
         resolve_captures([str(c) for c in captures]),
@@ -1059,6 +1098,21 @@ def train_multi(
     cuda = str(dev).startswith("cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=cuda)
 
+    item_roll = None
+    live_deltas = None
+    if (roll is not None and roll.enabled) or live_roll_val:
+        item_roll = item_camera_rolls(ds, cfg.section("telemetry"), cfg.section("camera"))
+        for role, ix in (("train", train_idx), ("val", sel_idx)):
+            r = np.abs(item_roll[ix])
+            r = r[np.isfinite(r)]
+            if len(r):
+                log.info("%s camera |roll| p50 %.1f p90 %.1f deg (%d of %d frames known)",
+                         role, np.median(r), np.percentile(r, 90), len(r), len(ix))  # fmt: skip
+    if live_roll_val and scorer is not None:
+        # one fixed re-roll per val frame (same every epoch): targets drawn from the live mix
+        d = sample_target_deltas(np.random.default_rng(LIVE_VAL_SEED), item_roll[sel_idx])
+        live_deltas = {int(k): float(v) for k, v in zip(sel_idx, d, strict=True)}
+
     def batch(idx: np.ndarray, augment: bool) -> tuple[Any, dict[str, Any]]:
         x = torch.as_tensor(np.stack([data[i] for i in idx])).to(dev).float()
         gates = [targets_raw[i] for i in idx]
@@ -1072,7 +1126,8 @@ def train_multi(
                     for g, f in zip(gates, flip, strict=True)
                 ]
             if roll is not None and roll.enabled:
-                x, gates = _augment_roll(torch, x, gates, rng, roll, principal, in_h)
+                fr = None if item_roll is None else np.where(flip, -1.0, 1.0) * item_roll[idx]
+                x, gates = _augment_roll(torch, x, gates, rng, roll, principal, in_h, fr)
             x = _augment_colour(torch, x, rng)
         tg = [build_targets(g, out_h, out_w, len(table), table.max_keypoints) for g in gates]
         tt = {k: torch.as_tensor(np.stack([t[k] for t in tg])).to(dev) for k in tg[0]}
@@ -1127,6 +1182,9 @@ def train_multi(
         if scorer is not None and (epoch % val_every == 0 or epoch == epochs):
             metric = scorer.score(net, data, batch_size)
             entry["val_detection"] = metric
+            if live_deltas is not None:
+                entry["val_det_live_roll"] = scorer.score(net, data, batch_size, live_deltas,
+                                                          principal)  # fmt: skip
             if rotated_val:
                 entry["rotated_val"] = scorer.score_rotated(
                     net, data, tuple(rotated_val), principal, batch_size
@@ -1146,6 +1204,8 @@ def train_multi(
             (entry.get("val_detection") or {}).get("detection_rate"),
             entry["elapsed_s"],
         )
+        if "val_det_live_roll" in entry:
+            log.info("  val_det_live_roll %.3f", entry["val_det_live_roll"]["detection_rate"])
         if "rotated_val" in entry:
             log.info("  rotated val: %s", {a: v["rate"] for a, v in entry["rotated_val"].items()})
         if (

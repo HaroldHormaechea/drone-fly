@@ -518,10 +518,12 @@ def _cmd_gates_train(args: argparse.Namespace) -> int:
             p=args.aug_roll_p,
             edges=_floats(args.aug_roll_edges, "--aug-roll-edges"),
             weights=_floats(args.aug_roll_weights, "--aug-roll-weights"),
+            fallback_weights=_floats(args.aug_roll_fallback_weights, "--aug-roll-fallback-weights"),
             shift=args.aug_shift,
             fill=args.aug_roll_fill,
         ).validate(),
         rotated_val=_floats(args.rotated_val, "--rotated-val") if args.rotated_val else (),
+        live_roll_val=args.live_roll_val,
     )
     print(f"weights: {meta['weights']} ({meta['purpose']}, epoch {meta['chosen_epoch']})")
     if meta.get("chosen_val_detection"):
@@ -1095,10 +1097,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_gt.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     p_gt.add_argument("--aug-roll-p", type=float, default=0.0,
                       help="share of images rolled (0 = off, as R1)")  # fmt: skip
-    p_gt.add_argument("--aug-roll-edges", default="0,35,90,135",
-                      help="roll bucket edges, deg, max 135 (PLACEHOLDER)")  # fmt: skip
-    p_gt.add_argument("--aug-roll-weights", default="0.6,0.3,0.1",
-                      help="one weight per bucket (PLACEHOLDER split)")  # fmt: skip
+    p_gt.add_argument("--aug-roll-edges", default="0,15,35,60,90,135",
+                      help="target |roll| buckets, deg, max 135 (live mix)")  # fmt: skip
+    p_gt.add_argument("--aug-roll-weights", default="0.15,0.35,0.40,0.07,0.03",
+                      help="target weight per bucket (live flight, ADR 0010)")  # fmt: skip
+    p_gt.add_argument("--aug-roll-fallback-weights", default="0.10,0.25,0.35,0.25,0.05",
+                      help="raw-angle weights for frames with no known roll")  # fmt: skip
+    p_gt.add_argument("--live-roll-val", action="store_true",
+                      help="also report val re-rolled to the live mix")  # fmt: skip
     p_gt.add_argument("--aug-roll-fill", choices=("mean", "reflect"), default="mean",
                       help="uncovered corners: ImageNet mean colour or reflection")  # fmt: skip
     p_gt.add_argument("--rotated-val", help="report val detection on frames rolled by these "

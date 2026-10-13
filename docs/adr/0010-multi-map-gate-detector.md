@@ -343,3 +343,37 @@ the epoch time and the frame cache (6.8 GB) while the counts still clear G1 (val
 Surtur ~339 in-range gate-frames). The GPU was **contended**: the user played League of Legends on
 it during the run, so timings and latencies of this run are not clean measurements.
 `--all-captures` leaves held-out-map captures out of training (named ones still raise).
+
+**Roll augmentation for R2 (target-matched).** The camera roll of a frame (the horizon tilt in the
+image: the screen angle of world-up, `harness/offline/roll.py`) was measured on 2026-10-13
+(|deg|):
+
+| Source | n | p50 / p90 / p95 / max | 0-15 / 15-35 / 35-60 / 60-90 / 90-135 / >135 % |
+|---|---|---|---|
+| UC69 live, 10 finished Infinity Loop races (teacher it1374) | 38,946 ticks | 35 / 57 / 63 / 81 | 15.3 / 35.0 / 42.0 / 7.6 / 0 / 0 |
+| live, within 8 m of the next gate | 7,142 | 33 / 57 / 62 / 78 | 18.2 / 34.6 / 40.3 / 6.9 / 0 / 0 |
+| UC71 train frames (dataset 9560fa4b-w768) | 8,155 | 14 / 39 / 47 / 166 | 52.7 / 33.1 / 13.2 / 0.9 / 0.1 / 0 |
+| UC71 val (AutumnFields + Surtur) | 1,519 | 10 / 31 / 39 / 61 | 62.7 / 29.6 / 7.6 / 0.1 / 0 / 0 |
+| manual flight, moving | 12,300 | 11 / 28 / 41 / 180 | 62.3 / 31.5 / 3.1 / 0.8 / 0.8 / 1.5 (crashes) |
+
+The training frames are far more level than live flight (median 14 vs 35 deg; the 60-90 deg band
+~8x under-represented) and val is more level still, so plain `val_det` is optimistic about live
+flight. `RollAug` therefore brings an augmented frame (p 0.6) to a **target roll** drawn from the
+live mix - a random sign times a magnitude from 0-15 15 %, 15-35 35 %, 35-60 40 %, 60-90 7 %,
+90-135 3 % (the last a deliberate crash-and-recovery tail, the user's call), clamped to +-135 deg -
+by rotating it `target - frame_roll` about the principal point (each frame's roll comes from its
+paired attitude; a horizontally flipped frame's roll changes sign). A frame without a known roll
+gets a raw angle from 0-15 10 %, 15-35 25 %, 35-60 35 %, 60-90 25 %, 90-135 5 %. The buckets are
+recorded in `params.roll_aug`. Rotation keeps keypoint identity (no `flip_pairs`). The learned
+path has no "top above bottom" assumption (decode: per-slot offsets; PnP: IPPE by index; the
+normal oriented by travel), so gates rolled past 90 deg are not rejected; the OpenCV quad
+estimator's TL/TR/BR/BL corner order is the only such assumption and it is not on this path.
+
+**`val_det_live_roll`** (`--live-roll-val`, report only; `val_det` stays the selection metric for
+comparability with R1): every val frame is re-rolled once to a live-mix target (fixed seed 71,
+the same every epoch) and scored with the attitude whose camera sees the rolled image
+(`roll.rolled_quat`) and each gate's in-image test re-judged at its rolled centre, so the eval
+rule is unchanged. **Limitation:** a rolled frame is not a real banked frame - the corners are
+padded (mean colour) and the scene, lighting and motion blur are those of the level flight - so
+it measures roll robustness, not live accuracy. `--rotated-val 0,30,...` reports image-space
+detection at fixed angles alongside.
