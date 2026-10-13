@@ -21,6 +21,7 @@ machine.
 ```
 drone-fly tracks list [--split train|val|held-out] [--source liftoff|procedural]
 drone-fly tracks check [--source ...] [--root DIR] [--scenes-root DIR] [--require-scenes]
+                       [--entry ID ...] [--gate-coverage | --require-gate-coverage] [--preset P]
 drone-fly tracks scan --source liftoff [--root DIR] [--scenes-root DIR] [--seed 68]
 drone-fly tracks stats --split train [--root DIR]
 drone-fly tracks extract-scenes [--map M ...] [--bundle M=NAME] [--witness M=POINTS] [--force]
@@ -31,6 +32,12 @@ drone-fly tracks extract-props [--force] [--root DIR] [--game-dir DIR]
 - `list` prints both catalogues, or one source or split.
 - `check` verifies that every referenced file exists locally, that its sha256 matches the catalogue,
   and that the entry converts. With `--require-scenes`, a map without a usable scene fails.
+  `--gate-coverage` (UC71) also lists, per Liftoff entry, the itemIDs that the harness gate-type
+  table (`harness/configs/gate_types/liftoff.yaml`) does not cover - neither a gate class, a
+  checkpoint volume nor a `not_gates` entry - and the route passages with no visible gate
+  (volume-only); `--require-gate-coverage` makes either a failure. `--entry` limits the check to
+  some entries. The gate table does not change the conversion: only `inflatable_arch` reaches it
+  (ADR 0010 §1).
 - `scan` pairs, converts and hashes every local track/race pair, then writes `tracks/liftoff.yaml`.
   Existing split assignments are preserved (see [Split](#split)).
 - `stats` aggregates spacing and aperture percentiles over **one** split. Data-derived parameters

@@ -106,6 +106,30 @@ masks, and whether FOV / uptilt follow the recording or the current settings. **
 alignment margin is rechecked with `captures verify --calibrate` on the first replay capture before
 strategy B is trusted (ADR 0010 §4).
 
+## AC3. Replay capture: `drone-fly harness captures replay` (menu positions pending P1)
+
+`drone-fly harness captures replay --recording <name> [--max-s N] [--fps 10] [--strategy
+auto|A|B|C] [--allow-pending-camera]` plays a stored recording in Liftoff and captures it:
+
+1. checks the recording (catalogue match; the preset camera, else `pending-camera` is refused
+   unless `--allow-pending-camera`);
+2. drives the menus (`harness/liftoff/ui_replay.py`): Liftoff running -> replay browser -> the
+   recording -> Play -> FPV camera, each step verified by a pixel probe (or telemetry for strategy
+   A); a failed step aborts with a screenshot under `artifacts/harness/liftoff/reports/ui-failures/`;
+3. records frames (and UDP telemetry under strategy A) into
+   `artifacts/harness/captures/<Map>/<map>-<date>-replay-<NN>/` (`harness/liftoff/recorder.py`);
+4. under strategy B rebuilds the pose from the recording XML on the frame clock (resampled to
+   100 Hz, velocity by finite difference, gyro 0) as `telemetry.csv` + a run-layout `frames.csv`, so
+   `load_capture` reads it unchanged;
+5. writes `meta.json` (`source: replay`, the recording name + sha256 + origin, the camera uptilt
+   from the recording, `pose_source`) and runs `captures verify --search-lag`; exit 0 only when
+   verified. Strategy C prints the manual fallback below and exits with a config error.
+
+The default strategy is **B** (P0a: every recording has a 10 Hz pose). **The replay-menu positions,
+screen probes and the camera key are placeholders**: until P1 measures them with
+`drone-fly harness ui shot` at 2560x1080, the command refuses before touching the game. The replay
+HUD masks are also measured in P1.
+
 ## Capture layout and `meta.json`
 
 New captures go to `artifacts/harness/captures/<Map>/<session>/` with globally unique session names

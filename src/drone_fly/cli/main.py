@@ -19,6 +19,9 @@
     drone-fly harness label --capture <dir> --track <xml> [--race] [--props] [--preset] [--out]
                           [--preview N] [--lag-ms]
     drone-fly harness captures register <dir> --track <catalogue-id> [--trackdata-root] [--force]
+    drone-fly harness captures record --track <catalogue-id> [--max-s N] [--fps 10] [--port]
+    drone-fly harness captures replay --recording <name> [--max-s N] [--fps 10]
+                          [--strategy auto|A|B|C] [--allow-pending-camera]
     drone-fly harness captures inventory [--dir <Recordings>] [--json out] [--trackdata-root]
                           [--no-pose]
     drone-fly harness captures verify <dir> [--search-lag] [--search-uptilt] [--trackdata-root]
@@ -345,6 +348,42 @@ def _cmd_captures_register(args: argparse.Namespace) -> int:
     print(f"capture sha256: {capture_sha256(args.dir)}")
     print("alignment: unverified (run `drone-fly harness captures verify`)")
     return EXIT_OK
+
+
+def _cmd_captures_record(args: argparse.Namespace) -> int:
+    from drone_fly.harness.liftoff.recorder import record_manual
+
+    out, res = record_manual(
+        args.track,
+        max_s=args.max_s,
+        fps=args.fps,
+        port=args.port,
+        trackdata_root=args.trackdata_root,
+        preset=args.preset or "liftoff",
+    )
+    print(json.dumps(res["stats"], indent=2))
+    print(f"capture: {out}")
+    print(f"next: drone-fly harness captures verify {out} --search-lag")
+    return EXIT_OK
+
+
+def _cmd_captures_replay(args: argparse.Namespace) -> int:
+    from drone_fly.harness.liftoff.recorder import record_replay
+
+    out, res = record_replay(
+        args.recording,
+        max_s=args.max_s,
+        fps=args.fps,
+        port=args.port,
+        strategy=args.strategy,
+        recordings_dir=args.dir,
+        trackdata_root=args.trackdata_root,
+        preset=args.preset or "liftoff",
+        allow_pending_camera=args.allow_pending_camera,
+    )
+    print(json.dumps(res, indent=2))
+    print(f"capture: {out}")
+    return EXIT_OK if res["alignment"]["verified"] else EXIT_CONFIG
 
 
 def _cmd_captures_inventory(args: argparse.Namespace) -> int:
@@ -916,6 +955,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_reg.add_argument("--force", action="store_true", help="rewrite an existing meta.json")
     _common(p_reg)
     p_reg.set_defaults(func=_cmd_captures_register)
+    p_rec = csub.add_parser("record", help="record a hand-flown capture of a catalogue track")
+    p_rec.add_argument("--track", required=True, help="tracks/liftoff.yaml catalogue id")
+    p_rec.add_argument("--max-s", type=float, help="stop after N seconds (default: Ctrl+C)")
+    p_rec.add_argument("--fps", type=float, default=10.0)
+    p_rec.add_argument("--port", type=int, default=9001, help="Liftoff telemetry UDP port")
+    p_rec.add_argument("--trackdata-root", help="trackdata root (completeness)")
+    _common(p_rec)
+    p_rec.set_defaults(func=_cmd_captures_record)
+    p_rep = csub.add_parser("replay", help="play a stored recording in Liftoff and capture it")
+    p_rep.add_argument("--recording", required=True, help="recording name (file stem) or path")
+    p_rep.add_argument("--max-s", type=float, help="cap the capture length")
+    p_rep.add_argument("--fps", type=float, default=10.0)
+    p_rep.add_argument("--port", type=int, default=9001)
+    p_rep.add_argument("--strategy", choices=("auto", "A", "B", "C"), default="auto")
+    p_rep.add_argument("--dir", help="Recordings folder (default %%USERPROFILE%%\\AppData\\...)")
+    p_rep.add_argument("--trackdata-root", help="trackdata root (verify)")
+    p_rep.add_argument("--allow-pending-camera", action="store_true",
+                       help="try a recording made with another drone/camera")  # fmt: skip
+    _common(p_rep)
+    p_rep.set_defaults(func=_cmd_captures_replay)
     p_inv = csub.add_parser("inventory", help="list Liftoff's stored recordings (read-only)")
     p_inv.add_argument("--dir", help="Recordings folder (default %%USERPROFILE%%\\AppData\\...)")
     p_inv.add_argument("--json", help="write the rows as JSON here")
