@@ -126,6 +126,23 @@ def validate_meta(meta: dict[str, Any], ckpt: str | Path = "checkpoint") -> None
         raise StudentSchemaError(
             f"{ckpt}: obs_schema differs from this build's {NAME} v{VERSION} in {diff}"
         )
+    # the deep-equal above rebuilds from the export's own tracker values: check them too
+    from drone_fly.sim.perception import LOST_POLICIES
+
+    tr = sch.get("tracker") or {}
+    bad = []
+    if tr.get("lost_policy") not in LOST_POLICIES:
+        bad.append(f"lost_policy {tr.get('lost_policy')!r} not in {LOST_POLICIES}")
+    if not float(tr.get("lost_hard_stop_s", 0.0)) > 0.0:
+        bad.append(f"lost_hard_stop_s {tr.get('lost_hard_stop_s')!r} must be > 0")
+    if not float(tr.get("drop_after_s", -1.0)) >= 0.0:
+        bad.append(f"drop_after_s {tr.get('drop_after_s')!r} must be >= 0")
+    if bad:
+        raise StudentSchemaError(
+            f"{ckpt}: obs_schema differs from what this build deploys in tracker: "
+            + "; ".join(bad)
+            + " (an export made before the lost policy existed must be re-exported)"
+        )
     version = meta.get("contract_version", (meta.get("action") or {}).get("version"))
     if version != 2:
         raise StudentSchemaError(
