@@ -1,0 +1,1270 @@
+"""``drone-fly train student``: DAgger distillation of the deployable student (UC70 D5, ADR 0009).
+
+* **Teacher** — :meth:`drone_fly.harness.teacher.TeacherCheckpoint.resolve` (val selection ->
+  ``teacher.pt`` -> latest periodic), frozen, mean action, on its exact ``teacher-obs``. The
+  course conversion is the teacher sidecar's (``conversion_from_sidecar``); the pool is
+  ``purpose="train"``.
+* **Contention guard** (:func:`check_contention`) — exit 2 naming the condition when the teacher's
+  run is still training, ``Liftoff.exe`` runs, or a live ``harness run`` runs;
+  ``--allow-gpu-contention`` overrides and labels the run.
+* **Feasibility** (non-blocking; :func:`run_feasibility`) — the teacher under exact observations on
+  held-out and val (``randomized`` mode: randomization 1, random timing, ground starts; N=32,
+  seed 1234). Held-out completion below :data:`~drone_fly.training.config.FEASIBILITY_THRESHOLD`
+  (0.70 / 0.85) logs a WARNING, writes the banner "AC7 absolute target infeasible by construction"
+  and makes the operative gates ">= 85 % of the teacher" + exact-vs-noise; training continues.
+  ``eval/feasibility.json`` is always written; ``--feasibility-only`` stops there (exit 0).
+* **Env** — :class:`~drone_fly.sim.student_env.StudentCourseEnv` (perception from the noise model;
+  timing from its measured live timing).
+* **DAgger** — rollouts of ``rollout`` ticks x N envs; per step the teacher acts with probability
+  ``beta`` (schedule ``start -> end``, linear or exp, over ``beta_over`` of the budget), else the
+  student's mean + ``explore_std`` noise. Labels: the teacher's mean on ``teacher_obs`` (whose
+  ``prev_action`` is the EXECUTED action), clipped to the decode range. The loss is on DECODED
+  quantities (``collective_g / max_g``, ``tanh(rates)``); on the student side the collective goes
+  through a straight-through clip plus ``lambda_raw * relu(out of range)^2``, so gradients never
+  die (:func:`dagger_loss`). A CPU FIFO buffer (``buffer`` samples; K1 stores its fp16 taps) feeds
+  ``updates`` minibatches of ``minibatch`` per iteration.
+* **Mechanics** (as the teacher's) — atomic checkpoints every ``checkpoint_every_s`` (600 s) and
+  at val evaluations, ``resume.pt`` (no buffer), a STOP file / Ctrl-C stop cleanly,
+  ``logs/progress.json`` / ``metrics.jsonl`` / ``episodes.csv`` / TensorBoard. Checkpoint selection:
+  the val evaluation in ``noise`` mode, seed 4321 (``eval/student_selection.json``).
+* **PPO fine-tune** (L4, ``--ppo-steps``): :func:`ppo_finetune` — the student + an asymmetric
+  critic (512-512 over teacher obs || critic extras; never exported), ``critic_warmup_iters``
+  critic-only iterations, a behaviour-cloning term toward the teacher (``bc_lambda`` decaying to 0
+  over ``bc_decay_frac``), fixed ``log_std``. **Plan deviation**: implemented here rather than by
+  generalising ``training/ppo.py`` with hooks, so the running UC68 teacher loop stays untouched.
+* ``--scale-report`` (CPU only, :func:`scale_report`) picks ``k``.
+
+Run folder: ``artifacts/training/<drone-id>/<run-id>/`` like the teacher's, plus ``inputs/``
+(``teacher.json``, a frozen ``noise_model.yaml`` with its sha256 and detector id).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import math
+import os
+import shutil
+import time
+from dataclasses import asdict, replace
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+import torch.nn as nn
+
+from drone_fly.harness.errors import HarnessConfigError
+
+log = logging.getLogger(__name__)
+
+STUDENT_NAME = "student.pt"
+SELECTION_FILE = "student_selection.json"
+INFEASIBLE_BANNER = "AC7 absolute target infeasible by construction"
+CONTENTION_LABEL = "GPU CONTENTION: timing / throughput not representative"
+#: k candidates of the scale report and the 07 training ranges they are compared against
+#: (``sim.course_gen``: apertures 3-10 drone widths, consecutive spacing 1-5 m).
+K_CANDIDATES = (4.0, 6.0, 10.0)
+RANGES_07 = {"aperture_m": (0.45, 1.5), "spacing_m": (1.0, 5.0)}
+
+
+class ContentionError(HarnessConfigError):
+    """The GPU is in use by something UC70 must not disturb (exit 2)."""
+
+    exit_code = 2
+
+
+# ----------------------------------------------------------------------------- guard
+
+
+def contention_conditions(
+    teacher_run: str | Path | None, process_lister: Any = None, now: float | None = None
+) -> list[str]:
+    """Why the GPU is not free: an active teacher run, Liftoff, a live harness run."""
+    from drone_fly.harness.teacher import default_process_lister, training_activity
+
+    lister = default_process_lister if process_lister is None else process_lister
+    out: list[str] = []
+    if teacher_run is not None:
+        out += [
+            f"teacher run: {c}"
+            for c in training_activity(teacher_run, now=now, process_lister=lister)
+        ]
+    try:
+        cmds = list(lister() or [])
+    except Exception:  # noqa: BLE001 - best effort
+        cmds = []
+    for cmd in cmds:
+        low = cmd.lower()
+        if "liftoff.exe" in low:
+            out.append("Liftoff.exe is running")
+            break
+    for cmd in cmds:
+        low = cmd.lower()
+        if ("drone-fly" in low or "drone_fly" in low) and "harness" in low and " run" in low:
+            out.append(f"a live harness run is running: {cmd[:100]}")
+            break
+    return out
+
+
+def check_contention(
+    teacher_run: str | Path | None, allow: bool, process_lister: Any = None
+) -> dict[str, Any]:
+    conds = contention_conditions(teacher_run, process_lister)
+    if conds and not allow:
+        raise ContentionError(
+            "the GPU is busy: " + "; ".join(conds) + ". Wait, or pass --allow-gpu-contention "
+            "for a labelled run"
+        )
+    if conds:
+        log.warning("%s: %s", CONTENTION_LABEL, "; ".join(conds))
+    return {"contention": bool(conds), "conditions": conds, "allowed": allow}
+
+
+# ----------------------------------------------------------------------------- loss
+
+
+def beta_at(frac: float, d: Any) -> float:
+    """The teacher-forcing ratio after ``frac`` of the budget."""
+    x = min(max(frac / max(d.beta_over, 1e-9), 0.0), 1.0)
+    if d.beta_schedule == "linear":
+        return float(d.beta_start + (d.beta_end - d.beta_start) * x)
+    end = max(d.beta_end, 1e-3)
+    b = d.beta_start * (end / max(d.beta_start, 1e-9)) ** x
+    return float(d.beta_end if x >= 1.0 else b)
+
+
+def decode_range(spec: Any, max_g: float) -> tuple[float, float]:
+    """The raw ``a0`` range the collective decoder does not clip."""
+    s = float(spec.collective_scale_g)
+    return -1.0 / s, (float(max_g) - 1.0) / s
+
+
+def decoded_label(raw: torch.Tensor, spec: Any, max_g: float) -> torch.Tensor:
+    """Teacher labels: raw clipped to the decode range, decoded -> ``[cg / max_g, tanh(rates)]``."""
+    lo, hi = decode_range(spec, max_g)
+    a0 = raw[:, 0].clamp(lo, hi)
+    cg = (1.0 + float(spec.collective_scale_g) * a0) / float(max_g)
+    return torch.cat([cg.unsqueeze(-1), torch.tanh(raw[:, 1:])], -1)
+
+
+def dagger_loss(
+    raw: torch.Tensor, label: torch.Tensor, spec: Any, max_g: float, lambda_raw: float
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Decoded-space MSE with a straight-through collective clip + a raw out-of-range penalty."""
+    mg = float(max_g)
+    cg_raw = 1.0 + float(spec.collective_scale_g) * raw[:, 0]
+    cg_c = cg_raw.clamp(0.0, mg)
+    cg_st = cg_raw + (cg_c - cg_raw).detach()
+    out = torch.cat([(cg_st / mg).unsqueeze(-1), torch.tanh(raw[:, 1:])], -1)
+    mse = ((out - label) ** 2).mean()
+    pen = (torch.relu(-cg_raw) ** 2 + torch.relu(cg_raw - mg) ** 2).mean() / (mg * mg)
+    loss = mse + lambda_raw * pen
+    return loss, {"mse": float(mse.detach()), "raw_penalty": float(pen.detach())}
+
+
+class ReplayBuffer:
+    """FIFO of ``(taps fp16, obs, label)`` on the CPU (pinned when the device is CUDA)."""
+
+    def __init__(self, capacity: int, obs_dim: int, feat_dim: int, pin: bool = False) -> None:
+        self.capacity = int(capacity)
+        self.feat_dim = int(feat_dim)
+        kw = {"pin_memory": True} if pin else {}
+        self.obs = torch.zeros(self.capacity, obs_dim, **kw)
+        self.label = torch.zeros(self.capacity, 4, **kw)
+        self.taps = (
+            torch.zeros(self.capacity, self.feat_dim, dtype=torch.float16, **kw)
+            if self.feat_dim
+            else None
+        )
+        self.ptr = 0
+        self.size = 0
+
+    def add(self, taps: torch.Tensor | None, obs: torch.Tensor, label: torch.Tensor) -> None:
+        n = obs.shape[0]
+        idx = (self.ptr + torch.arange(n)) % self.capacity
+        self.obs[idx] = obs.detach().float().cpu()
+        self.label[idx] = label.detach().float().cpu()
+        if self.taps is not None and taps is not None:
+            self.taps[idx] = taps.detach().to(torch.float16).cpu()
+        self.ptr = int((self.ptr + n) % self.capacity)
+        self.size = min(self.size + n, self.capacity)
+
+    def sample(self, m: int, device: Any, gen: torch.Generator | None = None) -> tuple:
+        idx = torch.randint(0, self.size, (min(m, self.size),), generator=gen)
+        taps = None if self.taps is None else self.taps[idx].to(device, non_blocking=True)
+        return (
+            taps,
+            self.obs[idx].to(device, non_blocking=True),
+            self.label[idx].to(device, non_blocking=True),
+        )
+
+
+# ----------------------------------------------------------------------------- builders
+
+
+def student_timing(cfg: Any, model: Any) -> Any:
+    """The control timing: the noise model's measured live timing, else the config's."""
+
+    base = cfg.base.timing
+    if not cfg.perception.timing_from_noise_model or model is None or not model.data.get("timing"):
+        return base
+    tm = model.timing()
+    delay = tm.get("obs_action_delay_s") or list(base.action_delay_s)
+    skip = tm.get("skip_prob") or list(base.skip_prob)
+    return replace(
+        base,
+        mode="random",
+        control_hz=(float(tm["control_hz"][0]), float(tm["control_hz"][1])),
+        control_hz_set=None,
+        action_delay_s=(float(delay[0]), float(delay[1])),
+        skip_prob=(0.0, min(float(skip[1]), 0.95)),
+    )
+
+
+def perception_config(cfg: Any, model: Any, mode: str | None = None) -> Any:
+    from drone_fly.sim.perception import PerceptionConfig
+
+    over: dict[str, Any] = {"world_scale_k": float(cfg.student.world_scale or 1.0)}
+    if cfg.perception.lost_timeout_s is not None:
+        over["lost_timeout_s"] = float(cfg.perception.lost_timeout_s)
+    if cfg.perception.acquire_timeout_s is not None:
+        over["acquire_timeout_s"] = float(cfg.perception.acquire_timeout_s)
+    return PerceptionConfig.from_model(model, mode or cfg.perception.mode, **over)
+
+
+def coverage_of(pool: Any, model: Any) -> np.ndarray:
+    from drone_fly.sim.student_env import course_coverage
+
+    classes = tuple(model.classes) if model is not None else ()
+    return np.array([course_coverage(c, classes) for c in pool.courses], np.int64)
+
+
+def filter_uncovered(pool: Any, model: Any) -> Any:
+    """``uncovered: exclude``: drop proxy / invisible courses (a group left empty is an error)."""
+    from drone_fly.sim.student_env import COVERED
+
+    cov = coverage_of(pool, model)
+    keep = [i for i, c in enumerate(cov) if c == COVERED]
+    remap = {old: new for new, old in enumerate(keep)}
+    groups = []
+    for g in pool.groups:
+        cs = [remap[c] for c in g.courses if c in remap]
+        if not cs:
+            raise HarnessConfigError(
+                f"perception.uncovered=exclude leaves group {g.name} without a course"
+            )
+        groups.append(replace(g, courses=cs))
+    return replace(pool, courses=[pool.courses[i] for i in keep], groups=groups)
+
+
+def build_student_env(
+    cfg: Any,
+    profile: Any,
+    dev: Any,
+    pool: Any,
+    model: Any,
+    *,
+    n_envs: int | None = None,
+    seed: int | None = None,
+    mode: str | None = None,
+    timing: Any = None,
+    env_config: Any = None,
+    randomization_scale: float | None = None,
+    episode_log: bool = True,
+) -> Any:
+    from drone_fly.sim.student_env import StudentCourseEnv
+    from drone_fly.training.ppo import build_teacher_env
+
+    env = build_teacher_env(
+        cfg.base,
+        profile,
+        dev,
+        pool,
+        n_envs=n_envs,
+        seed=seed,
+        timing=timing or student_timing(cfg, model),
+        env_config=env_config,
+        randomization_scale=randomization_scale,
+        episode_log=episode_log,
+    )
+    env.slack = 0.0
+    return StudentCourseEnv(
+        env,
+        model,
+        perception_config(cfg, model, mode),
+        k=float(cfg.student.world_scale or 1.0),
+        course_scale=[c.frame.world_scale for c in pool.courses],
+        coverage=coverage_of(pool, model),
+        seed=cfg.base.seed if seed is None else seed,
+    )
+
+
+def build_actor(cfg: Any, dev: Any, *, k1_path: Any = None, warm: bool = True) -> nn.Module:
+    from drone_fly.controller.student import build_student
+    from drone_fly.training.ppo import resolve_repo_path
+
+    s = cfg.student
+    actor = build_student(
+        s.actor, k1_path=k1_path, encoder=s.encoder, residual=s.residual, logstd_init=s.logstd_init
+    )
+    if warm and s.actor == "k1-student":
+        actor.warm_start(
+            resolve_repo_path(s.warm_start),
+            cfg.base.action.collective_scale_g,
+            logstd_init=s.logstd_init,
+        )
+    return actor.to(dev)
+
+
+# ----------------------------------------------------------------------------- evaluation
+
+
+def run_student_episodes(
+    policy: Any, senv: Any, course_ids: Any, *, teacher: bool = False
+) -> dict[str, np.ndarray]:
+    """One deterministic episode per env on pinned courses (``teacher``: act on teacher_obs)."""
+    from drone_fly.sim.multi_course import OUTCOMES
+
+    env = senv.env
+    n, dev = env.n, env.device
+    env.route_starts = False
+    senv.terminate_on_lost = not teacher
+    senv.reset_all(torch.as_tensor(np.asarray(course_ids), device=dev))
+    alive = torch.ones(n, dtype=torch.bool, device=dev)
+    k_end = torch.zeros(n, dtype=torch.long, device=dev)
+    outcome = torch.zeros(n, dtype=torch.long, device=dev)
+    t_end = torch.zeros(n, dtype=torch.float64, device=dev)
+    stratum = senv.stratum().clone()
+    tl = env.P["time_limit"][env.cid]
+    tc = env.timing_config
+    hz = max(tc.control_hz_set or tc.control_hz) if tc.mode == "random" else tc.fixed_hz
+    max_steps = int(math.ceil(float(tl.max()) * hz)) + 10
+    with torch.no_grad():
+        for _ in range(max_steps):
+            obs = senv.teacher_obs().float() if teacher else senv.student_obs().float()
+            act = policy.mean_action(obs)
+            _, done = senv.step(act.to(env.dtype))
+            fin = done & alive
+            k_end = torch.where(fin, env.last_k, k_end)
+            outcome = torch.where(fin, env.last_outcome, outcome)
+            t_end = torch.where(fin, env.t, t_end)
+            alive = alive & ~done
+            if not bool(alive.any()):
+                break
+    outcome = torch.where(alive, torch.full_like(outcome, OUTCOMES.index("timeout")), outcome)
+    return {
+        "k": k_end.cpu().numpy(),
+        "outcome": outcome.cpu().numpy(),
+        "t_end": t_end.cpu().numpy(),
+        "stratum": stratum.cpu().numpy(),
+    }
+
+
+def mode_settings(cfg: Any, model: Any) -> dict[str, Any]:
+    """AC7 evaluation settings: randomization 1, random (measured) timing, ground starts."""
+    env_cfg = replace(
+        cfg.base.env, start=replace(cfg.base.env.start, ground_fraction=1.0, route_fraction=0.0)
+    )
+    return {"randomization_scale": 1.0, "timing": student_timing(cfg, model), "env_config": env_cfg}
+
+
+def evaluate_policy(
+    policy: Any,
+    cfg: Any,
+    profile: Any,
+    pool: Any,
+    model: Any,
+    dev: Any,
+    *,
+    mode: str,
+    episodes: int,
+    seed: int,
+    teacher: bool = False,
+    batch: int = 4096,
+    course_filter: Any = None,
+) -> dict[str, Any]:
+    """Per-track completion of a student (``mode`` noise / exact) or the teacher (exact obs)."""
+    from drone_fly.sim.multi_course import OUTCOMES
+    from drone_fly.sim.student_env import STRATA
+
+    keep = [i for i, c in enumerate(pool.courses) if course_filter is None or course_filter(c)]
+    ids = np.repeat(np.asarray(keep, np.int64), episodes)
+    parts: dict[str, list[np.ndarray]] = {}
+    for s in range(0, len(ids), batch):
+        sub = ids[s : s + batch]
+        senv = build_student_env(
+            cfg,
+            profile,
+            dev,
+            pool,
+            model,
+            n_envs=len(sub),
+            seed=seed + s,
+            mode=mode,
+            episode_log=False,
+            **mode_settings(cfg, model),
+        )
+        torch.manual_seed(seed + s)
+        r = run_student_episodes(policy, senv, sub, teacher=teacher)
+        for k, v in r.items():
+            parts.setdefault(k, []).append(v)
+    res = {k: np.concatenate(v) for k, v in parts.items()}
+    tracks = []
+    for ci in keep:
+        rows = np.flatnonzero(ids == ci)
+        c = pool.courses[ci]
+        comp = res["k"][rows] >= c.total_crossings
+        oc = res["outcome"][rows]
+        tracks.append(
+            {
+                "id": c.id,
+                "map": c.meta.get("map"),
+                "source": c.meta.get("source"),
+                "episodes": int(len(rows)),
+                "completion": float(comp.mean()),
+                "route_fraction": float(np.mean(res["k"][rows] / max(c.total_crossings, 1))),
+                "stratum": STRATA[int(res["stratum"][rows][0])],
+                "outcomes": {
+                    o: float((oc == i).mean())
+                    for i, o in enumerate(OUTCOMES)
+                    if o != "none" and (oc == i).any()
+                },
+            }
+        )
+    macro = float(np.mean([t["completion"] for t in tracks])) if tracks else None
+    by_stratum = {}
+    for name in STRATA:
+        sel = [t for t in tracks if t["stratum"] == name]
+        if sel:
+            by_stratum[name] = {
+                "tracks": len(sel),
+                "completion": float(np.mean([t["completion"] for t in sel])),
+            }
+    oc_all = res["outcome"]
+    return {
+        "mode": mode,
+        "teacher": teacher,
+        "episodes": episodes,
+        "seed": seed,
+        "macro_completion": macro,
+        "per_track": tracks,
+        "strata": by_stratum,
+        "outcomes": {
+            o: float((oc_all == i).mean())
+            for i, o in enumerate(OUTCOMES)
+            if o != "none" and (oc_all == i).any()
+        },
+    }
+
+
+def eval_pool(cfg: Any, conv: Any, selectors: list[str], model: Any) -> Any:
+    from drone_fly.tracks.loader import build_pool
+
+    pool = build_pool(
+        [{"select": s} for s in selectors],
+        "eval",
+        conversion=conv,
+        root=cfg.base.tracks.root,
+        scenes_root=cfg.base.tracks.scenes_root,
+    )
+    if cfg.perception.uncovered == "exclude":
+        pool = filter_uncovered(pool, model)
+    return pool
+
+
+# ----------------------------------------------------------------------------- feasibility
+
+
+def run_feasibility(teacher_ck: Any, cfg: Any, out_dir: Path, device: str | None) -> dict:
+    """The teacher on held-out and val under exact observations (see the module docstring)."""
+    from drone_fly.training.evaluate import evaluate_teacher
+
+    f = cfg.feasibility
+    res: dict[str, Any] = {
+        "teacher": teacher_ck.record(),
+        "threshold": f.threshold,
+        "episodes": f.episodes,
+        "seed": f.seed,
+        "mode": "randomized",
+    }
+    for sel in f.selectors:
+        r = evaluate_teacher(
+            teacher_ck.run_dir,
+            [sel],
+            episodes=f.episodes,
+            seed=f.seed,
+            modes=("randomized",),
+            device=device,
+            checkpoint=teacher_ck.checkpoint,
+            write=False,
+        )
+        m = r["modes"]["randomized"]
+        res[sel] = {
+            "macro_completion": m["macro_completion"],
+            "tracks": m["tracks"],
+            "per_track": [
+                {"id": t.get("id"), "completion": t.get("completion")} for t in m["per_track"]
+            ],
+        }
+    held = res.get(f.selectors[0], {}).get("macro_completion")
+    infeasible = held is not None and held < f.threshold
+    res["held_out_completion"] = held
+    res["infeasible"] = bool(infeasible)
+    res["banner"] = INFEASIBLE_BANNER if infeasible else None
+    res["operative_gates"] = (
+        [">= 85 % of the teacher's held-out completion", "exact-vs-noise comparison"]
+        if infeasible
+        else [">= 70 % held-out completion", ">= 85 % of the teacher's"]
+    )
+    if infeasible:
+        log.warning(
+            "%s: teacher held-out completion %.1f %% < %.1f %%; training continues",
+            INFEASIBLE_BANNER,
+            100 * held,
+            100 * f.threshold,
+        )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "feasibility.json").write_text(json.dumps(res, indent=2) + "\n", encoding="utf-8")
+    return res
+
+
+# ----------------------------------------------------------------------------- scale report
+
+
+def scale_report(
+    *,
+    trackdata_root: str | None = None,
+    teacher_speeds: dict[str, float] | None = None,
+    out: str | Path | None = None,
+) -> dict[str, Any]:
+    """Pick ``k`` a priori (CPU): TRAIN-split aperture / spacing medians (and the teacher's val
+    speed when known) divided by ``k`` vs. 07's training ranges; the k whose medians fall inside
+    them with the smallest summed |log ratio| to the ranges' geometric centres."""
+    from drone_fly.tracks import catalogue as cat
+    from drone_fly.tracks.liftoff import ConversionConfig
+    from drone_fly.tracks.scan import aggregate_stats
+
+    c = cat.load_named("liftoff")
+    entries = cat.select(c, "liftoff:train", "stats")
+    root = cat.resolve_root(trackdata_root, c.header)
+    stats = aggregate_stats(entries, root, ConversionConfig.from_dict(None))
+    q = {"aperture_m": stats["aperture_m"], "spacing_m": stats["spacing_m"]}
+    ranges = dict(RANGES_07)
+    if teacher_speeds:
+        q["speed_mps"] = teacher_speeds
+    rows = []
+    for k in K_CANDIDATES:
+        row: dict[str, Any] = {"k": k, "inside": True, "log_ratio": 0.0, "values": {}}
+        for name, rng in ranges.items():
+            med = float(q[name]["p50"]) / k
+            lo, hi = rng
+            inside = lo <= med <= hi
+            lr = abs(math.log(med / math.sqrt(lo * hi)))
+            row["values"][name] = {
+                "p10": float(q[name]["p10"]) / k,
+                "p50": med,
+                "p90": float(q[name]["p90"]) / k,
+                "range_07": list(rng),
+                "inside": inside,
+                "log_ratio": lr,
+            }
+            row["inside"] = row["inside"] and inside
+            row["log_ratio"] += lr
+        rows.append(row)
+    inside = [r for r in rows if r["inside"]]
+    pick = min(inside or rows, key=lambda r: r["log_ratio"])
+    rep = {
+        "train_split": {
+            "tracks": stats.get("tracks"),
+            "legs": stats.get("legs"),
+            "aperture_m": stats["aperture_m"],
+            "spacing_m": stats["spacing_m"],
+        },
+        "teacher_speed_mps": teacher_speeds,
+        "speed_note": None
+        if teacher_speeds
+        else (
+            "no val-selected teacher yet: the teacher's val speed is not used (training-split "
+            "geometry only)"
+        ),
+        "ranges_07": {k: list(v) for k, v in ranges.items()},
+        "ranges_07_source": "sim.course_gen: APERTURE_MIN/MAX (3-10 drone widths), "
+        "MIN/MAX_SPACING; 07 flew the tractable tier (apertures 0.75-1.5 m)",
+        "candidates": rows,
+        "chosen_k": pick["k"],
+        "chosen_inside_all_ranges": pick["inside"],
+        "references": {"07_live_world_scale": 10.0, "liftoff_preset_world_scale": 4.0},
+    }
+    if out is not None:
+        p = Path(out)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(rep, indent=2) + "\n", encoding="utf-8")
+        p.with_suffix(".md").write_text(scale_markdown(rep), encoding="utf-8")
+        rep["written"] = str(p)
+    return rep
+
+
+def scale_markdown(rep: dict[str, Any]) -> str:
+    L = ["# Student world-scale (k) report", ""]
+    ts = rep["train_split"]
+    L += [
+        f"TRAIN split: {ts['tracks']} tracks, {ts['legs']} legs; aperture p10/p50/p90 "
+        f"{ts['aperture_m']['p10']}/{ts['aperture_m']['p50']}/{ts['aperture_m']['p90']} m; "
+        f"spacing {ts['spacing_m']['p10']}/{ts['spacing_m']['p50']}/{ts['spacing_m']['p90']} m",
+        "",
+    ]
+    if rep["speed_note"]:
+        L += [f"> {rep['speed_note']}", ""]
+    L += [
+        "| k | quantity | p10/k | p50/k | p90/k | 07 range | inside | abs log ratio |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for r in rep["candidates"]:
+        for name, v in r["values"].items():
+            L.append(
+                f"| {r['k']:g} | {name} | {v['p10']:.2f} | {v['p50']:.2f} | {v['p90']:.2f} | "
+                f"{v['range_07'][0]:g}-{v['range_07'][1]:g} | {'yes' if v['inside'] else 'no'} "
+                f"| {v['log_ratio']:.3f} |"
+            )
+    L += [
+        "",
+        f"**Chosen k = {rep['chosen_k']:g}** (inside every 07 range: "
+        f"{rep['chosen_inside_all_ranges']}). References: 07 flew live at k = 10; the `liftoff` "
+        "preset uses 4.",
+        "",
+    ]
+    return "\n".join(L)
+
+
+# ----------------------------------------------------------------------------- run folder
+
+
+def _atomic_save(obj: Any, path: Path) -> None:
+    tmp = path.with_suffix(".tmp")
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
+
+
+def student_sidecar(
+    cfg: Any,
+    actor: Any,
+    *,
+    teacher_ck: Any,
+    model: Any,
+    pcfg: Any,
+    timing: Any,
+    conversion: dict[str, Any],
+    contention: dict,
+) -> dict:
+    """The student sidecar keys (``write_sidecar(extra=...)``)."""
+    from drone_fly.sim.student_obs import schema
+
+    cam = model.camera
+    return {
+        "obs_schema": schema(
+            world_scale=float(cfg.student.world_scale),
+            camera=cam,
+            lost_timeout_s=pcfg.lost_timeout_s,
+            acquire_timeout_s=pcfg.acquire_timeout_s,
+            assoc_radius=float(model.tracker.get("assoc_radius", 1.0)),
+        ),
+        "world_scale": float(cfg.student.world_scale),
+        "actor_arch": actor.arch(),
+        "teacher": {**teacher_ck.record(), "obs_schema": "teacher-obs v1"},
+        "noise_model": {
+            "path": str(model.path) if model.path else None,
+            "sha256": model.sha256,
+            "detector_id": model.detector_id,
+            "detector_sha256": model.detector_sha256,
+            "revision": model.data.get("revision"),
+            "coverage": model.data.get("coverage"),
+        },
+        "perception": {**asdict(pcfg), "uncovered": cfg.perception.uncovered},
+        "camera": cam,
+        "course_conversion": conversion,
+        "timing": {
+            "mode": timing.mode,
+            "control_hz": list(timing.control_hz),
+            "action_delay_s": list(timing.action_delay_s),
+            "skip_prob": list(timing.skip_prob),
+            "source": model.timing().get("source"),
+        },
+        "contention": contention,
+        "deployable": cfg.student.actor == "k1-student",
+        "role": "deployable" if cfg.student.actor == "k1-student" else "baseline",
+    }
+
+
+class StudentRun:
+    """Checkpoint / resume / inputs writers of a student run folder."""
+
+    def __init__(self, run: Any, cfg: Any, profile: Any, actor: Any, sidecar: dict) -> None:
+        self.run, self.cfg, self.profile, self.actor, self.sidecar = (
+            run,
+            cfg,
+            profile,
+            actor,
+            sidecar,
+        )
+
+    def save_student(self, name: str = STUDENT_NAME) -> Path:
+        from drone_fly.sim.action import write_sidecar
+
+        spec = self.cfg.base.action
+        if spec.max_g is None:
+            spec = replace(spec, max_g=float(self.profile.max_g))
+        path = self.run.checkpoints / name
+        _atomic_save(self.actor.readout_state_dict(), path)
+        side = dict(self.sidecar)
+        conv = side.pop("course_conversion", None)
+        sch = side.pop("obs_schema")
+        ws = side.pop("world_scale")
+        write_sidecar(
+            path,
+            spec,
+            extra_dim=int(sch["dim"]),
+            actor=self.cfg.student.actor,
+            drone=self.profile.id,
+            run_id=self.run.run_id,
+            obs_schema=sch,
+            world_scale=ws,
+            course_conversion=conv,
+            extra=side,
+        )
+        return path
+
+    def write_inputs(self, teacher_ck: Any, model: Any) -> Path:
+        d = self.run.path / "inputs"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "teacher.json").write_text(
+            json.dumps(teacher_ck.record(), indent=2) + "\n", encoding="utf-8"
+        )
+        if model.path is not None:
+            shutil.copyfile(model.path, d / "noise_model.yaml")
+        (d / "noise_model.json").write_text(
+            json.dumps(
+                {
+                    "source": str(model.path),
+                    "sha256": model.sha256,
+                    "detector_id": model.detector_id,
+                    "detector_sha256": model.detector_sha256,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return d
+
+
+# ----------------------------------------------------------------------------- training
+
+
+def resolve_inputs(cfg: Any, teacher: str | Path, noise: str | Path | None) -> tuple:
+    from drone_fly.harness.teacher import TeacherCheckpoint
+    from drone_fly.sim.noise_model import NoiseModel
+    from drone_fly.training.evaluate import conversion_from_sidecar
+
+    ck = TeacherCheckpoint.resolve(teacher)
+    path = noise or cfg.perception.noise_model
+    if not path:
+        raise HarnessConfigError("train student needs --noise <noise_model.yaml>")
+    model = NoiseModel.load(path)
+    conv = conversion_from_sidecar(ck.sidecar)
+    if ck.sidecar.get("drone") != cfg.base.drone:
+        raise HarnessConfigError(
+            f"the teacher flies {ck.sidecar.get('drone')!r}, the student config {cfg.base.drone!r}"
+        )
+    return ck, model, conv
+
+
+def train_student(
+    cfg: Any,
+    profile: Any,
+    *,
+    teacher: str | Path,
+    noise: str | Path | None = None,
+    run_root: str | Path | None = None,
+    run_id: str | None = None,
+    resume: str | Path | None = None,
+    device: str | None = None,
+    max_iterations: int | None = None,
+    k1_path: str | None = None,
+    feasibility_only: bool = False,
+    skip_feasibility: bool = False,
+    allow_gpu_contention: bool = False,
+    process_lister: Any = None,
+) -> Any:
+    """Train a student (see the module docstring); returns a ``ppo.TrainResult``."""
+    from drone_fly.training.ppo import resolve_device
+    from drone_fly.training.run_dir import RunDir
+
+    if cfg.student.world_scale is None:
+        raise HarnessConfigError(
+            "student.world_scale (k) is not set: run `train student --scale-report` and set it"
+        )
+    ck, model, conv = resolve_inputs(cfg, teacher, noise)
+    contention = check_contention(ck.run_dir, allow_gpu_contention, process_lister)
+    dev = resolve_device(device or cfg.base.device)
+    torch.manual_seed(cfg.base.seed)
+    if resume is not None:
+        run = RunDir.reopen(resume, cfg, profile)
+        stop = run.path / "STOP"
+        if stop.exists():
+            stop.unlink()
+    else:
+        run = RunDir(cfg, profile, root=run_root, run_id=run_id)
+    log.addHandler(run.log_handler)
+    log.setLevel(logging.INFO)
+    try:
+        if contention["contention"]:
+            (run.path / "CONTENTION.txt").write_text(
+                CONTENTION_LABEL + "\n" + "\n".join(contention["conditions"]) + "\n", "utf-8"
+            )
+        if not skip_feasibility and not (resume and (run.eval_dir / "feasibility.json").is_file()):
+            run_feasibility(ck, cfg, run.eval_dir, str(dev))
+        if feasibility_only:
+            from drone_fly.training.ppo import TrainResult
+
+            return TrainResult(run, run.eval_dir / "feasibility.json", 0, 0, 0.0)
+        return _train_student(
+            cfg,
+            profile,
+            run,
+            dev,
+            ck,
+            model,
+            conv,
+            max_iterations,
+            k1_path,
+            resume is not None,
+            contention,
+        )
+    finally:
+        log.removeHandler(run.log_handler)
+        run.log_handler.close()
+
+
+def _train_student(
+    cfg: Any,
+    profile: Any,
+    run: Any,
+    dev: Any,
+    ck: Any,
+    model: Any,
+    conv: Any,
+    max_iterations: int | None,
+    k1_path: Any,
+    resuming: bool,
+    contention: dict,
+) -> Any:
+    from drone_fly.sim.multi_course import EPISODE_COLUMNS
+    from drone_fly.tracks.loader import build_pool, conversion_record
+    from drone_fly.training.evaluate import load_teacher
+    from drone_fly.training.ppo import TrainResult, group_metrics
+
+    d = cfg.distill
+    t_build = time.time()
+    pool = build_pool(
+        list(cfg.base.tracks.mix),
+        "train",
+        conversion=conv,
+        root=cfg.base.tracks.root,
+        scenes_root=cfg.base.tracks.scenes_root,
+    )
+    if cfg.perception.uncovered == "exclude":
+        pool = filter_uncovered(pool, model)
+    run.write_tracks_snapshot(pool)
+    timing = student_timing(cfg, model)
+    pcfg = perception_config(cfg, model)
+    senv = build_student_env(cfg, profile, dev, pool, model, timing=timing)
+    teacher, _ = load_teacher(ck.checkpoint, dev)
+    actor = build_actor(cfg, dev, k1_path=k1_path, warm=not resuming)
+    spec = cfg.base.action
+    max_g = float(spec.max_g or profile.max_g)
+    sidecar = student_sidecar(
+        cfg,
+        actor,
+        teacher_ck=ck,
+        model=model,
+        pcfg=pcfg,
+        timing=timing,
+        conversion=conversion_record(pool, conv),
+        contention=contention,
+    )
+    sr = StudentRun(run, cfg, profile, actor, sidecar)
+    sr.write_inputs(ck, model)
+    params = [p for p in actor.parameters() if p.requires_grad and p is not actor.log_std]
+    opt = torch.optim.Adam(params, lr=d.lr)
+    steps, it, elapsed0, best = 0, 0, 0.0, None
+    if resuming and run.resume_path.is_file():
+        st = torch.load(run.resume_path, map_location="cpu", weights_only=False)
+        actor.load_state_dict(st["actor"], strict=False)
+        opt.load_state_dict(st["optimizer"])
+        steps, it = int(st["steps"]), int(st["it"])
+        elapsed0, best = float(st.get("elapsed_s", 0.0)), st.get("best")
+        torch.set_rng_state(st["torch_rng"])
+        log.info(
+            "resumed %s at it %d, %.3g steps (the buffer restarts empty)", run.run_id, it, steps
+        )
+    n = senv.n
+    feat_dim = int(getattr(actor, "feat_dim", 0))
+    buf = ReplayBuffer(d.buffer, senv.student_obs().shape[1], feat_dim, pin=dev.type == "cuda")
+    gen = torch.Generator().manual_seed(cfg.base.seed + 17)
+    val_pool = eval_pool(cfg, conv, ["liftoff:val"], model)
+    log.info(
+        "student run %s: %s, k %g, drone %s, %d envs, %d courses, budget %.3g, device %s, "
+        "trainable %.1fk, teacher %s (%s), noise %s r%s, built in %.0f s%s",
+        run.run_id,
+        cfg.student.actor,
+        cfg.student.world_scale,
+        profile.id,
+        n,
+        len(pool.courses),
+        cfg.base.budget,
+        dev,
+        sum(p.numel() for p in params) / 1e3,
+        ck.run_id,
+        ck.label,
+        model.detector_id,
+        model.data.get("revision"),
+        time.time() - t_build,
+        f" [{CONTENTION_LABEL}]" if contention["contention"] else "",
+    )
+    tb = None
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+
+        tb = SummaryWriter(str(run.logs / "tb"))
+    except Exception:  # TensorBoard is optional
+        tb = None
+    t0 = last_ckpt = time.time()
+    steps0 = steps
+    ep_rows: list[np.ndarray] = []
+    interrupted = False
+    actor.eval()
+    try:
+        while True:
+            it += 1
+            frac = steps / cfg.base.budget
+            beta = beta_at(frac, d)
+            stats = {"loss": 0.0, "mse": 0.0, "raw_penalty": 0.0}
+            teacher_share = 0.0
+            with torch.no_grad():
+                for _ in range(d.rollout):
+                    obs_s = senv.student_obs().float()
+                    obs_t = senv.teacher_obs().float()
+                    feats = actor.features(obs_s)
+                    s_mean, _ = actor.act(feats, obs_s)
+                    t_mean = teacher.mean_action(obs_t)
+                    buf.add(feats if feat_dim else None, obs_s, decoded_label(t_mean, spec, max_g))
+                    use_t = torch.rand(n, device=dev) < beta
+                    noise_ = d.explore_std * torch.randn_like(s_mean)
+                    act = torch.where(use_t.unsqueeze(-1), t_mean, s_mean + noise_)
+                    teacher_share += float(use_t.float().mean())
+                    senv.step(act.to(senv.dtype))
+            actor.train()
+            for _ in range(d.updates):
+                taps, ob, lab = buf.sample(d.minibatch, dev, gen)
+                f = taps.float() if taps is not None else ob.new_zeros(ob.shape[0], 0)
+                mean, _ = actor.act(f, ob)
+                loss, parts = dagger_loss(mean, lab, spec, max_g, d.lambda_raw)
+                opt.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(params, 1.0)
+                opt.step()
+                stats["loss"] += float(loss.detach()) / d.updates
+                for k, v in parts.items():
+                    stats[k] += v / d.updates
+            actor.eval()
+            steps += d.rollout * n
+            rows = senv.episode_rows()
+            if len(rows):
+                run.episodes(EPISODE_COLUMNS, rows)
+                ep_rows.append(rows)
+            stop_file = (run.path / "STOP").exists()
+            finished = steps >= cfg.base.budget or (
+                max_iterations is not None and it >= max_iterations
+            )
+            wall = time.time() - t0
+            fps = (steps - steps0) / max(wall, 1e-9)
+            if it % cfg.base.log_every_iters == 0 or finished or stop_file:
+                eps = np.concatenate(ep_rows) if ep_rows else np.zeros((0, len(EPISODE_COLUMNS)))
+                ep_rows = []
+                row = {
+                    "it": it,
+                    "steps": steps,
+                    "fps": fps,
+                    "beta": beta,
+                    "teacher_share": teacher_share / d.rollout,
+                    "buffer": buf.size,
+                    **stats,
+                    **group_metrics(eps, pool.groups),
+                }
+                run.metrics(row)
+                run.progress(
+                    {
+                        "run_id": run.run_id,
+                        "kind": "student",
+                        "it": it,
+                        "steps": steps,
+                        "budget": cfg.base.budget,
+                        "fps": round(fps),
+                        "beta": round(beta, 4),
+                        "elapsed_s": round(elapsed0 + wall, 1),
+                        "eta_s": round((cfg.base.budget - steps) / max(fps, 1e-9), 1),
+                        "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "episode_completion": row.get("episode_completion"),
+                        "outcomes": row.get("outcomes"),
+                        "loss": stats["loss"],
+                        "best_val": best,
+                    }
+                )
+                if tb is not None:
+                    for k in ("loss", "mse", "raw_penalty", "beta", "episode_completion", "fps"):
+                        if row.get(k) is not None:
+                            tb.add_scalar(k, row[k], steps)
+                log.info(
+                    "it %d steps %.1fM fps %.0f beta %.3f loss %.4f compl %s outcomes %s",
+                    it,
+                    steps / 1e6,
+                    fps,
+                    beta,
+                    stats["loss"],
+                    row.get("episode_completion"),
+                    json.dumps({k: round(v, 3) for k, v in (row.get("outcomes") or {}).items()}),
+                )
+            if (it % d.val_every_iters == 0 and not finished) or finished or stop_file:
+                best = _val_select(actor, cfg, profile, val_pool, model, dev, sr, run, it, best)
+            if time.time() - last_ckpt >= cfg.base.checkpoint_every_s and not finished:
+                sr.save_student()
+                _save_resume(run, actor, opt, steps, it, elapsed0 + time.time() - t0, best)
+                last_ckpt = time.time()
+            if finished or stop_file:
+                interrupted = stop_file
+                break
+    except KeyboardInterrupt:
+        log.info("interrupted: saving and exiting")
+        interrupted = True
+    last = sr.save_student()
+    _save_resume(run, actor, opt, steps, it, elapsed0 + time.time() - t0, best)
+    if tb is not None:
+        tb.close()
+    log.info("saved %s (%s)", last, "interrupted" if interrupted else "done")
+    result = TrainResult(run, last, steps, it, time.time() - t0)
+    if cfg.finetune.steps > 0 and not interrupted:
+        ppo_finetune(
+            cfg, profile, run, dev, actor, teacher, senv, pool, sr, spec, max_g, val_pool, model
+        )
+    return result
+
+
+def _save_resume(
+    run: Any, actor: Any, opt: Any, steps: int, it: int, elapsed: float, best: Any
+) -> None:
+    run.save_resume(
+        {
+            "actor": actor.state_dict(),
+            "optimizer": opt.state_dict(),
+            "steps": steps,
+            "it": it,
+            "elapsed_s": elapsed,
+            "best": best,
+            "torch_rng": torch.get_rng_state(),
+        }
+    )
+
+
+def _val_select(
+    actor: Any,
+    cfg: Any,
+    profile: Any,
+    val_pool: Any,
+    model: Any,
+    dev: Any,
+    sr: StudentRun,
+    run: Any,
+    it: int,
+    best: Any,
+) -> Any:
+    """Evaluate on val (noise, seed 4321); keep ``student_it<N>.pt`` and select the best."""
+    d = cfg.distill
+    if not val_pool.courses:
+        return best
+    res = evaluate_policy(
+        actor,
+        cfg,
+        profile,
+        val_pool,
+        model,
+        dev,
+        mode="noise",
+        episodes=d.val_episodes,
+        seed=d.val_seed,
+    )
+    name = f"student_it{it}.pt"
+    sr.save_student(name)
+    macro = res["macro_completion"] or 0.0
+    hist_p = run.eval_dir / "val_history.jsonl"
+    with open(hist_p, "a", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "it": it,
+                    "checkpoint": name,
+                    "macro_completion": macro,
+                    "outcomes": res["outcomes"],
+                }
+            )
+            + "\n"
+        )
+    if best is None or macro > float(best["macro_completion"]):
+        best = {"it": it, "checkpoint": name, "macro_completion": macro}
+        (run.eval_dir / SELECTION_FILE).write_text(
+            json.dumps(
+                {
+                    **best,
+                    "mode": "noise",
+                    "seed": d.val_seed,
+                    "episodes": d.val_episodes,
+                    "selectors": ["liftoff:val"],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    log.info(
+        "val (noise) it %d: macro %.3f (best %.3f at it %s)",
+        it,
+        macro,
+        best["macro_completion"],
+        best["it"],
+    )
+    return best
+
+
+# ----------------------------------------------------------------------------- PPO fine-tune
+
+
+def ppo_finetune(
+    cfg: Any,
+    profile: Any,
+    run: Any,
+    dev: Any,
+    actor: Any,
+    teacher: Any,
+    senv: Any,
+    pool: Any,
+    sr: StudentRun,
+    spec: Any,
+    max_g: float,
+    val_pool: Any,
+    model: Any,
+    max_iterations: int | None = None,
+) -> dict[str, Any]:
+    """The optional L4 phase (see the module docstring)."""
+    from drone_fly.controller.student import StudentPPOAdapter
+    from drone_fly.sim.multi_course import CRITIC_EXTRA_DIM
+    from drone_fly.sim.teacher_obs import DIM as TDIM
+    from drone_fly.sim.teacher_obs import input_scale as tscale
+
+    f = cfg.finetune
+    ac = StudentPPOAdapter(
+        actor, TDIM + CRITIC_EXTRA_DIM, list(tscale()) + [1.0] * CRITIC_EXTRA_DIM
+    ).to(dev)
+    with torch.no_grad():
+        actor.log_std.fill_(f.logstd)
+    pi_params = [p for p in actor.parameters() if p.requires_grad and p is not actor.log_std]
+    vf_params = list(ac.vf.parameters())
+    opt = torch.optim.Adam([{"params": pi_params}, {"params": vf_params}], lr=f.lr)
+    n, roll = senv.n, f.roll
+    feat_dim = int(getattr(actor, "feat_dim", 0))
+    steps, it = 0, 0
+    best = None
+    t0 = time.time()
+    while steps < f.steps and (max_iterations is None or it < max_iterations):
+        it += 1
+        warm = it <= f.critic_warmup_iters
+        bc = f.bc_lambda * max(0.0, 1.0 - steps / max(f.bc_decay_frac * f.steps, 1.0))
+        obs_dim = senv.student_obs().shape[1]
+        fb = torch.zeros(roll, n, feat_dim, device=dev)
+        ob = torch.zeros(roll, n, obs_dim, device=dev)
+        cb = torch.zeros(roll, n, TDIM + CRITIC_EXTRA_DIM, device=dev)
+        ab = torch.zeros(roll, n, 4, device=dev)
+        lb = torch.zeros(roll, n, 4, device=dev)
+        lp = torch.zeros(roll, n, device=dev)
+        rb = torch.zeros(roll, n, device=dev)
+        vb = torch.zeros(roll, n, device=dev)
+        db = torch.zeros(roll, n, device=dev)
+        with torch.no_grad():
+            for s in range(roll):
+                obs_s = senv.student_obs().float()
+                obs_t = senv.teacher_obs().float()
+                ci = torch.cat([obs_t, senv.critic_extra().float()], -1)
+                feats = actor.features(obs_s)
+                mean, std = actor.act(feats, obs_s)
+                dist = torch.distributions.Normal(mean, std)
+                a = dist.sample()
+                r, done = senv.step(a.to(senv.dtype))
+                if feat_dim:
+                    fb[s] = feats
+                ob[s], cb[s], ab[s] = obs_s, ci, a
+                lb[s] = decoded_label(teacher.mean_action(obs_t), spec, max_g)
+                lp[s] = dist.log_prob(a).sum(-1)
+                rb[s], vb[s], db[s] = r.float(), ac.value(ci), done.float()
+            ci = torch.cat([senv.teacher_obs().float(), senv.critic_extra().float()], -1)
+            last_v = ac.value(ci)
+        adv = torch.zeros(roll, n, device=dev)
+        gae = torch.zeros(n, device=dev)
+        for s in reversed(range(roll)):
+            nv = last_v if s == roll - 1 else vb[s + 1]
+            nt = 1.0 - db[s]
+            delta = rb[s] + f.gamma * nv * nt - vb[s]
+            gae = delta + f.gamma * f.lam * nt * gae
+            adv[s] = gae
+        ret = (adv + vb).reshape(-1)
+        B = roll * n
+        bo, bcrit, ba = ob.reshape(B, -1), cb.reshape(B, -1), ab.reshape(B, 4)
+        bf = fb.reshape(B, feat_dim) if feat_dim else bo.new_zeros(B, 0)
+        bl, blab = lp.reshape(-1), lb.reshape(B, 4)
+        badv = adv.reshape(-1)
+        badv = (badv - badv.mean()) / (badv.std() + 1e-8)
+        perm = torch.randperm(B, device=dev)
+        for _ in range(f.epochs):
+            for mb in perm.chunk(f.minibatches):
+                v = ac.value(bcrit[mb])
+                v_loss = 0.5 * (v - ret[mb]).pow(2).mean()
+                if warm:
+                    loss = v_loss
+                else:
+                    mean, std = actor.act(bf[mb], bo[mb])
+                    dist = torch.distributions.Normal(mean, std)
+                    ratio = (dist.log_prob(ba[mb]).sum(-1) - bl[mb]).exp()
+                    surr = torch.min(
+                        ratio * badv[mb], ratio.clamp(1 - f.clip, 1 + f.clip) * badv[mb]
+                    )
+                    bc_loss, _ = dagger_loss(mean, blab[mb], spec, max_g, cfg.distill.lambda_raw)
+                    loss = -surr.mean() + 0.5 * v_loss + bc * bc_loss
+                opt.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(pi_params, f.max_grad_norm)
+                nn.utils.clip_grad_norm_(vf_params, f.max_grad_norm)
+                opt.step()
+        steps += B
+        if it % cfg.base.log_every_iters == 0:
+            log.info(
+                "ppo it %d steps %.1fM rew/step %.3f bc %.3f%s",
+                it,
+                steps / 1e6,
+                float(rb.mean()),
+                bc,
+                " (critic warm-up)" if warm else "",
+            )
+        if it % cfg.distill.val_every_iters == 0 or steps >= f.steps:
+            best = _val_select(
+                actor, cfg, profile, val_pool, model, dev, sr, run, 100000 + it, best
+            )
+    sr.save_student()
+    return {"iterations": it, "steps": steps, "seconds": time.time() - t0, "best": best}

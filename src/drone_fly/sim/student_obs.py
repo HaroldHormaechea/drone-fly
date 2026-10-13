@@ -77,6 +77,23 @@ def block_slice(name: str) -> slice:
     raise KeyError(name)
 
 
+def input_scale() -> list[float]:
+    """Fixed per-value multipliers for networks that read the raw observation (recorded in the
+    schema). ``harness30`` uses the teacher's; the K1 readout keeps its legacy 30 columns RAW (the
+    warm start) and applies this to the other 29 only."""
+    from drone_fly.sim.teacher_obs import input_scale as teacher_scale
+
+    out = list(teacher_scale()[:30])
+    out += [1.0] * 6  # attitude6
+    out += [1 / 10.0] * 3  # vel_body
+    out += [1.0] * 4  # prev_action
+    out += [2.0]  # arm_remaining_s
+    out += [1.0] * 3  # perception
+    out += [1 / 20.0] * 3 + [1.0] * 4 + [1.0] * 3 + [1.0, 1.0]  # history
+    assert len(out) == DIM
+    return out
+
+
 def schema(
     *,
     world_scale: float,
@@ -121,6 +138,7 @@ def schema(
             "uptilt_deg": float(camera.get("uptilt_deg", 0.0)),
         },
         "history": {"ema_tau_s": EMA_TAU_S, "ticks_norm": TICKS_NORM},
+        "input_scale": input_scale(),
         "requires": {
             "noise_model": True,
             "gate_estimator": "learned",

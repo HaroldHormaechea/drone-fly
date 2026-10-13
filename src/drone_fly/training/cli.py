@@ -583,6 +583,125 @@ def cmd_detector_noise(args: argparse.Namespace) -> int:
     return 0
 
 
+# ----------------------------------------------------------------------------- student (UC70)
+
+
+def cmd_student(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from drone_fly.training.distill import ContentionError, scale_report, train_student
+
+    if args.scale_report:
+        out = args.out or str(Path("artifacts") / "training" / (args.drone or "student")
+                              / "student-scale-report.json")  # fmt: skip
+        rep = scale_report(trackdata_root=args.trackdata_root, out=out)
+        for r in rep["candidates"]:
+            vals = ", ".join(f"{k} p50 {v['p50']:.2f} ({'in' if v['inside'] else 'OUT'})"
+                             for k, v in r["values"].items())  # fmt: skip
+            print(f"k {r['k']:g}: {vals}; sum |log ratio| {r['log_ratio']:.3f}")
+        if rep["speed_note"]:
+            print(rep["speed_note"])
+        print(f"chosen k = {rep['chosen_k']:g}; report: {rep.get('written')}")
+        return 0
+    if not args.teacher:
+        print("train student: --teacher is required (or --scale-report)")
+        return 2
+    overrides: dict[str, Any] = {}
+    for key in ("n_envs", "seed", "device"):
+        if getattr(args, key, None) is not None:
+            overrides[key] = getattr(args, key)
+    if args.budget is not None:
+        overrides["budget"] = float(args.budget)
+    if args.drone:
+        overrides["drone"] = args.drone
+    student: dict[str, Any] = {}
+    if args.actor:
+        student["actor"] = args.actor
+    if args.world_scale is not None:
+        student["world_scale"] = float(args.world_scale)
+    if args.residual:
+        student["residual"] = True
+    if student:
+        overrides["student"] = student
+    if args.ppo_steps is not None:
+        overrides["finetune"] = {"steps": float(args.ppo_steps)}
+    from drone_fly.training.config import load_raw, student_from_mapping
+
+    if args.resume:
+        import yaml
+
+        snap = yaml.safe_load((Path(args.resume) / "config.yaml").read_text(encoding="utf-8"))
+        raw = student_raw_from_snapshot(snap)
+        for k in ("n_envs", "device"):
+            if k in overrides:
+                raw[k] = overrides[k]
+        cfg = student_from_mapping(raw)
+    else:
+        data = load_raw(args.config, overrides)
+        if args.tracks or args.procedural is not None:
+            data = teacher_mix(data, args.tracks, args.procedural)
+        cfg = student_from_mapping(data)
+    try:
+        res = train_student(
+            cfg,
+            _profile(cfg.drone),
+            teacher=args.teacher,
+            noise=args.noise,
+            run_root=args.output_root,
+            resume=args.resume,
+            device=args.device,
+            max_iterations=args.max_iterations,
+            k1_path=args.k1_path,
+            feasibility_only=args.feasibility_only,
+            allow_gpu_contention=args.allow_gpu_contention,
+        )
+    except ContentionError as exc:
+        print(f"refused: {exc}")
+        return 2
+    print(f"run: {res.run.path}")
+    print(f"checkpoint: {res.checkpoint}")
+    if not args.feasibility_only:
+        print(f"steps {res.steps} in {res.iterations} iterations, {res.seconds:.1f} s")
+    return 0
+
+
+def student_raw_from_snapshot(snap: dict[str, Any]) -> dict[str, Any]:
+    """A student run's ``config.yaml`` back into a student config mapping."""
+    raw = teacher_raw_from_snapshot(snap)
+    feas = dict(raw.get("feasibility") or {})
+    if "selectors" in feas:
+        feas["selectors"] = list(feas["selectors"])
+    raw["feasibility"] = feas
+    return raw
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    from drone_fly.harness.errors import ExportError
+    from drone_fly.training.export import export_student
+
+    try:
+        meta = export_student(
+            args.run,
+            args.out,
+            checkpoint=args.checkpoint,
+            baseline_export=args.baseline_export,
+            bench=args.bench,
+            k1_path=args.k1_path,
+        )
+    except ExportError as exc:
+        print(f"refused: {exc}")
+        return 2
+    lat = meta.get("latency")
+    print(f"exported {meta['role']} student ({meta['actor']}, k {meta['world_scale']:g}) -> "
+          f"{args.out}")  # fmt: skip
+    if lat:
+        print(f"latency {lat['device']}: p50 {lat['p50_ms']:.2f} ms, p99 {lat['p99_ms']:.2f} ms "
+              f"(budget {lat['budget_ms']:g} ms: {'pass' if lat['pass'] else 'FAIL'})")  # fmt: skip
+    else:
+        print(meta.get("latency_note", "latency not measured"))
+    return 0
+
+
 # ----------------------------------------------------------------------------- parser
 
 
@@ -658,3 +777,39 @@ def add_parser(sub: Any) -> None:
         "--latency-only", action="store_true", help="only re-measure the inference latency"
     )
     p_dn.set_defaults(func=cmd_detector_noise)
+    p_s = tsub.add_parser("student", help="distil the deployable student from a teacher (UC70)")
+    p_s.add_argument("--teacher", help="teacher run folder or teacher .pt")
+    p_s.add_argument("--noise", help="noise_model.yaml of the detector the student will fly with")
+    p_s.add_argument("--drone", help="drone profile id (default: the config's)")
+    p_s.add_argument("--tracks", help="train selector, e.g. liftoff:train")
+    p_s.add_argument("--procedural", type=float, help="procedural share of the mix, e.g. 0.4")
+    p_s.add_argument("--actor", choices=("k1-student", "mlp-student"))
+    p_s.add_argument("--config", default="student-liftoff", help="student config (name or path)")
+    p_s.add_argument("--world-scale", type=float, dest="world_scale", help="k (scale report)")
+    p_s.add_argument("--residual", action="store_true", help="L2: the readout residual MLP")
+    p_s.add_argument("--budget", type=float)
+    p_s.add_argument("--n-envs", type=int, dest="n_envs")
+    p_s.add_argument("--resume", help="run folder to resume")
+    p_s.add_argument("--ppo-steps", type=float, dest="ppo_steps", help="L4 PPO fine-tune steps")
+    p_s.add_argument("--feasibility-only", action="store_true", dest="feasibility_only")
+    p_s.add_argument("--scale-report", action="store_true", dest="scale_report",
+                     help="CPU only: pick k from the train-split geometry")  # fmt: skip
+    p_s.add_argument("--trackdata-root", dest="trackdata_root")
+    p_s.add_argument("--out", help="--scale-report output (.json)")
+    p_s.add_argument("--allow-gpu-contention", action="store_true", dest="allow_gpu_contention")
+    p_s.add_argument("--k1-path", help="K1 connectome")
+    p_s.add_argument("--device", help="auto | cpu | cuda")
+    p_s.add_argument("--seed", type=int)
+    p_s.add_argument("--max-iterations", type=int)
+    p_s.add_argument("--output-root", help="run folders root (default artifacts/training)")
+    p_s.set_defaults(func=cmd_student)
+    p_x = tsub.add_parser("export", help="export a student run for harness run --checkpoint")
+    p_x.add_argument("run", help="student run folder (or a student checkpoint .pt)")
+    p_x.add_argument("--checkpoint", default="val", help="val | final | it<N>")
+    p_x.add_argument("--out", required=True, help="output .pt")
+    p_x.add_argument("--baseline-export", action="store_true", dest="baseline_export")
+    bench = p_x.add_mutually_exclusive_group()
+    bench.add_argument("--bench", action="store_true", default=None, help="CUDA latency bench")
+    bench.add_argument("--no-bench", action="store_false", dest="bench")
+    p_x.add_argument("--k1-path", help="K1 connectome")
+    p_x.set_defaults(func=cmd_export)

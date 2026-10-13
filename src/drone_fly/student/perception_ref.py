@@ -123,6 +123,7 @@ class ReferencePerception:
         self.passed = False
         self.status = HOLDING
         self.pos = np.asarray(pos, np.float64).copy()
+        self.t = float(t)
 
     def push_pose(self, t: float, pos: Any, quat: Any) -> None:
         self.ring[self.ring_i % RING] = (float(t), np.asarray(pos, np.float64).copy(),

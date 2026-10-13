@@ -52,6 +52,12 @@ TOP_KEYS = (
     "obs",
     "slack",
     "checkpoint_every_s",
+    # UC70 student configs
+    "student",
+    "perception",
+    "distill",
+    "finetune",
+    "feasibility",
 )
 #: Keys a teacher config inherits from ``proc-course-dr`` but does not use.
 TEACHER_IGNORED = ("course", "curriculum", "k1_path")
@@ -423,3 +429,147 @@ def load_teacher_config(
     ref: str | Path, overrides: dict[str, Any] | None = None, *, validate_tracks: bool = True
 ) -> TeacherConfig:
     return teacher_from_mapping(load_raw(ref, overrides), validate_tracks=validate_tracks)
+
+
+# ----------------------------------------------------------------------------- UC70 student
+
+STUDENT_ACTORS = ("k1-student", "mlp-student")
+#: The feasibility gate: held-out teacher completion below 0.70 / 0.85 makes AC7's absolute
+#: target infeasible by construction (the student can reach at most ~85 % of the teacher).
+FEASIBILITY_THRESHOLD = 0.70 / 0.85
+
+
+@dataclass(frozen=True)
+class StudentSection:
+    """``student:`` — the actor and its world scale ``k`` (fixed a priori by the scale report)."""
+
+    actor: str = "k1-student"
+    world_scale: float | None = None  # k; required for training (``--scale-report`` picks it)
+    encoder: bool = True  # L1
+    residual: bool = False  # L2
+    logstd_init: float = -1.5
+    warm_start: str = "training/07-proc-course-flight/model_readout.pt"
+
+
+@dataclass(frozen=True)
+class PerceptionSection:
+    """``perception:`` — the simulated detector (``timing`` comes from the noise model)."""
+
+    mode: str = "noise"
+    noise_model: str | None = None
+    uncovered: str = "proxy"
+    lost_timeout_s: float | None = None  # None: the noise model's recommendation
+    acquire_timeout_s: float | None = None
+    timing_from_noise_model: bool = True
+
+
+@dataclass(frozen=True)
+class DistillSection:
+    """``distill:`` — DAgger."""
+
+    rollout: int = 64
+    beta_start: float = 1.0
+    beta_end: float = 0.0
+    beta_schedule: str = "linear"  # linear | exp
+    beta_over: float = 0.5  # fraction of the budget
+    explore_std: float = 0.05
+    buffer: int = 2_000_000
+    updates: int = 8
+    minibatch: int = 8192
+    lr: float = 3.0e-4
+    lambda_raw: float = 0.01
+    val_every_iters: int = 200
+    val_episodes: int = 8
+    val_seed: int = 4321
+
+
+@dataclass(frozen=True)
+class FinetuneSection:
+    """``finetune:`` — the optional PPO phase (L4; ``--ppo-steps``)."""
+
+    steps: float = 0.0
+    lr: float = 1.0e-4
+    roll: int = 64
+    epochs: int = 4
+    minibatches: int = 16
+    gamma: float = 0.995
+    lam: float = 0.95
+    clip: float = 0.2
+    ent_coef: float = 0.0
+    max_grad_norm: float = 0.5
+    critic_warmup_iters: int = 20
+    bc_lambda: float = 0.1
+    bc_decay_frac: float = 0.5
+    logstd: float = -1.5
+
+
+@dataclass(frozen=True)
+class FeasibilitySection:
+    threshold: float = FEASIBILITY_THRESHOLD
+    episodes: int = 32
+    seed: int = 1234
+    selectors: tuple[str, ...] = ("liftoff:held-out", "liftoff:val")
+
+
+@dataclass(frozen=True)
+class StudentConfig:
+    """A ``train student`` config (``configs/student-liftoff.yaml``, extends the teacher's)."""
+
+    base: TeacherConfig
+    student: StudentSection = field(default_factory=StudentSection)
+    perception: PerceptionSection = field(default_factory=PerceptionSection)
+    distill: DistillSection = field(default_factory=DistillSection)
+    finetune: FinetuneSection = field(default_factory=FinetuneSection)
+    feasibility: FeasibilitySection = field(default_factory=FeasibilitySection)
+
+    def __post_init__(self) -> None:
+        if self.student.actor not in STUDENT_ACTORS:
+            raise TrainConfigError(f"student.actor must be one of {STUDENT_ACTORS}")
+        if self.perception.mode not in ("noise", "exact"):
+            raise TrainConfigError("perception.mode must be noise or exact")
+        if self.perception.uncovered not in ("proxy", "exclude"):
+            raise TrainConfigError("perception.uncovered must be proxy or exclude")
+        if self.distill.beta_schedule not in ("linear", "exp"):
+            raise TrainConfigError("distill.beta_schedule must be linear or exp")
+        if self.student.world_scale is not None and self.student.world_scale <= 0:
+            raise TrainConfigError("student.world_scale must be > 0")
+
+    @property
+    def name(self) -> str:
+        return self.base.name
+
+    @property
+    def drone(self) -> str:
+        return self.base.drone
+
+    @property
+    def actor(self) -> ActorConfig:  # RunDir reads config.actor.kind
+        return ActorConfig(kind=self.student.actor)
+
+    def snapshot(self) -> dict[str, Any]:
+        out = self.base.snapshot()
+        out["kind"] = "student"
+        for k in ("student", "perception", "distill", "finetune", "feasibility"):
+            out[k] = _plain(asdict(getattr(self, k)))
+        return out
+
+
+def student_from_mapping(data: dict[str, Any], *, validate_tracks: bool = True) -> StudentConfig:
+    base = teacher_from_mapping(data, validate_tracks=validate_tracks)
+    feas = dict(data.get("feasibility") or {})
+    if "selectors" in feas:
+        feas["selectors"] = tuple(feas["selectors"])
+    return StudentConfig(
+        base=base,
+        student=_section(StudentSection, data.get("student"), "student"),
+        perception=_section(PerceptionSection, data.get("perception"), "perception"),
+        distill=_section(DistillSection, data.get("distill"), "distill"),
+        finetune=_section(FinetuneSection, data.get("finetune"), "finetune"),
+        feasibility=_section(FeasibilitySection, feas, "feasibility"),
+    )
+
+
+def load_student_config(
+    ref: str | Path, overrides: dict[str, Any] | None = None, *, validate_tracks: bool = True
+) -> StudentConfig:
+    return student_from_mapping(load_raw(ref, overrides), validate_tracks=validate_tracks)

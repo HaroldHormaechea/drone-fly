@@ -402,6 +402,8 @@ class GatePerception:
             setattr(self, name, torch.where(m, t, getattr(self, name)))
         self.ticks_since = torch.where(m, torch.zeros_like(self.ticks_since), self.ticks_since)
         self.status = torch.where(m, torch.full_like(self.status, HOLDING), self.status)
+        p = pos.to(self.dtype)
+        self._pos = torch.where(m1, p, self._pos) if hasattr(self, "_pos") else p.clone()
 
     def push_pose(self, t: torch.Tensor, pos: torch.Tensor, quat: torch.Tensor) -> None:
         i = self.ring_i % RING
