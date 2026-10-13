@@ -321,6 +321,10 @@ def test_checkpoint_overrides(k1_export):
         "gates.lost_timeout_s": 1.3,
         "gates.acquire_timeout_s": 3.0,
         "gates.assoc_radius": 1.0,
+        # the export's pinned lost policy (write_student_run: the schema's legacy default)
+        "gates.lost_policy": "terminate",
+        "gates.lost_hard_stop_s": 6.0,
+        "gates.drop_after_s": 0.5,
         "parts.free_space_estimator": "none",
         "free_space.assume_no_obstacles": True,
     }

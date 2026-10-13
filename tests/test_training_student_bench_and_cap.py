@@ -24,6 +24,10 @@ from drone_fly.training import distill
 from drone_fly.training.config import load_raw
 from tests.student_support import tiny_pool, tiny_student_config, train_inputs
 
+#: The shipped caps (student-liftoff: distill.max_hours, finetune.max_hours; None = no cap).
+SHIPPED_CAPS = tuple(
+    (load_raw("student-liftoff").get(sec) or {}).get("max_hours") for sec in ("distill", "finetune")
+)
 ADR = Path(__file__).resolve().parents[1] / "docs" / "adr"
 ADR_0009 = ADR / "0009-student-distillation-and-detector-noise.md"
 
@@ -67,7 +71,10 @@ def test_shipped_world_scale_matches_the_adr_parameter_row():
 
 def test_max_hours_default_and_override(inputs):
     cfg = tiny_student_config(inputs.k07)
-    assert cfg.distill.max_hours is None and cfg.finetune.max_hours is None
+    from drone_fly.training.config import DistillSection, FinetuneSection
+
+    assert DistillSection().max_hours is None and FinetuneSection().max_hours is None
+    assert (cfg.distill.max_hours, cfg.finetune.max_hours) == SHIPPED_CAPS
     cfg = tiny_student_config(inputs.k07, distill={"max_hours": 2.5}, finetune={"max_hours": 3})
     assert cfg.distill.max_hours == 2.5 and cfg.finetune.max_hours == 3
     raw = load_raw("student-liftoff", {"distill": {"max_hours": 0.5}})
@@ -258,7 +265,7 @@ def test_cli_max_hours_reaches_both_phases(inputs, tmp_path, monkeypatch, capsys
     assert seen["cfg"].distill.max_hours == 2.5 and seen["cfg"].finetune.max_hours == 2.5
     rc = cli.main(_student_args(inputs, _cli_config(inputs, tmp_path)))
     assert rc == 0
-    assert seen["cfg"].distill.max_hours is None and seen["cfg"].finetune.max_hours is None
+    assert (seen["cfg"].distill.max_hours, seen["cfg"].finetune.max_hours) == SHIPPED_CAPS
 
 
 def test_cli_max_hours_applies_on_resume(inputs, tmp_path, monkeypatch, tiny_val):
@@ -291,7 +298,9 @@ def test_cli_resume_applies_ppo_steps_and_max_hours(inputs, tmp_path, monkeypatc
     # without the flags the snapshot's values stand
     cli.main(["train", "student", "--teacher", str(inputs.teacher), "--resume", str(res.run.path)])
     assert seen["cfg"].finetune.steps == snap["finetune"]["steps"]
-    assert seen["cfg"].finetune.max_hours is None and seen["cfg"].distill.max_hours is None
+    caps = (snap["distill"].get("max_hours"), snap["finetune"].get("max_hours"))
+    assert caps == SHIPPED_CAPS  # the run was built from the shipped config
+    assert (seen["cfg"].distill.max_hours, seen["cfg"].finetune.max_hours) == caps
 
 
 def test_cli_bench_parses_and_skips_training(inputs, tmp_path, monkeypatch, capsys):
