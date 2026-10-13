@@ -630,8 +630,9 @@ def _prepare_teacher(
         ctx.resources["oracle_course_info"] = plan.course_info
     step = tch.TeacherStepState(arm_total_s=tch.arm_total_s(controls))
     if tch.obs_version_of(plan.checkpoint.sidecar) >= 2:  # the battery block: refuse up front
+        battery = (plan.checkpoint.sidecar.get("obs_schema") or {}).get("battery") or {}
         step.cells = tch.require_battery_telemetry(
-            cfg, cfg.data.get("drone"), plan.checkpoint.source
+            cfg, cfg.data.get("drone"), plan.checkpoint.source, battery.get("cells")
         )
     ctx.resources["teacher_step"] = step
     ctx.extra_dim = tch.obs_dim_of(plan.checkpoint.sidecar)

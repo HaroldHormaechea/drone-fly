@@ -58,6 +58,10 @@ log = logging.getLogger(__name__)
 TEACHER_OBS_NAME = "teacher-obs"
 TEACHER_OBS_DIM_V1 = 148
 #: A v2 battery reading outside this volts-per-cell band means the cell count is wrong.
+#: Keys UC68's trainer adds to the sidecar's ``obs_schema.battery`` (run 2): not part of
+#: ``schema(v)``, so the strict comparison skips them; ``cells`` is checked against the drone
+#: profile and used, ``power_model`` is recorded.
+TRAINER_BATTERY_KEYS = ("cells", "power_model")
 CELL_VOLTS_BAND = (2.5, 4.45)
 #: A teacher run counts as still training when its checkpoints / progress changed this recently.
 TRAINING_ACTIVE_WINDOW_S = 15 * 60
@@ -386,8 +390,14 @@ def validate_teacher_sidecar(
     if int(side.get("extra_dim") or width) != width:
         raise TeacherSchemaError(f"{ckpt}: sidecar extra_dim {side.get('extra_dim')} != {width}")
     want = json.loads(json.dumps(schema(version)))
-    if json.loads(json.dumps(sch)) != want:
-        diff = sorted(k for k in set(sch) | set(want) if sch.get(k) != want.get(k))
+    have_sch = json.loads(json.dumps(sch))
+    trainer_battery = {}
+    if isinstance(have_sch.get("battery"), dict):
+        trainer_battery = {
+            k: have_sch["battery"].pop(k) for k in TRAINER_BATTERY_KEYS if k in have_sch["battery"]
+        }
+    if have_sch != want:
+        diff = sorted(k for k in set(have_sch) | set(want) if have_sch.get(k) != want.get(k))
         raise TeacherSchemaError(
             f"{ckpt}: obs_schema differs from this build's {NAME} v{version} in {diff} "
             "(the checkpoint was trained on a different observation)"
@@ -411,6 +421,14 @@ def validate_teacher_sidecar(
             f"{ckpt}: trained for drone {side.get('drone')!r}, but the harness config flies "
             f"{drone!r}"
         )
+    side_cells = trainer_battery.get("cells")
+    if side_cells is not None:
+        profile_cells = battery_cells(drone)
+        if profile_cells is not None and int(side_cells) != profile_cells:
+            raise TeacherSchemaError(
+                f"{ckpt}: obs_schema.battery.cells {side_cells} != drone profile {drone!r} "
+                f"power.cells {profile_cells}"
+            )
     from drone_fly.harness.policy import sha256_file as _sha
 
     inf = Path(getattr(contract.inference, "__file__", gdir / "inference.py"))
@@ -418,6 +436,8 @@ def validate_teacher_sidecar(
         "obs_schema": f"{NAME} v{version}",
         "obs_version": version,
         "obs_dim": width,
+        "battery_cells": None if side_cells is None else int(side_cells),
+        "power_model": trainer_battery.get("power_model"),
         "obs_source": live,
         "gpu_prototype_dir": str(gdir),
         "inference_sha256": _sha(inf) if inf.is_file() else None,
@@ -704,9 +724,12 @@ def battery_cells(drone: str | None) -> int | None:
     return None if power is None else int(power.cells)
 
 
-def require_battery_telemetry(cfg: Any, drone: str | None, ckpt: Any) -> int:
-    """A v2 checkpoint needs the pack reading: ``battery`` in the telemetry stream and the
-    profile's ``power.cells``. Returns the cell count."""
+def require_battery_telemetry(
+    cfg: Any, drone: str | None, ckpt: Any, sidecar_cells: int | None = None
+) -> int:
+    """A v2 checkpoint needs the pack reading: ``battery`` in the telemetry stream and a cell
+    count, the sidecar's ``obs_schema.battery.cells`` when present (it must equal the profile's
+    ``power.cells``), else the profile's. Returns the cell count."""
     tel = cfg.get("telemetry") or {}
     stream = tel.get("stream_format") or []
     if tel.get("replay_csv") is None and "battery" not in stream:
@@ -715,9 +738,17 @@ def require_battery_telemetry(cfg: Any, drone: str | None, ckpt: Any) -> int:
             "battery block (enable Battery in Liftoff's TelemetryConfiguration.json StreamFormat)"
         )
     cells = battery_cells(drone)
+    if sidecar_cells is not None:
+        if cells is not None and int(sidecar_cells) != cells:
+            raise TeacherSchemaError(
+                f"{ckpt}: obs_schema.battery.cells {sidecar_cells} != drone profile {drone!r} "
+                f"power.cells {cells}"
+            )
+        return int(sidecar_cells)
     if cells is None:
         raise TeacherSchemaError(
-            f"{ckpt} is teacher-obs v2 (battery): drone profile {drone!r} has no power.cells"
+            f"{ckpt} is teacher-obs v2 (battery): no obs_schema.battery.cells and drone profile "
+            f"{drone!r} has no power.cells"
         )
     return cells
 
