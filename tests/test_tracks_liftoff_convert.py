@@ -50,6 +50,7 @@ from drone_fly.tracks.liftoff import (
     convert_liftoff,
     is_nonsolid_item,
     item_primitives,
+    passage_bottom_z,
     scene_primitives,
 )
 from drone_fly.tracks.liftoff_extract.transforms import contains_point, qmul, qrot, reach
@@ -433,9 +434,16 @@ def test_unsupported_and_synthetic_spawns(hall, field):
     assert "spawn-unsupported" in hall.meta["flags"]
     np.testing.assert_allclose(hall.frame.origin, M @ np.array([0.0, 0.0, -5.0]), atol=1e-9)
     assert field.spawn_synthetic and "synthetic-spawn" in field.meta["flags"]
-    # 3 m behind passage 0, facing passage 1
+    # 3 m behind passage 0, facing passage 1; v4: on passage 0's BOTTOM (the ground), not at
+    # its centre height
     p0 = field.frame.to_contract_point(field.passages[0].center)
-    np.testing.assert_allclose(field.spawn_contract, p0 - np.array([3.0, 0.0, 0.0]), atol=1e-9)
+    bottom = np.array([*field.passages[0].center[:2], passage_bottom_z(field.passages[0])])
+    bottom_z = float(field.frame.to_contract_point(bottom)[2])
+    assert bottom_z < p0[2]
+    assert field.spawn_contract[2] == pytest.approx(bottom_z, abs=1e-9)
+    np.testing.assert_allclose(
+        field.spawn_contract, [p0[0] - 3.0, p0[1], bottom_z], atol=1e-9
+    )
 
 
 def test_spawn_support_window(props):

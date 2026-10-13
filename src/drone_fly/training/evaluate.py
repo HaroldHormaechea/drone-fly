@@ -59,7 +59,7 @@ def load_teacher(ckpt: Path, device: Any) -> tuple[Any, dict[str, Any]]:
 
     from drone_fly.controller.mlp_teacher import MLPTeacher
     from drone_fly.sim.action import read_sidecar
-    from drone_fly.sim.teacher_obs import DIM, NAME, VERSION
+    from drone_fly.sim.teacher_obs import NAME, VERSIONS, dim
     from drone_fly.tracks.catalogue import TrackDataError
     from drone_fly.tracks.liftoff import CONVERSION_VERSION
 
@@ -67,10 +67,11 @@ def load_teacher(ckpt: Path, device: Any) -> tuple[Any, dict[str, Any]]:
     if side is None:
         raise TrackDataError(f"{ckpt}: no sidecar (not a teacher checkpoint)")
     sch = side.get("obs_schema") or {}
-    if (sch.get("name"), sch.get("version"), sch.get("dim")) != (NAME, VERSION, DIM):
+    ver = sch.get("version")
+    if sch.get("name") != NAME or ver not in VERSIONS or sch.get("dim") != dim(ver):
         raise TrackDataError(
-            f"{ckpt}: unknown observation schema {sch.get('name')} v{sch.get('version')} "
-            f"(this build knows {NAME} v{VERSION}, {DIM} values)"
+            f"{ckpt}: unknown observation schema {sch.get('name')} v{ver} "
+            f"(this build knows {NAME} v{', v'.join(map(str, VERSIONS))})"
         )
     conv = side.get("course_conversion") or {}
     if conv.get("version") != CONVERSION_VERSION:
@@ -298,6 +299,7 @@ def evaluate_teacher(
             sub = ids[s : s + batch]
             env = build_teacher_env(cfg, profile, dev, pool, n_envs=len(sub), seed=seed + s,
                                     episode_log=False, **_mode_env(cfg, mode))  # fmt: skip
+            env.obs_version = int(side["obs_schema"]["version"])  # the checkpoint's schema
             torch.manual_seed(seed + s)
             r = run_episodes(actor, env, sub, max_total)
             for key, v in r.items():

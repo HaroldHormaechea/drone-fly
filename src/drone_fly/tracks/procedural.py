@@ -8,8 +8,9 @@ Obstacle HORIZONTAL sizes are multiplied by the course's mean aperture ratio (ma
 so they keep their size relative to the gates (scaling them by ``scale`` made 35-66 m blocks);
 vertical sizes follow ``scale`` like the heights. Gates become square ``opening`` passages facing
 their (already travel-oriented) yaw; pillars become vertical capsules (half-length = the pillar
-half-height, a conservative cap) and boxes axis-aligned boxes; every obstacle is also on the harness list (the
-max-half-extent rule applies). The start is on the ground: the support is the floor plane z = 0.
+half-height, a conservative cap) and boxes axis-aligned boxes; every obstacle is also on the
+harness list (the max-half-extent rule applies). The start is on the ground: the support is the
+floor plane z = 0.
 
 The ``spec`` keys (``tracks/procedural.yaml``): ``seed_base``, ``pool_size``, ``ng: [lo, hi)``,
 ``laps: [lo, hi)``, ``tier`` (``tractable`` / ``full``; recorded only), ``tunnels``,

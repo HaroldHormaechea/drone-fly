@@ -7,7 +7,7 @@ source: liftoff-xml
 root: artifacts/harness/trackdata
 scenes_root: null
 world_scale: 1.0
-conversion_version: 3
+conversion_version: 4
 scanned: '2026-10-13'
 split:
   method: 'map-hash-greedy: held-out, then val, to round(ratio*N) tracks + 2 maps'
@@ -294,7 +294,7 @@ entries:
     circuit: true
     openings: 0
     volumes: 9
-    route_length_m: 942.16
+    route_length_m: 943.06
     spacing_m:
       min: 30.29
       median: 33.73
@@ -308,8 +308,8 @@ entries:
     harness_overflow: 0
     harness_candidates: 103
     primitives: 262
-    cells: 5139
-    cell_overflow: 31
+    cells: 5295
+    cell_overflow: 30
     sheared: 0
     mesh_flagged: 31
     unknown_items: 0
@@ -2522,7 +2522,7 @@ entries:
     circuit: true
     openings: 19
     volumes: 0
-    route_length_m: 966.48
+    route_length_m: 966.56
     spacing_m:
       min: 7.56
       median: 15.53
@@ -2536,8 +2536,8 @@ entries:
     harness_overflow: 0
     harness_candidates: 146
     primitives: 566
-    cells: 4202
-    cell_overflow: 2050
+    cells: 4185
+    cell_overflow: 2046
     sheared: 0
     mesh_flagged: 0
     unknown_items: 0
@@ -3324,7 +3324,7 @@ entries:
     circuit: true
     openings: 2
     volumes: 28
-    route_length_m: 2463.08
+    route_length_m: 2463.3
     spacing_m:
       min: 9.5
       median: 26.24
@@ -3337,9 +3337,9 @@ entries:
     harness_list: 34
     harness_overflow: 0
     harness_candidates: 34
-    primitives: 8249
-    cells: 15500
-    cell_overflow: 6127
+    primitives: 8213
+    cells: 15416
+    cell_overflow: 6128
     sheared: 0
     mesh_flagged: 1
     unknown_items: 0
@@ -3907,7 +3907,7 @@ entries:
     circuit: false
     openings: 17
     volumes: 0
-    route_length_m: 524.05
+    route_length_m: 524.26
     spacing_m:
       min: 21.63
       median: 33.12
@@ -3921,15 +3921,15 @@ entries:
     harness_overflow: 0
     harness_candidates: 202
     primitives: 471
-    cells: 8468
-    cell_overflow: 939
+    cells: 8503
+    cell_overflow: 948
     sheared: 0
     mesh_flagged: 28
     unknown_items: 0
     solid_in_opening: 0
     spawn: synthetic
     spawn_support_offset_m: null
-    time_limit_s: 141.01
+    time_limit_s: 141.06
   flags:
   - no-scene
   - spawn-unsupported

@@ -34,7 +34,14 @@ from drone_fly.sim.pool import (
     obstacle_candidates,
     support_top,
 )
-from drone_fly.sim.teacher_obs import DIM, GATES_AHEAD, N_OBSTACLES, OBS_RANGE_M
+from drone_fly.sim.teacher_obs import (
+    FULL_CELL_V,
+    GATES_AHEAD,
+    N_OBSTACLES,
+    OBS_RANGE_M,
+    VERSION,
+    dim,
+)
 
 _F = np.float32
 
@@ -89,8 +96,15 @@ def build_teacher_obs(
     *,
     contract: Any = None,
     harness_course: Course | None = None,
+    battery: tuple[float, float] | None = None,
+    version: int = VERSION,
 ) -> np.ndarray:
-    """The 148-value observation of one drone (see :mod:`drone_fly.sim.teacher_obs`)."""
+    """The ``teacher-obs`` observation of one drone (see :mod:`drone_fly.sim.teacher_obs`).
+
+    ``version`` 1 gives the 148 values; 2 (default) appends ``battery`` = ``(charge,
+    volts_per_cell)`` exactly as :func:`battery_from_telemetry` builds it from Liftoff's
+    telemetry (a full pack, ``(1.0, 4.2)``, when ``None``).
+    """
     pos = np.asarray(state["pos"], np.float64)
     vel = np.asarray(state["vel"], np.float64)
     R = quat_to_matrix(np.asarray(state["quat"], np.float64))
@@ -121,6 +135,20 @@ def build_teacher_obs(
     parts.append(np.array([pos[2] - max(fh, top if top is not None else -math.inf)]))
     parts.append(np.asarray(prev_action, np.float64).reshape(4))
     parts.append(np.array([max(0.0, float(arm_remaining_s))]))
+    if version >= 2:
+        bat = battery if battery is not None else (1.0, FULL_CELL_V)
+        parts.append(np.asarray(bat, np.float64))
     out = np.concatenate(parts).astype(_F)
-    assert out.shape == (DIM,)
+    assert out.shape == (dim(version),)
     return out
+
+
+def battery_from_telemetry(
+    batt_charge: float, batt_volts: float, cells: int
+) -> tuple[float, float]:
+    """The ``teacher-obs`` v2 battery block from Liftoff telemetry.
+
+    ``(batt_charge, batt_volts / cells)``; ``cells`` is the drone profile's ``power.cells`` (3 for
+    the gremlin micro).
+    """
+    return float(batt_charge), float(batt_volts) / int(cells)

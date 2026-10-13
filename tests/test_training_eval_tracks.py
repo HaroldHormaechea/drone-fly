@@ -141,7 +141,7 @@ def test_track_summary_maps_outcomes_crossings_and_times():
     assert s["lap_time_s"] == pytest.approx(np.mean([2.0, 2.0, 2.0]))  # ct[2]-ct[0], ct[4]-ct[2]
     assert s["full_time_s"] == pytest.approx(4.0)
     assert s["outcomes"] == {"floor": 0.25, "collision": 0.25, "out-of-bounds": 0.0,
-                             "timeout": 0.25, "completed": 0.25}  # fmt: skip
+                             "timeout": 0.25, "completed": 0.25, "power_loss": 0.0}  # fmt: skip
     assert s["unfinished"] == 1 and s["stats"]["passages"] == 2
 
 

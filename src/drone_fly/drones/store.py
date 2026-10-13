@@ -29,6 +29,7 @@ KEY_ORDER = (
     "analog",
     "nominal",
     "randomization",
+    "power",
 )
 
 

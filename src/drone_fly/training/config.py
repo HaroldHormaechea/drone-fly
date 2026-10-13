@@ -57,6 +57,8 @@ TOP_KEYS = (
 TEACHER_IGNORED = ("course", "curriculum", "k1_path")
 ACTOR_KINDS = ("k1-reservoir-aug", "mlp-teacher")
 TEACHER_OBS = "teacher-obs-v1"
+#: ``obs`` value -> ``teacher-obs`` schema version (v2 adds the battery block).
+TEACHER_OBS_VERSIONS = {"teacher-obs-v1": 1, "teacher-obs-v2": 2}
 
 
 class TrainConfigError(HarnessConfigError):
@@ -291,6 +293,8 @@ class TracksConfig:
     root: str | None = None
     scenes_root: str | None = None
     conversion: dict[str, Any] = field(default_factory=dict)
+    #: Training-only course augmentation (``tracks.augment``): ``{mirror: bool, scales: [..]}``.
+    augment: dict[str, Any] = field(default_factory=dict)
 
     def conversion_dict(self) -> dict[str, Any]:
         return {
@@ -326,11 +330,16 @@ class TeacherConfig:
     episode_log_capacity: int = 262144
     raw: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
+    @property
+    def obs_version(self) -> int:
+        return TEACHER_OBS_VERSIONS[self.obs]
+
     def __post_init__(self) -> None:
         if self.actor.kind not in ACTOR_KINDS:
             raise TrainConfigError(f"unknown actor.kind {self.actor.kind!r} ({ACTOR_KINDS})")
-        if self.obs != TEACHER_OBS:
-            raise TrainConfigError(f"obs must be {TEACHER_OBS!r}, got {self.obs!r}")
+        if self.obs not in TEACHER_OBS_VERSIONS:
+            known = sorted(TEACHER_OBS_VERSIONS)
+            raise TrainConfigError(f"obs must be one of {known}, got {self.obs!r}")
         if self.action.version != 2:
             raise TrainConfigError("the teacher uses action contract v2")
         if self.n_envs < 1 or self.budget <= 0:
