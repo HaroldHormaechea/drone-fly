@@ -1001,7 +1001,8 @@ def _deltas_scorer(monkeypatch, rows, cam, masks=None):
         seen["gates"].append([dict(g) for g in gates])
         hit = {"detected": True, "position_error_rel": 0.1}
         # the eval rule: centre in the image and not under a mask
-        scored = [dict(hit) for g in gates if g["center_in_image"] and not g.get("center_masked")]
+        scored = [{**hit, "cls": g["cls"]} for g in gates
+                  if g["center_in_image"] and not g.get("center_masked")]  # fmt: skip
         return {"scored": scored, "false_detections": []}
 
     monkeypatch.setattr(gate_learned, "LearnedGateEstimator", Est)
@@ -1043,12 +1044,14 @@ def test_score_with_deltas(monkeypatch):
     principal = np.array([cam.cx, cam.cy]) * s.geometry[3]
     plain = s.score(net, data, batch_size=2)
     zero = s.score(net, data, batch_size=2, deltas={0: 0.0, 1: 0.0}, principal=principal)
-    assert plain == zero == {"n": 3, "detection_rate": 1.0, "position_error_rel_median": 0.1}
+    assert plain == zero == {"n": 3, "detection_rate": 1.0, "position_error_rel_median": 0.1,
+                             "per_class": {"arch": {"n": 3, "detection_rate": 1.0}}}  # fmt: skip
     assert np.allclose(seen["quats"][2], seen["quats"][0])  # delta 0: the same attitude
     seen["quats"].clear()
     seen["gates"].clear()
     rolled = s.score(net, data, batch_size=2, deltas={0: 90.0, 1: -40.0}, principal=principal)
     assert rolled["n"] == 2  # the edge gate rolled out of the frame: no longer scored
+    assert rolled["per_class"] == {"arch": {"n": 2, "detection_rate": 1.0}}
     (g0, g1) = seen["gates"]
     assert [g["center_in_image"] for g in g0] == [True, False]
     assert [g["center_in_image"] for g in g1] == [True, False]  # unseen stays unseen
