@@ -8,7 +8,9 @@
   capture raises :class:`TrackLeakageError` - it is never silently filtered.
 * **Refusals** (with a reason, the capture is left out): no / invalid ``meta.json`` (no catalogue
   id), alignment not verified, a track with unknown items (gate coverage), no labels, labels made
-  with another gate table.
+  with another gate table, and a **non-preset camera on a val map** (``preset_uptilt_deg``; ADR
+  0010: another drone's recordings, e.g. the Borrum 180 X at uptilt 30, add view diversity on train
+  maps only - selection and held-out evaluation stay on the deployed drone's camera).
 * **Protected windows.** Frames inside a held-out window recorded by ``--protect-holdout-of``
   weights (default v1) are never loaded; the window is recorded so the new weights keep it held
   out (``detector_noise.heldout_window``, the Infinity Loop regression in ``eval --compare``).
@@ -69,6 +71,15 @@ class TrackLeakageError(HarnessConfigError):
 def models_root() -> Path:
     root = find_repo_root()
     return (root if root is not None else Path.cwd()) / "artifacts" / "harness" / "liftoff"
+
+
+#: uptilt difference (deg) still counted as the preset camera (the 20.03 drone file vs 20 preset)
+CAMERA_TOL_DEG = 0.5
+
+
+def same_camera(meta: dict[str, Any], preset_uptilt_deg: float) -> bool:
+    """A capture's camera is the preset's (uptilt within :data:`CAMERA_TOL_DEG`). Pure."""
+    return abs(float(meta["camera"]["uptilt_deg"]) - float(preset_uptilt_deg)) <= CAMERA_TOL_DEG
 
 
 def labels_dir_for(capture_dir: Path, meta: dict[str, Any] | None) -> Path | None:
@@ -233,6 +244,7 @@ def assemble(
     telemetry_cfg: dict[str, Any] | None = None,
     include_selection_in_train: bool = False,
     params: dict[str, Any] | None = None,
+    preset_uptilt_deg: float | None = None,
 ) -> Dataset:
     """Assemble the dataset (see the module docstring). ``protect`` is a weights ``meta``."""
     from drone_fly.harness.offline.capture import load_capture
@@ -270,6 +282,16 @@ def assemble(
             )
         dc = DatasetCapture(d.name, d, meta, labels_dir_for(d, meta), None)
         caps.append(dc)
+        if (
+            split == "val"
+            and preset_uptilt_deg is not None
+            and not same_camera(meta, preset_uptilt_deg)
+        ):
+            dc.reason = (
+                f"camera uptilt {meta['camera']['uptilt_deg']:g} is not the preset's "
+                f"{preset_uptilt_deg:g}: other cameras are for train maps only"
+            )
+            continue
         if not meta["alignment"].get("verified"):
             dc.reason = "alignment not verified (run `harness captures verify`)"
             continue

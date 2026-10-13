@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -624,6 +625,9 @@ def run_heldout_eval(
     est, cfg = gdg.build_estimator(wpath, config=config, preset=preset, device=device)
     meta = est.meta or {}
     trained = trained_capture_names(meta)
+    from drone_fly.harness.offline.gate_dataset import same_camera
+
+    preset_uptilt = float(cfg.section("camera")["uptilt_deg"])
     dirs = resolve_captures([str(c) for c in captures]) if captures else iter_capture_dirs()
     chosen = []
     for d in dirs:
@@ -636,6 +640,15 @@ def run_heldout_eval(
             raise HarnessConfigError(
                 f"the weights trained or selected on capture {d.name}: it cannot be scored"
             )
+        if not same_camera(m, preset_uptilt):
+            msg = (
+                f"capture {d.name} uses camera uptilt {m['camera']['uptilt_deg']:g}, not the "
+                f"preset's {preset_uptilt:g}: evaluation stays on the deployed camera"
+            )
+            if captures:
+                raise HarnessConfigError(msg)
+            logging.getLogger(__name__).warning("%s; skipped", msg)
+            continue
         chosen.append((d, m))
     if not chosen:
         raise HarnessConfigError(f"no labelled capture on a {split} map to score")

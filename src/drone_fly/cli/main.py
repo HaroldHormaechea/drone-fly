@@ -22,6 +22,7 @@
     drone-fly harness captures record --track <catalogue-id> [--max-s N] [--fps 10] [--port]
     drone-fly harness captures replay --recording <name> [--max-s N] [--fps 10]
                           [--strategy auto|A|B|C] [--allow-pending-camera]
+                          --browser-pos ENV,RACE,ROW
     drone-fly harness captures inventory [--dir <Recordings>] [--json out] [--trackdata-root]
                           [--no-pose]
     drone-fly harness captures verify <dir> [--search-lag] [--search-uptilt] [--trackdata-root]
@@ -367,6 +368,20 @@ def _cmd_captures_record(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _browser_pos(text: str | None) -> tuple[int | None, int | None, int] | None:
+    """``ENV,RACE,ROW`` (0-based; ``-`` keeps that filter) -> a tuple."""
+    if not text:
+        return None
+    parts = text.split(",")
+    if len(parts) != 3:
+        raise HarnessConfigError(f"--browser-pos must be ENV,RACE,ROW, got {text!r}")
+    try:
+        env, race = (None if v.strip() == "-" else int(v) for v in parts[:2])
+        return env, race, int(parts[2])
+    except ValueError as exc:
+        raise HarnessConfigError(f"--browser-pos must be integers or '-', got {text!r}") from exc
+
+
 def _cmd_captures_replay(args: argparse.Namespace) -> int:
     from drone_fly.harness.liftoff.recorder import record_replay
 
@@ -380,6 +395,7 @@ def _cmd_captures_replay(args: argparse.Namespace) -> int:
         trackdata_root=args.trackdata_root,
         preset=args.preset or "liftoff",
         allow_pending_camera=args.allow_pending_camera,
+        browser_pos=_browser_pos(args.browser_pos),
     )
     print(json.dumps(res, indent=2))
     print(f"capture: {out}")
@@ -505,6 +521,7 @@ def _cmd_gates_dataset_report(args: argparse.Namespace) -> int:
         frame_stride=args.frame_stride,
         max_frames_per_capture=args.max_frames_per_capture,
         telemetry_cfg=cfg.section("telemetry"),
+        preset_uptilt_deg=float(cfg.section("camera")["uptilt_deg"]),
     )
     rep = gd.dataset_report(ds, heldout_rows)
     print(gd.report_summary(rep))
@@ -969,6 +986,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep.add_argument("--fps", type=float, default=10.0)
     p_rep.add_argument("--port", type=int, default=9001)
     p_rep.add_argument("--strategy", choices=("auto", "A", "B", "C"), default="auto")
+    p_rep.add_argument("--browser-pos", help="ENV,RACE,ROW: replay-browser dropdown / list "
+                       "indices, 0-based ('-' keeps a filter)")  # fmt: skip
     p_rep.add_argument("--dir", help="Recordings folder (default %%USERPROFILE%%\\AppData\\...)")
     p_rep.add_argument("--trackdata-root", help="trackdata root (verify)")
     p_rep.add_argument("--allow-pending-camera", action="store_true",

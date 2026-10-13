@@ -164,6 +164,34 @@ misses are `pnp_range`); beyond 15 m most misses are no centre peak at all (52 o
 (keypoint-heatmap refinement) targets the first, more and nearer data the second. No scene cache:
 `occluded` is not available on this capture.
 
+### 7. Replay capture (P1, measured live 2026-10-13)
+
+- **No telemetry during replay** (0 datagrams in 46 s on 127.0.0.1:9001): strategy B - frames +
+  the recording's XML pose, aligned by `captures verify` - is the capture method. The Play click
+  is the frame clock's origin (verify found -0.02 s / 0.00 s).
+- **The replay renders the recording's own drone camera** (uptilt from its `Blueprint/camera/angle`;
+  FOV is the global setting, 120 deg). `meta.json` takes the recording's uptilt.
+- **The P1 gate passed** on `04 - Infinity Loop - 01_16_606 - 2026-09-09` (preset camera):
+  margin 1.52; clock +-0.5 s 1.09 / 1.01; uptilt +-3 deg 1.35 / 1.40 (above 1.25, rejected by the
+  camera peak rule: the peak is within one step of the recorded uptilt). Strategy B is trusted with
+  both rules.
+- **Replay browser driving.** The browser's dropdown and list entries are text the driver cannot
+  read (no OCR), so `captures replay --browser-pos ENV,RACE,ROW` takes the operator's indices; a
+  wrong pick replays another flight and fails `verify`. Every step is checked on screen (browser
+  panel, the paused playback bar, the bar changing after Play).
+- **Other drones' recordings: train maps only (decision, team lead, 2026-10-13).** The 93 Borrum
+  180 X recordings (uptilt 30) verify with their own camera (margin 1.51, peak uptilt 29). They are
+  valid training data: the detector works from the image, the intrinsics are the same (global
+  FOV), and labels and PnP use the per-capture camera, so they add map and view diversity. The
+  deployed drone is the uptilt-20 small drone, so model selection and held-out evaluation stay on
+  its camera: the inventory marks such recordings `train-only` on train maps and `no` elsewhere,
+  `captures replay` refuses them on val / held-out maps, `gate_dataset.assemble` refuses a
+  non-preset-uptilt capture on a val map, and `eval --split held-out` skips (or, named explicitly,
+  refuses) one. They are captured after all preset-camera recordings, at most 4 per train map,
+  favouring maps with few preset captures.
+- **Gate classes.** A capture whose track has no class of the gate-type table (most non-arena
+  maps today) cannot be verified until P3 grows the table; it is captured now and verified then.
+
 ## Results
 
-Pending (P0b checkpoint 9, P1-P6).
+Pending (P1 bulk captures, P2-P6).

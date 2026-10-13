@@ -64,7 +64,7 @@ class CaptureRecorder:
     """Record UDP telemetry and/or screen frames into ``out_dir`` (see the module docstring).
 
     ``grab`` returns a BGR ``uint8`` image or ``None``; default: an mss/dxcam screen grabber of
-    ``monitor``. ``sock`` is a bound UDP socket (default: ``0.0.0.0:port``).
+    ``monitor``. ``sock`` is a bound UDP socket (default: ``127.0.0.1:port``, as the harness).
     """
 
     def __init__(
@@ -108,7 +108,7 @@ class CaptureRecorder:
         if self.telemetry:
             if self._sock is None:
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.bind(("0.0.0.0", self.port))
+                s.bind(("127.0.0.1", self.port))  # as the harness; 0.0.0.0 trips the firewall
                 self._sock = s
             self._sock.settimeout(0.2)
             self._spawn(self._telemetry_loop, "capture-udp")
@@ -343,9 +343,11 @@ def write_pose_capture(
 
 #: The AC3 capture strategy: "A" (UDP telemetry streams during replay playback), "B" (frames +
 #: the recording XML pose, aligned by `captures verify`) or "C" (neither: manual fallback only).
-#: P0a found a 10 Hz pose in every recording, so B is available; whether A holds is measured in P1.
+#: P0a found a 10 Hz pose in every recording; P1 (AC1b) measured no UDP during replay: B.
 REPLAY_STRATEGY = "B"
-#: Extra masks for the replay HUD (FrameMasks entries); PLACEHOLDER until P1 measures them.
+#: Extra masks for the replay HUD on top of the preset's (MEASURED 2026-10-13: none needed). The
+#: replay shows the live OSD (ALT/SPD, stick widgets) plus a "<pilot> - <time>" label at
+#: x 2280-2540, y 524-554, inside the preset's ghost_list mask; the playback bar hides in play.
 REPLAY_HUD_MASKS: list = []
 
 MANUAL_FALLBACK = """\
@@ -412,13 +414,18 @@ def record_replay(
     trackdata_root: str | Path | None = None,
     preset: str | None = "liftoff",
     allow_pending_camera: bool = False,
+    browser_pos: tuple[int | None, int | None, int] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     """``captures replay`` (AC3): play a stored recording in Liftoff and capture it.
+
+    ``browser_pos`` = ``(environment index, race index, list row)`` in the replay browser
+    (:func:`~drone_fly.harness.liftoff.ui_replay.select_recording`; None keeps a filter). A wrong
+    pick fails ``captures verify`` (the replayed pose does not match the frames).
 
     Strategy A records frames + UDP; B records frames and rebuilds the pose from the recording XML
     (:func:`write_pose_capture`); C refuses with the manual fallback. The capture's ``meta.json``
     links the catalogue entry and the recording (name + sha256); ``captures verify --search-lag``
-    then sets ``verified``. Positions of the replay menu must have been measured (P1).
+    then sets ``verified``.
     """
     from datetime import date
 
@@ -444,21 +451,39 @@ def record_replay(
     cfg = load_config("liftoff", None, preset=preset)
     cam = cfg.section("camera")
     if rec.uptilt_deg is None or abs(rec.uptilt_deg - float(cam["uptilt_deg"])) > rc.UPTILT_TOL_DEG:
+        if entry.get("split") != "train":
+            raise HarnessConfigError(
+                f"recording {rec.name!r} uses another drone/camera ({rec.drone}, uptilt "
+                f"{rec.uptilt_deg}) on a {entry.get('split')} map: val / held-out captures stay "
+                "on the preset camera (ADR 0010)"
+            )
         if not allow_pending_camera:
             raise HarnessConfigError(
                 f"recording {rec.name!r} uses another drone/camera ({rec.drone}, uptilt "
-                f"{rec.uptilt_deg}): pending AC1b; pass --allow-pending-camera to try it"
+                f"{rec.uptilt_deg}): train maps only; pass --allow-pending-camera to capture it"
             )
-    ui_replay.require_measured()  # before touching the game
+    if browser_pos is None:
+        raise HarnessConfigError(
+            "pass --browser-pos ENV,RACE,ROW: the replay browser's dropdown / list indices of the "
+            "recording (the driver cannot read the entries' text)"
+        )
     root = Path(captures_root) if captures_root else ci.captures_root()
     out = ci.next_session_dir(root, entry["map"], date.today().isoformat(), "replay")
     duration = rec.duration_s + 2.0
     limit = duration if max_s is None else min(max_s, duration)
-    ui_replay.start_replay(rec.name, rec.mode_folder, expect_telemetry=strat == "A")
-    t_play = time.time()
+    out.mkdir(parents=True, exist_ok=True)
+    env_i, race_i, row = browser_pos
+    ui_replay.ensure_running()
+    ui_replay.open_replays()
+    ui_replay.select_recording(env_i, race_i, row, str(out / "browser.png"))
+    recorder = CaptureRecorder(out, port=port, fps=fps, telemetry=strat == "A")
+    recorder.start()  # frames before Play have no pose and are dropped when loading
     try:
-        stats = CaptureRecorder(out, port=port, fps=fps, telemetry=strat == "A").run(limit)
+        t_play = ui_replay.play()
+        while time.time() - t_play < limit:
+            time.sleep(0.5)
     finally:
+        stats = recorder.stop()
         ui_replay.stop_to_menu()
     if strat == "B":
         write_pose_capture(out, rec, t0_frame_s=t_play)

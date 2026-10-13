@@ -98,37 +98,66 @@ unmatched (`Current flight*`); completeness 110 complete / 60 incomplete by laps
 cover 17 maps, including the held-out maps HangarC03, MinusTwo and ThePit and the val maps
 AutumnFields, Rustline and Surtur.
 
-## AC1b. Replay playback (live, P1)
+## AC1b. Replay playback (measured live 2026-10-13, P1)
 
-Pending: the datagram count / rate during one replay, the telemetry-vs-XML time fit (if A), the
-frame mapping measured with `captures verify`, the camera mode and how to force FPV, the replay HUD
-masks, and whether FOV / uptilt follow the recording or the current settings. **P1 gate:** the
-alignment margin is rechecked with `captures verify --calibrate` on the first replay capture before
-strategy B is trusted (ADR 0010 §4).
+**The replay browser.** Main menu -> TOOLS -> REPLAY -> the Replay card opens it: three filter
+dropdowns (Game mode, Environment, Race), the matching recordings as a list with tick boxes (up to
+5 ticked replay together as ghosts) and Replay / Back. The Environment entries are not in
+alphabetical order; the Race entries are in race-number order. A replay loads **paused** at
+00:00:000; a playback bar (time, rewind, Play, fast-forward, speed) starts it and hides while it
+plays. At the end the last frame stays; Esc opens a pause menu (Resume / Options / Replay Selection
+/ Quit); Replay Selection -> Confirm returns to the browser with the filters kept and the ticks
+cleared. Positions: `harness/liftoff/ui_replay.py` (`POINTS`, `BOXES`).
 
-## AC3. Replay capture: `drone-fly harness captures replay` (menu positions pending P1)
+**Telemetry during replay: none.** With the recorder listening on 127.0.0.1:9001 (as the harness)
+through 46 s of playback, 0 datagrams arrived. Strategy A is out; captures use **strategy B**
+(frames + the recording's XML pose). No telemetry-vs-XML time fit applies.
 
-`drone-fly harness captures replay --recording <name> [--max-s N] [--fps 10] [--strategy
-auto|A|B|C] [--allow-pending-camera]` plays a stored recording in Liftoff and captures it:
+**Frame mapping.** The replay starts at the recording's first state when Play is clicked:
+`captures verify` found the pose-to-frame offset at -0.02 s and 0.00 s on the first two replays
+(the Play click's wall time is the frame clock origin).
+
+**Camera.** A replay renders the FPV view of the **recording's own drone camera**, not the current
+drone's: a Borrum 180 X recording (camera angle 30) verifies with uptilt 30 (camera-check peak 29,
+one step) and the view is visibly pitched up; a Test small drone recording (20.03) peaks at 19.03.
+The field of view is the global video setting (peak 120 deg in both). No camera key is needed: the
+replay opens in FPV. `meta.json` therefore takes the uptilt from the recording (`camera.source:
+recording`).
+
+**HUD.** The replay shows the live OSD (ALT / SPD, stick widgets) and a `<pilot> - <time>` label
+at the right edge (x 2280-2540, y 524-554), which lies inside the preset's `ghost_list` mask: no
+extra replay masks are needed.
+
+**P1 gate (ADR 0010 §4): passed** on the first replay capture (`04 - Infinity Loop - 01_16_606 -
+2026-09-09`, preset camera): correct pose margin 1.52; clock +-0.5 s 1.09 / 1.01; uptilt +-3 deg
+1.35 / 1.40, which the camera check rejects (its peak stays within one step of the recorded
+uptilt). Strategy B is used for the bulk captures.
+
+## AC3. Replay capture: `drone-fly harness captures replay`
+
+`drone-fly harness captures replay --recording <name> --browser-pos ENV,RACE,ROW [--max-s N]
+[--fps 10] [--allow-pending-camera]` plays a stored recording in Liftoff and captures it:
 
 1. checks the recording (catalogue match; the preset camera, else `pending-camera` is refused
    unless `--allow-pending-camera`);
 2. drives the menus (`harness/liftoff/ui_replay.py`): Liftoff running -> replay browser -> the
-   recording -> Play -> FPV camera, each step verified by a pixel probe (or telemetry for strategy
-   A); a failed step aborts with a screenshot under `artifacts/harness/liftoff/reports/ui-failures/`;
-3. records frames (and UDP telemetry under strategy A) into
-   `artifacts/harness/captures/<Map>/<map>-<date>-replay-<NN>/` (`harness/liftoff/recorder.py`);
-4. under strategy B rebuilds the pose from the recording XML on the frame clock (resampled to
-   100 Hz, velocity by finite difference, gyro 0) as `telemetry.csv` + a run-layout `frames.csv`, so
-   `load_capture` reads it unchanged;
+   Environment and Race dropdown entries and the list row given by `--browser-pos` (0-based; `-`
+   keeps a filter) -> Replay -> Play, each step verified on screen; the ticked browser is saved as
+   `browser.png` in the capture; a failed step aborts with a screenshot under
+   `artifacts/harness/liftoff/reports/ui-failures/`. The driver cannot read the entries' text, so
+   the indices come from the operator (a `harness ui shot` of the browser); a wrong pick replays
+   another flight, whose pose then fails `captures verify`;
+3. records frames into `artifacts/harness/captures/<Map>/<map>-<date>-replay-<NN>/` for the
+   recording's duration (`harness/liftoff/recorder.py`), then returns to the browser;
+4. rebuilds the pose from the recording XML on the frame clock (resampled to 100 Hz, velocity by
+   finite difference, gyro 0) as `telemetry.csv` + a run-layout `frames.csv`, so `load_capture`
+   reads it unchanged;
 5. writes `meta.json` (`source: replay`, the recording name + sha256 + origin, the camera uptilt
-   from the recording, `pose_source`) and runs `captures verify --search-lag`; exit 0 only when
-   verified. Strategy C prints the manual fallback below and exits with a config error.
+   from the recording, `pose_source: recording-xml`) and runs `captures verify --search-lag`;
+   exit 0 only when verified. `--strategy C` prints the manual fallback below.
 
-The default strategy is **B** (P0a: every recording has a 10 Hz pose). **The replay-menu positions,
-screen probes and the camera key are placeholders**: until P1 measures them with
-`drone-fly harness ui shot` at 2560x1080, the command refuses before touching the game. The replay
-HUD masks are also measured in P1.
+A capture whose track has no gate of the gate-type table cannot be verified yet (`no gate of the
+gate-type table`): it waits for P3, which grows the table for the captured tracks.
 
 ## Capture layout and `meta.json`
 

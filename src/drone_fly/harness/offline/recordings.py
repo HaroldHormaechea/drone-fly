@@ -25,10 +25,11 @@ only when exactly one entry uses that track.
 ``unknown`` only when none applies (no race / no catalogue match / no track files and no capture).
 
 **Camera.** Each recording names its drone and camera (``droneConfiguration/Blueprint/camera``:
-``id`` and ``angle`` = the uptilt); the field of view is not stored. A recording whose uptilt
-differs from the preset camera's by more than :data:`UPTILT_TOL_DEG` (e.g. the Borrum 180 at 30 deg
-vs the preset's 20) is ``pending-camera``: usable only once AC1b shows which camera replay renders
-and ``captures verify`` accepts it.
+``id`` and ``angle`` = the uptilt); the field of view is not stored. Replay renders the recording's
+own camera (AC1b, P1). A recording whose uptilt differs from the preset camera's by more than
+:data:`UPTILT_TOL_DEG` (e.g. the Borrum 180 at 30 deg vs the preset's 20) is ``train-only`` on a
+train map (captured with its own uptilt in ``meta.json``) and ``no`` on a val / held-out map:
+model selection and evaluation stay on the deployed drone's camera (ADR 0010).
 
 **Source.** ``ai-attempt`` when the name matches the liftoff-episodes pattern
 ``<MapName>-model-<model>-attempt-<n>`` (:data:`AI_ATTEMPT_RE`), otherwise ``user``.
@@ -386,11 +387,17 @@ def inventory(
             cap, reason = "no", "no pose states"
         elif entry.get("status") not in (None, "ok"):
             cap, reason = "no", f"catalogue entry status {entry.get('status')}"
-        elif not same_cam:
-            cap = "pending-camera"
+        elif not same_cam and entry.get("split") != "train":
+            cap = "no"
             reason = (
-                f"different drone/camera ({rec.drone}, {rec.camera_id}, uptilt "
-                f"{rec.uptilt_deg} vs preset {preset_uptilt_deg:g}): needs AC1b + verify"
+                f"different drone/camera ({rec.drone}, uptilt {rec.uptilt_deg}) on a "
+                f"{entry.get('split')} map: selection and evaluation stay on the preset camera"
+            )
+        elif not same_cam:
+            cap = "train-only"
+            reason = (
+                f"different drone/camera ({rec.drone}, {rec.camera_id}, uptilt {rec.uptilt_deg} vs "
+                f"preset {preset_uptilt_deg:g}): train maps only, captured with its own uptilt"
             )
         else:
             cap, reason = "yes", None

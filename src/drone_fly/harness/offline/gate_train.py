@@ -790,6 +790,7 @@ def train_multi(
         telemetry_cfg=cfg.section("telemetry"),
         include_selection_in_train=deploy,
         params=params,
+        preset_uptilt_deg=float(cfg.section("camera")["uptilt_deg"]),
     )
     for c in ds.refused:
         log.warning("capture %s refused: %s", c.name, c.reason)
