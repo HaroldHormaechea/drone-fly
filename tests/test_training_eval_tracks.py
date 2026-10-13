@@ -5,6 +5,8 @@
   the scene strata, and per track: completion, gates passed (count / fraction), per-passage and
   per-lap success, lap / race times, outcome shares, stats, flags and scene status.
 * Deterministic: the same seed gives the same report.
+* Each checkpoint is evaluated at its own ``teacher-obs`` version: a v1 run at 148 values, a v2
+  run (power model on) at 150.
 * ``track_summary`` maps outcomes / crossings / times exactly (synthetic results).
 * Refused: an unknown observation schema, another conversion version, a changed conversion
   fingerprint, a non-mlp-teacher actor, a checkpoint without a sidecar.
@@ -51,6 +53,32 @@ def run(lib, tmp_path_factory):
     return res.run.path
 
 
+@pytest.fixture(scope="module")
+def run_v2(lib, tmp_path_factory):
+    from drone_fly.training.ppo import train_teacher
+
+    base = tmp_path_factory.mktemp("evalrun-v2")
+    with pytest.MonkeyPatch.context() as mp:
+        use_library(mp, lib)
+        cfg = load_teacher_config(write_teacher_config(lib, base / "t.yaml", obs="teacher-obs-v2",
+                                                       plant={"power": True}))  # fmt: skip
+        res = train_teacher(cfg, drones.load(cfg.drone), run_root=base / "runs", run_id="e2",
+                            max_iterations=1)  # fmt: skip
+    return res.run.path
+
+
+def _spy_obs_dims(monkeypatch):
+    seen = []
+    real = evaluate.run_episodes
+
+    def spy(actor, env, *a, **kw):
+        seen.append((env.obs_version, int(env.teacher_obs().shape[1]), actor.obs_dim))
+        return real(actor, env, *a, **kw)
+
+    monkeypatch.setattr(evaluate, "run_episodes", spy)
+    return seen
+
+
 @pytest.fixture
 def library(lib, monkeypatch):
     use_library(monkeypatch, lib)
@@ -90,6 +118,24 @@ def test_report_shape_and_files(run, library):
     md = (d / "train.md").read_text("utf-8")
     assert "# Teacher evaluation: train" in md and "## randomized" in md and "## nominal" in md
     assert "fake-desert-02-v2" in md and "counting mode: **randomized**" in md
+
+
+def test_v1_checkpoint_evaluates_at_148(run, library, monkeypatch):
+    seen = _spy_obs_dims(monkeypatch)
+    res = _eval(run, episodes=1, write=False)
+    assert res["obs_schema"] == "teacher-obs v1"
+    assert seen and set(seen) == {(1, 148, 148)}
+
+
+def test_v2_checkpoint_evaluates_at_150(run_v2, library, monkeypatch):
+    _, side = evaluate.load_teacher(run_v2 / "checkpoints" / "teacher.pt", "cpu")
+    assert (side["obs_schema"]["version"], side["obs_schema"]["dim"]) == (2, 150)
+    seen = _spy_obs_dims(monkeypatch)
+    res = _eval(run_v2, episodes=1, write=False)
+    assert res["obs_schema"] == "teacher-obs v2"
+    assert seen and set(seen) == {(2, 150, 150)}
+    for m in res["modes"].values():
+        assert m["tracks"] == 4
 
 
 def test_held_out_report_and_unconvertible_entries(run, library):
@@ -181,6 +227,7 @@ def _edit(ck, fn):
         (lambda s: s["obs_schema"].update(version=2), "unknown observation schema"),
         (lambda s: s["obs_schema"].update(name="other"), "unknown observation schema"),
         (lambda s: s["obs_schema"].update(dim=150), "unknown observation schema"),
+        (lambda s: s["obs_schema"].update(version=3, dim=152), "unknown observation schema"),
         (lambda s: s.pop("obs_schema"), "unknown observation schema"),
         (lambda s: s["course_conversion"].update(version=1), "course conversion v1"),
         (lambda s: s.update(actor="k1-reservoir-aug"), "only mlp-teacher"),
