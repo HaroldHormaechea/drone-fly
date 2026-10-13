@@ -78,6 +78,26 @@ to the frame clock and time-aligned by `captures verify`) is available for every
 A (UDP telemetry streaming during replay) is measured live in P1. Strategy C (neither) is ruled out
 by this inspection.
 
+## AC2. The inventory: `drone-fly harness captures inventory`
+
+`drone-fly harness captures inventory [--dir <Recordings>] [--json <out>] [--trackdata-root <dir>]
+[--no-pose]` lists every recording (read-only) with its mode folder, map, duration, source
+(`ai-attempt` for the liftoff-episodes `-model-<m>-attempt-<n>` names, else `user`), catalogue match
+(track + race uuid, else a unique track uuid for FreeFlight, else map + display name, else
+`unmatched`), split, completeness (`laps`, else `pose` through the pass rule, else a capture's
+`meta.json`; `unknown` only when none applies), drone, camera id and uptilt, and **capturable**:
+
+- `yes` - matched, has pose states, the preset camera (uptilt within 0.5 deg of the preset's);
+- `pending-camera` - a different drone / camera (the Borrum 180 X at uptilt 30): usable only after
+  AC1b shows which camera replay renders and `captures verify` accepts it at that uptilt;
+- `no` - with the reason (no catalogue match, no pose states, a catalogue entry that is not ok).
+
+First run (2026-10-13, 182 recordings): 170 matched by uuid, 9 FreeFlight by track uuid, 3
+unmatched (`Current flight*`); completeness 110 complete / 60 incomplete by laps, 12 unknown
+(FreeFlight / StuntMode, no race). Capturable: **86 yes**, 93 pending-camera, 3 no. The `yes` rows
+cover 17 maps, including the held-out maps HangarC03, MinusTwo and ThePit and the val maps
+AutumnFields, Rustline and Surtur.
+
 ## AC1b. Replay playback (live, P1)
 
 Pending: the datagram count / rate during one replay, the telemetry-vs-XML time fit (if A), the

@@ -19,6 +19,8 @@
     drone-fly harness label --capture <dir> --track <xml> [--race] [--props] [--preset] [--out]
                           [--preview N] [--lag-ms]
     drone-fly harness captures register <dir> --track <catalogue-id> [--trackdata-root] [--force]
+    drone-fly harness captures inventory [--dir <Recordings>] [--json out] [--trackdata-root]
+                          [--no-pose]
     drone-fly harness captures verify <dir> [--search-lag] [--search-uptilt] [--trackdata-root]
                           [--no-write] [--calibrate]
     drone-fly harness gates train (--captures <dir|glob|name>... | --all-captures) [--split-source]
@@ -342,6 +344,23 @@ def _cmd_captures_register(args: argparse.Namespace) -> int:
     print(f"completeness: {c['status']} ({c['source']}: {c.get('passed')}/{c.get('required')})")
     print(f"capture sha256: {capture_sha256(args.dir)}")
     print("alignment: unverified (run `drone-fly harness captures verify`)")
+    return EXIT_OK
+
+
+def _cmd_captures_inventory(args: argparse.Namespace) -> int:
+    from drone_fly.harness.offline.recordings import inventory, inventory_table
+
+    rows = inventory(
+        args.dir,
+        trackdata_root=args.trackdata_root,
+        pose_completeness=not args.no_pose,
+    )
+    print(inventory_table(rows))
+    if args.json:
+        Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.json).write_text(json.dumps([r.as_dict() for r in rows], indent=2),
+                                   encoding="utf-8")  # fmt: skip
+        print(f"inventory: {args.json}")
     return EXIT_OK
 
 
@@ -897,6 +916,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_reg.add_argument("--force", action="store_true", help="rewrite an existing meta.json")
     _common(p_reg)
     p_reg.set_defaults(func=_cmd_captures_register)
+    p_inv = csub.add_parser("inventory", help="list Liftoff's stored recordings (read-only)")
+    p_inv.add_argument("--dir", help="Recordings folder (default %%USERPROFILE%%\\AppData\\...)")
+    p_inv.add_argument("--json", help="write the rows as JSON here")
+    p_inv.add_argument("--trackdata-root", help="trackdata root (pose completeness)")
+    p_inv.add_argument("--no-pose", action="store_true", help="skip pose-based completeness")
+    p_inv.set_defaults(func=_cmd_captures_inventory)
     p_ver = csub.add_parser("verify", help="projection alignment: lag, camera, verified flag")
     p_ver.add_argument("dir", help="capture folder with meta.json")
     p_ver.add_argument("--search-lag", action="store_true", help="search the time offset +-1.5 s")
