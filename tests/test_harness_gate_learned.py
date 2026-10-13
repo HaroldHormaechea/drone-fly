@@ -341,7 +341,7 @@ def test_from_config_loads_validates_and_warms_up(tmp_path):
     assert isinstance(est, LearnedGateEstimator)
     assert est.weights_path == w and est.device == "cpu" and est.fp16 is False
     assert est.input_width == 128 and est.score_threshold == pytest.approx(0.4)
-    assert est.meta["purpose"] == "evaluate" and est.table.classes == ["inflatable_arch"]
+    assert est.meta["purpose"] == "evaluate" and est.table.classes == TABLE.classes
     assert est.default_aperture == pytest.approx(3.69 / 4.0)  # world_scale 4
     assert est.inference_s is None  # warm-up timing is not reported
 

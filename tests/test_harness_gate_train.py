@@ -157,7 +157,12 @@ def test_train_gates_cpu_smoke_writes_weights_and_log(labelled, tmp_path, monkey
     assert len(log["history"]) == 3 and log["chosen_epoch"] == meta["chosen_epoch"]
     assert all(h["val_loss"] is not None for h in log["history"])
     # metadata the estimator and eval rely on
-    assert meta["classes"] == ["inflatable_arch"] and meta["num_keypoints"] == 10
+    from drone_fly.harness.config import load_config
+    from drone_fly.harness.gate_types import GateTypeTable
+
+    table = GateTypeTable.from_config(load_config("liftoff", preset=PRESET).data["gate_types"])
+    assert meta["classes"] == table.classes and meta["num_keypoints"] == table.max_keypoints
+    assert meta["gate_types_hash"] == table.hash()  # UC71 P3: the 11-class preset table
     assert meta["backbone"] == "tiny-cnn" and meta["input_width"] == 128
     assert meta["purpose"] == "evaluate" and meta["select"] == "best-val"
     split = meta["splits"]["cap"]

@@ -53,9 +53,10 @@ def lib(tmp_path_factory):
 
 def test_the_packaged_file_resolves_with_bottom_and_family():
     t = load_gate_types_file(PACKAGED)
-    assert [e["class"] for e in t["gate_types"]] == ["inflatable_arch"]
+    assert t["gate_types"][0]["class"] == "inflatable_arch" and len(t["gate_types"]) == 11
     assert t["not_gates"] == []
     table = GateTypeTable.from_config(t["gate_types"], require_bottom=True)
+    assert all(g.bottom in ("open", "closed") and g.family for g in table.types)
     arch = table["inflatable_arch"]
     assert (arch.bottom, arch.family) == ("open", "inflatable")
 
@@ -169,7 +170,9 @@ def test_track_coverage_lists_unknown_items_and_volume_only_passages(tmp_path):
     assert d["gate_classes"] == {"inflatable_arch": 1}
     assert d["items"]["FakeCrate01"] == {"kind": "other", "cls": None, "count": 2}
     assert "unknown itemIDs ['FakeHoop01']" in cov.summary()
-    assert "1 volume-only passage(s) [2]" in cov.summary()
+    assert "1 volume-only passage(s) (33 %) [2]" in cov.summary()  # with its share
+    assert not cov.covered and not cov.ok  # FakeHoop01 is unknown
+    assert cov.volume_only_share == pytest.approx(1 / 3)
 
 
 def test_track_coverage_without_not_gates_or_a_covering_gate(tmp_path):
@@ -199,7 +202,7 @@ def test_tracks_check_gate_coverage_warns_without_failing(lib, monkeypatch, caps
     assert main(["tracks", "check", "--source", "liftoff", "--gate-coverage"]) == 0
     out = capsys.readouterr().out
     assert "gates warn fake-arena-01: 8 passage(s), unknown itemIDs ['FakeGateX01', " in out
-    assert "4 volume-only passage(s) [0, 1, 2, 3]" in out  # fake-field-01's checkpoint volumes
+    assert "4 volume-only passage(s) (67 %) [0, 1, 2, 3]" in out  # fake-field-01's volumes
     assert "check: all entries convert" in out
 
 
@@ -268,3 +271,37 @@ def test_harness_label_accepts_items_listed_in_not_gates(tmp_path):
     assert meta["gate_instances"] == [
         {"instance": "1", "item_id": "InflatableArchBrandless01", "cls": "inflatable_arch"}
     ]
+
+
+def _table_config(monkeypatch, path):
+    from drone_fly.harness import config as config_mod
+
+    monkeypatch.setattr(
+        config_mod, "load_config",
+        lambda harness, user=None, overrides=None, preset=None: load_config(
+            harness, {"gate_types": str(path)}, overrides, preset
+        ),
+    )  # fmt: skip
+
+
+def test_require_gate_coverage_passes_volume_only_but_require_visible_fails_it(
+    lib, monkeypatch, capsys, tmp_path
+):
+    """UC71 P3: unknown itemIDs fail --require-gate-coverage; volume-only passages (a checkpoint
+    volume with no visible gate) are only reported, unless --require-visible-passages."""
+    use_library(monkeypatch, lib)
+    thick = {**SQUARE, "class": "thick_gate", "match": "^FakeThickGate"}
+    _table_config(monkeypatch, write_table(tmp_path / "t.yaml", [ARCH, SQUARE, thick]))
+    base = ["tracks", "check", "--source", "liftoff", "--entry", "fake-field-01"]
+    assert main([*base, "--require-gate-coverage"]) == 0  # every itemID known
+    out = capsys.readouterr().out
+    assert "gates warn fake-field-01" in out and "4 volume-only passage(s) (67 %)" in out
+    assert main([*base, "--require-visible-passages"]) == 1
+    out = capsys.readouterr().out
+    assert "gates FAIL fake-field-01" in out and "check: 1 entr(y/ies) failed" in out
+    assert main([*base, "--require-gate-coverage", "--require-visible-passages"]) == 1
+    capsys.readouterr()
+    # an unknown itemID still fails --require-gate-coverage (FakeThickGate01 without its class)
+    _table_config(monkeypatch, write_table(tmp_path / "u.yaml", [ARCH, SQUARE]))
+    assert main([*base, "--require-gate-coverage"]) == 1
+    assert "unknown itemIDs ['FakeThickGate01']" in capsys.readouterr().out

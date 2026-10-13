@@ -676,3 +676,23 @@ def test_cli_dataset_report_exit_codes(world, tmp_path, monkeypatch, capsys):
     assert main(args) == 4  # still NO-GO: no protected window present
     out = capsys.readouterr().out
     assert "FAIL protected_window" in out and "FAIL train_frames" not in out
+
+
+def test_cli_dataset_report_counts_only_verified_preset_camera_heldout_captures(
+    world, tmp_path, monkeypatch
+):
+    """UC71 P3: an unverified or other-camera held-out capture never enters the held-out counts."""
+    monkeypatch.setattr(cat, "load_catalogue", lambda path: world.catalogue)
+    unverified = world.add("FakeD", 41, verified=False)
+    borrum = world.add("FakeD", 42, uptilt=30.0)
+    cfg = tmp_path / "small.yaml"
+    cfg.write_text(json.dumps(SMALL_CAMERA), "utf-8")
+    out = tmp_path / "rep.json"
+    args = ["harness", "gates", "dataset-report", "--split-source", str(world.catalogue.path),
+            "--trackdata-root", str(world.root), "--protect-holdout-of", "none", "--config",
+            str(cfg), "--json", str(out), "--captures", str(world.a)]  # fmt: skip
+    one = count_gate_frames(world.labels(world.d).rows)
+    main([*args, str(world.d), str(unverified), str(borrum)])
+    assert json.loads(out.read_text("utf-8"))["splits"]["held-out"] == {"FakeD": one}
+    main([*args, str(unverified), str(borrum)])  # neither counts: no held-out map at all
+    assert json.loads(out.read_text("utf-8"))["splits"]["held-out"] == {}

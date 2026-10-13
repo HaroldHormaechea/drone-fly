@@ -24,6 +24,22 @@ PRESET = "liftoff"
 REPO = Path(__file__).resolve().parent.parent
 
 
+#: One measured itemID per shipped gate class (UC71 P3, gate_types/liftoff.yaml comments).
+SHIPPED_ITEMS = {
+    "InflatableArchBrandless01": "inflatable_arch",
+    "AirgateBigLiftoffWhite01": "airgate_big",
+    "AirgateLiftoffDark01": "airgate_small",
+    "GenericGate200x250cm01": "generic_gate",
+    "GenericDoubleGate200x250cm01": "generic_double_gate",
+    "MultiGPStandard7x6Frame01": "multigp_frame_7x6",
+    "MultiGPChampTrack8x10Frame01": "multigp_frame_8x10",
+    "LightGate300x220cmVarBlue01": "light_gate_300x220",
+    "ASLLightHoopGate03": "light_hoop",
+    "InflatableGateLiftoff01": "inflatable_gate",
+    "TrussGateFinishGeneric01": "truss_gate_finish",
+}
+
+
 @pytest.fixture(scope="module")
 def cfg():
     return load_config("liftoff", preset=PRESET)
@@ -163,7 +179,9 @@ def test_preset_masks_cover_the_arena_hud(cfg):
 
 def test_preset_gate_type_table(cfg):
     table = GateTypeTable.from_config(cfg.data["gate_types"])
-    assert table.classes == ["inflatable_arch"]
+    assert table.classes[0] == "inflatable_arch" and len(table) == len(SHIPPED_ITEMS)
+    for item_id, cls in SHIPPED_ITEMS.items():  # UC71 P3: the captured tracks' gate types
+        assert table.classify(item_id).cls == cls, item_id
     arch = table.classify("InflatableArchBrandless01")
     assert arch is not None and arch.cls == "inflatable_arch"
     assert arch.aperture == (6.18, 3.69) and arch.outer == (8.0, 4.46)
