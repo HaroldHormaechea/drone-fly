@@ -1,4 +1,4 @@
-"""UC70 AC3 / AC9: student-observation parity (``student-obs`` v1, 59 float32).
+"""UC70 AC3 / AC9: student-observation parity (``student-obs`` v2, 61 float32).
 
 * The live harness (:class:`~drone_fly.harness.student.StudentObservationAssembler`) and the
   training-side reference (:func:`drone_fly.student.obs_ref.build_student_obs`) are BIT-identical
@@ -8,10 +8,14 @@
   trains on) matches the reference within the stated tolerance (atol 1e-5) for random perception
   states, including unacquired targets, visible / unseen next gates, hand-overs and ages.
 * ``k`` scaling equals the harness ``WorldScale(k)``.
+* v2's battery block [59:61) is ``battery_from_telemetry(batt_charge, batt_volts, cells)`` of the
+  tick's ``FlightState.battery`` (Liftoff's raw ``(charge, volts)``); a tick without the pack
+  reading is a coverage error.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import numpy as np
@@ -19,6 +23,7 @@ import pytest
 import torch
 
 from drone_fly.harness.assembler import ContractObservationAssembler
+from drone_fly.harness.errors import PerceptionCoverageError
 from drone_fly.harness.scale import WorldScale
 from drone_fly.harness.student import StudentObservationAssembler, StudentStepState
 from drone_fly.harness.types import FlightState, FreeSpaceEstimate
@@ -32,19 +37,34 @@ from drone_fly.sim.perception import (
 from drone_fly.sim.student_obs import (
     BLOCKS,
     DIM,
+    NAME,
+    VERSION,
     HistoryState,
     block_slice,
     input_scale,
     schema,
+    teacher_battery_schema,
 )
 from drone_fly.sim.student_obs import build_student_obs as build_torch
 from drone_fly.student.obs_ref import StudentHistory, build_student_obs, scale_state
 from drone_fly.student.perception_ref import estimate_from_raw
+from drone_fly.tracks.teacher_obs_ref import battery_from_telemetry
 from tests.student_support import CAMERA
 
 K = 6.0
 LOST = 1.3
 NOMINAL = 3.69
+CELLS = 3
+
+
+def with_pack(state, charge, volts):
+    """``state`` carrying Liftoff's raw battery block ``(batt_charge, batt_volts)``."""
+    return dataclasses.replace(state, battery=np.array([charge, volts], np.float32))
+
+
+def ref_pack(state):
+    """The reference's battery argument for a state built by :func:`with_pack`."""
+    return battery_from_telemetry(float(state.battery[0]), float(state.battery[1]), CELLS)
 
 
 def rand_quat(g):
@@ -111,6 +131,7 @@ def test_harness_assembler_is_bit_identical_to_the_reference(harness_contract):
         est = estimate_from_raw(raw, pos, cfg(), K, float(now))
         state = scale_state({"pos": pos, "vel": g.uniform(-8, 8, 3), "quat": rand_quat(g),
                              "omega": g.uniform(-3, 3, 3)}, K)  # fmt: skip
+        state = with_pack(state, g.uniform(0.0, 1.0), g.uniform(9.9, 12.6))  # a draining 3S
         prev = g.uniform(-1.5, 1.5, 4).astype(np.float32)
         step.prev_action = prev.copy()
         arm = step.arm_remaining_s(float(est.stamp))
@@ -119,7 +140,7 @@ def test_harness_assembler_is_bit_identical_to_the_reference(harness_contract):
         prev_t = now
         want = build_student_obs(harness_contract, state, est, prev_action=prev,
                                  arm_remaining_s=arm, lost_timeout_s=LOST, history=hist,
-                                 dt=dt)  # fmt: skip
+                                 dt=dt, battery=ref_pack(state))  # fmt: skip
         assert extra.dtype == np.float32 and extra.shape == (DIM,)
         assert np.array_equal(extra, want), (i, np.flatnonzero(extra != want))
         assert np.array_equal(obs, extra[:12])
@@ -129,7 +150,8 @@ def test_harness_assembler_is_bit_identical_to_the_reference(harness_contract):
         )
         assert np.array_equal(extra[block_slice("harness30")], h30)
         assert np.all(extra[22:30] == 0.0)
-    with pytest.raises(ValueError, match="59 values, not 30"):
+        np.testing.assert_allclose(extra[block_slice("battery")], ref_pack(state), rtol=1e-6)
+    with pytest.raises(ValueError, match=f"{DIM} values, not 30"):
         step.clock = Clock([99.0])
         asm.assemble(state, est, None, 30)
 
@@ -142,6 +164,7 @@ def test_harness_session_reset_restarts_the_history(harness_contract):
     raw = raw_perception(g, pos, acquired=True, matched=True, hand_over=False)
     state = scale_state({"pos": pos, "vel": np.zeros(3), "quat": [1, 0, 0, 0],
                          "omega": np.zeros(3)}, K)  # fmt: skip
+    state = with_pack(state, 1.0, 12.6)
     est = estimate_from_raw(raw, pos, cfg(), K, 0.0)
     first = asm.assemble(state, est, None, DIM)[1]
     asm.assemble(state, est, None, DIM)
@@ -149,6 +172,38 @@ def test_harness_session_reset_restarts_the_history(harness_contract):
     assert step.last_now is None and not step.history.init
     again = asm.assemble(state, est, None, DIM)[1]
     assert np.array_equal(first, again)
+
+
+def test_harness_battery_block_from_liftoff_telemetry(harness_contract):
+    step = StudentStepState(clock=Clock([0.0]))
+    asm = StudentObservationAssembler(harness_contract, step, lost_timeout_s=LOST,
+                                      battery_cells=CELLS)  # fmt: skip
+    g = np.random.default_rng(5)
+    pos = np.zeros(3)
+    raw = raw_perception(g, pos, acquired=True, matched=True, hand_over=False)
+    state = scale_state({"pos": pos, "vel": np.zeros(3), "quat": [1, 0, 0, 0],
+                         "omega": np.zeros(3)}, K)  # fmt: skip
+    est = estimate_from_raw(raw, pos, cfg(), K, 0.0)
+    extra = asm.assemble(with_pack(state, 0.8, 11.7), est, None, DIM)[1]
+    assert block_slice("battery") == slice(59, 61)
+    np.testing.assert_allclose(extra[59:61], [0.8, 3.9], rtol=1e-6)  # (charge, 11.7 V / 3)
+    # the schema's input scale makes a full pack (1.0, 4.2 V per cell) read as (1, 1)
+    np.testing.assert_allclose(np.array(input_scale()[59:61]) * [1.0, 4.2], [1.0, 1.0])
+
+
+def test_harness_tick_without_the_pack_reading_is_a_coverage_error(harness_contract):
+    step = StudentStepState(clock=Clock([0.0, 0.03]))
+    asm = StudentObservationAssembler(harness_contract, step, lost_timeout_s=LOST)
+    g = np.random.default_rng(6)
+    pos = np.zeros(3)
+    raw = raw_perception(g, pos, acquired=True, matched=True, hand_over=False)
+    state = scale_state({"pos": pos, "vel": np.zeros(3), "quat": [1, 0, 0, 0],
+                         "omega": np.zeros(3)}, K)  # fmt: skip
+    assert state.battery is None
+    est = estimate_from_raw(raw, pos, cfg(), K, 0.0)
+    with pytest.raises(PerceptionCoverageError) as ei:
+        asm.assemble(state, est, None, DIM)
+    assert ei.value.missing == ("battery",)
 
 
 # ----------------------------------------------------------------------------- torch == reference
@@ -169,6 +224,8 @@ def test_torch_twin_matches_the_reference(harness_contract):
         arm = g.uniform(0, 0.5, n)
         dt = np.full(n, 0.0 if tick == 0 else 0.025)
         raws = [raw_perception(g, pos[j]) for j in range(n)]
+        packs = [battery_from_telemetry(g.uniform(0, 1), g.uniform(9.9, 12.6), CELLS)
+                 for _ in range(n)]  # fmt: skip
         F = lambda x: torch.tensor(np.asarray(x), dtype=torch.float32)  # noqa: E731
         perc = {
             "target": F([r["target"] for r in raws]),
@@ -186,7 +243,7 @@ def test_torch_twin_matches_the_reference(harness_contract):
         got = build_torch(pos=F(pos), vel=F(vel), quat=F(quat), omega=F(omega), perc=perc, k=K,
                           nominal_aperture=NOMINAL, lost_timeout_s=LOST, prev_action=F(prev),
                           arm_remaining_s=F(arm), history=th,
-                          dt=torch.tensor(dt, dtype=torch.float64))  # fmt: skip
+                          dt=torch.tensor(dt, dtype=torch.float64), battery=F(packs))  # fmt: skip
         assert got.shape == (n, DIM)
         for j in range(n):
             est = estimate_from_raw(raws[j], pos[j], cfg(), K, 0.0)
@@ -194,7 +251,8 @@ def test_torch_twin_matches_the_reference(harness_contract):
             want = build_student_obs(harness_contract, st, est,
                                      prev_action=prev[j].astype(np.float32),
                                      arm_remaining_s=float(arm[j]), lost_timeout_s=LOST,
-                                     history=rh[j], dt=float(dt[j]))  # fmt: skip
+                                     history=rh[j], dt=float(dt[j]),
+                                     battery=packs[j])  # fmt: skip
             diff = np.abs(got[j].numpy() - want)
             bad = [name for name, _ in BLOCKS if diff[block_slice(name)].max() > 1e-5]
             assert not bad, (tick, j, bad, diff.max(), raws[j]["next_mode"])
@@ -260,10 +318,17 @@ def test_torch_obs_at_k_equals_prescaled_inputs_at_k1():
 
 def test_schema_pins_the_layout_and_parameters():
     s = schema(world_scale=K, lost_timeout_s=LOST, acquire_timeout_s=3.0, camera=CAMERA)
-    assert (s["name"], s["version"], s["dim"], s["dtype"]) == ("student-obs", 1, 59, "float32")
+    assert (NAME, VERSION, DIM) == ("student-obs", 2, 61)
+    assert (s["name"], s["version"], s["dim"], s["dtype"]) == (NAME, VERSION, DIM, "float32")
     assert [(b["name"], b["width"]) for b in s["blocks"]] == list(BLOCKS)
-    assert sum(w for _, w in BLOCKS) == DIM == 59
-    assert s["blocks"][-1]["start"] + s["blocks"][-1]["width"] == 59
+    assert sum(w for _, w in BLOCKS) == DIM
+    assert s["blocks"][-1] == {"name": "battery", "start": 59, "width": 2}
+    assert s["blocks"][-1]["start"] + s["blocks"][-1]["width"] == DIM
+    # the battery block is teacher-obs v2's, plus the pack's cell count
+    assert s["battery"] == {**teacher_battery_schema(), "cells": 3}
+    assert s["battery"]["features"] == ["charge", "volts_per_cell"]
+    assert schema(world_scale=K, lost_timeout_s=LOST, acquire_timeout_s=3.0, camera=CAMERA,
+                  battery_cells=4)["battery"]["cells"] == 4  # fmt: skip
     assert s["world_scale"] == K and s["tracker"]["lost_timeout_s"] == LOST
     assert s["camera"] == {"resolution": [640, 480], "hfov_deg": 90.0, "uptilt_deg": 0.0}
     assert s["harness30"]["obstacle_vision"] == "zeros" and s["harness30"]["extra_dim"] == 30
@@ -275,3 +340,4 @@ def test_schema_pins_the_layout_and_parameters():
     }
     assert len(s["input_scale"]) == DIM == len(input_scale())
     assert block_slice("perception") == slice(44, 47) and block_slice("history") == slice(47, 59)
+    assert input_scale()[59:61] == pytest.approx([1.0, 1 / 4.2])

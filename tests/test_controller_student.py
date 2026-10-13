@@ -70,6 +70,25 @@ def test_warm_start_equals_07_on_the_legacy_columns(student, source_07):
                                atol=1e-5, rtol=1e-5)  # fmt: skip
 
 
+def test_warm_start_from_07_ignores_the_v2_battery_block(student, source_07):
+    """student-obs v2 (61 values): the battery columns start inert, so a v2 student still equals
+    07 at init whatever the pack reads."""
+    from drone_fly.sim.student_obs import block_slice
+
+    assert DIM == 61 and block_slice("battery") == slice(59, 61)
+    r = student.feat_dim
+    assert torch.all(student.k1.pi[0].weight[:, r + 59 : r + 61] == 0)
+    src, _ = source_07
+    x = obs(seed=3)
+    y = x.clone()
+    y[:, 59:61] = torch.tensor([0.05, 3.1])  # an almost empty, sagging pack
+    with torch.no_grad():
+        mx, my = student.mean_action(x), student.mean_action(y)
+        ref, _ = src.act(src.features(x[:, :12]), x[:, :LEGACY])
+    torch.testing.assert_close(mx, my)
+    torch.testing.assert_close(mx[:, 1:], ref[:, 1:], atol=1e-5, rtol=1e-5)
+
+
 def test_new_columns_encoder_and_residual_start_inert(student):
     r = student.feat_dim
     w = student.k1.pi[0].weight

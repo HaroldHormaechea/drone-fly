@@ -64,7 +64,13 @@ def test_cpu_dagger_writes_the_run_folder_and_the_student_sidecar(inputs, tmp_pa
         assert (run / rel).is_file(), rel
     assert yaml.safe_load((run / "config.yaml").read_text("utf-8"))["kind"] == "student"
     side = read_sidecar(run / "checkpoints" / "student.pt")
-    assert side["actor"] == "k1-student" and side["extra_dim"] == 59 and side["world_scale"] == 6.0
+    from drone_fly.sim.student_obs import DIM, NAME, VERSION
+
+    assert side["actor"] == "k1-student" and side["extra_dim"] == DIM and side["world_scale"] == 6.0
+    sch = side["obs_schema"]
+    assert (sch["name"], sch["version"], sch["dim"]) == (NAME, VERSION, DIM)
+    assert (NAME, VERSION, DIM) == ("student-obs", 2, 61)
+    assert sch["battery"]["cells"] == 3  # the gremlin profile's power.cells
     assert side["obs_schema"]["name"] == "student-obs" and side["obs_schema"]["world_scale"] == 6.0
     assert side["contract_version"] == 2 and side["deployable"] is True
     nm = side["noise_model"]
@@ -223,7 +229,9 @@ def test_labels_come_from_teacher_obs_and_the_student_never_sees_them(inputs, tm
     sch = read_sidecar(inputs.teacher / "checkpoints" / "teacher.pt")["obs_schema"]
     assert sch["dim"] == dim(sch["version"])
     assert seen["teacher"] == {sch["dim"]}  # the teacher run's own teacher-obs width, exact
-    assert seen["student"] == {59}  # student-obs v1 only
+    from drone_fly.sim.student_obs import DIM as STUDENT_DIM
+
+    assert seen["student"] == {STUDENT_DIM} == {61}  # student-obs v2 only
     labs = torch.cat(seen["labels"])
     assert float(labs[:, 0].min()) >= 0.0 and float(labs[:, 0].max()) <= 1.0
     assert float(labs[:, 1:].abs().max()) <= 1.0

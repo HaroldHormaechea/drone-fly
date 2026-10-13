@@ -1,20 +1,24 @@
 """UC70 AC3 / AC6 / AC8: the deployable student export and the harness's version guard.
 
-* ``train export`` writes ONE ``drone-fly-student`` v1 file (readout only, ``k1.body.layer.*``
-  stripped) + a ``.contract.json``; it round-trips through the harness loader, and a dry-run
-  ``harness run --checkpoint student.pt`` with fakes ticks the K1 student and records its meta.
+* ``train export`` writes ONE ``drone-fly-student`` v1 file (``student-obs`` v2, 61 values;
+  readout only, ``k1.body.layer.*`` stripped) + a ``.contract.json``; it round-trips through the
+  harness loader, and a dry-run ``harness run --checkpoint student.pt`` with fakes ticks the K1
+  student and records its meta.
 * The guard refuses (exit 2, before anything is armed) a schema name / version / dim, a world
   scale, a camera or an action contract this build does not deploy, with both versions named.
 * ``--extra-dim`` is rejected for a student export; a K1 student on the CPU is refused without
   ``--allow-slow-cpu``; a non-learned estimator or another camera is refused; a detector whose
   sha differs from the noise model's only warns (``noise_model_detector_mismatch``).
 * The checkpoint's world scale / tracker timeouts / free-space settings override the config.
+* ``student-obs`` v2 observes the pack: a ``telemetry.stream_format`` without ``battery`` is
+  refused (exit 2); the dry run's replayed telemetry carries a 3S pack.
 Hermetic: the fixture connectome, a synthetic run folder, a fake detector, replayed telemetry.
 """
 
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +29,7 @@ import torch
 
 from drone_fly.harness.errors import HarnessConfigError, StudentDeviceError, StudentSchemaError
 from drone_fly.harness.student import check_student_config, plan_student
+from drone_fly.sim.student_obs import DIM, NAME, VERSION
 from drone_fly.student.checkpoint import (
     FORMAT,
     FORMAT_VERSION,
@@ -66,7 +71,8 @@ def test_export_writes_one_versioned_file_with_a_sidecar(k1_export):
     assert any(k.startswith("k1.pi.") for k in state)
     validate_meta(m, out)
     assert m["deployable"] is True and m["role"] == "deployable" and m["actor"] == "k1-student"
-    assert m["obs_schema"]["name"] == "student-obs" and m["obs_schema"]["dim"] == 59
+    assert (m["obs_schema"]["name"], m["obs_schema"]["version"]) == (NAME, VERSION)
+    assert m["obs_schema"]["dim"] == DIM == 61 and m["obs_schema"]["battery"]["cells"] == 3
     assert m["world_scale"] == 6.0 and m["contract_version"] == 2
     assert m["requires"] == {"gate_estimator": "learned", "detector_sha256": "d" * 64,
                              "free_space_estimator": "none", "assume_no_obstacles": True,
@@ -89,8 +95,8 @@ def test_export_round_trips_through_the_harness_policy_loader(k1_export, harness
         plan, step, contract=SimpleNamespace(device="cpu", k1_path=harness_k1_dir)
     )
     pol.load()
-    assert pol.extra_dim == 59 and pol.contract_version == 2
-    x = np.random.default_rng(0).normal(size=59).astype(np.float32)
+    assert pol.extra_dim == DIM and pol.contract_version == 2
+    x = np.random.default_rng(0).normal(size=DIM).astype(np.float32)
     a = pol.act(x[:12], x)
     assert a.shape == (4,) and np.all(np.isfinite(a)) and np.array_equal(step.prev_action, a)
     # the same numbers as the training-side model rebuilt from the run's checkpoint
@@ -126,9 +132,15 @@ def test_export_selects_val_final_or_an_iteration(tmp_path, harness_k1_dir):
 @pytest.mark.parametrize(
     ("edit", "match"),
     [
-        (lambda m: m["obs_schema"].update(name="teacher-obs"), "teacher-obs v1 .* student-obs v1"),
-        (lambda m: m["obs_schema"].update(version=2), "student-obs v2 .* student-obs v1"),
-        (lambda m: m["obs_schema"].update(dim=70), r"\(70 values\) .* \(59 values\)"),
+        (lambda m: m["obs_schema"].update(name="teacher-obs"),
+         rf"teacher-obs v{VERSION} .* {NAME} v{VERSION}"),
+        (lambda m: m["obs_schema"].update(version=1), rf"{NAME} v1 .* {NAME} v{VERSION}"),
+        (lambda m: m["obs_schema"].update(version=1, dim=59),
+         rf"{NAME} v1 \(59 values\) .* {NAME} v{VERSION} \({DIM} values\)"),
+        (lambda m: m["obs_schema"].update(dim=70), rf"\(70 values\) .* \({DIM} values\)"),
+        (lambda m: m["obs_schema"]["battery"].update(features=["charge", "volts"]),
+         "differs.*battery"),
+        (lambda m: m["obs_schema"].pop("battery"), "differs.*battery"),
         (lambda m: m["obs_schema"].update(world_scale=4.0), "world_scale"),
         (lambda m: m["obs_schema"]["camera"].update(hfov_deg=90.0), "differs.*camera"),
         (lambda m: m["obs_schema"].update(blocks=[]), "differs.*blocks"),
@@ -210,6 +222,38 @@ def test_non_learned_estimator_and_another_camera_are_refused(k1_export):
         check_student_config(plan, _cfg(**{"camera.uptilt_deg": 30.0}), dev)
 
 
+def test_a_stream_without_battery_is_refused(k1_export):
+    plan = plan_student(k1_export[1])
+    dev = SimpleNamespace(device="cuda")
+    no_pack = ["timestamp", "position", "attitude", "velocity", "gyro", "inputs", "motor_rpm"]
+    with pytest.raises(StudentSchemaError, match="observes the battery"):
+        check_student_config(plan, _cfg(**{"telemetry.stream_format": no_pack}), dev)
+    check_student_config(plan, _cfg(**{"telemetry.stream_format": [*no_pack, "battery"]}), dev)
+
+
+def test_a_session_without_battery_telemetry_is_refused_before_ticking(
+    k1_export, harness_contract, harness_k1_dir, tmp_path, fake_learned
+):
+    from drone_fly.cli.main import EXIT_CONFIG
+    from drone_fly.harness.session import run_harness
+
+    no_pack = ["timestamp", "position", "attitude", "velocity", "gyro", "inputs"]
+    cfg = {
+        "drone": STUDENT_DRONE,
+        "parts": {"state_source": "liftoff-csv", "abort_signal": None, "frame_source": None,
+                  "focus_probe": None},
+        "telemetry": {"replay_csv": str(tmp_path / "unused.csv"), "stream_format": no_pack},
+        "gates": {"learned": {"weights": None}},
+    }  # fmt: skip
+    with pytest.raises(StudentSchemaError, match="observes the battery"):
+        run_harness("liftoff", str(k1_export[1]), None, config=cfg, preset="liftoff",
+                    k1_path=str(harness_k1_dir), device="cpu", duration_s=0.5, dry_run=True,
+                    allow_slow_cpu=True, session_dir=str(tmp_path / "s"))  # fmt: skip
+    assert not any((tmp_path / "s").rglob("ticks.jsonl"))
+    # the CLI maps a HarnessConfigError (StudentSchemaError is one) to exit 2
+    assert issubclass(StudentSchemaError, HarnessConfigError) and EXIT_CONFIG == 2
+
+
 def test_detector_sha_mismatch_only_warns(k1_export, tmp_path, caplog):
     from drone_fly.harness.student import student_meta
     from drone_fly.sim.noise_model import sha256_file
@@ -277,8 +321,11 @@ def test_dry_run_session_ticks_the_exported_student(k1_export, harness_contract,
     from tests.oracle_support import make_course, unity_sample, write_telemetry_csv
 
     course = make_course()
+    # the replayed telemetry carries Liftoff's battery block: a 3S pack at 0.8 / 11.7 V
+    pack = np.array([0.8, 11.7], np.float32)
     csv_path = write_telemetry_csv(tmp_path / "tele.csv", [
-        unity_sample(course, (0.0, 0.0, 1.0), t=0.01 * i) for i in range(300)])  # fmt: skip
+        dataclasses.replace(unity_sample(course, (0.0, 0.0, 1.0), t=0.01 * i), battery=pack)
+        for i in range(300)])  # fmt: skip
     cfg = {
         "drone": STUDENT_DRONE,
         "parts": {"state_source": "liftoff-csv", "abort_signal": None, "frame_source": None,
@@ -297,14 +344,16 @@ def test_dry_run_session_ticks_the_exported_student(k1_export, harness_contract,
     assert s.config.parts.free_space_estimator == "none"
     ticks = [json.loads(x) for x in (s.run_dir / "ticks.jsonl").read_text("utf-8").splitlines()]
     assert ticks
-    assert all(len(t["extra"]) == 59 and np.all(np.isfinite(t["extra"])) for t in ticks)
+    assert all(len(t["extra"]) == DIM and np.all(np.isfinite(t["extra"])) for t in ticks)
+    for t in ticks:
+        assert t["extra"][59:61] == pytest.approx([0.8, 3.9], rel=1e-5)  # (charge, 11.7 V / 3)
     assert ticks[0]["extra"][43] == pytest.approx(0.5)  # arm_remaining_s counted from tick 0
     assert any(t.get("command") is not None for t in ticks)
     assert s.result.ticks == len(ticks)
     meta = json.loads((s.run_dir / "meta.json").read_text("utf-8"))
     st = meta["student"]
     assert st["actor"] == "k1-student" and st["deployable"] is True
-    assert st["obs_schema"] == "student-obs v1" and st["world_scale"] == 6.0
+    assert st["obs_schema"] == f"{NAME} v{VERSION}" and st["world_scale"] == 6.0
     assert st["overrides"]["gates.lost_timeout_s"] == 1.3
     assert meta["noise_model_detector_mismatch"] is False
 
