@@ -485,6 +485,17 @@ def train_teacher(
 LINEAGE_FILE = "lineage.json"
 
 
+def _obs_schema(cfg: Any, profile: Any, schema: Any) -> dict[str, Any]:
+    """The sidecar ``obs_schema``; v2 records the pack's cell count (the harness checks it) and
+    whether the plant's power model was on."""
+    out = schema(cfg.obs_version)
+    if "battery" in out:
+        power = getattr(profile, "power", None)
+        out["battery"]["cells"] = int(power.cells) if power is not None else None
+        out["battery"]["power_model"] = bool(cfg.plant.power and power is not None)
+    return out
+
+
 def _write_lineage(run: RunDir, source: Path) -> None:
     """``lineage.json`` for ``--continue-from``: a run folder (its ``resume.pt``) or one of its
     ``teacher_it<N>.pt`` checkpoints (weights only; optimizer and RNG start fresh, and the step
@@ -602,7 +613,7 @@ def _train_teacher(
     t_build = time.time()
     pool = build_teacher_pool(cfg, "train")
     sidecar = {
-        "obs_schema": schema(cfg.obs_version),
+        "obs_schema": _obs_schema(cfg, profile, schema),
         "world_scale": float(cfg.tracks.world_scale),
         "course_conversion": conversion_record(pool, teacher_conversion(cfg)),
     }

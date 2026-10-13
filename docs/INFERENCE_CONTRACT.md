@@ -213,7 +213,8 @@ The body frame is FLU.
 **Versions.** `teacher-obs` v2 (150 values) is the current version; v1 is its first 148 values.
 The sidecar's `obs_schema.version` says which one a checkpoint takes. A harness builds the battery
 block from live telemetry with `tracks.teacher_obs_ref.battery_from_telemetry(batt_charge,
-batt_volts, cells)`, where `cells` comes from the drone profile's `power.cells`. A v2 teacher was
+batt_volts, cells)`, where `cells` comes from the drone profile's `power.cells` and is recorded in the
+sidecar as `obs_schema.battery.cells` (with `power_model: true|false`). A v2 teacher was
 trained with the plant's power model (low-voltage cutoff, thrust drop at speed); see
 `drones/<id>/sysid.md`, "Power model".
 
