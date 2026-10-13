@@ -210,24 +210,36 @@ def test_search_recovers_the_lag_and_the_uptilt(scene):
     assert len(res.grid) == 11 and len(res.grid[0]) == len(res.offsets_s) == 13
 
 
-WRONG_CAMERA_GAP = (
-    "UC71 finding (QA, CP6): on clean synthetic renders the correct camera scores margin ~2.3 "
-    "but a 10 deg hfov / uptilt error still scores 1.4-1.6 >= MARGIN_MIN 1.25 (the arch legs are "
-    "vertical, so a pitch / scale error keeps most edge points on them); the absolute margin "
-    "alone does not reject a wrong camera"
+@pytest.mark.parametrize(
+    ("hfov", "uptilt", "reason"),
+    [
+        # the check grid is +-10 hfov (5 deg steps) / +-6 uptilt (1 deg) around the meta camera:
+        # its peak lands on (or towards) the true 120 / 22
+        (HFOV - 10.0, TRUE_UPTILT_DEG, "camera off: best hfov 120 vs meta 110"),
+        (HFOV, TRUE_UPTILT_DEG - 10.0, "camera off: best uptilt 18 vs meta 12"),
+    ],
 )
-
-
-@pytest.mark.xfail(strict=True, reason=WRONG_CAMERA_GAP)
-@pytest.mark.parametrize(("hfov", "uptilt"), [(HFOV - 10.0, TRUE_UPTILT_DEG),
-                                              (HFOV, TRUE_UPTILT_DEG - 10.0)])  # fmt: skip
-def test_a_wrong_camera_is_not_verified(scene, tmp_path, hfov, uptilt):
+def test_a_wrong_camera_is_not_verified(scene, tmp_path, hfov, uptilt, reason):
+    """QA CP6 finding, fixed in CP6b: the margin alone passed a 10 deg camera error (1.4-1.6)."""
     right = run(fresh(scene, "good", tmp_path / "r"), scene, search_lag=True)
     wrong = run(fresh(scene, "good", tmp_path / "w", hfov=hfov, uptilt=uptilt), scene,
                 search_lag=True)  # fmt: skip
-    assert right.verified
-    assert wrong.margin < right.margin
-    assert not wrong.verified and wrong.reasons
+    assert right.verified and right.camera["ok"] and right.camera["reasons"] == []
+    assert wrong.margin >= MARGIN_MIN  # the margin alone would pass it ...
+    assert wrong.reasons == [reason] and not wrong.verified  # ... the camera check does not
+    assert wrong.camera["ok"] is False and wrong.camera["reasons"] == [reason]
+    assert (wrong.camera["meta_hfov_deg"], wrong.camera["meta_uptilt_deg"]) == (hfov, uptilt)
+    block = wrong.alignment_block()
+    assert block["camera_check"]["ok"] is False and block["reasons"] == [reason]
+
+
+def test_the_camera_check_needs_the_margin_and_can_be_disabled(scene, tmp_path):
+    noise = run(scene.noise, scene, search_lag=False)
+    assert noise.margin < MARGIN_MIN and noise.camera is None  # no camera signal below it
+    cap = fresh(scene, "good", tmp_path, hfov=HFOV - 10.0)
+    off = run(cap, scene, search_lag=True, check_camera=False)
+    assert off.camera is None and off.verified  # the pre-CP6b verdict
+    assert off.alignment_block()["camera_check"] is None
 
 
 def test_a_wrong_camera_scores_below_the_right_one(scene, tmp_path):
@@ -285,10 +297,26 @@ def test_verify_capture_writes_the_alignment_block(scene, tmp_path):
     assert a["verified"] is True and a["margin"] >= MARGIN_MIN
     assert a["lag_ms"] == pytest.approx(-1000.0 * a["offset_s"], abs=0.1)
     assert a["frames"] >= MIN_FRAMES and a["reasons"] == [] and str(MARGIN_MIN) in a["method"]
+    assert a["camera_check"]["ok"] is True
+    assert meta["camera"]["uptilt_deg"] == TRUE_UPTILT_DEG and meta["camera"]["source"] == "test"
     before = (cap / "meta.json").read_text("utf-8")
     verify_capture(cap, write=False, config=SMALL_CAMERA, track_xml=scene.track,
                    search_lag=False, **FAST)  # fmt: skip
     assert (cap / "meta.json").read_text("utf-8") == before
+
+
+def test_verify_with_search_uptilt_records_the_measured_uptilt(scene, tmp_path):
+    cap = fresh(scene, "good", tmp_path, uptilt=PRESET_UPTILT_DEG)  # 2 deg off
+    res = verify_capture(cap, config=SMALL_CAMERA, track_xml=scene.track, search_lag=True,
+                         search_uptilt=True, **FAST)  # fmt: skip
+    assert res.verified and res.uptilt_deg == TRUE_UPTILT_DEG
+    meta = read_meta(cap)
+    assert meta["camera"]["uptilt_deg"] == TRUE_UPTILT_DEG and meta["camera"]["source"] == "align"
+    # without --search-uptilt the meta camera is never rewritten
+    cap2 = fresh(scene, "good", tmp_path / "b", uptilt=PRESET_UPTILT_DEG)
+    verify_capture(cap2, config=SMALL_CAMERA, track_xml=scene.track, search_lag=True, **FAST)
+    assert read_meta(cap2)["camera"] == {**meta["camera"], "uptilt_deg": PRESET_UPTILT_DEG,
+                                         "source": "test"}  # fmt: skip
 
 
 def test_align_needs_a_track_without_meta(scene, tmp_path):
