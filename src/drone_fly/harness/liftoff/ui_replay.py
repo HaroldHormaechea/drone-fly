@@ -160,10 +160,10 @@ def _pick_dropdown(field: str, index: int) -> None:
     _click_point(field, settle_s=0.8)
     notches, offset = ui_driver.dropdown_scroll(index)
     fx, fy = POINTS[field]
+    # as Quick Setup: reference coordinates; positive scrolls up (to the top), negative down
+    ui_driver._scroll(fx, fy + 90, 30)
     if notches:
-        x, y = ui_driver.dropdown_row_xy((fx, fy), 0)
-        ui_driver._scroll(x, y, notches)
-        time.sleep(0.6)
+        ui_driver._scroll(fx, fy + 90, -notches)
     x, y = ui_driver.dropdown_row_xy((fx, fy), offset)
     ui_driver._click_xy(x, y, 1.0)
 
