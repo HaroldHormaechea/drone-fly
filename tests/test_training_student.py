@@ -54,6 +54,7 @@ def test_cpu_dagger_writes_the_run_folder_and_the_student_sidecar(inputs, tmp_pa
     from drone_fly.sim.noise_model import sha256_file
 
     res = train(inputs, tmp_path)
+    k = tiny_student_config(inputs.k07).student.world_scale  # the shipped config's k (ADR 0009)
     run = res.run.path
     assert res.iterations == 2 and res.steps == 2 * 4 * 8
     assert run.parent.name == "liftoff-gremlin-micro"  # artifacts/training/<drone>/<run-id>/
@@ -66,12 +67,12 @@ def test_cpu_dagger_writes_the_run_folder_and_the_student_sidecar(inputs, tmp_pa
     side = read_sidecar(run / "checkpoints" / "student.pt")
     from drone_fly.sim.student_obs import DIM, NAME, VERSION
 
-    assert side["actor"] == "k1-student" and side["extra_dim"] == DIM and side["world_scale"] == 6.0
+    assert side["actor"] == "k1-student" and side["extra_dim"] == DIM and side["world_scale"] == k
     sch = side["obs_schema"]
     assert (sch["name"], sch["version"], sch["dim"]) == (NAME, VERSION, DIM)
     assert (NAME, VERSION, DIM) == ("student-obs", 2, 61)
     assert sch["battery"]["cells"] == 3  # the gremlin profile's power.cells
-    assert side["obs_schema"]["name"] == "student-obs" and side["obs_schema"]["world_scale"] == 6.0
+    assert side["obs_schema"]["name"] == "student-obs" and side["obs_schema"]["world_scale"] == k
     assert side["contract_version"] == 2 and side["deployable"] is True
     nm = side["noise_model"]
     assert nm["sha256"] == sha256_file(inputs.noise) and nm["detector_id"] == "synthetic-deadbeef"

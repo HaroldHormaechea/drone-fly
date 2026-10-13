@@ -21,6 +21,7 @@ from drone_fly import drones
 from drone_fly.controller.student import MLPStudent
 from drone_fly.sim.multi_course import OUTCOMES
 from drone_fly.training import distill
+from drone_fly.training.config import load_raw
 from tests.oracle_support import age_files, write_teacher_run
 from tests.student_support import (
     TRAIN_TIMING,
@@ -110,7 +111,8 @@ def test_modes_seeds_and_bounds(report):
     t = report["targets"]
     assert t["completion"] == 0.70 and t["teacher_ratio"] == 0.85
     assert t["meets_completion"] is False and t["meets_teacher_ratio"] is False
-    assert report["actor"] == "k1-student" and report["world_scale"] == 6.0
+    k = float(load_raw("student-liftoff")["student"]["world_scale"])  # the runs' k (ADR 0009)
+    assert report["actor"] == "k1-student" and report["world_scale"] == k
     assert report["selectors"] == ["liftoff:held-out"]
 
 
