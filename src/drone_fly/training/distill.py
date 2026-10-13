@@ -170,7 +170,7 @@ AUTO_PIN_MAX_BYTES = 1 << 30
 def replay_pin(buf_bytes: int, pin_memory: bool | None, device: Any) -> bool:
     """Whether to pin the replay buffer: never off CUDA; ``pin_memory`` when set; else auto
     (pin only below :data:`AUTO_PIN_MAX_BYTES`)."""
-    if getattr(device, "type", str(device)) != "cuda":
+    if str(getattr(device, "type", device)).split(":")[0] != "cuda":
         return False
     if pin_memory is None:
         return int(buf_bytes) < AUTO_PIN_MAX_BYTES
