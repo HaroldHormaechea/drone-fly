@@ -67,6 +67,7 @@ from drone_fly.harness.gate_types import GateTypeTable
 from drone_fly.harness.liftoff.masks import FrameMasks
 from drone_fly.harness.offline.roll import (
     FALLBACK_ROLL_WEIGHTS,
+    KEEP_SIGN_P,
     LIVE_ROLL_EDGES,
     LIVE_ROLL_WEIGHTS,
     ROLL_MAX_DEG,
@@ -310,6 +311,7 @@ class RollAug:
     fallback_weights: tuple[float, ...] = FALLBACK_ROLL_WEIGHTS
     shift: float = 0.0
     fill: str = "mean"
+    keep_sign_p: float = KEEP_SIGN_P
 
     @property
     def enabled(self) -> bool:
@@ -325,6 +327,7 @@ class RollAug:
             and 0 <= self.p <= 1
             and 0 <= self.shift <= 0.05
             and self.fill in FILLS
+            and 0 <= self.keep_sign_p <= 1
         )
         for w in (self.weights, self.fallback_weights):
             wa = np.asarray(w, float)
@@ -345,7 +348,8 @@ class RollAug:
         on = rng.random(n) < self.p
         if on.any():
             r = np.full(n, np.nan) if frame_roll is None else np.asarray(frame_roll, float)
-            d = sample_target_deltas(rng, r[on], self.edges, self.weights, self.fallback_weights)
+            d = sample_target_deltas(rng, r[on], self.edges, self.weights, self.fallback_weights,
+                                     keep_sign_p=self.keep_sign_p)  # fmt: skip
             ang[on] = d
         sh = (
             rng.uniform(-1.0, 1.0, (n, 2)) * self.shift * width
@@ -418,10 +422,14 @@ def _sample_theta(m: np.ndarray, width: int, height: int) -> np.ndarray:
 def _augment_roll(
     torch: Any, x: Any, gates: list[list[dict]], rng: np.random.Generator, aug: RollAug,
     center: np.ndarray, height: int, frame_roll: np.ndarray | None = None,
+    applied: list[float] | None = None,
 ) -> tuple[Any, list[list[dict]]]:  # fmt: skip
-    """:class:`RollAug` on a ``(B, 3, H, W)`` [0, 255] batch (GPU ``grid_sample``) + its targets."""
+    """:class:`RollAug` on a ``(B, 3, H, W)`` [0, 255] batch (GPU ``grid_sample``) + its targets;
+    the applied rotations (deg, non-zero only) are appended to ``applied``."""
     b, _, h, w = x.shape
     ang, sh = aug.sample(rng, b, w, frame_roll)
+    if applied is not None:
+        applied.extend(float(a) for a in ang if a != 0)
     moved = np.flatnonzero((ang != 0) | (np.abs(sh).sum(axis=1) > 0))
     if not len(moved):
         return x, gates
@@ -1127,7 +1135,8 @@ def train_multi(
                 ]
             if roll is not None and roll.enabled:
                 fr = None if item_roll is None else np.where(flip, -1.0, 1.0) * item_roll[idx]
-                x, gates = _augment_roll(torch, x, gates, rng, roll, principal, in_h, fr)
+                x, gates = _augment_roll(torch, x, gates, rng, roll, principal, in_h, fr,
+                                         roll_applied)  # fmt: skip
             x = _augment_colour(torch, x, rng)
         tg = [build_targets(g, out_h, out_w, len(table), table.max_keypoints) for g in gates]
         tt = {k: torch.as_tensor(np.stack([t[k] for t in tg])).to(dev) for k in tg[0]}
@@ -1153,7 +1162,9 @@ def train_multi(
     stopped_early = False
     net.train()
     t0 = time.perf_counter()
+    roll_applied: list[float] = []
     for epoch in range(1, epochs + 1):
+        roll_applied.clear()
         perm = rng.choice(train_idx, size=len(train_idx), replace=True, p=weights)
         sums: dict[str, float] = {}
         nb = 0
@@ -1204,6 +1215,19 @@ def train_multi(
             (entry.get("val_detection") or {}).get("detection_rate"),
             entry["elapsed_s"],
         )
+        if roll_applied:
+            d = np.abs(np.asarray(roll_applied))
+            ra = {
+                "n": int(len(d)),
+                "p50": float(np.median(d)),
+                "p90": float(np.percentile(d, 90)),
+                "max": float(d.max()),
+            }
+            entry["roll_applied_deg"] = ra
+            log.info(
+                "  roll |delta| p50 %.1f p90 %.1f max %.1f deg over %d images",
+                ra["p50"], ra["p90"], ra["max"], ra["n"],
+            )  # fmt: skip
         if "val_det_live_roll" in entry:
             log.info("  val_det_live_roll %.3f", entry["val_det_live_roll"]["detection_rate"])
         if "rotated_val" in entry:

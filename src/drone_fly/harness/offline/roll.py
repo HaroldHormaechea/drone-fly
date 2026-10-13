@@ -27,6 +27,11 @@ LIVE_ROLL_WEIGHTS = (0.15, 0.35, 0.40, 0.07, 0.03)
 #: Raw-angle weights over the same buckets, for a frame whose own roll is unknown.
 FALLBACK_ROLL_WEIGHTS = (0.10, 0.25, 0.35, 0.25, 0.05)
 ROLL_MAX_DEG = 135.0
+#: Chance that a target keeps the frame's own roll sign (a +60 deg frame drawn to -60 deg would turn
+#: 120 deg and lose large corners to padding; the hflip already balances left and right).
+KEEP_SIGN_P = 0.8
+#: Below this |roll| (deg) a frame counts as level: its target sign is random.
+LEVEL_DEG = 2.0
 WORLD_UP = np.array([0.0, 0.0, 1.0])  # contract frame, z up
 
 
@@ -67,16 +72,20 @@ def sample_target_deltas(
     weights: tuple[float, ...] = LIVE_ROLL_WEIGHTS,
     fallback_weights: tuple[float, ...] = FALLBACK_ROLL_WEIGHTS,
     max_deg: float = ROLL_MAX_DEG,
+    keep_sign_p: float = KEEP_SIGN_P,
 ) -> np.ndarray:
     """Rotation per frame that brings its camera roll to a target drawn from the live mix.
 
-    Target = random sign x a bucketed magnitude, clamped to ``+-max_deg``; the rotation is
-    ``target - frame_roll``. A frame with an unknown roll (NaN) gets a raw angle from
-    ``fallback_weights`` instead.
+    Target = sign x a bucketed magnitude, clamped to ``+-max_deg``; the sign is the frame's own
+    with probability ``keep_sign_p`` (random for a level frame, ``|roll| <` :data:`LEVEL_DEG`,
+    and otherwise); the rotation is ``target - frame_roll``. A frame with an unknown roll (NaN)
+    gets a raw angle from ``fallback_weights`` instead.
     """
     r = np.asarray(frame_roll, np.float64)
     n = len(r)
     sign = rng.choice([-1.0, 1.0], size=n)
+    keep = (rng.random(n) < keep_sign_p) & np.isfinite(r) & (np.abs(np.nan_to_num(r)) >= LEVEL_DEG)
+    sign = np.where(keep, np.sign(np.nan_to_num(r)), sign)
     target = np.clip(sign * sample_magnitudes(rng, n, edges, weights), -max_deg, max_deg)
     raw = rng.choice([-1.0, 1.0], size=n) * sample_magnitudes(rng, n, edges, fallback_weights)
     known = np.isfinite(r)

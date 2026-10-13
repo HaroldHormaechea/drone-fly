@@ -521,6 +521,7 @@ def _cmd_gates_train(args: argparse.Namespace) -> int:
             fallback_weights=_floats(args.aug_roll_fallback_weights, "--aug-roll-fallback-weights"),
             shift=args.aug_shift,
             fill=args.aug_roll_fill,
+            keep_sign_p=args.aug_roll_keep_sign_p,
         ).validate(),
         rotated_val=_floats(args.rotated_val, "--rotated-val") if args.rotated_val else (),
         live_roll_val=args.live_roll_val,
@@ -1103,6 +1104,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="target weight per bucket (live flight, ADR 0010)")  # fmt: skip
     p_gt.add_argument("--aug-roll-fallback-weights", default="0.10,0.25,0.35,0.25,0.05",
                       help="raw-angle weights for frames with no known roll")  # fmt: skip
+    p_gt.add_argument("--aug-roll-keep-sign-p", type=float, default=0.8,
+                      help="chance a target keeps the frame's own roll sign")  # fmt: skip
     p_gt.add_argument("--live-roll-val", action="store_true",
                       help="also report val re-rolled to the live mix")  # fmt: skip
     p_gt.add_argument("--aug-roll-fill", choices=("mean", "reflect"), default="mean",

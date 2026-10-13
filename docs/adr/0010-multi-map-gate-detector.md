@@ -361,7 +361,11 @@ The training frames are far more level than live flight (median 14 vs 35 deg; th
 flight. `RollAug` therefore brings an augmented frame (p 0.6) to a **target roll** drawn from the
 live mix - a random sign times a magnitude from 0-15 15 %, 15-35 35 %, 35-60 40 %, 60-90 7 %,
 90-135 3 % (the last a deliberate crash-and-recovery tail, the user's call), clamped to +-135 deg -
-by rotating it `target - frame_roll` about the principal point (each frame's roll comes from its
+by rotating it `target - frame_roll` about the principal point. The target keeps the frame's own roll
+sign with probability 0.8 (`keep_sign_p`; random for a level frame, |roll| < 2 deg, and otherwise):
+a fully random sign would turn a +60 deg frame to -60 deg through 120 deg and lose large corners to
+padding, while the hflip, applied first and negating the roll, already balances left and right.
+The applied |rotation| p50 / p90 / max is logged each epoch (`roll_applied_deg`) (each frame's roll comes from its
 paired attitude; a horizontally flipped frame's roll changes sign). A frame without a known roll
 gets a raw angle from 0-15 10 %, 15-35 25 %, 35-60 35 %, 60-90 25 %, 90-135 5 %. The buckets are
 recorded in `params.roll_aug`. Rotation keeps keypoint identity (no `flip_pairs`). The learned
