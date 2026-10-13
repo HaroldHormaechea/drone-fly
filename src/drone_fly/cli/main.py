@@ -484,6 +484,13 @@ def _trainable_captures(args: argparse.Namespace) -> list[Path]:
     return out
 
 
+def _floats(text: str, flag: str) -> tuple[float, ...]:
+    try:
+        return tuple(float(v) for v in text.split(","))
+    except ValueError as exc:
+        raise HarnessConfigError(f"{flag} must be comma-separated numbers, got {text!r}") from exc
+
+
 def _cmd_gates_train(args: argparse.Namespace) -> int:
     from drone_fly.harness.offline.gate_train import RollAug, train_multi
 
@@ -508,12 +515,13 @@ def _cmd_gates_train(args: argparse.Namespace) -> int:
         deploy=args.deploy,
         device=args.device,
         roll=RollAug(
-            max_deg=args.aug_roll_deg,
             p=args.aug_roll_p,
-            tail_deg=args.aug_roll_tail_deg,
-            tail_p=args.aug_roll_tail_p,
+            edges=_floats(args.aug_roll_edges, "--aug-roll-edges"),
+            weights=_floats(args.aug_roll_weights, "--aug-roll-weights"),
             shift=args.aug_shift,
-        ),
+            fill=args.aug_roll_fill,
+        ).validate(),
+        rotated_val=_floats(args.rotated_val, "--rotated-val") if args.rotated_val else (),
     )
     print(f"weights: {meta['weights']} ({meta['purpose']}, epoch {meta['chosen_epoch']})")
     if meta.get("chosen_val_detection"):
@@ -1085,13 +1093,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_gt.add_argument("--deploy", action="store_true",
                       help="retrain on train + val maps (select last) -> *-deploy.pt")  # fmt: skip
     p_gt.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
-    p_gt.add_argument("--aug-roll-deg", type=float, default=0.0,
-                      help="roll about the principal point: +-deg (0 = off, as R1)")  # fmt: skip
-    p_gt.add_argument("--aug-roll-p", type=float, default=0.6, help="share of images rolled")
-    p_gt.add_argument("--aug-roll-tail-deg", type=float, default=60.0,
-                      help="the rarer, larger roll range")  # fmt: skip
-    p_gt.add_argument("--aug-roll-tail-p", type=float, default=0.15,
-                      help="share of rolled images drawn from the tail range")  # fmt: skip
+    p_gt.add_argument("--aug-roll-p", type=float, default=0.0,
+                      help="share of images rolled (0 = off, as R1)")  # fmt: skip
+    p_gt.add_argument("--aug-roll-edges", default="0,35,90,135",
+                      help="roll bucket edges, deg, max 135 (PLACEHOLDER)")  # fmt: skip
+    p_gt.add_argument("--aug-roll-weights", default="0.6,0.3,0.1",
+                      help="one weight per bucket (PLACEHOLDER split)")  # fmt: skip
+    p_gt.add_argument("--aug-roll-fill", choices=("mean", "reflect"), default="mean",
+                      help="uncovered corners: ImageNet mean colour or reflection")  # fmt: skip
+    p_gt.add_argument("--rotated-val", help="report val detection on frames rolled by these "
+                      "angles, e.g. 0,30,60,90,135 (not used for selection)")  # fmt: skip
     p_gt.add_argument("--aug-shift", type=float, default=0.0,
                       help="random translation, fraction of the width (<= 0.05)")  # fmt: skip
     p_gt.set_defaults(func=_cmd_gates_train)
