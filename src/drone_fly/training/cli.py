@@ -692,6 +692,7 @@ def cmd_student(args: argparse.Namespace) -> int:
             max_iterations=args.max_iterations,
             k1_path=args.k1_path,
             feasibility_only=args.feasibility_only,
+            skip_feasibility=args.skip_feasibility,
             allow_gpu_contention=args.allow_gpu_contention,
         )
     except ContentionError as exc:
@@ -837,6 +838,12 @@ def add_parser(sub: Any) -> None:
     p_s.add_argument("--resume", help="run folder to resume")
     p_s.add_argument("--ppo-steps", type=float, dest="ppo_steps", help="L4 PPO fine-tune steps")
     p_s.add_argument("--feasibility-only", action="store_true", dest="feasibility_only")
+    p_s.add_argument(
+        "--skip-feasibility",
+        action="store_true",
+        dest="skip_feasibility",
+        help="don't re-run the stage (the same teacher's feasibility.json already exists)",
+    )
     p_s.add_argument("--scale-report", action="store_true", dest="scale_report",
                      help="CPU only: pick k from the train-split geometry")  # fmt: skip
     p_s.add_argument("--trackdata-root", dest="trackdata_root")
