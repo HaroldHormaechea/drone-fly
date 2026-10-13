@@ -833,6 +833,7 @@ class SelectionScorer:
         _, _, padded, scale = self.geometry
         ks = [int(k) for k in self.idx if int(k) in self.states]
         det, rel = [], []
+        per_cls: dict[str, list[bool]] = {}
         was_training = net.training
         net.eval()
         est = None
@@ -885,6 +886,7 @@ class SelectionScorer:
                     res = score_capture_frame(found, gates, WorldScale(1.0))
                     for e in res["scored"]:
                         det.append(e["detected"])
+                        per_cls.setdefault(str(e.get("cls")), []).append(e["detected"])
                         if e["detected"]:
                             rel.append(e["position_error_rel"])
         if was_training:
@@ -893,6 +895,10 @@ class SelectionScorer:
             "n": len(det),
             "detection_rate": float(np.mean(det)) if det else 0.0,
             "position_error_rel_median": float(np.median(rel)) if rel else None,
+            "per_class": {
+                c: {"n": len(v), "detection_rate": float(np.mean(v))}
+                for c, v in sorted(per_cls.items())
+            },
         }
 
     def score_rotated(
@@ -1238,6 +1244,10 @@ def train_multi(
                 "  roll |delta| p50 %.1f p90 %.1f max %.1f deg over %d images",
                 ra["p50"], ra["p90"], ra["max"], ra["n"],
             )  # fmt: skip
+        if "val_detection" in entry:
+            pc = entry["val_detection"].get("per_class") or {}
+            log.info("  val_det per class: %s", {c: round(v["detection_rate"], 3)
+                                                 for c, v in pc.items()})  # fmt: skip
         if "val_det_live_roll" in entry:
             log.info("  val_det_live_roll %.3f", entry["val_det_live_roll"]["detection_rate"])
         if "rotated_val" in entry:

@@ -533,6 +533,37 @@ def _cmd_gates_train(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _peak_rss_mb() -> float | None:
+    """This process's peak resident memory (MB), or None when the platform can't say."""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class _Counters(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [
+                (n, ctypes.c_size_t)
+                for n in ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                          "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                          "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage")
+            ]  # fmt: skip
+
+        c = _Counters()
+        c.cb = ctypes.sizeof(c)
+        k32 = ctypes.WinDLL("kernel32")
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        psapi = ctypes.WinDLL("psapi")
+        psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
+        if not psapi.GetProcessMemoryInfo(k32.GetCurrentProcess(), ctypes.byref(c), c.cb):
+            return None
+        return c.PeakWorkingSetSize / 2**20
+    try:
+        import resource
+    except ImportError:
+        return None
+    kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return kb / 2**20 if sys.platform == "darwin" else kb / 1024
+
+
 def _cmd_gates_dataset_report(args: argparse.Namespace) -> int:
     from drone_fly.harness.config import load_config
     from drone_fly.harness.gate_types import GateTypeTable
@@ -578,6 +609,15 @@ def _cmd_gates_dataset_report(args: argparse.Namespace) -> int:
     )
     rep = gd.dataset_report(ds, heldout_rows)
     print(gd.report_summary(rep))
+    if args.build_cache:
+        lw = args.input_width or int(
+            (cfg.section("gates").get("learned") or {}).get("input_width", 768)
+        )
+        _, idx = gd.build_frame_cache(ds, lw, cfg.section("camera"))
+        print(f"frame cache: {gd.cache_dir(ds, lw)} ({idx['shape'][0]} frames)")
+        peak = _peak_rss_mb()
+        if peak is not None:
+            print(f"peak RAM: {peak:.0f} MB")
     if args.json:
         Path(args.json).parent.mkdir(parents=True, exist_ok=True)
         Path(args.json).write_text(json.dumps(rep, indent=2), encoding="utf-8")
@@ -1118,6 +1158,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_gr = gsub.add_parser("dataset-report", help="in-range gate-frame counts and the G1 gate")
     _gate_inputs(p_gr)
     p_gr.add_argument("--json", help="write the report JSON here")
+    p_gr.add_argument(
+        "--build-cache",
+        action="store_true",
+        help="also build the training frame cache (CPU) for `gates train`",
+    )
+    p_gr.add_argument("--input-width", type=int, help="network input width of the cache")
     p_gr.set_defaults(func=_cmd_gates_dataset_report)
     p_gd = gsub.add_parser("draft-types", help="candidate gate_types entries from props.json")
     p_gd.add_argument("--props", required=True, help="props.json (liftoff-flight-analyzer)")

@@ -22,9 +22,11 @@
 
 The **manifest** (``data_manifest.json``) lists every capture (name, catalogue id, map, split role,
 capture sha256, counts, protected windows) and the catalogue sha256, gate-types hash, git head and
-hyper-parameters; its first 8 hex characters name the frame cache
-``artifacts/harness/liftoff/datasets/<manifest-sha8>/`` (masked + resized frames as at runtime, a
-``uint8`` memmap, so 20k frames do not need ~15 GB of RAM).
+hyper-parameters. The frame cache ``artifacts/harness/liftoff/datasets/<data-sha8>-w<width>/``
+holds the masked + resized frames as at runtime (a
+``uint8`` memmap, so 20k frames do not need ~15 GB of RAM). The cache is keyed by
+:meth:`Dataset.data_sha` (no training hyper-parameters), so ``gates dataset-report
+--build-cache`` can build it ahead of training on the CPU.
 
 :func:`dataset_report` counts in-range gate-frames (4-25 m, centre in the image, unmasked, not
 flagged occluded) by split x map x type with the 4-8 m bin separate, and :func:`g1_verdict` applies
@@ -35,6 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -169,6 +172,15 @@ class Dataset:
     def manifest_sha(self) -> str:
         m = self.manifest()
         m.pop("git_head")
+        return hashlib.sha256(json.dumps(m, sort_keys=True).encode()).hexdigest()
+
+    def data_sha(self) -> str:
+        """The manifest without the training hyper-parameters: what the frame cache depends on
+        (captures, counts, tables, frame selection), so a cache built ahead of training is
+        reused."""
+        m = self.manifest()
+        m.pop("git_head")
+        m["params"] = {k: m["params"].get(k) for k in DATA_PARAMS}
         return hashlib.sha256(json.dumps(m, sort_keys=True).encode()).hexdigest()
 
 
@@ -493,8 +505,14 @@ def report_summary(rep: dict[str, Any]) -> str:
 # ----------------------------------------------------------------------------- frame cache
 
 
+DATA_PARAMS = ("frame_stride", "max_frames_per_capture", "static_trim")
+
+
 def cache_dir(ds: Dataset, input_width: int) -> Path:
-    return models_root() / "datasets" / f"{ds.manifest_sha()[:8]}-w{input_width}"
+    return models_root() / "datasets" / f"{ds.data_sha()[:8]}-w{input_width}"
+
+
+CACHE_FLUSH_EVERY = 256  # frames between progress checkpoints of a frame-cache build
 
 
 def build_frame_cache(
@@ -502,8 +520,13 @@ def build_frame_cache(
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Masked + resized frames (as at runtime) of every item in a ``uint8`` memmap ``(N, 3, H, W)``.
 
-    Reused when ``index.json`` matches (same manifest, width and item files). All frames must share
-    one input geometry. Masks are per capture (``capture_index.camera_config``).
+    Reused when ``index.json`` matches (same width and item files). All frames must share one
+    input geometry. Masks are per capture (``capture_index.camera_config``).
+
+    The build streams each frame to ``frames.u8`` with plain file writes (one frame in RAM at a
+    time) and records ``progress.json`` every :data:`CACHE_FLUSH_EVERY` frames after flushing.
+    ``index.json`` is written last, so a cache without it is partial: a matching ``progress.json``
+    resumes it, anything else is rebuilt.
     """
     from drone_fly.harness.errors import lazy_import
     from drone_fly.harness.liftoff.gate_net import bgr_to_tensor, input_geometry, resize_images
@@ -515,34 +538,62 @@ def build_frame_cache(
     d = out or cache_dir(ds, input_width)
     files = [str(it.path) for it in ds.items]
     index_path, data_path = d / "index.json", d / "frames.u8"
+    progress_path = d / "progress.json"
     if index_path.is_file() and data_path.is_file():
         idx = json.loads(index_path.read_text(encoding="utf-8"))
         if idx.get("files") == files and idx.get("input_width") == input_width:
             shape = tuple(idx["shape"])
             return np.memmap(data_path, np.uint8, "r", shape=shape), idx
+    if not ds.items:
+        raise HarnessConfigError("the dataset has no frames")
     d.mkdir(parents=True, exist_ok=True)
+    index_path.unlink(missing_ok=True)  # stale or partial from here on
     masks_by_cap = {c.name: FrameMasks.from_config(camera_config(camera_cfg, c.meta))
                     for c in ds.used}  # fmt: skip
-    geometry = None
-    mm = None
-    for i, it in enumerate(ds.items):
-        img = load_image(it.path)
-        h, w = img.shape[:2]
-        g = input_geometry(w, h, input_width)
-        if geometry is None:
-            geometry = g
-            mm = np.memmap(data_path, np.uint8, "w+", shape=(len(ds.items), 3, g[1], g[0]))
-        elif g != geometry:
-            raise HarnessConfigError("all captures must share one frame size")
-        m = masks_by_cap.get(it.capture)
-        if m:
-            img = m.apply(img)
-        x = resize_images(bgr_to_tensor(img, "cpu"), g[0], g[1])[0]
-        mm[i] = x.round().clamp(0, 255).to(torch.uint8).numpy()
-    if mm is None:
-        raise HarnessConfigError("the dataset has no frames")
-    mm.flush()
-    idx = {"files": files, "input_width": input_width, "shape": list(mm.shape),
-           "geometry": list(geometry), "manifest_sha256": ds.manifest_sha()}  # fmt: skip
+    first = load_image(ds.items[0].path)
+    geometry = input_geometry(first.shape[1], first.shape[0], input_width)
+    del first
+    shape = (len(ds.items), 3, geometry[1], geometry[0])
+    frame_bytes = 3 * geometry[1] * geometry[0]
+    key = {"files_sha256": hashlib.sha256(json.dumps(files).encode()).hexdigest(),
+           "input_width": input_width, "shape": list(shape)}  # fmt: skip
+    done = 0
+    if progress_path.is_file() and data_path.is_file():
+        prog = json.loads(progress_path.read_text(encoding="utf-8"))
+        size_ok = data_path.stat().st_size == shape[0] * frame_bytes
+        if size_ok and {k: prog.get(k) for k in key} == key:
+            done = int(prog.get("done", 0))
+    if done == 0:
+        progress_path.unlink(missing_ok=True)
+        with open(data_path, "wb") as fh:
+            fh.truncate(shape[0] * frame_bytes)
+
+    def checkpoint(fh: Any, n: int) -> None:
+        fh.flush()
+        os.fsync(fh.fileno())
+        tmp = progress_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({**key, "done": n}), encoding="utf-8")
+        os.replace(tmp, progress_path)
+
+    with open(data_path, "r+b") as fh:
+        fh.seek(done * frame_bytes)
+        for i in range(done, shape[0]):
+            it = ds.items[i]
+            img = load_image(it.path)
+            g = input_geometry(img.shape[1], img.shape[0], input_width)
+            if g != geometry:
+                raise HarnessConfigError("all captures must share one frame size")
+            m = masks_by_cap.get(it.capture)
+            if m:
+                img = m.apply(img)
+            x = resize_images(bgr_to_tensor(img, "cpu"), g[0], g[1])[0]
+            fh.write(x.round().clamp(0, 255).to(torch.uint8).numpy().tobytes())
+            if (i + 1) % CACHE_FLUSH_EVERY == 0:
+                checkpoint(fh, i + 1)
+        checkpoint(fh, shape[0])
+    idx = {"files": files, "input_width": input_width, "shape": list(shape),
+           "geometry": list(geometry), "manifest_sha256": ds.manifest_sha(),
+           "data_sha256": ds.data_sha()}  # fmt: skip
     index_path.write_text(json.dumps(idx), encoding="utf-8")
-    return np.memmap(data_path, np.uint8, "r", shape=mm.shape), idx
+    progress_path.unlink(missing_ok=True)
+    return np.memmap(data_path, np.uint8, "r", shape=shape), idx
