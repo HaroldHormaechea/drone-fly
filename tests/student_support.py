@@ -304,3 +304,72 @@ def write_student_run(
         json.dumps({"checkpoint": "student.pt", "it": 1, "macro_completion": 0.5}), "utf-8"
     )
     return run
+
+
+# ----------------------------------------------------------------------------- tiny DAgger runs
+
+
+def write_07(path: Path, k1_path: Any) -> Path:
+    """A 07-style v1 readout (``K1ReservoirAug(30)``) on the fixture connectome."""
+    from drone_fly.controller.reservoir import K1ReservoirAug
+
+    torch.manual_seed(70)
+    src = K1ReservoirAug(30, k1_path)
+    with torch.no_grad():
+        for p in src.pi.parameters():
+            p.add_(0.1 * torch.randn_like(p))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(src.readout_state_dict(), path)
+    return path
+
+
+def tiny_student_config(warm_start: Path, *, actor: str = "k1-student", **over: Any):
+    """``student-liftoff`` shrunk for the CPU: 8 envs, procedural courses only, tiny DAgger."""
+    from drone_fly.training.config import load_raw, student_from_mapping
+
+    raw = load_raw("student-liftoff")
+    raw["n_envs"] = 8
+    raw["budget"] = 1.0e6
+    raw["device"] = "cpu"
+    raw["log_every_iters"] = 1
+    raw["checkpoint_every_s"] = 1.0e6
+    raw["tracks"] = dict(raw["tracks"], mix=[{"select": "procedural:proc-liftoff", "weight": 1.0}])
+    raw["student"] = dict(raw["student"], actor=actor, warm_start=str(warm_start))
+    raw["distill"] = dict(raw["distill"], rollout=4, updates=2, minibatch=16, buffer=200,
+                          val_every_iters=1000, val_episodes=1)  # fmt: skip
+    raw["finetune"] = dict(raw["finetune"], roll=4, epochs=1, minibatches=1)
+    for k, v in over.items():
+        if isinstance(v, dict) and isinstance(raw.get(k), dict):
+            raw[k] = {**raw[k], **v}
+        else:
+            raw[k] = v
+    return student_from_mapping(raw, validate_tracks=False)
+
+
+def tiny_pool(n: int = 2, purpose: str = "eval"):
+    """The first ``n`` procedural courses (stands in for liftoff:val / held-out)."""
+    from dataclasses import replace
+
+    from drone_fly.sim.pool import PoolGroup
+    from drone_fly.tracks.loader import build_pool
+
+    p = build_pool([{"select": "procedural:proc-liftoff"}], purpose)
+    return replace(p, courses=p.courses[:n], groups=[PoolGroup("tiny", list(range(n)), 1.0)])
+
+
+TRAIN_TIMING = {"frame_period_s": 0.03, "frame_jitter_s": 0.003, "frame_skip_p": 0.0,
+                "detection_lag_s": [0.03, 0.05], "control_hz": [28.0, 45.0]}  # fmt: skip
+
+
+def train_inputs(root: Path, k1_path: Any):
+    """A 07 readout, an idle tiny MLP teacher run and a noise model for tiny DAgger runs."""
+    from types import SimpleNamespace
+
+    from tests.oracle_support import age_files, write_teacher_run
+
+    k07 = write_07(root / "07" / "model_readout.pt", k1_path)
+    teacher = write_teacher_run(root / "runs")
+    age_files(teacher)
+    noise = write_noise_model(root / "noise_model.yaml", a=0.5, sigma_per_m=(0.02, 0.02, 0.02),
+                              timing=TRAIN_TIMING)  # fmt: skip
+    return SimpleNamespace(root=root, k07=k07, teacher=teacher, noise=noise, k1=k1_path)
