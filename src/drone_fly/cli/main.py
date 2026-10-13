@@ -17,6 +17,8 @@
     drone-fly harness label --capture <dir> --track <xml> [--race] [--props] [--preset] [--out]
                           [--preview N] [--lag-ms]
     drone-fly harness captures register <dir> --track <catalogue-id> [--trackdata-root] [--force]
+    drone-fly harness captures verify <dir> [--search-lag] [--search-uptilt] [--trackdata-root]
+                          [--no-write] [--calibrate]
     drone-fly harness train-gates --labels <dir>... [--out] [--preset] [--epochs] [--backbone]
                           [--holdout-frac 0.2 | --holdout t0:t1]
     drone-fly harness depth-fit --capture <dir> --track <xml> [--race] [--props] [--preset]
@@ -313,6 +315,27 @@ def _cmd_captures_register(args: argparse.Namespace) -> int:
     print(f"capture sha256: {capture_sha256(args.dir)}")
     print("alignment: unverified (run `drone-fly harness captures verify`)")
     return EXIT_OK
+
+
+def _cmd_captures_verify(args: argparse.Namespace) -> int:
+    from drone_fly.harness.offline import align
+
+    kw = {"config": args.config, "preset": args.preset or "liftoff",
+          "trackdata_root": args.trackdata_root, "max_frames": args.max_frames}  # fmt: skip
+    if args.calibrate:
+        rep = align.calibration_report(args.dir, **kw)
+        print(json.dumps(rep, indent=2))
+        return EXIT_OK
+    res = align.verify_capture(
+        args.dir,
+        write=not args.no_write,
+        search_lag=args.search_lag,
+        search_uptilt=args.search_uptilt,
+        **kw,
+    )
+    print(json.dumps(res.alignment_block(), indent=2))
+    print("verified" if res.verified else "NOT verified: " + "; ".join(res.reasons))
+    return EXIT_OK if res.verified else EXIT_CONFIG
 
 
 def _cmd_train_gates(args: argparse.Namespace) -> int:
@@ -718,6 +741,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_reg.add_argument("--force", action="store_true", help="rewrite an existing meta.json")
     _common(p_reg)
     p_reg.set_defaults(func=_cmd_captures_register)
+    p_ver = csub.add_parser("verify", help="projection alignment: lag, camera, verified flag")
+    p_ver.add_argument("dir", help="capture folder with meta.json")
+    p_ver.add_argument("--search-lag", action="store_true", help="search the time offset +-1.5 s")
+    p_ver.add_argument("--search-uptilt", action="store_true", help="search uptilt +-5 deg")
+    p_ver.add_argument("--trackdata-root", help="trackdata root (the capture's track XML)")
+    p_ver.add_argument("--max-frames", type=int, default=120, help="frames sampled")
+    p_ver.add_argument("--no-write", action="store_true", help="do not update meta.json")
+    p_ver.add_argument("--calibrate", action="store_true",
+                       help="print margins of the best vs deliberately wrong poses")  # fmt: skip
+    _common(p_ver)
+    p_ver.set_defaults(func=_cmd_captures_verify)
 
     p_train = hsub.add_parser("train-gates", help="train the learned gate detector on labels")
     p_train.add_argument("--labels", nargs="+", required=True, help="label folder(s)")
