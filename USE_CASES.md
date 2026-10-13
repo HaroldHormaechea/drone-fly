@@ -82,3 +82,4 @@ Statuses:
 | 70 | [use-cases/70-student-distillation-detector-noise.md](use-cases/70-student-distillation-detector-noise.md) | Deployable student distilled under a measured detector-noise model | pending | 2026-10-12 |
 | 71 | [use-cases/71-multi-map-gate-detector.md](use-cases/71-multi-map-gate-detector.md) | Gate detector generalization across Liftoff maps and gate types | pending | 2026-10-12 |
 | 72 | [use-cases/72-liftoff-eval-and-fine-tuning.md](use-cases/72-liftoff-eval-and-fine-tuning.md) | Liftoff evaluation on held-out tracks + fine-tuning from Liftoff episodes | pending | 2026-10-12 |
+| 73 | [use-cases/73-camera-obstacle-eyes-for-70-input-connectome.md](use-cases/73-camera-obstacle-eyes-for-70-input-connectome.md) | Camera-based obstacle "eyes" for the 70-input connectome (draft, needs refinement) | pending | 2026-10-14 |
