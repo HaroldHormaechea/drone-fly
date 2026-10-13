@@ -183,6 +183,7 @@ There is no in-training validation.
 | `v_ref_mps`, time limit | 4.0 m/s; 10 s + route / v_ref, at most 240 s | a priori |
 | rewards | see D8 | a priori (rebalanced before the pilot) |
 | route-start clearance | 0.3 m beyond `drone_radius_m` and above the floor | a priori (fixed after the pilot, see D9) |
+| PPO γ (run 2, power model on) | 0.999 (was 0.995) | a priori: the pack's timescale ≫ the old horizon (see D11) |
 
 The conversion rules necessarily saw every XML and prop: they decode geometry, they do not tune the
 policy. Any later change is driven by val only.
@@ -426,6 +427,31 @@ UC69's export measured 1.67 g and 2.91 g. UC69 quoted about 2.4 g, but that figu
 force, which includes drag.
 
 The rewards are unchanged: losing power ends the episode, so managing the throttle is learned.
+
+**Discount γ 0.999 (a priori).** The first run-2 attempt (`…061143Z…-INVALID-horizon`, stopped at
+about 0.3e9 steps) used γ 0.995. At 20–50 Hz that is a horizon of about 200 steps, or 4–10 s. The
+pack, though, dies about 20 s into full stick, and the persistent sag that kills it builds up
+earlier.
+
+The policy therefore converged on sprinting until the cutoff. power_loss rose from 16 % to 45 % of
+episodes, and those episodes had a higher median return (432 over 20.7 s) than completed ones (377).
+The cost of flooring it, the −10 plus all progress forfeited after the cutoff, was discounted to
+about 0.07.
+
+Cruising at 15–18 m/s lasts the whole 240 s time limit even with the worst randomized pack. That is
+enough to finish 61–62 of the 63 train tracks: only hannover-01 needs 26 m/s, which is out of reach
+under the power model and caps the train ceiling at about 98 %.
+
+γ 0.999 is a horizon of about 1000 steps, about 28 s, which matches the pack's full-stick life. The
+other remedies considered were rejected:
+- the crash penalty already equals the power_loss one;
+- a time penalty would push toward more speed;
+- there is no material alive bonus to remove;
+- the pack already outlasts the time limit at sustainable speeds;
+- sag-potential shaping is too weak inside the old horizon.
+
+Follow-up, not done in this run: timeouts are treated as true terminals in GAE. They should
+bootstrap as truncations, but they are about 0 % of outcomes.
 
 **`teacher-obs` v2.** The actor and the critic both observe the battery: 2 values at [148:150),
 `batt_charge` and `batt_volts / cells`, defined exactly as Liftoff's live telemetry provides them,

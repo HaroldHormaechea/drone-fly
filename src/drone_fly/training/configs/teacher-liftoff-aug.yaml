@@ -8,6 +8,8 @@
 #    and at 0.85x / 1.15x scale (all 6 combinations; geometry only, physics unchanged)
 #  - procedural share 0.5 (was 0.4)
 #  - checkpoints every ~1.2e8 steps (229 iterations at 8192 envs x 64) for val selection
+#  - gamma 0.999 (a priori): the pack's ~20 s full-stick timescale is far beyond gamma 0.995's
+#    ~5 s horizon; at 0.995 the policy sprinted until the cutoff (ADR 0007 D11)
 extends: teacher-liftoff
 name: teacher-liftoff-aug
 budget: 2.0e9
@@ -22,3 +24,5 @@ tracks:
     mirror: true
     scales: [0.85, 1.0, 1.15]
 checkpoint_every_iters: 229
+ppo:
+  gamma: 0.999
