@@ -335,13 +335,18 @@ def build_teacher_pool(cfg: Any, purpose: str = "train", mix: Any = None) -> Any
     """The course pool of a teacher config (``purpose="train"``: leakage guarded, AC9)."""
     from drone_fly.tracks.loader import build_pool
 
-    return build_pool(
+    pool = build_pool(
         list(mix if mix is not None else cfg.tracks.mix),
         purpose,
         conversion=teacher_conversion(cfg),
         root=cfg.tracks.root,
         scenes_root=cfg.tracks.scenes_root,
     )
+    if purpose == "train" and cfg.tracks.augment:
+        from drone_fly.tracks.augment import augment_pool
+
+        pool = augment_pool(pool, dict(cfg.tracks.augment), teacher_conversion(cfg))
+    return pool
 
 
 def build_teacher_env(
@@ -478,8 +483,37 @@ LINEAGE_FILE = "lineage.json"
 
 
 def _write_lineage(run: RunDir, source: Path) -> None:
+    """``lineage.json`` for ``--continue-from``: a run folder (its ``resume.pt``) or one of its
+    ``teacher_it<N>.pt`` checkpoints (weights only; optimizer and RNG start fresh, and the step
+    counter continues at ``N * n_envs * roll`` of the source run's config)."""
     import json
 
+    import yaml
+
+    if source.is_file():
+        ckpt = source
+        src_run = ckpt.parent.parent
+        snap = yaml.safe_load((src_run / "config.yaml").read_text(encoding="utf-8"))
+        it = int(ckpt.stem.split("_it")[1]) if "_it" in ckpt.stem else None
+        if it is None:
+            raise ValueError(f"{ckpt}: continue from a teacher_it<N>.pt (its N sets the counter)")
+        steps = it * int(snap["n_envs"]) * int(snap["ppo"]["roll"])
+        conv = None
+        side = ckpt.with_suffix(".contract.json")
+        if side.is_file():
+            conv = json.loads(side.read_text(encoding="utf-8")).get("course_conversion") or {}
+            conv = conv.get("version")
+        lineage = {
+            "continued_from": {
+                "run": src_run.name,
+                "checkpoint": str(ckpt),
+                "it": it,
+                "steps": steps,
+                "course_conversion_version": conv,
+            }
+        }
+        (run.path / LINEAGE_FILE).write_text(json.dumps(lineage, indent=2) + "\n", "utf-8")
+        return
     src_resume = source / "checkpoints" / "resume.pt"
     if not src_resume.is_file():
         src_resume = source / "resume.pt"
@@ -586,8 +620,16 @@ def _train_teacher(
     ck = _TeacherCheckpoints(run, cfg, ac, opt, env, sidecar)
     steps, it, elapsed0 = 0, 0, 0.0
     state_path = run.resume_path if resuming else None
-    if lineage is not None and not run.resume_path.is_file():  # a fresh continuation
-        state_path = Path(lineage["continued_from"]["resume"])
+    src = (lineage or {}).get("continued_from") or {}
+    if lineage is not None and not run.resume_path.is_file() and "checkpoint" in src:
+        # a fresh continuation from a periodic checkpoint: weights only, the counter continues
+        ac.load_state_dict(torch.load(src["checkpoint"], map_location="cpu", weights_only=True))
+        steps, it = int(src["steps"]), int(src["it"])
+        log.info(
+            "continued %s from %s (it %d, %.3g steps)", run.run_id, src["checkpoint"], it, steps
+        )
+    elif lineage is not None and not run.resume_path.is_file():  # a fresh continuation
+        state_path = Path(src["resume"])
     if state_path is not None and state_path.is_file():
         st = torch.load(state_path, map_location="cpu", weights_only=False)
         ac.load_state_dict(st["actor"])

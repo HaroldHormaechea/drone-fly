@@ -588,7 +588,7 @@ def add_parser(sub: Any) -> None:
     p_t.add_argument(
         "--continue-from",
         dest="continue_from",
-        help="start a NEW run from this run's resume.pt (e.g. after a course-conversion fix)",
+        help="start a NEW run from a run folder (its resume.pt) or a teacher_it<N>.pt checkpoint",
     )
     p_t.add_argument("--budget", type=float)
     p_t.add_argument("--n-envs", type=int, dest="n_envs")

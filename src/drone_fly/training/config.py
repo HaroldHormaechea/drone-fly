@@ -291,6 +291,8 @@ class TracksConfig:
     root: str | None = None
     scenes_root: str | None = None
     conversion: dict[str, Any] = field(default_factory=dict)
+    #: Training-only course augmentation (``tracks.augment``): ``{mirror: bool, scales: [..]}``.
+    augment: dict[str, Any] = field(default_factory=dict)
 
     def conversion_dict(self) -> dict[str, Any]:
         return {

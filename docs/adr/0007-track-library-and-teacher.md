@@ -263,9 +263,48 @@ Pilot 2 also confirmed challenger condition 2. Only 0.2 % of ground starts ended
 
 Pilot 2 throughput was about 52k steps/s on a GPU shared with games (97–100 % utilisation).
 
-<!-- RESULTS:PILOT -->
+**Pilot readout.** After the fixes, the first 1e8 steps of run 1 served as the pilot. At 94M steps,
+training-episode completion was 13.7 % (Liftoff 8.2 %, procedural 21.6 %), against the
+about 5 % plateau before the fixes.
 
-<!-- RESULTS:RUN1 -->
+**Run 1.**
+
+| | value |
+|---|---|
+| run | `20261012T231445Z-teacher-liftoff` (conversion v2, it 0–1603) → `20261013T014931Z-teacher-liftoff` (`--continue-from`, conversion v3, it 1603–3815) |
+| steps | 2.0e9 |
+| throughput | 77–117k steps/s |
+| training-episode completion at the end | 67.8 % (Liftoff 64.6 %, procedural 72.6 %) |
+
+Val selection (randomized, seed 4321, N = 32, 14 val tracks):
+
+| checkpoint | val macro |
+|---|---|
+| it1920 (≈1.0e9 steps) | **32.1 %** (selected) |
+| it2400 | 24.3 % |
+| it2880 | 25.4 % |
+| it3360 | 24.1 % |
+| final | 27.0 % |
+
+AC8 results for it1920 (randomized counts; nominal in brackets for information):
+
+| split | macro | scene | no-scene (optimistic) | flagged | tracks ≥ 95 % | tracks at 0 % |
+|---|---|---|---|---|---|---|
+| train (63) | **68.9 %** [75.8 %] | 59.8 % (30) | 77.3 % (33) | 69.5 % (17) | 25 | 7 |
+| held-out (15) | **21.2 %** [22.5 %] | 0.0 % (2) | 24.5 % (13) | 0.0 % (2) | 0 | 9 |
+
+Both targets were missed (train ≥ 95 %, held-out ≥ 80 %). The per-track tables are in
+`<run>/eval/{train,val,held-out}.md`.
+
+Failure modes:
+- **Generalization gap.** Val peaks at about 1e9 steps and then stalls while train keeps rising.
+  Failures on unseen maps are mostly early collisions: on val, 53 % of outcomes are collisions.
+- **Scene geometry.** Train scene tracks are about 17 points below no-scene ones. Failures cluster
+  at passages whose straight legs pass within 0–0.4 m of scene walls.
+- **Synthetic spawns float at gate-centre height** (a conversion flaw). minus-two-01 times out on
+  every episode without a single gate.
+- **Dive start.** On the-pit-06 the start gate is 9 m below a raised spawn, and the policy never
+  reaches it.
 
 ### D10. Catalogue schema
 
@@ -306,7 +345,54 @@ checkpoint sidecar (`lineage.continued_from`: run, iteration, steps, source conv
 new run's sidecar `course_conversion` is v3, so evals and UC69 use v3. Under D9 this is still run 1:
 a bug-fix continuation, not a val-driven change.
 
-<!-- RESULTS:HAIRPIN -->
+**Hairpins and floor in the run-1 evals.**
+- **Floor.** Every one of the 11 floor-capped train tracks now completes: hannover-01, marina-bay-04
+  and short-circuit-01 at 100 %; bando-city-02 and permafrost-03 at 97 %; bardwells-yard-01 and -06
+  at 88 %; bando-city-03 at 81 %; straw-bale-06 at 66 %.
+- **Hairpins.** Only paris-drone-festival-02 fails mainly at a hairpin: 16 of its 32 episodes fail
+  at or just after #7, a real 180° turn. short-circuit-03 and liftoff-arena-01 fail elsewhere.
+
+## Run 2: the single val-driven change set (D9)
+
+Run 1 missed both targets: train 68.9 %, val 32.1 %, held-out 21.2 %. D9 therefore allows one change
+set, driven by val evidence, and one more run. Held-out was not consulted for any of these choices.
+
+**A. Conversion v4 (bug fixes, not tuning).**
+- **Synthetic spawns on the ground.** A track without a spawn item got a spawn 3 m before passage 0
+  at the gate's CENTRE height. With no support underneath, the ground start rested on nothing,
+  0.7–2.5 m above the floor, a state never seen in training. It is now placed at passage 0's
+  bottom. Verified on all four synthetic-spawn tracks: the spawn is at the bottom of passage 0,
+  which is ground level on minus-two-01, where the gate centre is 0.66 m up.
+- **Frame-fidelity check: not a bug, unchanged.** `FlagGateGeneric01` and the `Inflatable*` gates
+  showed only 25 % and 49 % of their openings clear of solids. Their "solids" are the real Liftoff
+  colliders, though: the flag-banner meshes and the inflatable tubes (capsule radius 0.39 m) sit
+  inside the trigger volume. The trigger is simply larger than the free aperture.
+- **`pack_courses` empty-cell-table fix.** An empty table appended a stray CSR start, so every
+  later course read the wrong rows. This bug was latent: no current course has an empty table.
+
+**B. Generalization (the val-driven part).** Val peaked at about 1e9 steps and then stalled while
+train kept rising, and most val failures were early collisions on unseen maps.
+- **(i) Course augmentation, training only** (`tracks/augment.py`, `tracks.augment`). Every Liftoff
+  train course is also flown mirrored (y → −y) and at 0.85× and 1.15× scale, in all 6 combinations.
+  The copies are built once at pool build time. Only the geometry changes; the plant, observation
+  and action are untouched.
+  - Verified on 5 train tracks × 3 variants: pass-rule verdicts are identical on 9,540 random
+    segments, surface distances and floor heights match the scaled originals to about 1e-13, and
+    the run-1 policy flies all six Arena-04 variants at 100 %.
+- **(ii) Procedural share 0.5** (was 0.4).
+- **(iii) Checkpoints every about 1.2e8 steps** (229 iterations), so val selection can catch an
+  early peak.
+- An obstacle curriculum for procedural courses was not adopted.
+
+**Warm start.** Run 2 continues from run 1's val-selected `teacher_it1920.pt` (conversion v3) on v4
+courses with augmentation on, for 1.2e9 more steps (budget 2.2066e9), config `teacher-liftoff-aug`.
+`--continue-from` now also accepts a `teacher_it<N>.pt`: it loads the weights, starts a fresh
+optimizer, and continues the step counter at N × n_envs × roll. The pass-slack curriculum was
+already over, so its `init_m` is 0. The lineage is in `lineage.json` and the sidecar.
+
+The choice was made for the user's need of a usable teacher today, and because val had already
+peaked at about 1e9. **Caveat:** with a warm start, the effect of the augmentation cannot be
+separated from that of the extra steps.
 
 ## Consequences
 

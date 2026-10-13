@@ -903,7 +903,7 @@ def pack_courses(courses: Sequence[SimCourse], max_outline: int = MAX_OUTLINE) -
         valid = t >= 0
         cnt = valid.sum(axis=1)
         keys.append(c.cells.keys + kbase[i])
-        starts.append(flat_off + np.r_[0, np.cumsum(cnt)[:-1]].astype(np.int64))
+        starts.append((flat_off + np.cumsum(cnt) - cnt).astype(np.int64))  # empty table: no rows
         cnts.append(cnt.astype(np.int64))
         flats.append((t[valid] + poff[i]).astype(np.int64))  # row-major keeps nearest-first
         flat_off += int(cnt.sum())

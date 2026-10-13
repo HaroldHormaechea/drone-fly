@@ -75,7 +75,7 @@ from drone_fly.sim.pool import (
 from drone_fly.tracks.catalogue import TrackDataError, sha256_file
 from drone_fly.tracks.liftoff_extract.props import box_corners, hull, opening
 
-CONVERSION_VERSION = 3  # v2: gate-frame rings; v3: floor under volumes, hairpins (ADR 0007)
+CONVERSION_VERSION = 4  # v2 gate rings; v3 floor under volumes, hairpins; v4 grounded spawn
 _M = np.asarray(UNITY_TO_CONTRACT, np.float64)
 SOURCE_SCENE, SOURCE_ITEM, SOURCE_TABLE, SOURCE_PROCEDURAL = 0, 1, 2, 3
 NONSOLID_TYPES = ("TrackBlueprintAction", "TrackBlueprintSpawnpoint", "TrackBlueprintRibbon")
@@ -537,20 +537,29 @@ def classify_passage(
     )  # fmt: skip
 
 
+def _volume_z_extent(shape: str, R: np.ndarray, h: np.ndarray) -> float:
+    """Half the vertical extent of a volume (local frame ``R``, half-size ``h``)."""
+    if shape == "sphere":
+        return float(h[0])
+    if shape == "cylinder":  # axis = local y, radius h[0], half-height h[1]
+        return abs(R[2, 1]) * float(h[1]) + math.hypot(R[2, 0], R[2, 2]) * float(h[0])
+    return float(np.abs(R[2, :]) @ h)
+
+
 def passage_bottom_z(p: Passage) -> float:
     """Lowest z of a passage (an opening's outline, or a volume's extent)."""
     if p.kind == "opening":
         if not len(p.outline):
             return float(p.center[2])
         return float((p.center + p.outline @ p.rot[:, :2].T)[:, 2].min())
-    R, h = p.vol_rot, p.vol_half
-    if p.shape == "sphere":
-        ext = float(h[0])
-    elif p.shape == "cylinder":  # axis = local y, radius h[0], half-height h[1]
-        ext = abs(R[2, 1]) * float(h[1]) + math.hypot(R[2, 0], R[2, 2]) * float(h[0])
-    else:
-        ext = float(np.abs(R[2, :]) @ h)
-    return float(p.center[2]) - ext
+    return float(p.center[2]) - _volume_z_extent(p.shape, p.vol_rot, p.vol_half)
+
+
+def _raw_bottom_z_c(r: _RawPassage) -> float:
+    """Lowest contract-frame z of a raw passage (before the course frame exists)."""
+    if r.kind == "opening" and len(r.outline_pts_c):
+        return float(np.min(np.asarray(r.outline_pts_c)[:, 2]))
+    return float((_M @ r.center_u)[2]) - _volume_z_extent(r.shape, r.vol_rot_c, r.vol_half)
 
 
 #: Below this |unit(in) + unit(out)| a passage is a hairpin: the bisector is degenerate (v3).
@@ -751,6 +760,8 @@ def convert_liftoff(
         d[2] = 0.0
         d = _unit(d) if np.linalg.norm(d) > 1e-9 else np.array([1.0, 0.0, 0.0])
         sp = c0 - cfg.synthetic_spawn_back_m * d
+        # v4: on the ground (the first passage's bottom), not floating at its centre height
+        sp[2] = _raw_bottom_z_c(raws[0])
         yaw = math.atan2(d[1], d[0])
         flags.append("synthetic-spawn")
     top = None
