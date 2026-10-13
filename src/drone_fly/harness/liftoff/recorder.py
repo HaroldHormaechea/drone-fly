@@ -270,7 +270,7 @@ def pose_rows(
     if len(t) < 2:
         raise HarnessConfigError("the recording has fewer than 2 pose states")
     vel = np.gradient(p, t, axis=0)
-    grid = np.arange(t[0], t[-1], 1.0 / (hz * rate))
+    grid = np.arange(t[0], t[-1], rate / hz)  # hz on the frame clock (frame dt = rec dt / rate)
     idx = np.clip(np.searchsorted(t, grid, side="right") - 1, 0, len(t) - 2)
     u = (grid - t[idx]) / (t[idx + 1] - t[idx])
     pos = p[idx] + u[:, None] * (p[idx + 1] - p[idx])
