@@ -23,7 +23,8 @@ Stick conventions (defaults, mode 2; every sign is explicit config):
 Arming (``controls.arm_button`` / ``controls.disarm_button``, optional): Liftoff only flies an
 armed drone, and binds *Arm* and *Disarm* to pad buttons (momentary presses). ``arm_button`` is
 pulsed for ``arm_press_s`` on the first command after :meth:`arm`, i.e. once the game has focus;
-``disarm_button`` is pulsed on the fail-safe (every stop). Without a ``disarm_button`` the arm
+``disarm_button`` is pulsed on the fail-safe (every stop); ``arm_remaining_s()`` reports the
+arming time left (the UC69 teacher observation). Without a ``disarm_button`` the arm
 button is treated as a toggle and pulsed again on the fail-safe if this run armed. For
 ``arm_settle_s`` after the Arm press the sticks stay neutral with the throttle at minimum
 (Liftoff, like real flight controllers, refuses to arm with the throttle up).
@@ -256,6 +257,7 @@ class VgamepadActionSink(ActionSink):
         #: Set when the disarm could not be confirmed: never park the pad at centred sticks.
         self.hold_throttle = False
         self._settle_until: float | None = None
+        self._arm_until: float | None = None  # end of arming (press + settle), sink clock
         self.button_resolver = button_resolver
         self.clock = clock
         self.sleep = sleep
@@ -420,6 +422,7 @@ class VgamepadActionSink(ActionSink):
             now = self.clock()
             self._release_at = now + self.arm_press_s
             self._settle_until = now + max(self.arm_settle_s, self.arm_press_s)
+            self._arm_until = self._settle_until
             self.armed = True
         elif self._pressed is not None and self._release_at is not None:
             if self.clock() >= self._release_at:
@@ -440,6 +443,20 @@ class VgamepadActionSink(ActionSink):
         sticks = self.neutral_sticks() if self._settling() else self.sticks_for(command)
         _pad_set(self.pad, sticks)
         return {"sticks": sticks}
+
+    def arm_remaining_s(self, now: float | None = None) -> float:
+        """Seconds of arming left (UC69: the teacher observation's ``arm_remaining_s``).
+
+        ``max(arm_settle_s, arm_press_s)`` before the Arm press, counted down from the press
+        (``now`` on the sink's clock, default :attr:`clock`), and 0 without an arm button.
+        """
+        if self.arm_button is None:
+            return 0.0
+        total = max(self.arm_settle_s, self.arm_press_s)
+        if self._arm_until is None:
+            return float(total)
+        t = self.clock() if now is None else float(now)
+        return float(min(total, max(0.0, self._arm_until - t)))
 
     def _settling(self) -> bool:
         """True while the drone is being armed (throttle held at minimum)."""
@@ -499,6 +516,7 @@ class VgamepadActionSink(ActionSink):
         self._disarm_done = False
         self.hold_throttle = False
         self._settle_until = None
+        self._arm_until = None
         self._release_at = None
         self._pressed = None
 

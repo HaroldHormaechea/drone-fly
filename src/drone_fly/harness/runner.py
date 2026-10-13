@@ -28,6 +28,11 @@ Live overlay (UC-65, optional)
     and ``run()`` publishes the stop reason after the fail-safe. The publisher never calls the
     focus probe: the runner hands it its own focus result.
 
+Estimator stop (UC69)
+    A gate source may end the attempt on purpose by raising
+    :class:`~drone_fly.harness.errors.EstimatorStop` from ``update``: the runner stops with its
+    reason before anything is sent on that tick (the fail-safe still follows).
+
 Fail-safe (latched)
     On stale telemetry, gate lost, a stale free-space estimate, loss of window focus, any
     perception / policy / sink exception, the abort signal or Ctrl+C, the runner calls
@@ -46,6 +51,7 @@ from typing import Any, NoReturn
 import numpy as np
 
 from drone_fly.harness.config import require_number
+from drone_fly.harness.errors import EstimatorStop
 from drone_fly.harness.interfaces import (
     ActionSink,
     Harness,
@@ -561,6 +567,8 @@ class HarnessRunner:
             if h.free_space_estimator is not None:
                 fs = h.free_space_estimator.update(frame, state, gate.target, t1)
                 record.perception_s["free_space"] = clock.now() - tg
+        except EstimatorStop as stop:  # an intended end of the attempt (oracle episode monitor)
+            self._finish(record, stop.reason, stop.detail)
         except Exception as exc:  # noqa: BLE001
             log.exception("perception failed")
             self._finish(record, STOP_PERCEPTION_ERROR, repr(exc))
