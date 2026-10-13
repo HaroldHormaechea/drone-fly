@@ -257,7 +257,7 @@ A teacher's `<stem>.contract.json` adds three keys to the §0 ones:
   version, it does not know.
 - A checkpoint without `obs_schema` is not a teacher.
 
-## 8. Student checkpoints: `student-obs` v1 and the `drone-fly-student` export (UC70)
+## 8. Student checkpoints: `student-obs` v2 and the `drone-fly-student` export (UC70)
 
 The deployable student is the K1 reservoir actor distilled from the teacher under a measured
 detector-noise model ([ADR 0009](adr/0009-student-distillation-and-detector-noise.md)). It sees only
@@ -269,7 +269,7 @@ what the live harness can assemble.
 `WorldScale(k)` (the checkpoint's `world_scale`; 6 for the first student). Rates, quaternions and
 times are not scaled.
 
-### Layout (59 float32, `drone_fly.sim.student_obs`)
+### Layout (61 float32, `drone_fly.sim.student_obs`, v2)
 
 | Indices | Block | Contents |
 |---|---|---|
@@ -280,8 +280,14 @@ times are not scaled.
 | [43] | `arm_remaining_s` | the arming time left |
 | [44:47) | `perception` | `min(target_age, T)/T`, target valid, `min(next_age, T)/T`, with `T = lost_timeout_s`; age = now - the capture stamp of the frame behind the last match |
 | [47:59) | `history` | EMA (tau 0.25 s) of the body-frame target vector / k (3) and of `prev_action` (4); the world-frame target change since the previous tick, rotated into the body (3; zero unless matched this tick, zero on a hand-over); ticks since a match / 50, capped at 1 (1); the hand-over flag (1) |
+| [59:61) | `battery` | `charge` (Liftoff `batt_charge`, 0..1) and volts per cell (`batt_volts / cells`, V; `cells` = the drone profile's `power.cells`, recorded in `obs_schema.battery.cells`) — exactly `teacher-obs` v2's battery block (`tracks.teacher_obs_ref.battery_from_telemetry`); in the sim, the plant's power model |
 
 The history resets at episode / session start (its EMAs start from the first tick's values).
+
+v2 (UC70, after UC68's power model) appended the `battery` block; v1 (59 values) is no longer
+deployed and a v1 export is refused by the version guard. The live harness needs `battery` in the
+telemetry `StreamFormat`; without it a student run is refused (exit 2).
+
 `drone_fly.student.obs_ref.build_student_obs` builds it through the real assembler; the harness's
 `StudentObservationAssembler` calls the same function, and the batched training builder is
 tolerance-tested against it (1e-5).
@@ -299,9 +305,10 @@ The gate tracker's `GateEstimate.info` carries the ages: `target_age_s`, `next_a
  "state_dict": {"...": "the readout only (k1.body.layer.* is rebuilt from the K1 connectome)"},
  "meta": {"contract_version": 2, "action": {"collective_scale_g": 1.0, "max_rate_rad_s": 4.0, "max_g": 4.23},
           "actor": "k1-student", "actor_arch": {"encoder": true, "residual": false, "...": "..."},
-          "obs_schema": {"name": "student-obs", "version": 1, "dim": 59, "world_scale": 6.0,
+          "obs_schema": {"name": "student-obs", "version": 2, "dim": 61, "world_scale": 6.0,
                          "tracker": {"lost_timeout_s": 1.3, "acquire_timeout_s": 3.0, "assoc_radius": 1.0},
                          "camera": {"resolution": [2560, 1080], "hfov_deg": 120.0, "uptilt_deg": 20.0},
+                         "battery": {"features": ["charge", "volts_per_cell"], "cells": 3, "...": "..."},
                          "...": "..."},
           "world_scale": 6.0, "teacher": {"...": "..."}, "noise_model": {"sha256": "...", "detector_id": "..."},
           "perception": {"...": "..."}, "camera": {"...": "..."}, "timing": {"...": "..."},

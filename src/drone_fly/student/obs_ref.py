@@ -74,8 +74,15 @@ def build_student_obs(
     lost_timeout_s: float,
     history: StudentHistory,
     dt: float,
+    battery: tuple[float, float] | None = None,
 ) -> np.ndarray:
-    """The 59 float32 values (see :mod:`drone_fly.sim.student_obs`); advances ``history``."""
+    """The student-obs values (see :mod:`drone_fly.sim.student_obs`); advances ``history``.
+
+    ``battery`` = ``(charge, volts_per_cell)`` (``teacher_obs_ref.battery_from_telemetry``);
+    ``None`` = a full pack, as the sim without a power model.
+    """
+    from drone_fly.sim.teacher_obs import FULL_CELL_V
+
     asm = ContractObservationAssembler(contract)
     fs = FreeSpaceEstimate(obstacle_vision=np.zeros(8, _F))
     _, h30 = asm.assemble(state_k, est_k, fs, 30)
@@ -96,6 +103,7 @@ def build_student_obs(
     out = np.concatenate([
         np.asarray(h30, _F), R[:, 0], R[:, 1], vb, np.asarray(prev_action, _F),
         [_F(arm_remaining_s)], perc, hist,
+        np.asarray(battery if battery is not None else (1.0, FULL_CELL_V), _F),
     ]).astype(_F)  # fmt: skip
     assert out.shape[0] == DIM
     return out

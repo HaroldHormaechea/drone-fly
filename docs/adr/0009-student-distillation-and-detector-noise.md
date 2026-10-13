@@ -68,12 +68,14 @@ legacy 30 columns (v1 -> v2 collective conversion). Trainable: `tap_norm`, `pi`,
 `--baseline-export`, which labels it `deployable: false`; `harness run` refuses that without
 `--allow-baseline`).
 
-### 4. `student-obs` v1 (59 float32)
+### 4. `student-obs` v2 (61 float32)
 
 `harness30` (the real `ContractObservationAssembler`, `obstacle_vision` zeros), `attitude6`,
 `vel_body`, `prev_action` (raw), `arm_remaining_s`, `perception` (ages normalised by
 `lost_timeout_s`, target valid), `history` (EMAs, the world-frame target change rotated into the
-body — zero while holding — ticks since a match, the hand-over flag). Age = now minus the capture
+body — zero while holding — ticks since a match, the hand-over flag), and (v2) `battery`:
+charge and volts per cell exactly as `teacher-obs` v2 (UC68's power model in the sim; Liftoff's
+`battery` telemetry live, divided by the profile's `power.cells`). Age = now minus the capture
 stamp of the frame behind the last match: the tracker now records that stamp (the async learned
 estimator carries its frame's). `student.obs_ref.build_student_obs` is called by both the
 training reference and the harness assembler (bit-identical by construction); the torch builder
@@ -134,6 +136,13 @@ Fitted on CPU on 324 held-out frames of one map (LiftoffArena); **LOW-n, provisi
 - Latency: CPU only so far (98 ms p50, not representative): rerun `--latency-only --device cuda`.
 
 ## Deviations from the approved plan
+
+0. **`student-obs` v2 (61 values, battery block)** — added after the UC69 live test showed the
+   low-voltage cutoff after ~18 s at full throttle and UC68 added the power model + `teacher-obs`
+   v2. The block is appended (v1 indices unchanged); the 07 warm start zeroes its readout columns
+   like every other new sense (init still equals 07); the student config turns `plant.power` on,
+   as the teacher. The frozen teacher's observation follows its own sidecar version
+   (`env.obs_version`), so a v1 or v2 teacher labels from what it was trained on.
 
 1. **Tracker association gating in the simulated perception.** The replay showed the plain
    truth-associated reference far more optimistic than the real tracker, which only re-associates

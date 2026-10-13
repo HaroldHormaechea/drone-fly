@@ -266,6 +266,7 @@ class LiftoffConverter:
             t=sample.t,
             received_at=sample.received_at,
             discontinuity=discontinuity,
+            battery=None if sample.battery is None else np.asarray(sample.battery, np.float32),
         )
 
 

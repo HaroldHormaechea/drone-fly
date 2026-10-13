@@ -1,4 +1,4 @@
-"""The deployable student's observation, schema ``student-obs`` v1: 59 float32 (UC70 D4).
+"""The deployable student's observation, schema ``student-obs`` v2: 61 float32 (UC70 D4).
 
 Everything the live harness can assemble from the learned gate detector, the telemetry and its
 own action history, in **student units** (Liftoff metres / ``k``, the harness ``WorldScale(k)``;
@@ -23,6 +23,10 @@ rates, quaternions and times unscaled). Blocks, in order (:data:`BLOCKS`):
    the target matched this tick, so zero while holding even under pure rotation, and zero on a
    hand-over); ticks since the last match, ``min(n, TICKS_NORM) / TICKS_NORM`` (1); the hand-over
    flag (1). Reset at episode / session start (the EMAs start at the first tick's values).
+8. ``battery`` [59:61) (v2): ``charge`` (Liftoff's ``batt_charge``, 0..1) and the pack voltage per
+   cell (``batt_volts / cells``, V) — exactly ``teacher-obs`` v2's battery block
+   (``tracks.teacher_obs_ref.battery_from_telemetry``); in the sim, the plant's power model
+   (a full pack without one).
 
 The NumPy reference (``drone_fly.student.obs_ref.build_student_obs``) calls the REAL harness
 assembler; the harness's ``StudentObservationAssembler`` calls that same function. This module
@@ -42,7 +46,7 @@ from drone_fly.sim.perception import NEXT_VISIBLE
 from drone_fly.sim.quat import gravity_body
 
 NAME = "student-obs"
-VERSION = 1
+VERSION = 2
 BLOCKS: tuple[tuple[str, int], ...] = (
     ("harness30", 30),
     ("attitude6", 6),
@@ -51,6 +55,7 @@ BLOCKS: tuple[tuple[str, int], ...] = (
     ("arm_remaining_s", 1),
     ("perception", 3),
     ("history", 12),
+    ("battery", 2),
 )
 DIM = sum(w for _, w in BLOCKS)
 HARNESS_LAYOUT: tuple[tuple[str, int], ...] = (
@@ -90,6 +95,7 @@ def input_scale() -> list[float]:
     out += [2.0]  # arm_remaining_s
     out += [1.0] * 3  # perception
     out += [1 / 20.0] * 3 + [1.0] * 4 + [1.0] * 3 + [1.0, 1.0]  # history
+    out += list(teacher_scale(2)[-2:])  # battery: as teacher-obs v2 (charge, volts / 4.2)
     assert len(out) == DIM
     return out
 
@@ -101,6 +107,7 @@ def schema(
     acquire_timeout_s: float,
     camera: dict[str, Any],
     assoc_radius: float = 1.0,
+    battery_cells: int = 3,
 ) -> dict[str, Any]:
     """The JSON-able ``obs_schema`` written into the student checkpoint (pins ``k``, the tracker
     timeouts and the camera the noise model and perception assumed)."""
@@ -139,6 +146,7 @@ def schema(
         },
         "history": {"ema_tau_s": EMA_TAU_S, "ticks_norm": TICKS_NORM},
         "input_scale": input_scale(),
+        "battery": {**teacher_battery_schema(), "cells": int(battery_cells)},
         "requires": {
             "noise_model": True,
             "gate_estimator": "learned",
@@ -147,6 +155,13 @@ def schema(
         },  # fmt: skip
         "prev_action": "raw policy output of the previous tick, before decoding / clipping",
     }
+
+
+def teacher_battery_schema() -> dict[str, Any]:
+    """``teacher-obs`` v2's battery block definitions (the student copies them)."""
+    from drone_fly.sim.teacher_obs import schema as teacher_schema
+
+    return dict(teacher_schema(2)["battery"])
 
 
 def _unit(d: torch.Tensor) -> torch.Tensor:
@@ -234,6 +249,7 @@ def build_student_obs(
     arm_remaining_s: torch.Tensor,
     history: HistoryState,
     dt: torch.Tensor,
+    battery: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """``(n, 59)`` student observations from course-frame state + :meth:`GatePerception.outputs`
     (``k`` = course units per student unit, i.e. the student's world scale for a
@@ -281,8 +297,13 @@ def build_student_obs(
     ], -1)  # fmt: skip
     hist = history_step(history, R, pk, tk, prev_action, perc["matched"], perc["hand_over"],
                         perc["target_valid"], dt)  # fmt: skip
-    return torch.cat([h30, R[:, :, 0], R[:, :, 1], vb, prev_action.to(dt_),
-                      arm_remaining_s.to(dt_).unsqueeze(-1), perc3, hist], -1)  # fmt: skip
+    if battery is None:  # a full pack (no power model), as teacher-obs v2
+        from drone_fly.sim.teacher_obs import FULL_CELL_V
+
+        battery = pos.new_tensor([1.0, FULL_CELL_V]).expand(pos.shape[0], 2)
+    parts = [h30, R[:, :, 0], R[:, :, 1], vb, prev_action.to(dt_),
+             arm_remaining_s.to(dt_).unsqueeze(-1), perc3, hist, battery.to(dt_)]  # fmt: skip
+    return torch.cat(parts, -1)
 
 
 def ema_alpha(dt: float) -> float:

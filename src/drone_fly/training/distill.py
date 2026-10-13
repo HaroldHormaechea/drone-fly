@@ -258,6 +258,17 @@ def filter_uncovered(pool: Any, model: Any) -> Any:
     return replace(pool, courses=[pool.courses[i] for i in keep], groups=groups)
 
 
+def battery_cells_of(profile: Any) -> int:
+    """The pack's cell count (``power.cells``; the live per-cell voltage divides by it)."""
+    pw = getattr(profile, "power", None)
+    if pw is None:
+        raise HarnessConfigError(
+            f"drone profile {profile.id} has no 'power' block: the student observes the battery "
+            "(student-obs v2) and needs power.cells"
+        )
+    return int(pw.cells)
+
+
 def teacher_obs_version_of(sidecar: dict[str, Any]) -> int:
     """The teacher's ``teacher-obs`` version (v1 sidecars predate the battery block)."""
     return int((sidecar.get("obs_schema") or {}).get("version", 1))
@@ -673,6 +684,7 @@ def student_sidecar(
     timing: Any,
     conversion: dict[str, Any],
     contention: dict,
+    battery_cells: int = 3,
 ) -> dict:
     """The student sidecar keys (``write_sidecar(extra=...)``)."""
     from drone_fly.sim.student_obs import schema
@@ -685,6 +697,7 @@ def student_sidecar(
             lost_timeout_s=pcfg.lost_timeout_s,
             acquire_timeout_s=pcfg.acquire_timeout_s,
             assoc_radius=float(model.tracker.get("assoc_radius", 1.0)),
+            battery_cells=battery_cells,
         ),
         "world_scale": float(cfg.student.world_scale),
         "actor_arch": actor.arch(),
@@ -923,6 +936,7 @@ def _train_student(
         timing=timing,
         conversion=conversion_record(pool, conv),
         contention=contention,
+        battery_cells=battery_cells_of(profile),
     )
     sr = StudentRun(run, cfg, profile, actor, sidecar)
     sr.write_inputs(ck, model)

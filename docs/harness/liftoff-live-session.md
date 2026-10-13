@@ -393,14 +393,18 @@ ages and a short history. Its export carries everything the harness needs.
    ```
    No `--extra-dim`. The run logs the checkpoint's overrides: world scale `k`, the tracker
    timeouts and association radius, `free_space: none` + `assume_no_obstacles`.
-3. **Refusals before arming (exit 2):** a schema / action-contract / format version this build does
+3. **Battery telemetry is required** (`student-obs` v2 observes the pack): `battery` must be in
+   Liftoff's `TelemetryConfiguration.json` `StreamFormat` and in `telemetry.stream_format` (the
+   `liftoff` preset already lists it). The per-cell voltage divides by the export's
+   `obs_schema.battery.cells` (the drone profile's `power.cells`).
+4. **Refusals before arming (exit 2):** missing battery telemetry; a schema / action-contract / format version this build does
    not deploy; a baseline export (`deployable: false`) without `--allow-baseline`; a gate estimator
    other than `learned`; a camera (resolution, FOV, uptilt) different from the trained one; a K1
    student on the CPU without `--allow-slow-cpu`.
-4. **Warning only:** a detector whose sha differs from the one the student's noise model describes
+5. **Warning only:** a detector whose sha differs from the one the student's noise model describes
    (`noise_model_detector_mismatch` in `meta.json`). Refit the noise model for that detector
    (`train detector-noise`) and retrain the student before trusting the result.
-5. `meta.json` records the student's provenance (`student`: checkpoint sha, actor, role, k, the
+6. `meta.json` records the student's provenance (`student`: checkpoint sha, actor, role, k, the
    teacher, the noise model, the export latency, the overrides).
 
 ### Refitting the detector noise model

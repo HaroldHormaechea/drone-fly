@@ -81,6 +81,8 @@ class FlightState:
     t: float = 0.0
     received_at: float = 0.0
     discontinuity: bool = False
+    #: Liftoff's raw ``battery`` block ``(charge, volts)`` when the stream carries it (UC70).
+    battery: np.ndarray | None = None
 
     def as_state_dict(self) -> dict[str, np.ndarray]:
         """The ``{"pos","vel","quat","omega"}`` dict shape ``inference.py`` functions take."""

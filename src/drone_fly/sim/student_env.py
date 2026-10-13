@@ -127,6 +127,7 @@ class StudentCourseEnv:
             pos=e.pos, vel=e.vel, quat=e.quat, omega=e.omega, perc=out, k=self.k,
             nominal_aperture=self.pcfg.nominal_aperture, lost_timeout_s=self.pcfg.lost_timeout_s,
             prev_action=e.prev_action, arm_remaining_s=arm, history=self.hist, dt=dt,
+            battery=e.battery(),
         )  # fmt: skip
 
     # ---- the env API ----

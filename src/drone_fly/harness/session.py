@@ -448,8 +448,9 @@ def run_harness(
         step = stu.StudentStepState(arm_total_s=arm_total_s(cfg.get("controls") or {}))
         step.sink = h.action_sink
         assembler = stu.StudentObservationAssembler(
-            contract, step, lost_timeout_s=student_plan.lost_timeout_s
-        )
+            contract, step, lost_timeout_s=student_plan.lost_timeout_s,
+            battery_cells=student_plan.battery_cells,
+        )  # fmt: skip
         policy = stu.StudentPolicyRunner(student_plan, step, contract=contract)
     else:
         assembler = ContractObservationAssembler(contract)

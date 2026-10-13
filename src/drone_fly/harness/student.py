@@ -72,10 +72,14 @@ class StudentStepState(TeacherStepState):
 class StudentObservationAssembler(ObservationAssembler):
     """``student-obs`` v1 (see the module docstring); ``state`` arrives in student units."""
 
-    def __init__(self, contract: Any, step: StudentStepState, *, lost_timeout_s: float) -> None:
+    def __init__(
+        self, contract: Any, step: StudentStepState, *, lost_timeout_s: float,
+        battery_cells: int = 3,
+    ) -> None:  # fmt: skip
         self.contract = contract
         self.step = step
         self.lost_timeout_s = float(lost_timeout_s)
+        self.battery_cells = int(battery_cells)
 
     def required_blocks(self, extra_dim: int) -> tuple[str, ...]:
         return ("target", "curr_gate", "next_lookahead")
@@ -93,7 +97,12 @@ class StudentObservationAssembler(ObservationAssembler):
         extra_dim: int,
     ) -> tuple[np.ndarray, np.ndarray]:
         from drone_fly.student.obs_ref import build_student_obs
+        from drone_fly.tracks.teacher_obs_ref import battery_from_telemetry
 
+        if state.battery is None:
+            raise PerceptionCoverageError(["battery"], extra_dim)
+        bat = battery_from_telemetry(float(state.battery[0]), float(state.battery[1]),
+                                     self.battery_cells)  # fmt: skip
         t0 = time.perf_counter()
         now = float(self.step.clock())
         dt = 0.0 if self.step.last_now is None else max(now - self.step.last_now, 0.0)
@@ -107,6 +116,7 @@ class StudentObservationAssembler(ObservationAssembler):
             lost_timeout_s=self.lost_timeout_s,
             history=self.step.history,
             dt=dt,
+            battery=bat,
         )
         self.step.timings["assemble"].append(time.perf_counter() - t0)
         if extra.shape[0] != extra_dim:
@@ -135,6 +145,10 @@ class StudentPlan:
     @property
     def lost_timeout_s(self) -> float:
         return float(self.meta["obs_schema"]["tracker"]["lost_timeout_s"])
+
+    @property
+    def battery_cells(self) -> int:
+        return int((self.meta["obs_schema"].get("battery") or {}).get("cells", 3))
 
 
 def plan_student(checkpoint: str | Path, *, allow_baseline: bool = False) -> StudentPlan | None:
@@ -199,6 +213,12 @@ def check_student_config(
         raise StudentSchemaError(
             f"the live camera {live} differs from the camera the student's noise model and "
             f"perception assumed {trained}"
+        )
+    stream = (cfg.section("telemetry").get("stream_format") or [])
+    if stream and "battery" not in stream:
+        raise StudentSchemaError(
+            "the student observes the battery (student-obs v2): add 'battery' to Liftoff's "
+            "TelemetryConfiguration.json StreamFormat and to telemetry.stream_format"
         )
     if plan.actor == "k1-student" and str(contract.device) == "cpu" and not allow_slow_cpu:
         raise StudentDeviceError(

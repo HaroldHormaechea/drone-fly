@@ -2,7 +2,8 @@
 #  - the teacher's env, drone, action contract and course conversion (extends teacher-liftoff);
 #    the course conversion actually used is the TEACHER SIDECAR's (refused if it differs)
 #  - tracks: 60 % Liftoff TRAIN tracks (scene courses x2 in the group) + 40 % procedural
-#  - dynamics randomization 1; timing from the noise model's measured live timing
+#  - dynamics randomization 1, the UC68 power model on; timing from the noise model's measured
+#    live timing
 #  - starts: half ground, half air; 30 % of air starts before a route passage (the teacher's;
 #    perception starts unacquired there, as after a respawn)
 #  - pass slack 0 throughout
@@ -13,6 +14,9 @@ name: student-liftoff
 n_envs: 4096
 budget: 2.0e8
 randomization_scale: 1.0
+plant:
+  power: true                # UC68 battery + thrust-at-speed model, as the teacher (student-obs v2
+                             # observes the battery; power_loss is an episode outcome)
 tracks:
   mix:
     - {select: "liftoff:train", weight: 0.6, scene_weight: 2.0}

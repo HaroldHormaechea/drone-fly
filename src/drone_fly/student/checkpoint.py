@@ -93,6 +93,7 @@ def expected_schema(meta: dict[str, Any]) -> dict[str, Any]:
         acquire_timeout_s=float(tr.get("acquire_timeout_s", 0.0)),
         camera=meta.get("camera") or sch.get("camera") or {"resolution": [0, 0], "hfov_deg": 0},
         assoc_radius=float(tr.get("assoc_radius", 1.0)),
+        battery_cells=int((sch.get("battery") or {}).get("cells", 3)),
     )
 
 
