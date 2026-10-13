@@ -99,6 +99,7 @@ class ReferencePerception:
         self.model = model
         self.cfg = config
         self.exact = config.mode == "exact"
+        self.reacq = config.lost_policy == "reacquire"
         self.spec: VisibilitySpec = model.visibility_spec()
         self.cn = model.class_noise()
         self.fp = model.data["false_positives"]
@@ -119,6 +120,8 @@ class ReferencePerception:
         self.tg = _Slot(seen=float(t), src=float(t))
         self.nx = _Slot(seen=float(t), src=float(t))
         self.ticks_since = 0
+        self.t_last = False  # reacquire: a released target's estimate is kept
+        self.t_good = float(t)  # reacquire: the last good event (match, acquisition, pass)
         self.hand_over = False
         self.passed = False
         self.status = HOLDING
@@ -253,6 +256,9 @@ class ReferencePerception:
             else:
                 tg.acq = tg.fp = tg.active = False
             self.last_event = float(t)
+            if self.reacq:
+                self.t_good = float(t)
+                self.t_last = False
             nx.acq = nx.fp = nx.active = nx.miss = False
             nx.z = np.zeros(4)
         # 2. frame arrival
@@ -280,11 +286,14 @@ class ReferencePerception:
             nx.miss = miss_n
             nx.z = z_n
         unacq = frame and not tg.acq
+        if self.reacq:  # (a) a stale held target re-acquires from this frame's candidates
+            stale = tg.acq and not tg.active and (t - tg.seen > c.drop_after_s)
+            unacq = unacq or (frame and stale and (det_t or wrong))
         pick_fp = unacq and wrong and ((not det_t) or d["fp_pick"] < p_pick)
         acq_true = unacq and det_t and not pick_fp
         assoc = float(np.linalg.norm(pos + R @ relb_t - tg.world)) <= c.assoc_limit
         upd_t = (frame and tg.acq and not tg.fp and det_t and assoc) or acq_true
-        if frame and not tg.fp:
+        if (frame and not tg.fp) or acq_true:
             tg.active = upd_t
         if pick_fp:
             tg.active = False
@@ -293,7 +302,10 @@ class ReferencePerception:
         if upd_t or pick_fp:
             tg.src = tc
         tg.acq = tg.acq or acq_true or pick_fp
-        tg.fp = tg.fp or pick_fp
+        tg.fp = False if acq_true else (tg.fp or pick_fp)
+        if self.reacq and (acq_true or pick_fp):
+            self.t_good = float(t)
+            self.t_last = False
         if pick_fp:
             tg.world = pd + Rd @ fp_relb
             fn = Rd @ fp_nb
@@ -324,6 +336,17 @@ class ReferencePerception:
             nx.yaw = _travel_yaw(R @ nx.nb, nx.world - pos)
             nx.seen = float(t)
         self.ticks_since = 0 if a_t else self.ticks_since + 1
+        if self.reacq:
+            if a_t:
+                self.t_good = float(t)
+            if tg.acq and t - tg.seen > c.lost_timeout_s:  # (b) release, keep the estimate
+                tg.acq = tg.fp = tg.active = False
+                self.t_last = True
+            st = TRACKING if (a_t and not crossed) else HOLDING
+            self.status = LOST if t - self.t_good > c.lost_hard_stop_s else st
+            self.pos = pos
+            self.t = float(t)
+            return
         if tg.acq:
             st = TRACKING if (a_t and not crossed) else HOLDING
             if t - tg.seen > c.lost_timeout_s:
@@ -340,11 +363,12 @@ class ReferencePerception:
     # ---- outputs ----
     def outputs(self) -> dict[str, Any]:
         tg, nx, c = self.tg, self.nx, self.cfg
+        has = tg.acq or self.t_last
         if nx.active and nx.acq:
             mode = NEXT_VISIBLE
         elif nx.acq:
             mode = NEXT_UNSEEN_KNOWN
-        elif tg.acq:
+        elif has:
             mode = NEXT_UNSEEN_TARGET
         else:
             mode = NEXT_UNSEEN_NONE
@@ -357,9 +381,9 @@ class ReferencePerception:
         )
         return {
             "status": self.status,
-            "target": tg.world.copy() if tg.acq else self.pos.copy(),
-            "target_yaw": tg.yaw if tg.acq else 0.0,
-            "acquired": tg.acq,
+            "target": tg.world.copy() if has else self.pos.copy(),
+            "target_yaw": tg.yaw if has else 0.0,
+            "acquired": has,
             "next_mode": mode,
             "next_center": np.asarray(nc, np.float64).copy(),
             "next_yaw": nx.yaw,

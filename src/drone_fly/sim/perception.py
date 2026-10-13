@@ -27,6 +27,17 @@ Each control tick (:meth:`GatePerception.step`), in this order:
    route advances first); at the measured next-gate mis-association rate the next slot takes a
    false positive. Samples come from the fitted (range, azimuth) histogram.
 
+**Lost policy** (``PerceptionConfig.lost_policy``; the live tracker has the same switch):
+
+* ``terminate`` (legacy, the default): a held target unmatched for ``lost_timeout_s`` is ``lost``
+  and the episode ends (``gate_lost``); before the first acquisition, after ``acquire_timeout_s``.
+* ``reacquire`` (UC70 amendment, ADR 0009): (a) a held target unmatched for more than
+  ``drop_after_s`` may be replaced by the acquisition rule on any frame that has a candidate (a
+  true detection, or a false positive with the fitted pick probability); (b) after
+  ``lost_timeout_s`` unmatched it is RELEASED: its last estimate stays the target
+  (``target_valid`` 0) and the slot acquires again. ``lost`` only when nothing good (a match, an
+  acquisition or a pass) happened for ``lost_hard_stop_s``.
+
 Modes: ``noise`` (the model) and ``exact`` (same tracker + frustum + frame clock; every in-frustum
 frame detected, no error, no latency, no false positive).
 
@@ -59,6 +70,7 @@ from drone_fly.sim.noise_model import (
 #: Ticks of pose history (covers the measured detection lag at the slowest control rate).
 RING = 16
 MODES = ("noise", "exact")
+LOST_POLICIES = ("terminate", "reacquire")
 #: Status codes (as the harness's ``tracking`` / ``holding`` / ``lost``).
 TRACKING, HOLDING, LOST = 0, 1, 2
 STATUS_NAMES = ("tracking", "holding", "lost")
@@ -268,8 +280,18 @@ class PerceptionConfig:
     #: target only within ``assoc_radius * max(1, aperture)`` of it, both in the harness's
     #: training scale ``k`` -> ``k * assoc_radius * max(1, nominal / k)`` here. ``inf`` = off.
     assoc_limit: float = math.inf
+    #: ``terminate`` | ``reacquire`` (module docstring).
+    lost_policy: str = "terminate"
+    lost_hard_stop_s: float = 6.0
+    drop_after_s: float = 0.5
 
     def __post_init__(self) -> None:
+        if self.lost_policy not in LOST_POLICIES:
+            raise ValueError(
+                f"lost_policy must be one of {LOST_POLICIES}, got {self.lost_policy!r}"
+            )
+        if self.lost_hard_stop_s <= 0 or self.drop_after_s < 0:
+            raise ValueError("lost_hard_stop_s > 0 and drop_after_s >= 0")
         if self.mode not in MODES:
             raise ValueError(f"perception.mode must be one of {MODES}, got {self.mode!r}")
         if self.lost_timeout_s <= 0 or self.acquire_timeout_s < 0 or self.frame_period_s <= 0:
@@ -330,6 +352,7 @@ class GatePerception:
         self.cam = TorchCamera.from_block(cam_block)
         self.tab = model.to_tables(self.device, dtype) if model is not None else {}
         self.exact = config.mode == "exact"
+        self.reacq = config.lost_policy == "reacquire"
         z = lambda *s: torch.zeros(*s, dtype=dtype, device=self.device)  # noqa: E731
         b = lambda: torch.zeros(n, dtype=torch.bool, device=self.device)  # noqa: E731
         self.ring_t = torch.zeros(n, RING, dtype=torch.float64, device=self.device)
@@ -355,6 +378,9 @@ class GatePerception:
         self.n_src = torch.zeros(n, dtype=torch.float64, device=self.device)
         self.n_z = z(n, 4)
         self.ticks_since = torch.zeros(n, dtype=torch.long, device=self.device)
+        # reacquire policy: a released target's last estimate is kept; the last good event time
+        self.t_last = b()
+        self.t_good = torch.zeros(n, dtype=torch.float64, device=self.device)
         self.hand_over = b()
         self.passed = b()
         self.status = torch.full((n,), HOLDING, dtype=torch.long, device=self.device)
@@ -390,7 +416,7 @@ class GatePerception:
         self.t0 = torch.where(m, t, self.t0)
         self.last_event = torch.where(m, torch.full_like(t, -math.inf), self.last_event)
         for name in ("t_acq", "t_fp", "t_active", "t_miss", "n_known", "n_fp", "n_active",
-                     "n_miss", "hand_over", "passed"):  # fmt: skip
+                     "n_miss", "hand_over", "passed", "t_last"):  # fmt: skip
             setattr(self, name, getattr(self, name) & ~m)
         for name in ("t_relb", "t_nb", "t_world", "t_z", "n_relb", "n_nb", "n_world", "n_z"):
             v = getattr(self, name)
@@ -398,7 +424,7 @@ class GatePerception:
         for name in ("t_yaw", "n_yaw"):
             v = getattr(self, name)
             setattr(self, name, torch.where(m, torch.zeros_like(v), v))
-        for name in ("t_seen", "t_src", "n_seen", "n_src"):
+        for name in ("t_seen", "t_src", "n_seen", "n_src", "t_good"):
             setattr(self, name, torch.where(m, t, getattr(self, name)))
         self.ticks_since = torch.where(m, torch.zeros_like(self.ticks_since), self.ticks_since)
         self.status = torch.where(m, torch.full_like(self.status, HOLDING), self.status)
@@ -558,6 +584,9 @@ class GatePerception:
         self.t_seen = torch.where(take, t, self.t_seen)
         self.t_src = torch.where(take, self.n_src, self.t_src)
         self.last_event = torch.where(ho, t, self.last_event)
+        if self.reacq:  # a pass is a good event; the passed gate's estimate is no target
+            self.t_good = torch.where(ho, t, self.t_good)
+            self.t_last = self.t_last & ~ho
         for name in ("n_known", "n_fp", "n_active", "n_miss"):
             setattr(self, name, getattr(self, name) & ~ho)
         self.n_z = torch.where(ho.unsqueeze(-1), torch.zeros_like(self.n_z), self.n_z)
@@ -593,18 +622,24 @@ class GatePerception:
         self.n_z = torch.where(frame.unsqueeze(-1), z_n, self.n_z)
         # target slot: acquisition (true or false positive) / association
         unacq = frame & ~self.t_acq
+        if self.reacq:  # (a) a stale held target re-acquires from this frame's candidates
+            stale = self.t_acq & ~self.t_active & (t - self.t_seen > c.drop_after_s)
+            unacq = unacq | (frame & stale & (det_t | wrong))
         pick_fp = unacq & wrong & (~det_t | (d["fp_pick"] < self.tab.get("acq_pick_wrong", 0.5)))
         acq_true = unacq & det_t & ~pick_fp
         new_t = pos + _mv(R, relb_t)
         assoc = (new_t - self.t_world).norm(dim=-1) <= c.assoc_limit
         upd_t = (frame & self.t_acq & ~self.t_fp & det_t & assoc) | acq_true
-        self.t_active = torch.where(frame & ~self.t_fp, upd_t, self.t_active)
+        self.t_active = torch.where((frame & ~self.t_fp) | acq_true, upd_t, self.t_active)
         self.t_active = torch.where(pick_fp, torch.zeros_like(pick_fp), self.t_active)
         self.t_relb = torch.where(upd_t.unsqueeze(-1), relb_t, self.t_relb)
         self.t_nb = torch.where(upd_t.unsqueeze(-1), nb_t, self.t_nb)
         self.t_src = torch.where(upd_t | pick_fp, tc, self.t_src)
         self.t_acq = self.t_acq | acq_true | pick_fp
-        self.t_fp = self.t_fp | pick_fp
+        self.t_fp = torch.where(acq_true, torch.zeros_like(acq_true), self.t_fp | pick_fp)
+        if self.reacq:
+            self.t_good = torch.where(acq_true | pick_fp, t, self.t_good)
+            self.t_last = self.t_last & ~(acq_true | pick_fp)
         # a false-positive target is fixed in the world at its sighting
         fp_world = pd + _mv(Rd, fp_relb)
         fp_n = _mv(Rd, fp_nb)
@@ -641,6 +676,18 @@ class GatePerception:
         self.n_seen = torch.where(a_n, t, self.n_seen)
         self.ticks_since = torch.where(a_t, torch.zeros_like(self.ticks_since),
                                        self.ticks_since + 1)  # fmt: skip
+        if self.reacq:
+            self.t_good = torch.where(a_t, t, self.t_good)
+            # (b) release a target unmatched for lost_timeout: keep its estimate, acquire again
+            rel = self.t_acq & (t - self.t_seen > c.lost_timeout_s)
+            self.t_acq = self.t_acq & ~rel
+            self.t_fp = self.t_fp & ~rel
+            self.t_active = self.t_active & ~rel
+            self.t_last = self.t_last | rel
+            st = torch.where(a_t & ~ho, TRACKING, HOLDING)
+            self.status = torch.where(t - self.t_good > c.lost_hard_stop_s, LOST, st)
+            self._pos = pos
+            return
         # status
         age = t - self.t_seen
         acq_status = torch.where(a_t & ~ho, TRACKING, HOLDING)
@@ -663,11 +710,13 @@ class GatePerception:
         pos = self._pos
         t = t.to(torch.float64)
         c = self.cfg
-        target = torch.where(self.t_acq.unsqueeze(-1), self.t_world, pos)
+        # a target estimate exists: held, or (reacquire) the last released one
+        has = self.t_acq | self.t_last
+        target = torch.where(has.unsqueeze(-1), self.t_world, pos)
         mode = torch.where(
             self.n_active & self.n_known, NEXT_VISIBLE,
             torch.where(self.n_known, NEXT_UNSEEN_KNOWN,
-                        torch.where(self.t_acq, NEXT_UNSEEN_TARGET, NEXT_UNSEEN_NONE)),
+                        torch.where(has, NEXT_UNSEEN_TARGET, NEXT_UNSEEN_NONE)),
         )  # fmt: skip
         next_center = torch.where((mode <= NEXT_UNSEEN_KNOWN).unsqueeze(-1), self.n_world,
                                   torch.where((mode == NEXT_UNSEEN_TARGET).unsqueeze(-1),
@@ -681,8 +730,8 @@ class GatePerception:
         return {
             "status": self.status,
             "target": target,
-            "target_yaw": torch.where(self.t_acq, self.t_yaw, torch.zeros_like(self.t_yaw)),
-            "acquired": self.t_acq,
+            "target_yaw": torch.where(has, self.t_yaw, torch.zeros_like(self.t_yaw)),
+            "acquired": has,
             "next_mode": mode,
             "next_center": next_center,
             "next_yaw": self.n_yaw,

@@ -185,6 +185,9 @@ def plan_student(checkpoint: str | Path, *, allow_baseline: bool = False) -> Stu
         "gates.lost_timeout_s": float(tr["lost_timeout_s"]),
         "gates.acquire_timeout_s": float(tr["acquire_timeout_s"]),
         "gates.assoc_radius": float(tr.get("assoc_radius", 1.0)),
+        "gates.lost_policy": str(tr.get("lost_policy", "terminate")),
+        "gates.lost_hard_stop_s": float(tr.get("lost_hard_stop_s", 6.0)),
+        "gates.drop_after_s": float(tr.get("drop_after_s", 0.5)),
         "parts.free_space_estimator": "none",
         "free_space.assume_no_obstacles": True,
     }

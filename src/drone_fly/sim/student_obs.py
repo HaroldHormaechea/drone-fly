@@ -108,6 +108,9 @@ def schema(
     camera: dict[str, Any],
     assoc_radius: float = 1.0,
     battery_cells: int = 3,
+    lost_policy: str = "terminate",
+    lost_hard_stop_s: float = 6.0,
+    drop_after_s: float = 0.5,
 ) -> dict[str, Any]:
     """The JSON-able ``obs_schema`` written into the student checkpoint (pins ``k``, the tracker
     timeouts and the camera the noise model and perception assumed)."""
@@ -138,6 +141,9 @@ def schema(
             "lost_timeout_s": float(lost_timeout_s),
             "acquire_timeout_s": float(acquire_timeout_s),
             "assoc_radius": float(assoc_radius),
+            "lost_policy": str(lost_policy),
+            "lost_hard_stop_s": float(lost_hard_stop_s),
+            "drop_after_s": float(drop_after_s),
         },
         "camera": {
             "resolution": [int(v) for v in camera["resolution"]],

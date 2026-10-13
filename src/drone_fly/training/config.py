@@ -469,6 +469,11 @@ class PerceptionSection:
     lost_timeout_s: float | None = None  # None: the noise model's recommendation
     acquire_timeout_s: float | None = None
     timing_from_noise_model: bool = True
+    #: The tracker's lost policy (sim.perception; ADR 0009 amendment). The student flies
+    #: ``reacquire``; the harness's legacy default is ``terminate``.
+    lost_policy: str = "reacquire"
+    lost_hard_stop_s: float = 6.0
+    drop_after_s: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -546,6 +551,8 @@ class StudentConfig:
             )
         if self.perception.mode not in ("noise", "exact"):
             raise TrainConfigError("perception.mode must be noise or exact")
+        if self.perception.lost_policy not in ("terminate", "reacquire"):
+            raise TrainConfigError("perception.lost_policy must be terminate or reacquire")
         if self.perception.uncovered not in ("proxy", "exclude"):
             raise TrainConfigError("perception.uncovered must be proxy or exclude")
         if self.distill.beta_schedule not in ("linear", "exp"):

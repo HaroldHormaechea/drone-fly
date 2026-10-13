@@ -277,6 +277,9 @@ class LearnedGateEstimator(TrackingGateEstimator):
             acquire_timeout_s=num("acquire_timeout_s", 3.0, min_value=0.0),
             pass_area_frac=num("pass_area_frac", 0.2, min_value=0.0, max_value=1.0),
             gates_per_lap=None if gpl is None else int(gpl),
+            lost_policy=str(cfg.get("lost_policy", "terminate")),
+            lost_hard_stop_s=num("lost_hard_stop_s", 6.0, min_value=0.0, min_exclusive=True),
+            drop_after_s=num("drop_after_s", 0.5, min_value=0.0),
         )
         est.weights_path = weights_path
         est.warmup()

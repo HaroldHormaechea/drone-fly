@@ -230,6 +230,9 @@ def perception_config(cfg: Any, model: Any, mode: str | None = None) -> Any:
         over["lost_timeout_s"] = float(cfg.perception.lost_timeout_s)
     if cfg.perception.acquire_timeout_s is not None:
         over["acquire_timeout_s"] = float(cfg.perception.acquire_timeout_s)
+    over["lost_policy"] = str(cfg.perception.lost_policy)
+    over["lost_hard_stop_s"] = float(cfg.perception.lost_hard_stop_s)
+    over["drop_after_s"] = float(cfg.perception.drop_after_s)
     return PerceptionConfig.from_model(model, mode or cfg.perception.mode, **over)
 
 
@@ -841,6 +844,9 @@ def student_sidecar(
             acquire_timeout_s=pcfg.acquire_timeout_s,
             assoc_radius=float(model.tracker.get("assoc_radius", 1.0)),
             battery_cells=battery_cells,
+            lost_policy=pcfg.lost_policy,
+            lost_hard_stop_s=pcfg.lost_hard_stop_s,
+            drop_after_s=pcfg.drop_after_s,
         ),
         "world_scale": float(cfg.student.world_scale),
         "actor_arch": actor.arch(),

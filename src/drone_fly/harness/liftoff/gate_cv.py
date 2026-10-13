@@ -36,6 +36,12 @@ Shared by every subclass (the tracker):
    ``info`` carries ``target_age_s`` / ``next_age_s`` (now - that stamp; ``lost_timeout_s`` when
    nothing is held), ``target_valid`` (a current gate is held) and ``hand_over`` (passed this
    tick). No behaviour changes.
+9. UC70 lost policy (``gates.lost_policy``; the simulator's ``sim.perception`` mirrors it):
+   ``terminate`` (default, steps 6 as above) or ``reacquire``: (a) a held gate unmatched for more
+   than ``drop_after_s`` is replaced by the acquisition rule whenever detections exist; (b) after
+   ``lost_timeout_s`` unmatched it is RELEASED (its last estimate stays the target, ``target_valid``
+   false) and the tracker acquires again; the status is ``lost`` (the runner's fail-safe) only when
+   nothing good — a match, an acquisition or a pass — happened for ``lost_hard_stop_s``.
 
 OpenCV is imported lazily (on the first frame / detection call).
 """
@@ -176,7 +182,17 @@ class TrackingGateEstimator(GateEstimator):
         acquire_timeout_s: float = 3.0,
         pass_area_frac: float = 0.2,
         gates_per_lap: int | None = None,
+        lost_policy: str = "terminate",
+        lost_hard_stop_s: float = 6.0,
+        drop_after_s: float = 0.5,
     ) -> None:
+        if lost_policy not in ("terminate", "reacquire"):
+            raise HarnessConfigError(
+                f"gates.lost_policy must be terminate or reacquire, got {lost_policy!r}"
+            )
+        self.lost_policy = lost_policy
+        self.lost_hard_stop_s = float(lost_hard_stop_s)
+        self.drop_after_s = float(drop_after_s)
         self.camera = camera
         self.scale = scale or WorldScale(1.0)
         self.default_aperture = float(default_aperture)  # training scale; acquire fallback
@@ -265,6 +281,8 @@ class TrackingGateEstimator(GateEstimator):
         self._t0: float | None = None
         self._last_event: float | None = None  # last sighting or pass
         self._det_stamp: float | None = None  # capture stamp behind the latest detections
+        self._released: _Tracked | None = None  # reacquire: the last released target
+        self._good: float | None = None  # reacquire: the last match / acquisition / pass
 
     @property
     def lap(self) -> int:
@@ -307,17 +325,31 @@ class TrackingGateEstimator(GateEstimator):
         dets = [] if frame is None else self.detect_frame(frame, state)
         src = self._det_stamp
 
+        reacq = self.lost_policy == "reacquire"
+        if self._good is None:
+            self._good = now
         match: GateDetection | None = None
+        acquired = False
         if self.current is not None and dets:
             match = self._associate(dets)
+            if (match is None and reacq
+                    and now - self.current.last_seen > self.drop_after_s):  # fmt: skip
+                # (a) a stale held gate is replaced by the acquisition rule
+                match = min(dets, key=lambda d: d.distance * (1.0 + d.off_axis))
+                self.current = _Tracked.of(match, now, src)
+                acquired = True
         elif self.current is None and dets:
             match = min(dets, key=lambda d: d.distance * (1.0 + d.off_axis))
             self.current = _Tracked.of(match, now, src)
+            acquired = True
         if match is not None and self.current is not None:
-            prev = self.current.prev_signed
+            prev = None if acquired and reacq else self.current.prev_signed
             self.current = _Tracked.of(match, now, src)
             self.current.prev_signed = prev
             self._last_event = now
+            if reacq:
+                self._good = now
+                self._released = None
 
         next_det: GateDetection | None = None
         if self.current is not None:
@@ -338,9 +370,26 @@ class TrackingGateEstimator(GateEstimator):
             self.next_known = None
             next_det = None
             self._last_event = now
+            if reacq:
+                self._good = now
+                self._released = None
 
         status: str
-        if self.current is not None:
+        if reacq:
+            if self.current is not None and now - self.current.last_seen > self.lost_timeout_s:
+                self._released = self.current  # (b) release; keep its estimate as the target
+                self.current = None
+            status = "tracking" if match is not None and not passed else "holding"
+            if now - self._good > self.lost_hard_stop_s:
+                status = "lost"
+            held = self.current if self.current is not None else self._released
+            if held is not None:
+                target = held.center.astype(_F)
+                curr = curr_gate_block(held.gate)
+            else:
+                target = pos.astype(_F)
+                curr = np.array([1.0, 0.0, self.default_aperture], _F)
+        elif self.current is not None:
             age = now - self.current.last_seen
             status = "tracking" if match is not None and not passed else "holding"
             if age > self.lost_timeout_s:
@@ -360,6 +409,8 @@ class TrackingGateEstimator(GateEstimator):
             nxt = lookahead_unseen(pos, self.next_known.center)
         elif self.current is not None:
             nxt = lookahead_unseen(pos, self.current.center)
+        elif reacq and self._released is not None:
+            nxt = lookahead_unseen(pos, self._released.center)
         else:
             nxt = lookahead_unseen(pos, pos + np.array([1.0, 0.0, 0.0]))
 
@@ -421,6 +472,9 @@ class OpenCvGateEstimator(TrackingGateEstimator):
         pass_area_frac: float = 0.2,
         gates_per_lap: int | None = None,
         masks: Any = None,
+        lost_policy: str = "terminate",
+        lost_hard_stop_s: float = 6.0,
+        drop_after_s: float = 0.5,
     ) -> None:
         if nominal_width_m <= 0 or nominal_height_m <= 0:
             raise HarnessConfigError("gates.nominal_width_m / nominal_height_m must be > 0")
@@ -445,6 +499,9 @@ class OpenCvGateEstimator(TrackingGateEstimator):
             acquire_timeout_s=acquire_timeout_s,
             pass_area_frac=pass_area_frac,
             gates_per_lap=gates_per_lap,
+            lost_policy=lost_policy,
+            lost_hard_stop_s=lost_hard_stop_s,
+            drop_after_s=drop_after_s,
         )
 
     @classmethod
@@ -478,6 +535,9 @@ class OpenCvGateEstimator(TrackingGateEstimator):
             acquire_timeout_s=num("acquire_timeout_s", 3.0, min_value=0.0),
             pass_area_frac=num("pass_area_frac", 0.2, min_value=0.0, max_value=1.0),
             gates_per_lap=None if gpl is None else int(gpl),
+            lost_policy=str(cfg.get("lost_policy", "terminate")),
+            lost_hard_stop_s=num("lost_hard_stop_s", 6.0, min_value=0.0, min_exclusive=True),
+            drop_after_s=num("drop_after_s", 0.5, min_value=0.0),
             masks=FrameMasks.from_config(cam),
         )
 

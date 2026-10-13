@@ -94,6 +94,9 @@ def expected_schema(meta: dict[str, Any]) -> dict[str, Any]:
         camera=meta.get("camera") or sch.get("camera") or {"resolution": [0, 0], "hfov_deg": 0},
         assoc_radius=float(tr.get("assoc_radius", 1.0)),
         battery_cells=int((sch.get("battery") or {}).get("cells", 3)),
+        lost_policy=str(tr.get("lost_policy", "terminate")),
+        lost_hard_stop_s=float(tr.get("lost_hard_stop_s", 6.0)),
+        drop_after_s=float(tr.get("drop_after_s", 0.5)),
     )
 
 
