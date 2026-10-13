@@ -1145,6 +1145,216 @@ def write_report(
     return mpath, jpath
 
 
+# ----------------------------------------------------------------------------- validation replay
+
+#: Reference-perception seeds averaged in the replay.
+REPLAY_SEEDS = 20
+
+
+def load_catalogue_course(track_file: str | None, trackdata_root: str | Path | None) -> Any:
+    """The catalogue course whose ``track`` file is ``track_file`` (no scene needed)."""
+    from drone_fly.tracks import catalogue as cat
+    from drone_fly.tracks.catalogue import TrackDataError
+    from drone_fly.tracks.loader import load_course
+
+    if not track_file:
+        raise TrackDataError("the labels name no track file")
+    try:
+        c = cat.load_named("liftoff")
+    except TrackDataError:
+        import drone_fly
+
+        src = Path(drone_fly.__file__).resolve().parents[2]
+        c = cat.load_catalogue(src / "tracks" / "liftoff.yaml")
+    name = Path(str(track_file)).name
+    entry = next((e for e in c.entries if e.get("track") == name), None)
+    if entry is None:
+        raise TrackDataError(f"no catalogue entry with track {name}")
+    root = Path(trackdata_root) if trackdata_root else Path(str(track_file)).parent
+    return load_course(entry, catalogue=c, root=root, scenes_root=None)[0]
+
+
+def truth_progress(cap: Any, course: Any) -> np.ndarray:
+    """Route progress ``k`` per telemetry sample (``RouteProgress`` + ``gate_crossed``, slack 0;
+    restarted at every capture segment, i.e. after respawns)."""
+    from drone_fly.sim.pool import RouteProgress, gate_crossed
+
+    pos = np.array([course.frame.to_course_point(s.pos) for s in cap.states], np.float64)
+    ks = np.zeros(len(pos), np.int64)
+    for a, b in cap.segments:
+        prog = RouteProgress(course.n_passages, course.laps, course.circuit)
+        for i in range(a + 1, b):
+            p = course.passages[prog.target]
+            if not prog.finished and gate_crossed(pos[i - 1], pos[i], p, 0.0):
+                prog.advance()
+            ks[i] = prog.k
+    return ks
+
+
+def _passage_dict(p: Any) -> dict[str, Any]:
+    return {
+        "center": np.asarray(p.center, np.float64),
+        "rot": np.asarray(p.rot, np.float64),
+        "wh": (float(p.w), float(p.h)),
+    }
+
+
+def _hold_runs(statuses: list[str], stamps: list[float]) -> tuple[list[float], int]:
+    """Durations of consecutive ``holding`` runs and the number of entries into ``lost``."""
+    holds, lost, start = [], 0, None
+    for i, st in enumerate(statuses):
+        if st == "holding" and start is None:
+            start = stamps[i]
+        if st != "holding" and start is not None:
+            holds.append(stamps[i] - start)
+            start = None
+        if st == "lost" and (i == 0 or statuses[i - 1] != "lost"):
+            lost += 1
+    if start is not None:
+        holds.append(stamps[-1] - start)
+    return holds, lost
+
+
+def _summ(x: list[float]) -> dict[str, Any]:
+    a = np.asarray(x, np.float64)
+    return {
+        "n": int(a.size),
+        "median": float(np.median(a)) if a.size else None,
+        "p90": float(np.percentile(a, 90)) if a.size else None,
+    }
+
+
+def validation_replay(
+    seq: list[tuple[Any, list[Any]]],
+    ks: np.ndarray,
+    course: Any,
+    model: dict[str, Any],
+    tracker: dict[str, Any],
+    camera: Any,
+    seeds: int = REPLAY_SEEDS,
+) -> dict[str, Any]:
+    """The real ``TrackingGateEstimator`` over the held-out frames (their recorded detections) vs
+    the reference perception on the same truth trajectory (see the module docstring)."""
+    from drone_fly.harness.liftoff.gate_cv import TrackingGateEstimator
+    from drone_fly.harness.scale import WorldScale
+    from drone_fly.harness.types import Frame
+    from drone_fly.sim.noise_model import NoiseModel
+    from drone_fly.sim.perception import STATUS_NAMES, TICK_DRAWS, PerceptionConfig
+    from drone_fly.student.perception_ref import ReferencePerception, sample
+
+    cache = {i: dets for i, (_, dets) in enumerate(seq)}
+
+    class _Replay(TrackingGateEstimator):
+        def detect(self, image: np.ndarray, state: Any) -> list[Any]:  # pragma: no cover
+            return []
+
+        def detect_frame(self, frame: Any, state: Any) -> list[Any]:
+            return cache[frame.index]
+
+    nm = NoiseModel(model)
+    ap = nm.class_noise().aperture_m
+    tr = _Replay(
+        camera,
+        WorldScale(1.0),
+        default_aperture=float(min(ap)),
+        assoc_radius=float(tracker["assoc_radius"]),
+        lost_timeout_s=float(tracker["lost_timeout_s"]),
+        acquire_timeout_s=float(tracker["acquire_timeout_s"]),
+        pass_area_frac=float(tracker.get("pass_area_frac", 0.2)),
+    )
+    n = course.n_passages
+    total = course.total_crossings
+    stamps = [f.stamp for f, _ in seq]
+    k_at = [int(ks[f.sample_index]) for f, _ in seq]
+    truth_cross = sum(max(0, b - a) for a, b in zip(k_at, k_at[1:], strict=False))
+    blank = np.zeros((1, 1, 3), np.uint8)
+    real_status, real_err, real_pass = [], [], 0
+    for i, ((f, _), k) in enumerate(zip(seq, k_at, strict=True)):
+        est = tr.update(Frame(blank, f.stamp, i), f.state, f.stamp)
+        real_status.append(est.status)
+        real_pass += int(est.passed)
+        if tr.current is not None:
+            truth = course.frame.to_contract_point(course.passages[k % n].center)
+            real_err.append(float(np.linalg.norm(np.asarray(est.target, np.float64) - truth)))
+    holds_r, lost_r = _hold_runs(real_status, stamps)
+    period = float(np.median(np.diff(stamps))) if len(stamps) > 1 else 0.1
+    cfg = PerceptionConfig.from_model(
+        nm,
+        "noise",
+        detection_lag_s=(0.0, 0.0),
+        frame_period_s=period,
+        frame_jitter_s=0.0,
+        frame_skip_p=0.0,
+        lost_timeout_s=float(tracker["lost_timeout_s"]),
+        world_scale_k=1.0,
+    )
+    ref_err, ref_holds, ref_lost, ref_track = [], [], [], []
+    scale = course.frame.world_scale
+    for s in range(seeds):
+        rng = np.random.default_rng(1000 + s)
+        ref = ReferencePerception(nm, cfg)
+        f0 = seq[0][0]
+        ref.reset(f0.stamp, course.frame.to_course_point(f0.state.pos), f0.state.quat,
+                  np.zeros(2))  # fmt: skip
+        sts = []
+        for i, ((f, _), k) in enumerate(zip(seq, k_at, strict=True)):
+            pc = course.frame.to_course_point(f.state.pos)
+            ref.push_pose(f.stamp, pc, f.state.quat)
+            nxt = course.passages[(k + 1) % n] if k + 1 < total else None
+            crossed = i > 0 and k > k_at[i - 1]
+            ref.step(
+                f.stamp, pc, f.state.quat, _passage_dict(course.passages[k % n]),
+                None if nxt is None else _passage_dict(nxt), crossed, scale,
+                sample(rng, TICK_DRAWS),
+            )  # fmt: skip
+            out = ref.outputs()
+            sts.append(STATUS_NAMES[out["status"]])
+            if out["acquired"]:
+                d = np.linalg.norm(out["target"] - course.passages[k % n].center) * scale
+                ref_err.append(float(d))
+        h, lo = _hold_runs(sts, stamps)
+        ref_holds += h
+        ref_lost.append(lo)
+        ref_track.append(float(np.mean([x == "tracking" for x in sts])))
+    dur_min = max((stamps[-1] - stamps[0]) / 60.0, 1e-9)
+    real = {
+        "target_error_m": _summ(real_err),
+        "tracking_share": float(np.mean([x == "tracking" for x in real_status])),
+        "lost_share": float(np.mean([x == "lost" for x in real_status])),
+        "hold_s": _summ(holds_r),
+        "lost_events": lost_r,
+        "lost_events_per_min": lost_r / dur_min,
+        "tracker_passes": real_pass,
+    }
+    ref_sum = {
+        "seeds": seeds,
+        "target_error_m": _summ(ref_err),
+        "tracking_share": float(np.mean(ref_track)),
+        "hold_s": _summ(ref_holds),
+        "lost_events_mean": float(np.mean(ref_lost)),
+        "lost_events_per_min": float(np.mean(ref_lost)) / dur_min,
+        "passes": truth_cross,
+    }
+    re, fe = real["target_error_m"]["median"], ref_sum["target_error_m"]["median"]
+    rh, fh = real["hold_s"]["median"], ref_sum["hold_s"]["median"]
+    summary = {
+        "frames": len(seq),
+        "truth crossings in the window": truth_cross,
+        "real tracker passes (own pass rule)": real_pass,
+        "target error median real / reference (m)": f"{_fmt(re, '.2f')} / {_fmt(fe, '.2f')}",
+        "tracking share real / reference": (
+            f"{real['tracking_share']:.2f} / {ref_sum['tracking_share']:.2f}"
+        ),
+        "hold median real / reference (s)": f"{_fmt(rh, '.2f')} / {_fmt(fh, '.2f')}",
+        "lost events per min real / reference": (
+            f"{real['lost_events_per_min']:.2f} / {ref_sum['lost_events_per_min']:.2f}"
+        ),
+        "note": "reference: truth-driven hand-over, synchronous frames (no latency), "
+        f"{seeds} seeds; real: recorded detections, the tracker's own association + pass rule",
+    }
+    return {"real": real, "reference": ref_sum, "summary": summary}
+
+
 # ----------------------------------------------------------------------------- driver
 
 
@@ -1225,6 +1435,8 @@ def run_detector_noise(
     fit: NoiseFitConfig | None = None,
     estimator: Any = None,
     max_frames: int | None = None,
+    replay: bool = True,
+    trackdata_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run the measurement and write the model + report (see the module docstring)."""
     import torch
@@ -1284,6 +1496,7 @@ def run_detector_noise(
 
     records = Records()
     cap_meta = []
+    replay_input = []
     camera_block = None
     for i, cap_dir in enumerate(captures):
         cap_dir = Path(cap_dir)
@@ -1301,6 +1514,7 @@ def run_detector_noise(
         if max_frames is not None:
             rows = rows[:max_frames]
         used = 0
+        seq = []
         for r in rows:
             f = by_file.get(r["file"])
             if f is None:
@@ -1314,7 +1528,10 @@ def run_detector_noise(
                 pos=np.asarray(f.state.pos, np.float64), quat=np.asarray(f.state.quat, np.float64),
                 spec=spec, aperture=aperture, out=records,
             )  # fmt: skip
+            seq.append((f, dets))
             used += 1
+        seq.sort(key=lambda x: x[0].stamp)
+        replay_input.append((cap, seq, lab.meta.get("track")))
         cap_meta.append({
             "name": lab.name, "path": str(cap_dir.resolve()), "labels": str(lab.labels_dir),
             "map": map_name(lab.meta.get("track")), "track": lab.meta.get("track"),
@@ -1360,9 +1577,22 @@ def run_detector_noise(
         "rule": f"miss-burst p99 below {LOST_TIMEOUT_RANGE_M:g} m, clamped to "
         f"[{LOST_TIMEOUT_CLAMP_S[0]:g}, {LOST_TIMEOUT_CLAMP_S[1]:g}] s",
     }
+    replay_res = None
+    if replay and replay_input and replay_input[0][1]:
+        cap0, seq0, track0 = replay_input[0]
+        try:
+            from drone_fly.harness.liftoff.gate_cv import camera_from_config
+
+            course = load_catalogue_course(track0, trackdata_root)
+            ks = truth_progress(cap0, course)
+            cam = camera_from_config(cfg.section("camera"))
+            replay_res = validation_replay(seq0, ks, course, model, model["tracker"], cam)
+        except Exception as exc:  # noqa: BLE001 - the replay is diagnostic; report why it failed
+            log.warning("validation replay skipped: %s", exc)
+            replay_res = {"summary": {"skipped": str(exc)}}
     model_path = write_model(out_dir, model)
     plots = write_plots(out_dir, model, records)
-    md, js = write_report(out_dir, model, records, fit, plots)
+    md, js = write_report(out_dir, model, records, fit, plots, replay_res)
     (out_dir / "records.json").write_text(
         json.dumps({"gates": records.gates, "false_positives": records.false_positives,
                     "frames": records.frames}, default=float),
@@ -1376,6 +1606,7 @@ def run_detector_noise(
         "detector_id": did,
         "model": model,
         "records": records,
+        "replay": replay_res,
     }
 
 
