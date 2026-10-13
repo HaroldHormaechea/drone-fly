@@ -601,7 +601,19 @@ def cmd_student(args: argparse.Namespace) -> int:
     if args.scale_report:
         out = args.out or str(Path("artifacts") / "training" / (args.drone or "student")
                               / "student-scale-report.json")  # fmt: skip
-        rep = scale_report(trackdata_root=args.trackdata_root, out=out)
+        speeds = rng07 = sources = None
+        if args.teacher:  # CPU: the teacher's val speed vs. 07's own flight speed
+            from drone_fly.training.distill import speed_stats_07, teacher_speed_stats
+
+            t = teacher_speed_stats(args.teacher, device="cpu")
+            s07 = speed_stats_07(k1_path=args.k1_path, device="cpu")
+            speeds = t["speed_mps"]
+            rng07 = (s07["speed_mps"]["p10"], s07["speed_mps"]["p90"])
+            sources = {"teacher": t, "07": s07}
+            print(f"teacher val speed p50 {speeds['p50']:.2f} / p90 {speeds['p90']:.2f} m/s; "
+                  f"07 speed p10-p90 {rng07[0]:.2f}-{rng07[1]:.2f} m/s")  # fmt: skip
+        rep = scale_report(trackdata_root=args.trackdata_root, teacher_speeds=speeds,
+                           speed_range_07=rng07, speed_sources=sources, out=out)  # fmt: skip
         for r in rep["candidates"]:
             vals = ", ".join(f"{k} p50 {v['p50']:.2f} ({'in' if v['inside'] else 'OUT'})"
                              for k, v in r["values"].items())  # fmt: skip

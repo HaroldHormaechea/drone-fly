@@ -560,10 +560,121 @@ def run_feasibility(teacher_ck: Any, cfg: Any, out_dir: Path, device: str | None
 # ----------------------------------------------------------------------------- scale report
 
 
+def _pcts(a: np.ndarray) -> dict[str, float]:
+    return {f"p{q}": round(float(np.percentile(a, q)), 3) for q in (10, 25, 50, 75, 90)} | {
+        "n": int(a.size)
+    }
+
+
+def speed_stats_07(
+    *,
+    k1_path: Any = None,
+    episodes: int = 64,
+    seed: int = 1234,
+    device: str = "cpu",
+    config: str = "proc-course-dr",
+) -> dict[str, Any]:
+    """07's flight speed in its own procedural courses (contract v1, the legacy decode): the
+    per-tick speed of every live episode until it ends (CPU)."""
+    from drone_fly.controller.reservoir import load_readout
+    from drone_fly.sim.action import ActionSpec
+    from drone_fly.training.config import WarmStartConfig, load_train_config
+    from drone_fly.training.ppo import build_env, resolve_device, resolve_repo_path
+
+    cfg = load_train_config(config)
+    cfg = replace(cfg, action=ActionSpec(), warm_start=WarmStartConfig())
+    dev = resolve_device(device)
+    from drone_fly import drones
+
+    ck = resolve_repo_path("training/07-proc-course-flight/model_readout.pt")
+    actor = load_readout(ck, 30, k1_path or cfg.k1_path, dev)
+    env = build_env(cfg, drones.load(cfg.drone), dev, n_envs=episodes, seed=seed, episode_log=False)
+    rng = np.random.default_rng(seed)
+    env.reset_all(torch.as_tensor(rng.integers(0, env.P["cen"].shape[0], episodes), device=dev))
+    period = 1.0 / (
+        cfg.timing.fixed_hz
+        if cfg.timing.mode == "fixed"
+        else max(cfg.timing.control_hz_set or cfg.timing.control_hz)
+    )
+    alive = torch.ones(episodes, dtype=torch.bool, device=dev)
+    speeds: list[np.ndarray] = []
+    obs, ext = env.obs().float(), env.extra().float()
+    with torch.no_grad():
+        for _ in range(int(math.ceil(cfg.course.episode_s / period)) + 5):
+            mean, _ = actor.act(actor.features(obs), ext)
+            obs, _r, done, _t = env.step(mean.to(env.pos.dtype))
+            obs, ext = obs.float(), env.extra().float()
+            sp = env.vel.norm(dim=-1)
+            speeds.append(sp[alive & ~done].cpu().numpy())
+            alive = alive & ~done
+            if not bool(alive.any()):
+                break
+    a = np.concatenate(speeds) if speeds else np.zeros(0)
+    return {"checkpoint": str(ck), "config": cfg.name, "drone": cfg.drone, "episodes": episodes,
+            "seed": seed, "speed_mps": _pcts(a)}  # fmt: skip
+
+
+def teacher_speed_stats(
+    teacher: str | Path,
+    *,
+    selectors: tuple[str, ...] = ("liftoff:val",),
+    episodes: int = 4,
+    seed: int = 4321,
+    device: str = "cpu",
+) -> dict[str, Any]:
+    """The teacher's flight speed on ``selectors`` (randomized mode, its own observation
+    version): the per-tick speed of live episodes after arming (CPU)."""
+    import yaml
+
+    from drone_fly import drones
+    from drone_fly.harness.teacher import TeacherCheckpoint
+    from drone_fly.tracks.loader import build_pool
+    from drone_fly.training.cli import teacher_raw_from_snapshot
+    from drone_fly.training.config import teacher_from_mapping
+    from drone_fly.training.evaluate import _mode_env, conversion_from_sidecar, load_teacher
+    from drone_fly.training.ppo import build_teacher_env, resolve_device
+
+    ck = TeacherCheckpoint.resolve(teacher)
+    snap = yaml.safe_load((ck.run_dir / "config.yaml").read_text(encoding="utf-8"))
+    cfg = teacher_from_mapping(teacher_raw_from_snapshot(snap), validate_tracks=False)
+    dev = resolve_device(device)
+    actor, side = load_teacher(ck.checkpoint, dev)
+    pool = build_pool([{"select": s} for s in selectors], "eval",
+                      conversion=conversion_from_sidecar(side), root=cfg.tracks.root,
+                      scenes_root=cfg.tracks.scenes_root)  # fmt: skip
+    keep = [i for i, c in enumerate(pool.courses) if c.meta.get("source") == "liftoff-xml"]
+    ids = np.repeat(np.asarray(keep, np.int64), episodes)
+    env = build_teacher_env(cfg, drones.load(cfg.drone), dev, pool, n_envs=len(ids), seed=seed,
+                            episode_log=False, **_mode_env(cfg, "randomized"))  # fmt: skip
+    env.obs_version = teacher_obs_version_of(side)
+    env.route_starts = False
+    env.slack = 0.0
+    env.reset_all(torch.as_tensor(ids, device=dev))
+    tc = env.timing_config
+    hz = max(tc.control_hz_set or tc.control_hz) if tc.mode == "random" else tc.fixed_hz
+    steps = int(math.ceil(float(env.P["time_limit"][env.cid].max()) * hz)) + 10
+    alive = torch.ones(env.n, dtype=torch.bool, device=dev)
+    speeds: list[np.ndarray] = []
+    with torch.no_grad():
+        for _ in range(steps):
+            act = actor.mean_action(env.teacher_obs().float())
+            _, done = env.step(act.to(env.dtype))
+            live = alive & ~done & (env.t > env.arm_until)
+            speeds.append(env.vel.norm(dim=-1)[live].cpu().numpy())
+            alive = alive & ~done
+            if not bool(alive.any()):
+                break
+    a = np.concatenate(speeds) if speeds else np.zeros(0)
+    return {"teacher": ck.record(), "selectors": list(selectors), "tracks": len(keep),
+            "episodes_per_track": episodes, "seed": seed, "speed_mps": _pcts(a)}  # fmt: skip
+
+
 def scale_report(
     *,
     trackdata_root: str | None = None,
     teacher_speeds: dict[str, float] | None = None,
+    speed_range_07: tuple[float, float] | None = None,
+    speed_sources: dict[str, Any] | None = None,
     out: str | Path | None = None,
 ) -> dict[str, Any]:
     """Pick ``k`` a priori (CPU): TRAIN-split aperture / spacing medians (and the teacher's val
@@ -579,8 +690,9 @@ def scale_report(
     stats = aggregate_stats(entries, root, ConversionConfig.from_dict(None))
     q = {"aperture_m": stats["aperture_m"], "spacing_m": stats["spacing_m"]}
     ranges = dict(RANGES_07)
-    if teacher_speeds:
+    if teacher_speeds and speed_range_07:
         q["speed_mps"] = teacher_speeds
+        ranges["speed_mps"] = (float(speed_range_07[0]), float(speed_range_07[1]))
     rows = []
     for k in K_CANDIDATES:
         row: dict[str, Any] = {"k": k, "inside": True, "log_ratio": 0.0, "values": {}}
@@ -623,6 +735,8 @@ def scale_report(
         "chosen_k": pick["k"],
         "chosen_inside_all_ranges": pick["inside"],
         "references": {"07_live_world_scale": 10.0, "liftoff_preset_world_scale": 4.0},
+        "speed_sources": speed_sources,
+        "speed_range_07": None if not speed_range_07 else list(speed_range_07),
     }
     if out is not None:
         p = Path(out)
@@ -909,6 +1023,10 @@ def _train_student(
         root=cfg.base.tracks.root,
         scenes_root=cfg.base.tracks.scenes_root,
     )
+    if cfg.base.tracks.augment:  # training only, as the teacher (mirror / scales)
+        from drone_fly.tracks.augment import augment_pool
+
+        pool = augment_pool(pool, dict(cfg.base.tracks.augment), conv)
     if cfg.perception.uncovered == "exclude":
         pool = filter_uncovered(pool, model)
     run.write_tracks_snapshot(pool)

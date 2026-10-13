@@ -9,7 +9,7 @@
 #  - pass slack 0 throughout
 #  - student: the K1 reservoir actor warm-started from 07 (v1 -> v2), L1 sense encoder on;
 #    world_scale k is set from `train student --scale-report` before run 1 (ADR parameter table)
-extends: teacher-liftoff
+extends: teacher-liftoff-aug   # power model, battery obs, training-course augmentation (UC68 run 2)
 name: student-liftoff
 n_envs: 4096
 budget: 2.0e8
@@ -18,7 +18,7 @@ plant:
   power: true                # UC68 battery + thrust-at-speed model, as the teacher (student-obs v2
                              # observes the battery; power_loss is an episode outcome)
 tracks:
-  mix:
+  mix:                       # the plan's 60 / 40 (the teacher ran 50 / 50); augmentation inherited
     - {select: "liftoff:train", weight: 0.6, scene_weight: 2.0}
     - {select: "procedural:proc-liftoff", weight: 0.4}
 env:
