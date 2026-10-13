@@ -999,10 +999,10 @@ def _deltas_scorer(monkeypatch, rows, cam, masks=None):
 
     def score_frame(found, gates, scale):
         seen["gates"].append([dict(g) for g in gates])
-        hit = {"detected": True, "position_error_rel": 0.1}
-        # the eval rule: centre in the image and not under a mask
-        scored = [{**hit, "cls": g["cls"]} for g in gates
-                  if g["center_in_image"] and not g.get("center_masked")]  # fmt: skip
+        # the eval rule: centre in the image and not under a mask; "hit" (default True) = found
+        kept = [g for g in gates if g["center_in_image"] and not g.get("center_masked")]
+        scored = [{"detected": g.get("hit", True), "position_error_rel": 0.1, "cls": g["cls"]}
+                  for g in kept]  # fmt: skip
         return {"scored": scored, "false_detections": []}
 
     monkeypatch.setattr(gate_learned, "LearnedGateEstimator", Est)
@@ -1201,3 +1201,37 @@ def test_score_with_deltas_rejudges_center_masked_at_the_rolled_centre(monkeypat
         res = s2.score(net, data, deltas={0: 90.0}, principal=principal)
         assert [g["center_masked"] for g in seen2["gates"][0]] == [False, False, False]
         assert res["n"] == 3
+
+
+def test_score_per_class_counts_and_rates(monkeypatch):
+    """9aee455: per_class {cls: {n, detection_rate}} - the counts sum to n and each rate is
+    that class's share of detected gates."""
+    pytest.importorskip("torch")
+    from drone_fly.harness.liftoff import gate_net
+
+    cam = _cam()
+    monkeypatch.setattr(gate_net, "decode", lambda out, score_threshold=0.3: [[] for _ in out])
+
+    def gate(cls, hit, seen=True):
+        return {"cls": cls, "range_m": 10.0, "center_in_image": seen, "hit": hit,
+                "center_px": [cam.cx, cam.cy]}  # fmt: skip
+
+    rows = [
+        [gate("arch", True), gate("square", False), gate("arch", False)],
+        [gate("square", True), gate("square", True), gate("arch", True, seen=False)],
+        [gate("light", False)],
+    ]
+    s, _ = _deltas_scorer(monkeypatch, rows, cam)
+    data = np.zeros((3, 3, s.geometry[1], s.geometry[0]), np.uint8)
+    res = s.score(_IdentityNet(), data, batch_size=2)
+    pc = res["per_class"]
+    assert list(pc) == ["arch", "light", "square"]  # sorted
+    assert pc["arch"] == {"n": 2, "detection_rate": 0.5}
+    assert pc["light"] == {"n": 1, "detection_rate": 0.0}
+    assert pc["square"]["n"] == 3 and pc["square"]["detection_rate"] == pytest.approx(2 / 3)
+    assert sum(v["n"] for v in pc.values()) == res["n"] == 6  # the unseen arch is not scored
+    detected = sum(v["n"] * v["detection_rate"] for v in pc.values())
+    assert detected / res["n"] == pytest.approx(res["detection_rate"]) == pytest.approx(0.5)
+    empty, _ = _deltas_scorer(monkeypatch, [[]], cam)
+    none = empty.score(_IdentityNet(), data[:1])
+    assert none["n"] == 0 and none["per_class"] == {} and none["detection_rate"] == 0.0

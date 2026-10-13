@@ -414,9 +414,96 @@ def test_frame_cache_round_trip_and_reuse(world, tmp_path, monkeypatch):
     assert idx3["input_width"] == 160
 
 
-def test_default_cache_dir_is_keyed_by_the_manifest(world):
-    ds = build(world, [world.a], max_frames_per_capture=2)
-    assert gd.cache_dir(ds, 128) == world.models / "datasets" / f"{ds.manifest_sha()[:8]}-w128"
+def test_cache_key_is_the_data_not_the_training_params(world):
+    """9aee455: the frame cache is keyed by data_sha - captures, counts, tables and the frame
+    selection (DATA_PARAMS) - so changing a training hyper-parameter reuses the cache."""
+    assert gd.DATA_PARAMS == ("frame_stride", "max_frames_per_capture", "static_trim")
+    base = build(world, [world.a, world.c], max_frames_per_capture=3)
+    sha = base.data_sha()
+    assert len(sha) == 64
+    assert gd.cache_dir(base, 128) == world.models / "datasets" / f"{sha[:8]}-w128"
+    assert gd.cache_dir(base, 160).name == f"{sha[:8]}-w160"  # the width is in the folder name
+    training = {"epochs": 40, "backbone": "resnet18-hf", "select": "val-detection", "lr": 1e-3,
+                "roll_aug": {"p": 0.5}, "batch_size": 8, "seed": 3, "deploy": False}  # fmt: skip
+    trained = build(world, [world.a, world.c], max_frames_per_capture=3, params=training)
+    assert trained.manifest_sha() != base.manifest_sha()  # the manifest records them ...
+    assert trained.data_sha() == sha  # ... the cache key does not
+    assert gd.cache_dir(trained, 128) == gd.cache_dir(base, 128)
+    for kw in ({"max_frames_per_capture": 4}, {"max_frames_per_capture": 3, "frame_stride": 2},
+               {"max_frames_per_capture": 3, "static_trim": False}):  # fmt: skip
+        other = build(world, [world.a, world.c], **kw)
+        assert other.data_sha() != sha, kw
+    assert build(world, [world.a], max_frames_per_capture=3).data_sha() != sha  # other captures
+
+
+def _counting_loader(monkeypatch, fail_at=None):
+    """evaluate.load_image counting its calls; raising on call ``fail_at`` (1-based)."""
+    from drone_fly.harness.offline import evaluate
+
+    real, calls = evaluate.load_image, []
+
+    def load(path):
+        calls.append(path)
+        if fail_at is not None and len(calls) == fail_at:
+            raise RuntimeError("interrupted")
+        return real(path)
+
+    monkeypatch.setattr(evaluate, "load_image", load)
+    return calls
+
+
+def test_an_interrupted_cache_build_resumes_byte_identically(world, tmp_path, monkeypatch):
+    ds = build(world, [world.a, world.c], max_frames_per_capture=4)  # 8 tiny frames
+    cam = CFG.section("camera")
+    clean, _ = build_frame_cache(ds, 128, cam, out=tmp_path / "clean")
+    clean = np.asarray(clean).copy()
+    monkeypatch.setattr(gd, "CACHE_FLUSH_EVERY", 2)
+    out = tmp_path / "cache"
+    # call 1 reads the geometry, calls 2-6 frames 0-4: frame 4's read fails
+    _counting_loader(monkeypatch, fail_at=6)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        build_frame_cache(ds, 128, cam, out=out)
+    assert not (out / "index.json").exists()  # partial: never mistaken for a finished cache
+    prog = json.loads((out / "progress.json").read_text("utf-8"))
+    assert prog["done"] == 4  # the last checkpoint (every 2 frames), not the 5 attempted
+    assert prog["input_width"] == 128 and prog["shape"][0] == 8
+    monkeypatch.undo()
+    monkeypatch.setattr(gd, "models_root", lambda: world.models)
+    monkeypatch.setattr(gd, "CACHE_FLUSH_EVERY", 2)
+    calls = _counting_loader(monkeypatch)
+    mm, idx = build_frame_cache(ds, 128, cam, out=out)
+    assert len(calls) == 1 + 4  # the geometry read + only frames 4-7
+    assert [str(p) for p in calls[1:]] == idx["files"][4:]
+    assert np.array_equal(np.asarray(mm), clean)  # byte-identical to an uninterrupted build
+    assert (out / "frames.u8").read_bytes() == (tmp_path / "clean" / "frames.u8").read_bytes()
+    assert not (out / "progress.json").exists()
+    assert idx["data_sha256"] == ds.data_sha() and idx["manifest_sha256"] == ds.manifest_sha()
+    del mm
+
+
+def test_a_partial_cache_without_progress_or_with_another_key_is_rebuilt(
+    world, tmp_path, monkeypatch
+):
+    ds = build(world, [world.a, world.c], max_frames_per_capture=2)  # 4 frames
+    cam = CFG.section("camera")
+    clean, _ = build_frame_cache(ds, 128, cam, out=tmp_path / "clean")
+    clean = np.asarray(clean).copy()
+    out = tmp_path / "cache"
+    out.mkdir()
+    (out / "frames.u8").write_bytes(bytes([255]) * 1000)  # a stale frames.u8: no progress, no index
+    calls = _counting_loader(monkeypatch)
+    mm, _ = build_frame_cache(ds, 128, cam, out=out)
+    assert len(calls) == 1 + 4 and np.array_equal(np.asarray(mm), clean)  # a full rebuild
+    del mm
+    # a progress.json of another dataset (other files) does not resume it either
+    (out / "index.json").unlink()
+    (out / "progress.json").write_text(json.dumps({"files_sha256": "0" * 64, "input_width": 128,
+                                                   "shape": list(clean.shape), "done": 3}),
+                                       "utf-8")  # fmt: skip
+    calls.clear()
+    mm, _ = build_frame_cache(ds, 128, cam, out=out)
+    assert len(calls) == 1 + 4 and np.array_equal(np.asarray(mm), clean)
+    del mm
 
 
 # ----------------------------------------------------------------------------- report / G1
@@ -744,3 +831,38 @@ def test_gates_train_refuses_a_heldout_capture_named_explicitly(world, tmp_path,
     err = capsys.readouterr().err
     assert f"capture {world.d.name} is on FakeD" in err and "held-out maps are never" in err
     assert not (world.models / "models").exists()  # nothing was trained
+
+
+def test_cli_dataset_report_build_cache(world, tmp_path, monkeypatch, capsys):
+    """--build-cache builds the training frame cache (printing its dir and peak RAM); without
+    the flag nothing is built."""
+    import re
+
+    monkeypatch.setattr(cat, "load_catalogue", lambda path: world.catalogue)
+    cfg = tmp_path / "small.yaml"
+    cfg.write_text(json.dumps(SMALL_CAMERA), "utf-8")
+    args = ["harness", "gates", "dataset-report", "--captures", str(world.a), str(world.c),
+            "--split-source", str(world.catalogue.path), "--trackdata-root", str(world.root),
+            "--protect-holdout-of", "none", "--config", str(cfg),
+            "--max-frames-per-capture", "2"]  # fmt: skip
+    datasets = world.models / "datasets"
+    before = set(datasets.iterdir()) if datasets.is_dir() else set()
+    main(args)
+    out = capsys.readouterr().out
+    assert "frame cache:" not in out and "peak RAM" not in out
+    assert (set(datasets.iterdir()) if datasets.is_dir() else set()) == before  # nothing built
+    main([*args, "--build-cache", "--input-width", "128"])
+    out = capsys.readouterr().out
+    m = re.search(r"frame cache: (.+) \((\d+) frames\)", out)
+    assert m and int(m.group(2)) == 4
+    d = Path(m.group(1))
+    assert d.parent == datasets and d.name.endswith("-w128")
+    idx = json.loads((d / "index.json").read_text("utf-8"))
+    assert idx["input_width"] == 128 and idx["shape"][0] == 4
+    assert d.name == f"{idx['data_sha256'][:8]}-w128"
+    assert not (d / "progress.json").exists()
+    assert re.search(r"peak RAM: \d+ MB", out)
+    calls = _counting_loader(monkeypatch)
+    main([*args, "--build-cache", "--input-width", "128"])  # a second run reuses it
+    assert f"frame cache: {d} (4 frames)" in capsys.readouterr().out
+    assert calls == []  # no frame read
