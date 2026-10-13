@@ -2,8 +2,12 @@
 
 Checkpoint resolution and freezing, the schema / provenance guard, the concurrent-training guard,
 the teacher assembler / policy (coverage, raw ``prev_action``, ``arm_remaining_s``, v2 decode to
-the gremlin sticks) and the session wiring (``run_harness(..., teacher=...)``: the oracle
-overrides, world scale 1.0, the frozen copy, meta, the start refusal before anything is sent).
+the gremlin sticks), both ``teacher-obs`` versions (v1 148 values, byte-identical to the
+reference; v2 150 with the pack reading from ``latest_sample()``, the cell guard and the
+``require_battery_telemetry`` refusal), the trainer's ``battery.cells`` / ``power_model`` sidecar
+keys (cells cross-checked against the profile, both recorded) and the session wiring
+(``run_harness(..., teacher=...)``: the oracle overrides, world scale 1.0, the frozen copy, meta,
+the start refusal before anything is sent).
 
 Hermetic: a tiny ``MLPTeacher`` + sidecar written by the tests, telemetry replayed from a
 synthetic CSV, the dry-run sink, and the catalogue load replaced by the synthetic course.
@@ -36,6 +40,8 @@ from drone_fly.harness.teacher import (
     arm_total_s,
     check_concurrent_training,
     contract_obs_source,
+    obs_dim_of,
+    require_battery_telemetry,
     require_rate_scale_one,
     session_dir_for,
     stop_class,
@@ -43,7 +49,7 @@ from drone_fly.harness.teacher import (
     validate_teacher_sidecar,
 )
 from drone_fly.sim.action import read_sidecar, sidecar_path
-from drone_fly.sim.teacher_obs import DIM, schema
+from drone_fly.sim.teacher_obs import DIM, dim, schema
 from tests.oracle_support import (
     DRONE,
     age_files,
@@ -144,25 +150,120 @@ def side(tmp_path):
     return read_sidecar(run / "checkpoints" / "teacher.pt")
 
 
-def test_validate_sidecar_ok_records_provenance(harness_contract, side):
+@pytest.fixture
+def side_v1(tmp_path):
+    run = write_teacher_run(tmp_path, name="v1", version=1)
+    return read_sidecar(run / "checkpoints" / "teacher.pt")
+
+
+@pytest.mark.parametrize("version, width", [(1, 148), (2, 150)])
+def test_validate_sidecar_ok_records_provenance(harness_contract, tmp_path, version, width):
+    run = write_teacher_run(tmp_path, version=version)
+    side = read_sidecar(run / "checkpoints" / "teacher.pt")
     rec = validate_teacher_sidecar(side, contract=harness_contract, drone=DRONE)
-    assert rec["obs_schema"] == "teacher-obs v1" and rec["obs_dim"] == DIM == 148
+    assert rec["obs_schema"] == f"teacher-obs v{version}"
+    assert rec["obs_version"] == version and rec["obs_dim"] == width == dim(version)
+    assert obs_dim_of(side) == width
     assert rec["obs_source"] == contract_obs_source(harness_contract)
-    assert rec["obs_source"] == schema()["harness30"]["obs_source"]
+    assert rec["obs_source"] == schema(version)["harness30"]["obs_source"]
     assert rec["inference_sha256"] and len(rec["inference_sha256"]) == 64
+    assert rec["battery_cells"] is None and rec["power_model"] is None  # a plain schema
+
+
+def trainer_obs_schema(version=2, *, drone=DRONE, power=True):
+    """The ``obs_schema`` UC68's trainer writes (``training.ppo._obs_schema``): v2 records the
+    profile's pack cells and whether the plant's power model was on."""
+    from drone_fly import drones
+
+    out = schema(version)
+    if "battery" in out:
+        pw = drones.load(drone).power
+        out["battery"]["cells"] = int(pw.cells) if pw is not None else None
+        out["battery"]["power_model"] = bool(power and pw is not None)
+    return out
+
+
+def trainer_side(tmp_path, *, name="trainer", **kw):
+    run = write_teacher_run(tmp_path, name=name,
+                            sidecar_overrides={"obs_schema": trainer_obs_schema(**kw)})  # fmt: skip
+    return run, read_sidecar(run / "checkpoints" / "teacher.pt")
+
+
+@pytest.mark.parametrize("power", [True, False])
+def test_validate_accepts_a_trainer_v2_sidecar(harness_contract, tmp_path, power):
+    _, side = trainer_side(tmp_path, power=power)
+    assert side["obs_schema"]["battery"]["cells"] == 3
+    assert side["obs_schema"]["battery"]["power_model"] is power
+    rec = validate_teacher_sidecar(side, contract=harness_contract, drone=DRONE)
+    assert rec["obs_schema"] == "teacher-obs v2" and rec["obs_dim"] == 150
+    assert rec["battery_cells"] == 3 and rec["power_model"] is power
+    # the validator works on a copy: the sidecar mapping keeps the trainer keys
+    assert {"cells", "power_model"} <= set(side["obs_schema"]["battery"])
+
+
+def test_validate_accepts_a_trainer_sidecar_without_a_cell_count(harness_contract, tmp_path):
+    _, side = trainer_side(tmp_path)
+    side["obs_schema"]["battery"].update(cells=None, power_model=False)  # a profile without power
+    rec = validate_teacher_sidecar(side, contract=harness_contract, drone=DRONE)
+    assert rec["battery_cells"] is None and rec["power_model"] is False
+
+
+@pytest.mark.parametrize("cells", [4, 1, 6])
+def test_validate_refuses_a_trainer_cell_count_unlike_the_profile(harness_contract, tmp_path,
+                                                                 cells):  # fmt: skip
+    _, side = trainer_side(tmp_path)
+    side["obs_schema"]["battery"]["cells"] = cells
+    match = rf"battery.cells {cells} != drone profile .* power.cells 3"
+    with pytest.raises(TeacherSchemaError, match=match):
+        validate_teacher_sidecar(side, contract=harness_contract, drone=DRONE)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda b: b.update(capacity_mah=450),  # an unknown extra key
+        lambda b: b.update(features=["charge", "volts"]),
+        lambda b: b.update(no_power_model=[1.0, 12.6]),
+        lambda b: b.update(charge="something else"),
+        lambda b: b.pop("volts_per_cell"),
+    ],
+    ids=["extra-key", "features", "no_power_model", "charge-text", "missing-key"],
+)
+def test_validate_still_refuses_other_battery_tampers(harness_contract, tmp_path, mutate):
+    _, side = trainer_side(tmp_path)
+    mutate(side["obs_schema"]["battery"])
+    with pytest.raises(TeacherSchemaError, match=r"obs_schema differs .*battery"):
+        validate_teacher_sidecar(side, contract=harness_contract, drone=DRONE)
+
+
+def test_trainer_keys_are_not_accepted_outside_the_battery_block(harness_contract, tmp_path):
+    _, side = trainer_side(tmp_path)
+    side["obs_schema"]["cells"] = 3
+    with pytest.raises(TeacherSchemaError, match=r"obs_schema differs .*cells"):
+        validate_teacher_sidecar(side, contract=harness_contract, drone=DRONE)
+
+
+def test_default_test_run_is_the_current_version(side):
+    assert DIM == 150 and side["obs_schema"]["version"] == 2 and side["extra_dim"] == 150
 
 
 @pytest.mark.parametrize(
     "mutate,match",
     [
-        (lambda s: s["obs_schema"].update(version=2), r"teacher-obs v2 .* not this build's"),
-        (lambda s: s["obs_schema"].update(name="student-obs"), "student-obs v1"),
-        (lambda s: s["obs_schema"].update(dim=150), r"150 values"),
+        # unknown version / name, a dim that is not the version's
+        (lambda s: s["obs_schema"].update(version=3), r"teacher-obs v3 \(150 values\) is not one"),
+        (lambda s: s["obs_schema"].update(name="student-obs"), r"student-obs v2 .* is not one"),
+        (lambda s: s["obs_schema"].update(dim=148), r"teacher-obs v2 \(148 values\) is not one"),
         (lambda s: s.update(obs_schema={}), "None vNone"),
         (lambda s: s.update(actor="k1-reservoir-aug"), "not an mlp-teacher"),
         (lambda s: s.update(extra_dim=70), "extra_dim 70"),
         (lambda s: s["obs_schema"]["blocks"][0].update(width=31), r"obs_schema differs .*blocks"),
-        (lambda s: s["obs_schema"].update(input_scale=[1.0] * 148), "input_scale"),
+        (lambda s: s["obs_schema"].update(input_scale=[1.0] * 150), "input_scale"),
+        # schema tamper: the battery block definition removed / changed
+        (lambda s: s["obs_schema"].pop("battery"), r"obs_schema differs .*battery"),
+        (lambda s: s["obs_schema"]["battery"].update(no_power_model=[1.0, 12.6]),
+         r"obs_schema differs .*battery"),
+        (lambda s: s["obs_schema"]["blocks"].pop(), r"obs_schema differs .*blocks"),
         (lambda s: s["obs_schema"]["harness30"].update(obs_source="contract make_obs (x)"),
          "differs"),
         (lambda s: s.update(drone="liftoff-5inch-vortex-pro-250"), "trained for drone"),
@@ -178,7 +279,28 @@ def test_validate_sidecar_names_both_versions(harness_contract, side):
     side["obs_schema"]["version"] = 7
     with pytest.raises(TeacherSchemaError) as ei:
         validate_teacher_sidecar(side, contract=harness_contract, drone=DRONE)
-    assert "v7" in str(ei.value) and "v1" in str(ei.value)
+    msg = str(ei.value)
+    assert "v7" in msg and "teacher-obs v1 (148 values)" in msg
+    assert "teacher-obs v2 (150 values)" in msg
+
+
+@pytest.mark.parametrize(
+    "mutate,match",
+    [
+        # a v1 sidecar relabelled v2 (still 148 values), or widened to 150 without the block
+        (lambda s: s["obs_schema"].update(version=2), r"teacher-obs v2 \(148 values\) is not one"),
+        (lambda s: s["obs_schema"].update(dim=150), r"teacher-obs v1 \(150 values\) is not one"),
+        (lambda s: s.update(extra_dim=150), "extra_dim 150 != 148"),
+        # a v1 sidecar that grew a v2 battery block
+        (lambda s: s["obs_schema"].update(battery=schema(2)["battery"]),
+         r"obs_schema differs .*battery"),
+    ],
+)
+def test_validate_v1_sidecar_refusals(harness_contract, side_v1, mutate, match):
+    validate_teacher_sidecar(dict(side_v1), contract=harness_contract, drone=DRONE)  # valid as is
+    mutate(side_v1)
+    with pytest.raises(TeacherSchemaError, match=match):
+        validate_teacher_sidecar(side_v1, contract=harness_contract, drone=DRONE)
 
 
 def test_validate_sidecar_obs_source_against_the_loaded_contract(harness_contract, side):
@@ -334,6 +456,101 @@ def test_assembler_requires_the_oracle_block(harness_contract):
         asm.assemble(None, GateEstimate(target=np.zeros(3, np.float32)), None, DIM)
 
 
+class _Source:
+    """A state source whose ``latest_sample()`` is a fixed telemetry sample."""
+
+    def __init__(self, battery=(0.8, 11.7)) -> None:
+        from drone_fly.harness.types import TelemetrySample
+
+        self.sample = None if battery is False else TelemetrySample(
+            t=0.0, position=np.zeros(3, np.float32), quat_xyzw=np.array([0, 0, 0, 1.0], np.float32),
+            velocity=np.zeros(3, np.float32), gyro=np.zeros(3, np.float32),
+            battery=None if battery is None else np.asarray(battery, np.float32),
+        )  # fmt: skip
+
+    def latest_sample(self):
+        return self.sample
+
+
+def _oracle_extra(contract, version, *, cells=None, source=None, prev=(0.3, -0.7, 0.2, 0.05)):
+    """``(assembler extra, NumPy reference at the same version)`` for one oracle state."""
+    from drone_fly.harness.oracle import OracleGateSource, StartTolerance
+    from drone_fly.tracks import teacher_obs_ref as ref
+    from tests.oracle_support import loop_passages, make_course, state, tilt_quat
+
+    course = make_course(loop_passages(), laps=2, circuit=True, box=True)
+    step = TeacherStepState(arm_total_s=0.5, cells=cells, state_source=source)
+    step.prev_action = np.asarray(prev, np.float32)
+    loose = StartTolerance(horizontal_m=50.0, dz_m=50.0, yaw_deg=180.0, speed_mps=100.0)
+    src = OracleGateSource(course, purpose="eval", start_tolerance=loose, arm_clock=step)
+    src.progress.reset(3)
+    s = state(course, [2.0, 9.0, 1.7], vel=[-3.0, -1.0, 0.4], quat=tilt_quat("x", 0.3, yaw=2.6),
+              omega=[0.4, -0.2, 1.1])  # fmt: skip
+    gate = src.update(None, s, 100.0)
+    asm = TeacherObservationAssembler(contract, {"oracle": src}, step, version=version)
+    _, extra = asm.assemble(s, gate, None, dim(version))
+    bat = step.battery() if version >= 2 else None
+    want = ref.build_teacher_obs(src.state_course, src.course, src.progress, step.prev_action,
+                                 step.arm_remaining_s(gate.stamp), contract=contract,
+                                 harness_course=src.harness_course, battery=bat,
+                                 version=version)  # fmt: skip
+    return extra, want
+
+
+def test_v1_assembler_is_byte_identical_to_the_reference(harness_contract):
+    v1, want = _oracle_extra(harness_contract, 1)
+    assert v1.shape == (148,) and v1.dtype == np.float32
+    assert v1.tobytes() == want.tobytes()
+    # v1 never asks for the pack (no telemetry source, no cells): exactly the v2 prefix
+    v2, _ = _oracle_extra(harness_contract, 2, cells=3, source=_Source((0.8, 11.7)))
+    assert v2[:148].tobytes() == v1.tobytes()
+
+
+def test_v2_assembler_battery_block_from_latest_sample(harness_contract):
+    extra, want = _oracle_extra(harness_contract, 2, cells=3, source=_Source((0.8, 11.7)))
+    assert extra.shape == (150,) and extra.tobytes() == want.tobytes()
+    np.testing.assert_allclose(extra[148:], [0.8, 3.9], rtol=1e-6)
+    extra, _ = _oracle_extra(harness_contract, 2, cells=3, source=_Source((1.0, 12.6)))
+    np.testing.assert_allclose(extra[148:], [1.0, 4.2], rtol=1e-6)
+    # no pack wired at all (a hermetic / sim-side use): the schema's no-power-model value
+    extra, _ = _oracle_extra(harness_contract, 2)
+    np.testing.assert_allclose(extra[148:], schema(2)["battery"]["no_power_model"], rtol=1e-6)
+
+
+@pytest.mark.parametrize("volts", [4.2, 7.4, 13.5, 16.8])  # 1S / 2S / 3S over 4.45 / 4S packs
+def test_v2_cell_guard_refuses_a_pack_outside_the_band(harness_contract, volts):
+    with pytest.raises(TeacherSchemaError, match="power.cells does not match"):
+        _oracle_extra(harness_contract, 2, cells=3, source=_Source((0.9, volts)))
+
+
+@pytest.mark.parametrize("volts", [7.5, 13.32, 11.1])  # 2.5 (edge), 4.44 and 3.7 V per cell
+def test_v2_cell_guard_band_edges_are_accepted(volts):
+    step = TeacherStepState(cells=3, state_source=_Source((0.5, volts)))
+    assert step.battery() == pytest.approx((0.5, volts / 3))
+
+
+@pytest.mark.parametrize(
+    "source, cells", [(_Source(None), 3), (_Source(False), 3), (_Source((0.8, 11.7)), None)]
+)
+def test_v2_battery_needs_a_sample_with_a_pack_and_the_cells(source, cells):
+    with pytest.raises(TeacherSchemaError, match="needs the pack reading"):
+        TeacherStepState(cells=cells, state_source=source).battery()
+
+
+def test_require_battery_telemetry(tmp_path):
+    with_battery = {"telemetry": {"stream_format": ["position", "battery"]}}
+    assert require_battery_telemetry(with_battery, DRONE, "ck.pt") == 3
+    for cfg in ({"telemetry": {"stream_format": ["position", "rotation", "velocity"]}},
+                {"telemetry": {}}, {}):  # fmt: skip
+        with pytest.raises(TeacherSchemaError, match="no battery block"):
+            require_battery_telemetry(cfg, DRONE, "ck.pt")
+    # a CSV replay is exempt from the stream check (the recorded columns carry the pack)
+    replay = {"telemetry": {"replay_csv": str(tmp_path / "t.csv"), "stream_format": ["position"]}}
+    assert require_battery_telemetry(replay, DRONE, "ck.pt") == 3
+    with pytest.raises(TeacherSchemaError, match="no power.cells"):
+        require_battery_telemetry(with_battery, None, "ck.pt")
+
+
 @pytest.fixture
 def runner_and_obs(harness_contract, tmp_path):
     run = write_teacher_run(tmp_path, seed=3)
@@ -343,14 +560,16 @@ def runner_and_obs(harness_contract, tmp_path):
     )
     pol.load()
     rng = np.random.default_rng(0)
-    return pol, step, rng.normal(0, 3, DIM).astype(np.float32)
+    return pol, step, rng.normal(0, 3, pol.extra_dim).astype(np.float32)
 
 
 def test_policy_mean_action_and_raw_prev_action(runner_and_obs):
     import torch
 
     pol, step, x = runner_and_obs
-    assert pol.extra_dim == 148 and pol.contract_version == 2 and pol.sha256
+    assert pol.extra_dim == obs_dim_of(pol.checkpoint) == 150
+    assert pol._actor.obs_dim == pol.extra_dim
+    assert pol.contract_version == 2 and pol.sha256
     pol._actor.pi[-1].bias.data[:] = torch.tensor([3.0, -2.5, 0.0, 1.7])  # beyond the clip range
     raw = pol.act(x[:12], x)
     with torch.no_grad():
@@ -362,6 +581,21 @@ def test_policy_mean_action_and_raw_prev_action(runner_and_obs):
     assert len(step.timings["policy"]) == 1
     pol.warm_up()
     np.testing.assert_array_equal(step.prev_action, raw)  # warm-up leaves it alone
+
+
+def test_policy_runs_a_v1_checkpoint_at_148(harness_contract, tmp_path):
+    import torch
+
+    run = write_teacher_run(tmp_path, version=1)
+    pol = TeacherPolicyRunner(run / "checkpoints" / "teacher.pt", TeacherStepState(),
+                              contract=harness_contract, drone=DRONE)  # fmt: skip
+    pol.load()
+    assert pol.extra_dim == obs_dim_of(pol.checkpoint) == 148 == pol._actor.obs_dim
+    x = np.random.default_rng(1).normal(0, 3, 148).astype(np.float32)
+    raw = pol.act(x[:12], x)
+    with torch.no_grad():
+        want = pol._actor.mean_action(torch.as_tensor(x)[None])[0].numpy()
+    np.testing.assert_allclose(raw, want, atol=1e-6)
 
 
 def test_policy_v2_decode_to_gremlin_sticks(harness_contract, runner_and_obs):
@@ -465,11 +699,14 @@ def _ticks(run_dir: Path) -> list[dict]:
     return [json.loads(x) for x in (run_dir / "ticks.jsonl").read_text("utf-8").splitlines()]
 
 
-def test_session_teacher_oracle_dry_run(harness_contract, harness_k1_dir, tmp_path, oracle_course):
-    run = write_teacher_run(tmp_path / "runs")
+@pytest.mark.parametrize("version", [1, 2])
+def test_session_teacher_oracle_dry_run(harness_contract, harness_k1_dir, tmp_path, oracle_course,
+                                        version):  # fmt: skip
+    width = dim(version)
+    run = write_teacher_run(tmp_path / "runs", version=version)
     age_files(run)
     course = oracle_course.course
-    csv_path = spawn_csv(tmp_path / "tele.csv", course)
+    csv_path = spawn_csv(tmp_path / "tele.csv", course)  # a full 3S pack: 1.0, 12.6 V
     s = run_teacher(tmp_path, harness_k1_dir, teacher_config(csv_path), run,
                     trackdata_root=str(tmp_path / "td"), duration_s=0.9)  # fmt: skip
     r = s.result
@@ -484,12 +721,12 @@ def test_session_teacher_oracle_dry_run(harness_contract, harness_k1_dir, tmp_pa
     assert s.config.world_scale == 1.0 and s.config.contract.device == "cpu"
     meta = json.loads((s.run_dir / "meta.json").read_text("utf-8"))
     assert meta["perception"] == "oracle" and meta["track_id"] == "liftoff-arena-04"
-    assert meta["extra_dim"] == 148 and meta["provided_blocks"] == [
+    assert meta["extra_dim"] == width and meta["provided_blocks"] == [
         "curr_gate", "next_lookahead", "oracle", "target"
     ]  # fmt: skip
     t = meta["teacher"]
     assert t["world_scale_effective"] == 1.0 and t["preset_world_scale_ignored"] == 4.0
-    assert t["selection"] == "final" and t["obs_schema"] == "teacher-obs v1"
+    assert t["selection"] == "final" and t["obs_schema"] == f"teacher-obs v{version}"
     assert t["conversion_fingerprint"] == oracle_course.calls[0]["fingerprint"]
     assert t["course"]["track_id"] == "liftoff-arena-04" and "files" not in t["course"]
     # the FROZEN copy is what flew
@@ -503,10 +740,26 @@ def test_session_teacher_oracle_dry_run(harness_contract, harness_k1_dir, tmp_pa
     assert o["perception"] == "oracle" and o["start_offsets"]["horizontal_m"] < 0.01
     assert meta["teacher_timing_ms"]["policy"]["n"] == r.ticks
     ticks = _ticks(s.run_dir)
-    assert len(ticks[0]["extra"]) == 148
+    assert {len(x["extra"]) for x in ticks} == {width}
+    if version == 2:  # the pack reading from the replayed telemetry: (1.0, 12.6 / 3)
+        for x in ticks:
+            assert x["extra"][148:] == pytest.approx([1.0, 4.2], rel=1e-6)
     assert ticks[0]["gate"]["info"]["perception"] == "oracle"
     assert ticks[0]["extra"][147] == pytest.approx(0.5)  # dry run: arming counted from tick 0
     assert ticks[-1]["extra"][147] == 0.0
+
+
+def test_session_meta_records_the_trainer_battery_provenance(harness_contract, harness_k1_dir,
+                                                             tmp_path, oracle_course):  # fmt: skip
+    run, _ = trainer_side(tmp_path / "runs")
+    age_files(run)
+    csv_path = spawn_csv(tmp_path / "tele.csv", oracle_course.course)
+    s = run_teacher(tmp_path, harness_k1_dir, teacher_config(csv_path), run,
+                    trackdata_root=str(tmp_path / "td"), duration_s=0.5)  # fmt: skip
+    assert s.result.reason == "completed", (s.result.reason, s.result.error)
+    t = json.loads((s.run_dir / "meta.json").read_text("utf-8"))["teacher"]
+    assert t["obs_schema"] == "teacher-obs v2"
+    assert t["battery_cells"] == 3 and t["power_model"] is True
 
 
 def test_session_start_misaligned_never_sends(harness_contract, harness_k1_dir, tmp_path,

@@ -22,8 +22,8 @@
                           [--every N] [--report <dir>]
     drone-fly harness pad-check [--preset] [--config] [--magnitude] [--pulse-s] [--min-alt]
                           [--max-alt] [--out]
-    drone-fly harness ui launch|last-session|reset|save-recording --name N|select-drone --name N
-                          [--slot S] [--level L]|quit|shot [--out]
+    drone-fly harness ui launch|last-session|reset|retry|save-recording --name N|
+                          select-drone --name N [--slot S] [--level L]|quit|shot [--out]
     drone-fly harness latency-report <run dir> [--recompute]
     drone-fly harness overlay [--port N] [--monitor M] [--layout default|mask_confined]
                           [--replay <run dir>] [--fps F] [--k1-path] [--preset] [--config]
@@ -391,6 +391,9 @@ def _cmd_ui(args: argparse.Namespace) -> int:
         if not args.name:
             raise HarnessConfigError("ui save-recording needs --name")
         print(f"save-recording: {ui_driver.save_recording(args.name)}")
+    elif args.action == "retry":
+        ui_driver.retry(args.level or "infinity-loop")
+        print("retry: ok")
     else:
         ui_driver.ACTIONS[args.action]()
         print(f"{args.action}: ok")
@@ -733,8 +736,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ui = hsub.add_parser(
         "ui",
-        help="drive Liftoff's menus: launch | last-session | reset | save-recording | "
-        "select-drone | quit | shot",
+        help="drive Liftoff's menus: launch | last-session | reset | retry (after a finished "
+        "race) | save-recording | select-drone | quit | shot",
     )
     p_ui.add_argument(
         "action",
@@ -742,6 +745,7 @@ def build_parser() -> argparse.ArgumentParser:
             "launch",
             "last-session",
             "reset",
+            "retry",
             "save-recording",
             "select-drone",
             "quit",
@@ -755,7 +759,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ui.add_argument("--slot", type=int, help="select-drone: list row (default: DRONE_SLOTS)")
     p_ui.add_argument(
-        "--level", help="select-drone: also load this level (ui_driver.QUICK_SETUP_LEVELS)"
+        "--level",
+        help="select-drone: also load this level; retry: the level whose spawn to verify "
+        "(default infinity-loop; ui_driver.QUICK_SETUP_LEVELS)",
     )
     p_ui.set_defaults(func=_cmd_ui)
 
