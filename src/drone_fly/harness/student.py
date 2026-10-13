@@ -15,7 +15,9 @@
   without ``--allow-slow-cpu`` (:class:`~drone_fly.harness.errors.StudentDeviceError`). A detector
   sha different from the noise model's only warns (``noise_model_detector_mismatch``). The
   checkpoint's ``world_scale``, tracker timeouts / association radius, ``free_space: none`` and
-  ``assume_no_obstacles`` override the config (logged).
+  ``assume_no_obstacles`` override the config (logged). The export's battery cell count must
+  equal the config drone's ``power.cells``, and every tick's live voltage per cell must lie in
+  :data:`CELL_V_BAND` (2.5-4.45 V, as UC69), else :class:`StudentSchemaError`.
 * :class:`StudentPolicyRunner` — the student's mean action (``act_with_brain`` also returns the
   K1 propagated state for the live overlay); it records the raw action as ``prev_action``.
 
@@ -43,6 +45,10 @@ from drone_fly.harness.teacher import TeacherStepState
 from drone_fly.harness.types import FlightState, FreeSpaceEstimate, GateEstimate
 
 log = logging.getLogger(__name__)
+
+#: Plausible live pack voltage per cell (V), as the UC69 teacher path: outside it the cell count
+#: (or the telemetry's battery block) is wrong.
+CELL_V_BAND = (2.5, 4.45)
 
 
 @dataclass
@@ -101,6 +107,7 @@ class StudentObservationAssembler(ObservationAssembler):
 
         if state.battery is None:
             raise PerceptionCoverageError(["battery"], extra_dim)
+        check_cell_voltage(float(state.battery[1]), self.battery_cells)
         bat = battery_from_telemetry(float(state.battery[0]), float(state.battery[1]),
                                      self.battery_cells)  # fmt: skip
         t0 = time.perf_counter()
@@ -214,6 +221,7 @@ def check_student_config(
             f"the live camera {live} differs from the camera the student's noise model and "
             f"perception assumed {trained}"
         )
+    check_cell_count(plan, cfg)
     stream = (cfg.section("telemetry").get("stream_format") or [])
     if stream and "battery" not in stream:
         raise StudentSchemaError(
@@ -239,6 +247,38 @@ def check_student_config(
             live_sha[:8],
         )
         plan.warnings.append("noise_model_detector_mismatch")
+
+
+def check_cell_voltage(volts: float, cells: int) -> float:
+    """``volts / cells``; refuses (:class:`StudentSchemaError`) a value outside
+    :data:`CELL_V_BAND` — a wrong cell count or a broken battery block."""
+    v = float(volts) / int(cells)
+    lo, hi = CELL_V_BAND
+    if not lo <= v <= hi:
+        raise StudentSchemaError(
+            f"live pack voltage {volts:.2f} V over {cells} cells = {v:.2f} V per cell, outside "
+            f"{lo}-{hi} V: the student's cell count (obs_schema.battery.cells) does not match the "
+            "airframe, or the telemetry battery block is wrong"
+        )
+    return v
+
+
+def check_cell_count(plan: StudentPlan, cfg: Any) -> None:
+    """The export's ``obs_schema.battery.cells`` must equal the config drone's ``power.cells``."""
+    from drone_fly.harness.config import load_drone_profile
+
+    profile = load_drone_profile(cfg.data)
+    if profile is None or getattr(profile, "power", None) is None:
+        raise StudentSchemaError(
+            f"the student observes the battery over {plan.battery_cells} cells, but the config's "
+            f"drone {cfg.data.get('drone')!r} has no profile power block to confirm the cell count"
+        )
+    if int(profile.power.cells) != plan.battery_cells:
+        raise StudentSchemaError(
+            f"{plan.path.name}: trained for a {plan.battery_cells}-cell pack "
+            f"(obs_schema.battery.cells), but drone {profile.id} has power.cells "
+            f"{profile.power.cells}"
+        )
 
 
 def student_meta(plan: StudentPlan) -> dict[str, Any]:
