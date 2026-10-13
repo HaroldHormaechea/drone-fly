@@ -3,8 +3,11 @@
 :func:`memory_status` reads the physical memory, the system commit and this process's private
 bytes (Windows: ``GlobalMemoryStatusEx`` / ``GetProcessMemoryInfo`` through ``ctypes``; Linux:
 ``/proc/meminfo`` + ``/proc/self/status``; ``None`` fields elsewhere). :func:`preflight` logs them
-with an estimate of what the run is about to allocate and WARNS when that estimate plus the current
-system commit exceeds the physical memory (the machine would page). No dependency, no killing.
+with an estimate of what the run is about to allocate and WARNS when this process's private bytes
+plus that estimate exceed the physical memory, or the estimate exceeds the available physical
+memory (the machine would page). The system commit is logged but not used: on Windows it routinely
+exceeds the physical memory (pagefile-backed reservations), so a rule on it would always fire. No
+dependency, no killing.
 """
 
 from __future__ import annotations
@@ -49,13 +52,18 @@ def _windows() -> dict[str, Any]:
             ("PrivateUsage", ctypes.c_size_t),
         ]
 
+    kernel32, psapi = ctypes.windll.kernel32, ctypes.windll.psapi
+    # The default c_int restype truncates the -1 pseudo-handle -> ERROR_INVALID_HANDLE (reads 0).
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
+    psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
     ms = MEMORYSTATUSEX()
     ms.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-    ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms))
+    kernel32.GlobalMemoryStatusEx(ctypes.byref(ms))
     pmc = PMC()
     pmc.cb = ctypes.sizeof(PMC)
-    h = ctypes.windll.kernel32.GetCurrentProcess()
-    ctypes.windll.psapi.GetProcessMemoryInfo(h, ctypes.byref(pmc), pmc.cb)
+    if not psapi.GetProcessMemoryInfo(kernel32.GetCurrentProcess(), ctypes.byref(pmc), pmc.cb):
+        raise ctypes.WinError()
     return {
         "physical_total": int(ms.ullTotalPhys),
         "physical_available": int(ms.ullAvailPhys),
@@ -106,7 +114,7 @@ def preflight(about_to_allocate: int, what: str = "the run") -> dict[str, Any]:
     """Log the memory status and warn when ``about_to_allocate`` bytes would overcommit."""
     st = memory_status()
     st["about_to_allocate"] = int(about_to_allocate)
-    tot, commit = st["physical_total"], st["commit_total"]
+    tot, avail, priv = st["physical_total"], st["physical_available"], st["process_private"]
 
     def g(v: Any) -> str:
         return "?" if v is None else f"{v / GB:.1f} GB"
@@ -114,15 +122,21 @@ def preflight(about_to_allocate: int, what: str = "the run") -> dict[str, Any]:
     log.info(
         "memory preflight (%s): physical %s, available %s, system commit %s, this process "
         "private %s (working set %s); about to allocate %s",
-        what, g(tot), g(st["physical_available"]), g(commit), g(st["process_private"]),
+        what, g(tot), g(avail), g(st["commit_total"]), g(priv),
         g(st["process_working_set"]), g(about_to_allocate),
     )  # fmt: skip
-    st["overcommit"] = bool(tot and commit is not None and commit + about_to_allocate > tot)
+    over_process = bool(tot and priv is not None and priv + about_to_allocate > tot)
+    over_available = bool(avail is not None and about_to_allocate > avail)
+    st["over_process"], st["over_available"] = over_process, over_available
+    st["overcommit"] = over_process or over_available
     if st["overcommit"]:
         log.warning(
-            "memory preflight: system commit %s + %s for %s exceeds physical memory %s: the "
-            "machine will page (slower training). Consider a smaller distill.buffer, "
-            "distill.pin_memory: false, or closing other programs. Not stopping anything.",
-            g(commit), g(about_to_allocate), what, g(tot),
+            "memory preflight: %s for %s; this process private %s + %s = %s vs physical %s, "
+            "and %s vs available %s: the machine will page (slower training). Consider a smaller "
+            "distill.buffer, distill.pin_memory: false, or closing other programs. Not stopping "
+            "anything.",
+            g(about_to_allocate), what, g(priv), g(about_to_allocate),
+            g(None if priv is None else priv + about_to_allocate), g(tot),
+            g(about_to_allocate), g(avail),
         )  # fmt: skip
     return st

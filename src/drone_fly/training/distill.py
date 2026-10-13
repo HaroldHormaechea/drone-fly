@@ -167,6 +167,16 @@ def dagger_loss(
 AUTO_PIN_MAX_BYTES = 1 << 30
 
 
+def replay_pin(buf_bytes: int, pin_memory: bool | None, device: Any) -> bool:
+    """Whether to pin the replay buffer: never off CUDA; ``pin_memory`` when set; else auto
+    (pin only below :data:`AUTO_PIN_MAX_BYTES`)."""
+    if getattr(device, "type", str(device)) != "cuda":
+        return False
+    if pin_memory is None:
+        return int(buf_bytes) < AUTO_PIN_MAX_BYTES
+    return bool(pin_memory)
+
+
 def strip_pool_geometry(pool: Any) -> int:
     """Drop each course's host-side geometry (primitives, contact cells, harness list,
     heightfield) once the env holds the packed copy on the device; returns the bytes released
@@ -1136,8 +1146,7 @@ def _train_student(
     feat_dim = int(getattr(actor, "feat_dim", 0))
     obs_dim = senv.student_obs().shape[1]
     buf_bytes = ReplayBuffer.nbytes(d.buffer, obs_dim, feat_dim)
-    pin = (buf_bytes < AUTO_PIN_MAX_BYTES) if d.pin_memory is None else bool(d.pin_memory)
-    pin = pin and dev.type == "cuda"
+    pin = replay_pin(buf_bytes, d.pin_memory, dev)
     from drone_fly.training.memcheck import preflight
 
     mem = preflight(buf_bytes, f"the DAgger buffer ({d.buffer:.0f} samples)")
