@@ -323,6 +323,12 @@ Two simulator gaps cause this:
 
 So the remaining gap is power and aerodynamics modelling (a pack sag / cutoff model, thrust vs. airspeed), not perception.
 
+**Run 2 (2026-10-13), `teacher_it1374`.** This teacher was trained with the fitted pack model and sees its battery (teacher-obs v2). **3 of 3 valid attempts finished all 4 laps (33/33)** in about 73.7 s, a little faster than its sim race. The pack stayed above the cutoff (8.83 V minimum, 48 % charge left).
+
+With the power model, control transfers completely. The remaining gap is perception (UC70/UC71).
+
+The other 7 attempts wait on a post-race Retry fix: after a finished race, `ui retry` must wait for the result screen and confirm the spawn before the next attempt starts.
+
 ## Measure a new drone
 
 System identification flies scripted manoeuvres with the drone and fits the airframe parameters the

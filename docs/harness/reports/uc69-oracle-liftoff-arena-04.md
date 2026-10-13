@@ -4,6 +4,86 @@
 > TRAIN track, stale-build scene. Summary of the gitignored session report; no telemetry or frames
 > are committed.
 
+## Run 2: teacher_it1374 (teacher-obs v2, battery-aware), 2026-10-13
+
+| | |
+|---|---|
+| Teacher | `20261013T075647Z-teacher-liftoff-aug`, `teacher_it1374.pt`, val-selected, sha `a140e970` |
+| Observation | `teacher-obs` v2: v1 plus the pack block (charge, volts per cell, 3 cells) |
+| Training | trained with the power model fitted on run 1's telemetry |
+| Course | conversion v4 `7d4c8e44dcbb995e`; world scale 1.0 |
+| Session | `artifacts/eval/liftoff-gremlin-micro/20261013T075647Z-teacher-liftoff-aug/oracle/liftoff-arena-04/sessions/20261013T134302Z-a140e970/` |
+| Attempts | 6: 3 flew (N_eff 3) and 3 were refused (see below) |
+
+### Result: the teacher finishes the race
+
+**3 of 3 valid attempts finished the full race: 33 of 33 crossings, 4 laps, no contact under the
+sim's rules.**
+
+Mechanical verdict: **control transfers**. Live sim-rule completion is 100 % [43.9, 100] % (N_eff
+3), against the sim's 87.5 % randomized / 100 % nominal. The report also flags the session for a
+re-run because 3 of its 6 attempts were refused.
+
+| attempt | race time (1st to last crossing) | lap times | first gate after arming | min pack V | at the finish |
+|---|---|---|---|---|---|
+| 1 | 73.78 s | 14.12 / 18.19 / 20.30 / 21.16 s | 3.59 s | 8.83 V | 9.98 V, charge 0.48 |
+| 3 | 73.76 s | 14.09 / 18.15 / 20.35 / 21.17 s | 3.59 s | 8.84 V | 9.95 V, charge 0.48 |
+| 5 | 73.68 s | 14.07 / 18.15 / 20.31 / 21.15 s | 3.59 s | 8.84 V | 9.95 V, charge 0.48 |
+
+- **Liftoff's own race clock:** 1:13.759 and 1:13.675 on its result screen, in 1st and 2nd place
+  against the AI ghosts.
+- **Sim, same checkpoint:** a 79.3 s race randomized and 77.2 s nominal, with 19.3-19.7 s laps.
+  The live race is a little faster.
+- **Battery:** no power loss in any attempt. The lowest pack voltage was 8.83 V, still above
+  Liftoff's 8.10 V cutoff. The race ends about 76 s after spin-up with 48 % charge left.
+- **Thrust at full stick:** the body-z specific force is 1.8 g p50 / 3.4 g p95 at 23 m/s, the same
+  shortfall as run 1. The teacher now flies within it.
+- **Loop:** 50.0 Hz, 3 missed deadlines in 11,680 ticks. Live vs offline crossings: 0 mismatches.
+
+### Refused attempts: a harness reset issue, not a flight
+
+Attempts 2, 4 and 6 were refused at the start check (exit 6). The telemetry was 37.7 m off,
+rotated 90 deg and moving at 2.7-10 m/s, so the drone was never armed.
+
+- **What happens:** after a finished race, Liftoff shows its post-race screen with the race replay
+  running behind it. Esc -> Reset does not respawn from there.
+- **First fix:** `ui retry`, which clicks the screen's "Retry" button. It works when the screen
+  has settled. It worked by hand twice, and both times the drone was at the spawn and at rest.
+- **Why it failed inside the loop:** it clicked within about 1-5 s of the finish, before the
+  screen accepted input.
+- **Why the at-rest check passed anyway:** in the post-race state Liftoff streams position
+  (0, 0, 0), so two identical zero samples looked like a drone at rest.
+
+The remaining 7 attempts are deferred until a fixed retry has been verified live. The fix:
+- wait for the post-race screen by a pixel probe of the Retry button;
+- click, then require **both** a non-zero position at the level's spawn (`spawn_matches`) and
+  rest over a longer window;
+- otherwise re-click.
+
+### Comparison with run 1
+
+| | run 1: it1920 (v1, no power model) | run 2: it1374 (v2, battery-aware) |
+|---|---|---|
+| crossings | 11 / 33 in 10 of 10 attempts | **33 / 33 in 3 of 3** |
+| end | power_loss: 8.10 V cutoff 18.3 s after spin-up | finished at about 76 s, min 8.83 V |
+| lap 1 | 13.0 s | 14.1 s |
+| speed on the long legs | about 24 m/s | about 23 m/s |
+
+### Conclusion
+
+Once the simulator models the pack, and the teacher sees its battery and is trained under it,
+**control transfers completely with oracle gates**. The privileged teacher races all 4 laps of
+Infinity Loop in Liftoff, matching or beating its own sim lap times. Run 1's failure was a
+modelling gap (battery and power), not a control gap. **The remaining gap to a live student is
+perception (UC70/UC71).**
+
+Still open: the remaining 7 attempts for N = 10, which wait on the retry fix.
+
+---
+
+# Run 1: teacher_it1920 (teacher-obs v1, no power model)
+
+
 ## Session
 
 | | |

@@ -798,7 +798,7 @@ def score_attempt(
         "power": power_summary(traj),
         "failure": None,
     }
-    if not complete:
+    if not complete and rec.meta.get("stop_class") != "refused":  # a refused run never flew
         out["failure"] = classify_failure(
             traj,
             course,

@@ -20,8 +20,8 @@
                           [--every N] [--report <dir>]
     drone-fly harness pad-check [--preset] [--config] [--magnitude] [--pulse-s] [--min-alt]
                           [--max-alt] [--out]
-    drone-fly harness ui launch|last-session|reset|save-recording --name N|select-drone --name N
-                          [--slot S] [--level L]|quit|shot [--out]
+    drone-fly harness ui launch|last-session|reset|retry|save-recording --name N|
+                          select-drone --name N [--slot S] [--level L]|quit|shot [--out]
     drone-fly harness latency-report <run dir> [--recompute]
     drone-fly harness overlay [--port N] [--monitor M] [--layout default|mask_confined]
                           [--replay <run dir>] [--fps F] [--k1-path] [--preset] [--config]
@@ -698,8 +698,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ui = hsub.add_parser(
         "ui",
-        help="drive Liftoff's menus: launch | last-session | reset | save-recording | "
-        "select-drone | quit | shot",
+        help="drive Liftoff's menus: launch | last-session | reset | retry (after a finished "
+        "race) | save-recording | select-drone | quit | shot",
     )
     p_ui.add_argument(
         "action",
@@ -707,6 +707,7 @@ def build_parser() -> argparse.ArgumentParser:
             "launch",
             "last-session",
             "reset",
+            "retry",
             "save-recording",
             "select-drone",
             "quit",

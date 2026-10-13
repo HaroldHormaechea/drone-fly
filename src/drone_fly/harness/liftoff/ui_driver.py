@@ -53,6 +53,10 @@ POINTS = {
     "main_quit": (258, 494),
     "quit_yes": (1394, 650),
     "quit_no": (1514, 650),  # also a harmless spot on the plain main menu
+    # Post-race screen (the race finished; the replay runs behind it): "Retry" restarts the race
+    # at the spawn. MEASURED 2026-10-13 (UC69 it1374 live, Infinity Loop). Esc -> Reset does not
+    # respawn from this screen.
+    "race_retry": (2438, 888),
 }
 VK_ESCAPE = 0x1B
 #: Save-recording dialog probes (reference pixels): the per-row "Save" buttons of the list variant
@@ -246,6 +250,40 @@ def reset(timeout_s: float = 20.0) -> None:
     press_escape()
     click("pause_reset", settle_s=2.0)
     _wait(lambda: telemetry_streaming(wait_s=1.0), timeout_s, "telemetry after the reset")
+
+
+def drone_at_rest(window_s: float = 1.0, tol_m: float = 0.05) -> bool:
+    """True when two telemetry positions ``window_s`` apart differ by less than ``tol_m``."""
+    a = telemetry_position(wait_s=2.0)
+    time.sleep(window_s)
+    b = telemetry_position(wait_s=2.0)
+    if a is None or b is None:
+        return False
+    return sum((float(x) - float(y)) ** 2 for x, y in zip(a, b, strict=True)) ** 0.5 < tol_m
+
+
+def retry(timeout_s: float = 45.0, appear_s: float = 4.0, settle_s: float = 3.0) -> None:
+    """After a finished race: click "Retry" on the post-race screen (restarts at the spawn).
+
+    The screen animates in a few seconds after the finish and the race replay plays behind it,
+    so: wait ``appear_s``, click, and verify by telemetry that the drone is at rest (the replay
+    moves it); re-click until it is, for at most ``timeout_s``. The run's start check verifies
+    the position against the track.
+    """
+    _focused()
+    _require_level()
+    time.sleep(appear_s)
+    deadline = time.monotonic() + timeout_s
+    while True:
+        click("race_retry", settle_s=settle_s)
+        if drone_at_rest():
+            return
+        if time.monotonic() >= deadline:
+            raise HarnessConfigError(
+                f"the race did not restart within {timeout_s:.0f} s of clicking Retry "
+                "(the drone is still moving: post-race replay?)"
+            )
+        log.info("drone still moving after Retry; clicking again")
 
 
 RECORDINGS_DIR = Path(os.environ.get("USERPROFILE", "~")) / (
@@ -709,6 +747,7 @@ ACTIONS = {
     "launch": launch,
     "last-session": last_session,
     "reset": reset,
+    "retry": retry,
     "save-recording": save_recording,
     "quit": quit_game,
 }
