@@ -137,14 +137,9 @@ def test_pack_pads_passages_harness_and_offsets_cells(courses):
     assert pk["hf_meta"][0, 1] > 0 and pk["hf_meta"][2, 1] == 0  # arena has terrain, desert not
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="QA finding (UC68): pack_courses appends one cell_start for a course with an EMPTY cell "
-    "table (np.r_[0, cumsum(cnt)[:-1]] is [0] for no rows), so every course packed after it reads "
-    "its candidates from the previous row: wrong contacts / obstacle observations. No current "
-    "Liftoff train track or proc-liftoff course has an empty table (latent).",
-)
 def test_pack_handles_a_course_with_an_empty_cell_table(courses):
+    # Regression (UC68 QA finding): an EMPTY cell table must not shift the cell_start of every
+    # course packed after it (np.r_[0, cumsum(cnt)[:-1]] gave [0] for no rows).
     field, proc = courses["fake-field-01"], courses["proc"][0]
     assert len(field.cells.keys) == 0  # checkpoints only, no scene: nothing solid near the route
     env = make_env([field, proc], n_envs=1)
