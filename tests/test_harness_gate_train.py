@@ -977,7 +977,7 @@ def test_augment_roll_collects_the_applied_rotations():
 # ----------------------------------------------------------------------------- score(deltas)
 
 
-def _deltas_scorer(monkeypatch, rows, cam):
+def _deltas_scorer(monkeypatch, rows, cam, masks=None):
     """A SelectionScorer over ``rows`` with a stub estimator and score_capture_frame that marks
     every scored gate (center_in_image) as detected and records the attitude it was given."""
     from types import SimpleNamespace
@@ -1000,7 +1000,8 @@ def _deltas_scorer(monkeypatch, rows, cam):
     def score_frame(found, gates, scale):
         seen["gates"].append([dict(g) for g in gates])
         hit = {"detected": True, "position_error_rel": 0.1}
-        scored = [dict(hit) for g in gates if g["center_in_image"]]
+        # the eval rule: centre in the image and not under a mask
+        scored = [dict(hit) for g in gates if g["center_in_image"] and not g.get("center_masked")]
         return {"scored": scored, "false_detections": []}
 
     monkeypatch.setattr(gate_learned, "LearnedGateEstimator", Est)
@@ -1013,7 +1014,7 @@ def _deltas_scorer(monkeypatch, rows, cam):
     s.ds = SimpleNamespace(items=items)
     s.idx = np.arange(len(rows))
     s.table, s.device, s.score_threshold, s.min_keypoints = table, "cpu", 0.3, 4
-    s.cams, s.masks = {"cap": cam}, {"cap": None}
+    s.cams, s.masks = {"cap": cam}, {"cap": masks}
     import dataclasses
 
     state = dataclasses.make_dataclass("State", ["quat"])  # replace()-able, as FlightState
@@ -1147,3 +1148,53 @@ def test_train_multi_without_roll_computes_no_rolls(roll_world, tmp_path, monkey
                for h in log["history"])  # fmt: skip
     params = json.loads((tmp_path / "plain" / "data_manifest.json").read_text("utf-8"))["params"]
     assert params["roll_aug"] is None and params["live_roll_val"] is False
+
+
+def test_score_with_deltas_rejudges_center_masked_at_the_rolled_centre(monkeypatch):
+    """37fc17b: a rolled gate's center_masked is the fixed (unrolled) OSD masks at its ROLLED
+    centre, replacing the label-time value (re-judged, not OR'd)."""
+    pytest.importorskip("torch")
+    from drone_fly.harness.liftoff import gate_net
+    from drone_fly.harness.liftoff.masks import FrameMasks, MaskRegion
+
+    gt = _gt()
+    cam = _cam()  # 1280 x 540, principal (639.5, 269.5)
+    monkeypatch.setattr(gate_net, "decode", lambda out, score_threshold=0.3: [[] for _ in out])
+    osd = FrameMasks([MaskRegion("osd", (500.0, 440.0, 300.0, 100.0))], (cam.width, cam.height))
+    c = np.array([cam.cx, cam.cy])
+
+    def gate(px, masked):
+        return {"cls": "arch", "range_m": 10.0, "center_in_image": True, "center_px": list(px),
+                "center_masked": masked}  # fmt: skip
+
+    into = gate(c + [200.0, 0.0], False)  # unmasked; rolls 90 deg into the OSD rect
+    out_of = gate([650.0, 480.0], True)  # masked; rolls 90 deg out of the rect
+    clear = gate(c + [-50.0, 0.0], False)  # unmasked before and after
+    m90 = gt.roll_affine(90.0, c, [0, 0])
+    assert osd.contains(gt.apply_affine(m90, into["center_px"]), cam.width, cam.height)[0]
+    assert osd.contains(np.array([out_of["center_px"]]), cam.width, cam.height)[0]
+    assert not osd.contains(gt.apply_affine(m90, out_of["center_px"]), cam.width, cam.height)[0]
+    rows = [[into, out_of, clear]]
+    s, seen = _deltas_scorer(monkeypatch, rows, cam, masks=osd)
+    data = np.zeros((1, 3, s.geometry[1], s.geometry[0]), np.uint8)
+    net = _IdentityNet()
+    principal = c * s.geometry[3]
+    plain = s.score(net, data)
+    assert plain["n"] == 2  # into + clear (out_of is masked in its label)
+    # 3. deltas 0: re-judged at the same centre == the label values -> the same score
+    seen["gates"].clear()
+    zero = s.score(net, data, deltas={0: 0.0}, principal=principal)
+    assert zero == plain
+    assert [g["center_masked"] for g in seen["gates"][0]] == [False, True, False]
+    # 1 + 2. rolled 90: `into` is now under the OSD (excluded); `out_of` left it (scored)
+    seen["gates"].clear()
+    rolled = s.score(net, data, deltas={0: 90.0}, principal=principal)
+    assert [g["center_masked"] for g in seen["gates"][0]] == [True, False, False]
+    assert all(g["center_in_image"] for g in seen["gates"][0])
+    assert rolled["n"] == 2  # out_of + clear: a different pair than unrolled
+    # 4. no masks: every rolled gate is unmasked, whatever its label said
+    for none in (None, FrameMasks()):
+        s2, seen2 = _deltas_scorer(monkeypatch, rows, cam, masks=none)
+        res = s2.score(net, data, deltas={0: 90.0}, principal=principal)
+        assert [g["center_masked"] for g in seen2["gates"][0]] == [False, False, False]
+        assert res["n"] == 3
