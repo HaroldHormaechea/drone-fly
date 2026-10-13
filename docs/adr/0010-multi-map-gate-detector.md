@@ -255,10 +255,27 @@ pending captures verified with margins 2.01-3.60 and the camera peak within one 
 captures on tracks with no visible gate (AutumnFields 06 x3, Rustline 01 x3, StrawBale 05 x2,
 Permafrost 02) and surtur-02/03 (one finish gate: 20 / 15 frames with a gate in view < 50).
 
-**Occlusion.** Not measurable on this machine: no scene cache of a captured map is present locally
-(the catalogue lists BandoCity, Hannover and ShortCircuit as `ok`, the files are not in the
-trackdata root). `tracks extract-scenes` (UnityPy, reads the installed game files) would build them;
-labels carry no `occluded` flag until then.
+**Occlusion.** Scene caches were built for 7 captured maps (`tracks extract-scenes`, read-only on
+the game files, into the worktree's `artifacts/harness/scenes/`; ThePit, MarinaBay, TheGreen and
+Surtur found no matching bundle). `harness/offline/occlusion.py` tests the drone-to-gate-centre
+sight line (every 0.25 m, the last 1 m at the gate and the first 0.3 m at the drone skipped)
+against the caches' boxes, capsules and spheres. Mesh and terrain colliders are not in the caches,
+so this is a **lower bound**. Occluded share of in-range gate-frames, verified captures:
+
+| Map | Type | 4-8 m | 8-15 m | 15-25 m | 4-25 m |
+|---|---|---|---|---|---|
+| LiftoffArena | inflatable_arch | 0.0 % of 513 | 0.6 % of 1051 | 1.0 % of 1631 | 0.7 % of 3195 |
+| Hannover | airgate_big | 0.0 % of 118 | 0.0 % of 244 | 3.2 % of 442 | 1.7 % of 804 |
+| Hannover | inflatable_gate | 0.0 % of 20 | 6.2 % of 48 | 21.1 % of 71 | 12.9 % of 139 |
+| BandoCity | light_gate_300x220 / light_hoop | 0 % | 0 % | 0 % | 0 % of 333 / 262 |
+| HangarC03 | truss_gate_finish | 0 % | 0 % | 0 % | 0 % of 501 |
+| MinusTwo | airgate_small | 0 % | 0 % | 0 % | 0 % of 6828 |
+| PineValley | airgate_big | 0 % | 0 % | 0 % | 0 % of 1297 |
+| ShortCircuit | inflatable_arch | 0 % | 0 % | 0 % | 0 % of 127 |
+
+Overall 54 of 14,286 (0.4 %), concentrated in Hannover's hedged route beyond 15 m. Not material:
+per the plan, labels stay unflagged and occlusion handling is not built in UC71; `diagnose` can
+use the caches where they exist.
 
 **G1 (`gates dataset-report`): NO-GO on one criterion, val maps (1 of 2).** In-range (4-25 m)
 gate-frames, with the 4-8 / 8-15 / 15-25 m bins:
@@ -294,3 +311,9 @@ replay session cannot fill it.
 Under D-U1, of the held-out types only `inflatable_arch` is seen in training; `airgate_small`,
 `generic_gate` and `truss_gate_finish` are reported as `unseen type` (`airgate_small` is
 `airgate_big`'s shape at 0.59 scale, but a class carries one size for PnP).
+
+**G1 update (2026-10-13 evening): GO.** The user hand-flew AutumnFields race 04 (`04 - Mudlarking -
+02_27_681 - 2026-10-13`, preset drone); its replay capture `autumn-fields-2026-10-13-replay-04`
+verified (margin 1.73, camera peak uptilt 19.03 / hfov 120) and adds 707 in-range arch
+gate-frames (130 at 4-8 m) on a second val map. Val: AutumnFields 707, Surtur 678. Every G1
+criterion now passes.
