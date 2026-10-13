@@ -37,6 +37,14 @@
   id and the ``tiny-cnn`` fallback.
 
 Default output: ``artifacts/harness/liftoff/models/liftoff-gates.pt``.
+
+**UC71: multi-map training** (:func:`train_multi`, ``drone-fly harness gates train``) replaces the
+time split with the track catalogue's map split: train-map captures train, val-map captures select
+(``--select val-detection``: decode + PnP + the eval matching rule every ``--val-every`` epochs),
+held-out-map captures are refused (:mod:`~drone_fly.harness.offline.gate_dataset`). The frames
+come from a memmap cache, sampled map x class balanced; v1's held-out window stays held out.
+Outputs go to ``artifacts/harness/liftoff/models/<detector-id>/``. ``train-gates`` (above) stays
+for single-capture UC64 training.
 """
 
 from __future__ import annotations
@@ -552,4 +560,451 @@ def train_gates(
     )
     meta["weights"] = str(out_path)
     meta["training_log"] = str(log_path)
+    return meta
+
+
+# ----------------------------------------------------------------------------- UC71: multi-map
+
+SELECT_MODES = ("val-detection", "val-loss", "last")
+DEFAULT_WEIGHTS_NAME = "liftoff-gates-v2"
+
+
+def _protected_split(rows_stamps: np.ndarray, window: dict[str, Any], n_used: int) -> dict:
+    """A ``splits`` record for a capture trained around a protected (held-out) window."""
+    st = np.sort(np.asarray(rows_stamps, np.float64))
+    before, after = st[st < window["t_start"]], st[st > window["t_end"]]
+    record = {
+        "mode": "protected",
+        "holdout": {"t_start": float(window["t_start"]), "t_end": float(window["t_end"])},
+        "val": [],
+        "train": _ranges(before) + _ranges(after),
+        "counts": {
+            "train": int(n_used),
+            "val": 0,
+            "holdout": int(window.get("frames") or 0),
+            "guard": 0,
+        },
+    }
+    check_disjoint(record)
+    return record
+
+
+class SelectionScorer:
+    """Val-map detection rate of the in-training network (decode + PnP + the eval matching rule).
+
+    Uses the cached network inputs (no image reload) and a ``LearnedGateEstimator`` around the
+    live network for PnP; the detection rate over in-range gates (4-25 m), ties broken by the lower
+    median relative position error.
+    """
+
+    def __init__(
+        self,
+        ds: Any,
+        sel_index: np.ndarray,
+        table: GateTypeTable,
+        cfg: Any,
+        telemetry_cfg: dict[str, Any],
+        geometry: tuple,
+        device: str,
+    ) -> None:
+        from drone_fly.harness.liftoff.gate_cv import camera_from_config
+        from drone_fly.harness.liftoff.masks import FrameMasks
+        from drone_fly.harness.offline.capture import load_capture
+        from drone_fly.harness.offline.capture_index import camera_config
+
+        self.ds, self.idx, self.table = ds, sel_index, table
+        self.geometry, self.device = geometry, device
+        self.states: dict[int, Any] = {}
+        self.cams: dict[str, Any] = {}
+        self.masks: dict[str, Any] = {}
+        lc = cfg.section("gates").get("learned") or {}
+        self.min_keypoints = int(lc.get("min_keypoints", 4))
+        self.score_threshold = float(lc.get("score_threshold", 0.3))
+        by_cap: dict[str, list[int]] = {}
+        for k in sel_index:
+            by_cap.setdefault(ds.items[k].capture, []).append(int(k))
+        caps = {c.name: c for c in ds.used}
+        for name, ks in by_cap.items():
+            c = caps[name]
+            cam_cfg = camera_config(cfg.section("camera"), c.meta)
+            self.cams[name] = camera_from_config(cam_cfg)
+            self.masks[name] = FrameMasks.from_config(cam_cfg)
+            lag = 0.0
+            if c.labels_dir is not None:
+                lm = json.loads((c.labels_dir / "labels_meta.json").read_text(encoding="utf-8"))
+                lag = float(lm.get("lag_ms", 0.0))
+            cap = load_capture(c.path, telemetry_cfg, 1.0, lag)
+            by_file = {str(f.path.relative_to(cap.root)).replace("\\", "/"): f for f in cap.frames}
+            for k in ks:
+                f = by_file.get(ds.items[k].row["file"])
+                if f is not None:
+                    self.states[k] = f.state
+
+    def score(self, net: Any, data: Any, batch_size: int = 8) -> dict[str, Any]:
+        torch = lazy_import("torch", purpose="gate-net selection")
+        from drone_fly.harness.liftoff.gate_learned import LearnedGateEstimator
+        from drone_fly.harness.liftoff.gate_net import decode, normalize_pad
+        from drone_fly.harness.offline.evaluate import score_capture_frame
+        from drone_fly.harness.scale import WorldScale
+
+        _, _, padded, scale = self.geometry
+        ks = [int(k) for k in self.idx if int(k) in self.states]
+        det, rel = [], []
+        was_training = net.training
+        net.eval()
+        est = None
+        with torch.no_grad():
+            for b in range(0, len(ks), batch_size):
+                kk = ks[b : b + batch_size]
+                x = torch.as_tensor(np.stack([data[k] for k in kk])).to(self.device).float()
+                outs = decode(net(normalize_pad(x, padded)), score_threshold=self.score_threshold)
+                for k, dets in zip(kk, outs, strict=True):
+                    item = self.ds.items[k]
+                    cam = self.cams[item.capture]
+                    if est is None:
+                        est = LearnedGateEstimator(
+                            net, {}, self.table, cam, WorldScale(1.0),
+                            min_keypoints=self.min_keypoints,
+                        )  # fmt: skip
+                    est.camera, est.masks = cam, self.masks[item.capture]
+                    for d in dets:
+                        d["center"] = d["center"] / scale
+                        d["keypoints"] = d["keypoints"] / scale
+                    est._cache_index, est._cache, est._frame_index = k, dets, k
+                    blank = np.empty((cam.height, cam.width, 3), np.uint8)
+                    found = est.detect(blank, self.states[k])
+                    res = score_capture_frame(found, item.row["gates"], WorldScale(1.0))
+                    for e in res["scored"]:
+                        det.append(e["detected"])
+                        if e["detected"]:
+                            rel.append(e["position_error_rel"])
+        if was_training:
+            net.train()
+        return {
+            "n": len(det),
+            "detection_rate": float(np.mean(det)) if det else 0.0,
+            "position_error_rel_median": float(np.median(rel)) if rel else None,
+        }
+
+
+def better_selection(a: dict[str, Any], b: dict[str, Any] | None) -> bool:
+    """Selection order: higher detection rate, then lower median relative error."""
+    if b is None:
+        return True
+    if a["detection_rate"] != b["detection_rate"]:
+        return a["detection_rate"] > b["detection_rate"]
+    ea, eb = a["position_error_rel_median"], b["position_error_rel_median"]
+    return ea is not None and (eb is None or ea < eb)
+
+
+def train_multi(
+    captures: list[str | Path],
+    *,
+    trackdata_root: str | Path | None = None,
+    split_source: str | Path | None = None,
+    detector_id: str | None = None,
+    weights_name: str = DEFAULT_WEIGHTS_NAME,
+    config: str | Path | dict[str, Any] | None = None,
+    preset: str | None = "liftoff",
+    epochs: int = 40,
+    backbone: str = "resnet18-hf",
+    batch_size: int = 8,
+    lr: float = 1e-3,
+    input_width: int | None = None,
+    frame_stride: int = 1,
+    max_frames_per_capture: int | None = None,
+    select: str = "val-detection",
+    val_every: int = 2,
+    patience: int | None = None,
+    protect_holdout_of: str | Path | None = "release:v1",
+    deploy: bool = False,
+    device: str = "auto",
+    seed: int = 0,
+    out_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """``drone-fly harness gates train`` (UC71 AC6): multi-capture, catalogue-split training.
+
+    Train-map captures train; val-map captures select (``val-detection`` every ``val_every``
+    epochs, or ``val-loss``); held-out-map captures raise. ``deploy`` retrains on train + val maps
+    for ``epochs`` (``select last``) into ``<weights_name>-deploy.pt``. Writes
+    ``<out_root>/<detector-id>/`` (weights, training log, ``data_manifest.json``).
+    ``protect_holdout_of`` (default the v1 release weights) names weights whose held-out windows
+    are never loaded.
+    """
+    torch = lazy_import("torch", purpose="gate-net training")
+    from drone_fly.harness.liftoff.gate_learned import configured_weights
+    from drone_fly.harness.liftoff.gate_net import (
+        BACKBONES,
+        STRIDE,
+        GateKeypointNet,
+        build_targets,
+        gate_net_loss,
+        normalize_pad,
+    )
+    from drone_fly.harness.offline import gate_dataset as gd
+    from drone_fly.harness.offline.capture_index import resolve_captures
+    from drone_fly.tracks import catalogue as cat
+
+    if select not in SELECT_MODES:
+        raise HarnessConfigError(f"--select must be one of {SELECT_MODES}, got {select!r}")
+    if deploy:
+        select = "last"
+    if backbone not in BACKBONES:
+        raise HarnessConfigError(f"--backbone must be one of {BACKBONES}, got {backbone!r}")
+    if val_every < 1:
+        raise HarnessConfigError("--val-every must be >= 1")
+    cfg = load_config("liftoff", config, preset=preset)
+    table = GateTypeTable.from_config(cfg.get("gate_types"))
+    catalogue = cat.load_catalogue(split_source) if split_source else cat.load_named("liftoff")
+    lw = input_width or int((cfg.section("gates").get("learned") or {}).get("input_width", 768))
+    dev = device
+    if dev == "auto":
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+    rng = np.random.default_rng(seed)
+    torch.manual_seed(seed)
+    if protect_holdout_of == "release:v1":
+        protect_holdout_of = configured_weights({"release": "v1"})
+    protect = gd.read_weights_meta(protect_holdout_of) if protect_holdout_of else None
+    params = {
+        "epochs": epochs,
+        "backbone": backbone,
+        "batch_size": batch_size,
+        "lr": lr,
+        "input_width": lw,
+        "select": select,
+        "val_every": val_every,
+        "seed": seed,
+        "deploy": deploy,
+        "protect_holdout_of": None if protect_holdout_of is None else str(protect_holdout_of),
+    }
+    ds = gd.assemble(
+        resolve_captures([str(c) for c in captures]),
+        catalogue=catalogue,
+        table=table,
+        not_gates=getattr(cfg, "not_gates", ()),
+        trackdata_root=trackdata_root,
+        protect=protect,
+        frame_stride=frame_stride,
+        max_frames_per_capture=max_frames_per_capture,
+        telemetry_cfg=cfg.section("telemetry"),
+        include_selection_in_train=deploy,
+        params=params,
+    )
+    for c in ds.refused:
+        log.warning("capture %s refused: %s", c.name, c.reason)
+    train_idx = np.array([i for i, it in enumerate(ds.items) if it.role == gd.ROLE_TRAIN], int)
+    sel_idx = np.array([i for i, it in enumerate(ds.items) if it.role == gd.ROLE_SELECTION], int)
+    if len(train_idx) == 0:
+        raise HarnessConfigError("no training frames (no usable train-map capture)")
+    if select != "last" and len(sel_idx) == 0:
+        raise HarnessConfigError(
+            f"--select {select} needs val-map captures; none is usable (or use --select last)"
+        )
+    weights = np.array([ds.items[i].weight for i in train_idx], np.float64)
+    weights /= weights.sum()
+
+    data, idx_meta = gd.build_frame_cache(ds, lw, cfg.section("camera"))
+    geometry = tuple(idx_meta["geometry"])
+    in_w, _, padded, scale = geometry
+    out_h, out_w = padded // STRIDE, in_w // STRIDE
+    targets_raw = [_train_gates(it.row, table, scale) for it in ds.items]
+    scorer = None
+    if select == "val-detection":
+        scorer = SelectionScorer(ds, sel_idx, table, cfg, cfg.section("telemetry"), geometry, dev)
+
+    net = GateKeypointNet(
+        len(table), table.max_keypoints, backbone, pretrained=backbone != "tiny-cnn"
+    )
+    net.to(dev)
+    bb_params = list(net.backbone.parameters())
+    bb_ids = {id(p) for p in bb_params}
+    head = [p for p in net.parameters() if id(p) not in bb_ids]
+    opt = torch.optim.AdamW(
+        [
+            {"params": bb_params, "lr": lr * (0.2 if backbone != "tiny-cnn" else 1.0)},
+            {"params": head, "lr": lr},
+        ],
+        weight_decay=1e-4,
+    )
+    total_steps = max(1, epochs * math.ceil(len(train_idx) / batch_size))
+    sched = torch.optim.lr_scheduler.LambdaLR(
+        opt, lambda step: 0.5 * (1 + math.cos(math.pi * min(step, total_steps) / total_steps))
+    )
+    cuda = str(dev).startswith("cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=cuda)
+
+    def batch(idx: np.ndarray, augment: bool) -> tuple[Any, dict[str, Any]]:
+        x = torch.as_tensor(np.stack([data[i] for i in idx])).to(dev).float()
+        gates = [targets_raw[i] for i in idx]
+        if augment:
+            flip = rng.random(len(idx)) < 0.5
+            if flip.any():
+                fi = torch.as_tensor(np.flatnonzero(flip), device=dev)
+                x[fi] = x[fi].flip(-1)
+                gates = [
+                    _flip_gates(g, table, in_w) if f else g
+                    for g, f in zip(gates, flip, strict=True)
+                ]
+            x = _augment_colour(torch, x, rng)
+        tg = [build_targets(g, out_h, out_w, len(table), table.max_keypoints) for g in gates]
+        tt = {k: torch.as_tensor(np.stack([t[k] for t in tg])).to(dev) for k in tg[0]}
+        return normalize_pad(x, padded), tt
+
+    def val_loss() -> float | None:
+        if len(sel_idx) == 0:
+            return None
+        net.eval()
+        total = 0.0
+        with torch.no_grad():
+            for k in range(0, len(sel_idx), batch_size):
+                idx = sel_idx[k : k + batch_size]
+                x, tt = batch(idx, augment=False)
+                with torch.autocast("cuda", dtype=torch.float16, enabled=cuda):
+                    loss, _ = gate_net_loss(net(x), tt)
+                total += float(loss) * len(idx)
+        net.train()
+        return total / len(sel_idx)
+
+    history: list[dict[str, Any]] = []
+    best: dict[str, Any] = {"epoch": None, "metric": None, "state": None}
+    stopped_early = False
+    net.train()
+    t0 = time.perf_counter()
+    for epoch in range(1, epochs + 1):
+        perm = rng.choice(train_idx, size=len(train_idx), replace=True, p=weights)
+        sums: dict[str, float] = {}
+        nb = 0
+        for k in range(0, len(perm), batch_size):
+            x, tt = batch(perm[k : k + batch_size], augment=True)
+            with torch.autocast("cuda", dtype=torch.float16, enabled=cuda):
+                out_t = net(x)
+            loss, parts = gate_net_loss(out_t, tt)
+            opt.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
+            sched.step()
+            parts["total"] = float(loss.detach())
+            for key, v in parts.items():
+                sums[key] = sums.get(key, 0.0) + v
+            nb += 1
+        entry: dict[str, Any] = {
+            "epoch": epoch,
+            "train": {k: v / max(nb, 1) for k, v in sums.items()},
+            "val_loss": val_loss(),
+            "lr": opt.param_groups[1]["lr"],
+            "elapsed_s": time.perf_counter() - t0,
+        }
+        metric = None
+        if scorer is not None and (epoch % val_every == 0 or epoch == epochs):
+            metric = scorer.score(net, data, batch_size)
+            entry["val_detection"] = metric
+        elif select == "val-loss" and entry["val_loss"] is not None:
+            metric = {"detection_rate": -entry["val_loss"], "position_error_rel_median": None}
+        history.append(entry)
+        if metric is not None and better_selection(metric, best["metric"]):
+            state = {k: v.detach().clone().cpu() for k, v in net.state_dict().items()}
+            best = {"epoch": epoch, "metric": metric, "state": state}
+        log.info(
+            "epoch %d/%d train %.4f val_loss %s val_det %s (%.0fs)",
+            epoch,
+            epochs,
+            entry["train"]["total"],
+            entry["val_loss"],
+            (entry.get("val_detection") or {}).get("detection_rate"),
+            entry["elapsed_s"],
+        )
+        if (
+            patience
+            and select != "last"
+            and best["epoch"] is not None
+            and epoch - best["epoch"] >= patience
+        ):
+            stopped_early = True
+            break
+
+    chosen_epoch = history[-1]["epoch"]
+    if select != "last" and best["state"] is not None:
+        net.load_state_dict(best["state"])
+        chosen_epoch = best["epoch"]
+
+    # -- outputs: <out_root>/<detector-id>/ --
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M")
+    did = detector_id or f"{weights_name}-{stamp}"
+    out_dir = (Path(out_root) if out_root else gd.models_root() / "models") / did
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{weights_name}-deploy" if deploy else weights_name
+    out_path = out_dir / f"{stem}.pt"
+    manifest_path = out_dir / "data_manifest.json"
+    manifest_path.write_text(json.dumps(ds.manifest(), indent=2), encoding="utf-8")
+    trained, selection, splits, holdout = [], [], {}, {}
+    for c in ds.used:
+        used = [it for it in ds.items if it.capture == c.name]
+        rec = {
+            "name": c.name,
+            "capture": str(c.path),
+            "catalogue_id": c.meta["catalogue_id"],
+            "map": c.meta["map"],
+            "split_role": c.role,
+            "capture_sha256": c.sha256,
+            "n_used": len(used),
+        }
+        if c.role != gd.ROLE_TRAIN:
+            selection.append(rec)
+            continue
+        trained.append(rec)
+        if c.protected and not deploy:
+            stamps = np.array([it.row["stamp"] for it in used])
+            splits[c.name] = _protected_split(stamps, c.protected, len(used))
+            holdout[c.name] = splits[c.name]["holdout"]
+    chosen_det = best["metric"] if select == "val-detection" else None
+    meta = {
+        "format": 1,
+        "created_utc": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "detector_id": did,
+        "classes": table.classes,
+        "num_keypoints": table.max_keypoints,
+        "keypoints_per_class": [t.n_keypoints for t in table.types],
+        "gate_types_hash": table.hash(),
+        "gate_types": cfg.get("gate_types"),
+        "backbone": backbone,
+        "backbone_config": net.backbone_config,
+        "fpn_channels": 96,
+        "input_width": in_w,
+        "stride": STRIDE,
+        # protected (held-out) stamp windows per capture, as read by `eval` / detector_noise
+        "holdout": holdout,
+        "splits": splits,
+        "purpose": "deploy" if deploy else "evaluate",
+        # train-map captures only: val-map captures (selection) count as never trained
+        "captures": trained,
+        "selection_captures": selection,
+        "split_source": str(getattr(catalogue, "path", split_source)),
+        "catalogue_sha256": ds.catalogue_sha256,
+        "data_manifest_sha256": ds.manifest_sha(),
+        "epochs": epochs,
+        "epochs_run": len(history),
+        "select": select,
+        "val_every": val_every,
+        "stopped_early": stopped_early,
+        "chosen_epoch": chosen_epoch,
+        "chosen_val_detection": chosen_det,
+        "batch_size": batch_size,
+        "lr": lr,
+        "preset": preset,
+        "git_head": ds.git_head,
+    }
+    state = {
+        k: (v.detach().float() if v.is_floating_point() else v.detach()).cpu()
+        for k, v in net.state_dict().items()
+    }
+    torch.save({"state_dict": state, "meta": meta}, out_path)
+    log_path = out_path.with_name(f"{out_path.stem}.training_log.json")
+    log_path.write_text(
+        json.dumps({"meta": meta, "chosen_epoch": chosen_epoch, "history": history}, indent=2),
+        encoding="utf-8",
+    )
+    meta["weights"] = str(out_path)
+    meta["training_log"] = str(log_path)
+    meta["data_manifest"] = str(manifest_path)
     return meta

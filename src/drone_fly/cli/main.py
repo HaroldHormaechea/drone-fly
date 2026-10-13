@@ -19,6 +19,12 @@
     drone-fly harness captures register <dir> --track <catalogue-id> [--trackdata-root] [--force]
     drone-fly harness captures verify <dir> [--search-lag] [--search-uptilt] [--trackdata-root]
                           [--no-write] [--calibrate]
+    drone-fly harness gates train (--captures <dir|glob|name>... | --all-captures) [--split-source]
+                          [--detector-id] [--epochs] [--backbone] [--input-width] [--frame-stride]
+                          [--max-frames-per-capture] [--select val-detection|val-loss|last]
+                          [--val-every 2] [--protect-holdout-of <weights>] [--deploy]
+    drone-fly harness gates dataset-report (--captures ... | --all-captures) [--json out]
+    drone-fly harness gates draft-types --props <props.json> --items <itemID>...
     drone-fly harness train-gates --labels <dir>... [--out] [--preset] [--epochs] [--backbone]
                           [--holdout-frac 0.2 | --holdout t0:t1]
     drone-fly harness depth-fit --capture <dir> --track <xml> [--race] [--props] [--preset]
@@ -336,6 +342,108 @@ def _cmd_captures_verify(args: argparse.Namespace) -> int:
     print(json.dumps(res.alignment_block(), indent=2))
     print("verified" if res.verified else "NOT verified: " + "; ".join(res.reasons))
     return EXIT_OK if res.verified else EXIT_CONFIG
+
+
+def _gate_captures(args: argparse.Namespace) -> list[Path]:
+    from drone_fly.harness.offline.capture_index import iter_capture_dirs, resolve_captures
+
+    if args.all_captures:
+        return iter_capture_dirs(args.captures_root)
+    if not args.captures:
+        raise HarnessConfigError("pass --captures <dir|glob|name>... or --all-captures")
+    return resolve_captures(args.captures, args.captures_root)
+
+
+def _cmd_gates_train(args: argparse.Namespace) -> int:
+    from drone_fly.harness.offline.gate_train import train_multi
+
+    meta = train_multi(
+        _gate_captures(args),
+        trackdata_root=args.trackdata_root,
+        split_source=args.split_source,
+        detector_id=args.detector_id,
+        config=args.config,
+        preset=args.preset or "liftoff",
+        epochs=args.epochs,
+        backbone=args.backbone,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        input_width=args.input_width,
+        frame_stride=args.frame_stride,
+        max_frames_per_capture=args.max_frames_per_capture,
+        select=args.select,
+        val_every=args.val_every,
+        patience=args.patience,
+        protect_holdout_of=None if args.protect_holdout_of == "none" else args.protect_holdout_of,
+        deploy=args.deploy,
+        device=args.device,
+    )
+    print(f"weights: {meta['weights']} ({meta['purpose']}, epoch {meta['chosen_epoch']})")
+    if meta.get("chosen_val_detection"):
+        print(f"val detection: {meta['chosen_val_detection']}")
+    print(f"data manifest: {meta['data_manifest']}")
+    return EXIT_OK
+
+
+def _cmd_gates_dataset_report(args: argparse.Namespace) -> int:
+    from drone_fly.harness.config import load_config
+    from drone_fly.harness.gate_types import GateTypeTable
+    from drone_fly.harness.offline import gate_dataset as gd
+    from drone_fly.harness.offline.capture_index import CaptureMetaError, link_entry, read_meta
+    from drone_fly.harness.offline.gate_train import load_labels
+    from drone_fly.tracks import catalogue as cat
+
+    cfg = load_config("liftoff", args.config, preset=args.preset or "liftoff")
+    catalogue = cat.load_catalogue(args.split_source) if args.split_source else cat.load_named(
+        "liftoff")  # fmt: skip
+    usable, heldout_rows = [], {}
+    for d in _gate_captures(args):
+        try:
+            meta = read_meta(d)
+            split = link_entry(meta, catalogue)["split"]
+        except CaptureMetaError:
+            usable.append(d)  # assemble records the refusal
+            continue
+        if split == "held-out":
+            lab = gd.labels_dir_for(d, meta)
+            if lab is not None:
+                heldout_rows.setdefault(meta["map"], []).extend(load_labels(lab).rows)
+            continue
+        usable.append(d)
+    protect = None if args.protect_holdout_of == "none" else args.protect_holdout_of
+    if protect == "release:v1":
+        from drone_fly.harness.liftoff.gate_learned import configured_weights
+
+        protect = configured_weights({"release": "v1"})
+    ds = gd.assemble(
+        usable,
+        catalogue=catalogue,
+        table=GateTypeTable.from_config(cfg.get("gate_types")),
+        not_gates=cfg.not_gates,
+        trackdata_root=args.trackdata_root,
+        protect=gd.read_weights_meta(protect),
+        frame_stride=args.frame_stride,
+        max_frames_per_capture=args.max_frames_per_capture,
+        telemetry_cfg=cfg.section("telemetry"),
+    )
+    rep = gd.dataset_report(ds, heldout_rows)
+    print(gd.report_summary(rep))
+    if args.json:
+        Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.json).write_text(json.dumps(rep, indent=2), encoding="utf-8")
+        print(f"report: {args.json}")
+    return EXIT_OK if rep["g1"]["go"] else EXIT_COVERAGE
+
+
+def _cmd_gates_draft_types(args: argparse.Namespace) -> int:
+    import yaml
+
+    from drone_fly.harness.offline.autolabel import draft_gate_types, load_props
+
+    drafts = draft_gate_types(load_props(args.props), args.items)
+    print("# CANDIDATES ONLY: check every class with label previews before training on it.")
+    print(yaml.safe_dump({"gate_types": drafts}, sort_keys=False, default_flow_style=None))
+    return EXIT_OK
 
 
 def _cmd_train_gates(args: argparse.Namespace) -> int:
@@ -753,7 +861,49 @@ def build_parser() -> argparse.ArgumentParser:
     _common(p_ver)
     p_ver.set_defaults(func=_cmd_captures_verify)
 
-    p_train = hsub.add_parser("train-gates", help="train the learned gate detector on labels")
+    p_gates = hsub.add_parser("gates", help="multi-map gate detector: train, report, types")
+    gsub = p_gates.add_subparsers(dest="gates_command", required=True)
+
+    def _gate_inputs(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--captures", nargs="+", help="capture folders, globs or names")
+        p.add_argument("--all-captures", action="store_true", help="every capture found")
+        p.add_argument("--captures-root", help="default artifacts/harness/captures")
+        p.add_argument("--split-source", help="track catalogue (default tracks/liftoff.yaml)")
+        p.add_argument("--trackdata-root", help="trackdata root (track XMLs)")
+        p.add_argument("--frame-stride", type=int, default=1)
+        p.add_argument("--max-frames-per-capture", type=int)
+        p.add_argument("--protect-holdout-of", default="release:v1",
+                       help="weights whose held-out windows stay out ('none' = off)")  # fmt: skip
+        _common(p)
+
+    p_gt = gsub.add_parser("train", help="train on train-map captures, select on val maps")
+    _gate_inputs(p_gt)
+    p_gt.add_argument("--detector-id", help="default liftoff-gates-v2-<YYYYMMDD-HHMM>")
+    p_gt.add_argument("--epochs", type=int, default=40)
+    p_gt.add_argument("--backbone", choices=("resnet18-hf", "tiny-cnn"), default="resnet18-hf")
+    p_gt.add_argument("--batch-size", type=int, default=8)
+    p_gt.add_argument("--lr", type=float, default=1e-3)
+    p_gt.add_argument("--input-width", type=int)
+    p_gt.add_argument("--select", choices=("val-detection", "val-loss", "last"),
+                      default="val-detection")  # fmt: skip
+    p_gt.add_argument("--val-every", type=int, default=2, help="val decode every N epochs")
+    p_gt.add_argument("--patience", type=int, help="early stop after N epochs without gain")
+    p_gt.add_argument("--deploy", action="store_true",
+                      help="retrain on train + val maps (select last) -> *-deploy.pt")  # fmt: skip
+    p_gt.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    p_gt.set_defaults(func=_cmd_gates_train)
+    p_gr = gsub.add_parser("dataset-report", help="in-range gate-frame counts and the G1 gate")
+    _gate_inputs(p_gr)
+    p_gr.add_argument("--json", help="write the report JSON here")
+    p_gr.set_defaults(func=_cmd_gates_dataset_report)
+    p_gd = gsub.add_parser("draft-types", help="candidate gate_types entries from props.json")
+    p_gd.add_argument("--props", required=True, help="props.json (liftoff-flight-analyzer)")
+    p_gd.add_argument("--items", nargs="+", required=True, help="itemIDs")
+    p_gd.set_defaults(func=_cmd_gates_draft_types)
+
+    p_train = hsub.add_parser(
+        "train-gates", help="train the learned gate detector on labels (alias, single-map UC64)"
+    )
     p_train.add_argument("--labels", nargs="+", required=True, help="label folder(s)")
     p_train.add_argument("--out", help="weights path (default .../models/liftoff-gates.pt)")
     _common(p_train)
