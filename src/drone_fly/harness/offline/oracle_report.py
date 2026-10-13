@@ -36,6 +36,9 @@ TRANSFER_PP = 0.20
 INCONCLUSIVE_SIM = 0.50
 FAILSAFE_RERUN_SHARE = 0.20
 ARM_DELAY_FLAG_S = 0.25
+#: Thresholds compare with this tolerance: shares of N = 10 are multiples of 0.1, and
+#: ``abs(0.7 - 0.9)`` is ``0.20000000000000007`` (a 20 pp gap still transfers).
+EPS = 1e-9
 EXCLUDED_CLASSES = ("failsafe", "refused")
 Z95 = 1.959964
 
@@ -152,7 +155,7 @@ def live_summary(scores: list[dict[str, Any]], course: Any) -> dict[str, Any]:
         else {
             "p50": float(np.median(arm)),
             "max": float(np.max(arm)),
-            "flagged": bool(np.max(arm) > ARM_DELAY_FLAG_S),
+            "flagged": bool(np.max(arm) > ARM_DELAY_FLAG_S + EPS),
         },  # fmt: skip
         "contacts": [
             {"run": s["run"], **s["contact"]} for s in valid if s.get("contact") is not None
@@ -259,13 +262,13 @@ def verdict(live: dict[str, Any], sim: dict[str, Any] | None) -> dict[str, Any]:
     sim_c = rand.get("completion")
     mode = live["dominant_failure_mode"]
     flags: list[str] = []
-    if n and head is not None and raw is not None and abs(raw - head) > TRANSFER_PP:
+    if n and head is not None and raw is not None and abs(raw - head) > TRANSFER_PP + EPS:
         kinds = Counter(c["kind"] for c in live["contacts"])
         flags.append(
             f"Geometry disagreement: raw completion {_pct(raw)} vs sim-rule {_pct(head)} "
             f"(contacts: {dict(kinds)})"
         )
-    if live["excluded_share"] > FAILSAFE_RERUN_SHARE:
+    if live["excluded_share"] > FAILSAFE_RERUN_SHARE + EPS:
         flags.append(
             f"Fail-safe / refused attempts are {_pct(live['excluded_share'])} of the session "
             f"(> {_pct(FAILSAFE_RERUN_SHARE)}): re-run the session for AC9"
@@ -279,7 +282,7 @@ def verdict(live: dict[str, Any], sim: dict[str, Any] | None) -> dict[str, Any]:
     elif sim_c is None:
         kind = "no-sim"
         text = f"Live sim-rule completion {_pct(head)} (N={n}); the sim comparison is unavailable."
-    elif sim_c < INCONCLUSIVE_SIM:
+    elif sim_c < INCONCLUSIVE_SIM - EPS:
         kind = "inconclusive"
         text = (
             f"Inconclusive: the teacher completes only {_pct(sim_c)} of randomized sim episodes on "
@@ -287,7 +290,7 @@ def verdict(live: dict[str, Any], sim: dict[str, Any] | None) -> dict[str, Any]:
             f"Per-passage success: live {_pct(live['per_passage_success'])} vs sim "
             f"{_pct(rand.get('per_passage_success'))}."
         )
-    elif abs(head - sim_c) <= TRANSFER_PP:
+    elif abs(head - sim_c) <= TRANSFER_PP + EPS:
         kind = "transfers"
         text = (
             f"Control transfers: live sim-rule completion {_pct(head)} "
