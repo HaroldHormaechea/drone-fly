@@ -1,0 +1,37 @@
+# UC70 run-2 deployable student (ADR 0009 "Run 1 result" follow-up).
+# `drone-fly train student --config student-liftoff-run2 --teacher <run> --noise <yaml>`.
+#
+# Extends run-1 (student-liftoff) and turns ON the three run-2 perception features that close the
+# information / false-positive gap WITHOUT touching the teacher or the frozen K1:
+#   1. the next-gate pointer OBS block (schema v3, DIM 65) — always appended; here it carries a
+#      NOISY HUD proxy (per-episode bias + per-tick jitter) with per-episode dropout so the student
+#      stays deployable pre-UC72 (where the live learned tracker leaves the pointer unavailable);
+#   2. world-frame gate memory (perception-internal; feeds the existing obs fields);
+#   3. false-positive suppression (pointer / memory / temporal sub-gates on acquisition).
+# All three are independently toggleable so the experiment can attribute the gains; with them OFF
+# the run reproduces run-1 exactly (bar the appended pointer columns).
+#
+# VRAM: run-1's 4096 envs peaked ~3.1 GB (csr32) in the student process on an 8 GB GPU (total,
+# incl. the game's contention, peaked ~6.5 GB). On a 6 GB RTX A3000, 4096 fits only on a DEDICATED
+# GPU, so run-2 defaults to n_envs 2048 (overridable with --n-envs). ~2x gradient-updates/sample is
+# retained; the DAgger buffer and everything else are unchanged from run-1.
+# The pointer-noise sigmas and bearing_tol_deg below are PROVISIONAL, pending real HUD
+# characterisation in UC72.
+extends: student-liftoff
+name: student-liftoff-run2
+n_envs: 2048                  # VRAM: fits 6 GB; override with --n-envs on an 8 GB+ dedicated GPU
+perception:
+  pointer:
+    bias_sigma_rad: 0.05      # ~2.9 deg per-episode HUD bearing bias (provisional; UC72)
+    jitter_sigma_rad: 0.03    # ~1.7 deg per-tick jitter (provisional; UC72)
+    dropout_p: 0.1            # 10 % of episodes fly with the pointer unavailable (bit = 0)
+    bearing_tol_deg: 20.0     # FP pointer-consistency gate tolerance
+  gate_memory:
+    enabled: true
+    fresh_s: 1.5              # a remembered pose stays usable as the fallback target for 1.5 s
+  fp_suppression:
+    pointer: true
+    memory: true
+    temporal: true
+    memory_tol: 2.0           # course units: reject a candidate this far from the remembered pose
+    temporal_frames: 2        # require 2 consecutive candidate frames before promoting

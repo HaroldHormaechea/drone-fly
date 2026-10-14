@@ -336,6 +336,21 @@ def perception_config(cfg: Any, model: Any, mode: str | None = None) -> Any:
     over["lost_policy"] = str(cfg.perception.lost_policy)
     over["lost_hard_stop_s"] = float(cfg.perception.lost_hard_stop_s)
     over["drop_after_s"] = float(cfg.perception.drop_after_s)
+    # UC70 run-2 features (default-OFF in the config ⇒ run-1 perception, bar the pointer obs block)
+    p = cfg.perception.pointer
+    over["pointer_bias_sigma_rad"] = float(p.bias_sigma_rad)
+    over["pointer_jitter_sigma_rad"] = float(p.jitter_sigma_rad)
+    over["pointer_dropout_p"] = float(p.dropout_p)
+    over["pointer_bearing_tol_deg"] = float(p.bearing_tol_deg)
+    gm = cfg.perception.gate_memory
+    over["gate_memory"] = bool(gm.enabled)
+    over["gate_memory_fresh_s"] = float(gm.fresh_s)
+    fs = cfg.perception.fp_suppression
+    over["fp_suppress_pointer"] = bool(fs.pointer)
+    over["fp_suppress_memory"] = bool(fs.memory)
+    over["fp_suppress_temporal"] = bool(fs.temporal)
+    over["fp_memory_tol"] = float(fs.memory_tol)
+    over["fp_temporal_frames"] = int(fs.temporal_frames)
     return PerceptionConfig.from_model(model, mode or cfg.perception.mode, **over)
 
 
@@ -950,6 +965,10 @@ def student_sidecar(
             lost_policy=pcfg.lost_policy,
             lost_hard_stop_s=pcfg.lost_hard_stop_s,
             drop_after_s=pcfg.drop_after_s,
+            pointer_bias_sigma_rad=pcfg.pointer_bias_sigma_rad,
+            pointer_jitter_sigma_rad=pcfg.pointer_jitter_sigma_rad,
+            pointer_dropout_p=pcfg.pointer_dropout_p,
+            pointer_bearing_tol_deg=pcfg.pointer_bearing_tol_deg,
         ),
         "world_scale": float(cfg.student.world_scale),
         "actor_arch": actor.arch(),
