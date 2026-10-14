@@ -87,6 +87,7 @@ def expected_schema(meta: dict[str, Any]) -> dict[str, Any]:
 
     sch = meta.get("obs_schema") or {}
     tr = sch.get("tracker") or {}
+    ptr = sch.get("pointer") or {}
     return schema(
         world_scale=float(meta.get("world_scale", sch.get("world_scale", 0.0))),
         lost_timeout_s=float(tr.get("lost_timeout_s", 0.0)),
@@ -97,6 +98,10 @@ def expected_schema(meta: dict[str, Any]) -> dict[str, Any]:
         lost_policy=str(tr.get("lost_policy", "terminate")),
         lost_hard_stop_s=float(tr.get("lost_hard_stop_s", 6.0)),
         drop_after_s=float(tr.get("drop_after_s", 0.5)),
+        pointer_bias_sigma_rad=float(ptr.get("bias_sigma_rad", 0.0)),
+        pointer_jitter_sigma_rad=float(ptr.get("jitter_sigma_rad", 0.0)),
+        pointer_dropout_p=float(ptr.get("dropout_p", 0.0)),
+        pointer_bearing_tol_deg=float(ptr.get("bearing_tol_deg", 20.0)),
     )
 
 

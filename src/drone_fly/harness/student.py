@@ -124,6 +124,10 @@ class StudentObservationAssembler(ObservationAssembler):
             history=self.step.history,
             dt=dt,
             battery=bat,
+            # UC70 run-2: the next-gate pointer (student-obs v3). The live learned tracker does not
+            # populate info["pointer"] pre-UC72, so this is None -> zeros / bit = 0 (degraded, as
+            # trained for with per-episode pointer dropout). UC72 adds the live HUD reader.
+            pointer=(gate.info or {}).get("pointer"),
         )
         self.step.timings["assemble"].append(time.perf_counter() - t0)
         if extra.shape[0] != extra_dim:

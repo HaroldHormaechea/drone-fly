@@ -78,6 +78,8 @@ STATUS_NAMES = ("tracking", "holding", "lost")
 #: target, unseen with nothing known (+x).
 NEXT_VISIBLE, NEXT_UNSEEN_KNOWN, NEXT_UNSEEN_TARGET, NEXT_UNSEEN_NONE = range(4)
 #: Per-tick draws: (name, width, kind) with kind "u" (uniform [0, 1)) or "n" (standard normal).
+#: ``ptr_jit`` (UC70 run-2) is the per-tick next-gate-pointer angular jitter (azimuth, elevation);
+#: always drawn, scaled by ``pointer_jitter_sigma_rad`` (0 ⇒ the exact truth bearing).
 TICK_DRAWS: tuple[tuple[str, int, str], ...] = (
     ("jitter", 1, "n"),
     ("skip", 1, "u"),
@@ -91,8 +93,16 @@ TICK_DRAWS: tuple[tuple[str, int, str], ...] = (
     ("fp_r", 1, "u"),
     ("fp_a", 1, "u"),
     ("next_mis", 1, "u"),
+    ("ptr_jit", 2, "n"),
 )
-EPISODE_DRAWS: tuple[tuple[str, int, str], ...] = (("lat", 1, "u"), ("phase", 1, "u"))
+#: ``ptr_drop`` / ``ptr_bias`` (UC70 run-2): the per-episode pointer dropout roll and the
+#: per-episode angular bias (azimuth, elevation); always drawn, config-scaled (0 ⇒ parity-strict).
+EPISODE_DRAWS: tuple[tuple[str, int, str], ...] = (
+    ("lat", 1, "u"),
+    ("phase", 1, "u"),
+    ("ptr_drop", 1, "u"),
+    ("ptr_bias", 2, "n"),
+)
 
 
 def draw_width(spec: tuple[tuple[str, int, str], ...]) -> int:
@@ -284,6 +294,32 @@ class PerceptionConfig:
     lost_policy: str = "terminate"
     lost_hard_stop_s: float = 6.0
     drop_after_s: float = 0.5
+    # ---- UC70 run-2 (ADR 0009): all default-OFF ⇒ run-1 behaviour (byte-identical ``outputs()``,
+    # except the always-appended pointer obs block, which is the exact truth bearing at these
+    # defaults). The pointer obs is computed from the TRUTH target centre; its noise is a HUD
+    # proxy. The gate-memory and FP-suppression toggles are perception-internal.
+    #: Next-gate pointer (HUD proxy) per-episode angular bias / per-tick jitter std (rad); 0 ⇒ the
+    #: exact truth bearing.
+    pointer_bias_sigma_rad: float = 0.0
+    pointer_jitter_sigma_rad: float = 0.0
+    #: Per-episode probability the whole episode flies with the pointer unavailable (bit = 0).
+    pointer_dropout_p: float = 0.0
+    #: FP pointer-consistency sub-gate: reject a candidate whose body bearing is more than this far
+    #: off the noisy pointer (degrees). Only consulted when ``fp_suppress_pointer``.
+    pointer_bearing_tol_deg: float = 20.0
+    #: World-frame gate memory: remember each slot's last confident (non-FP) pose and fall back to
+    #: it (while fresh) when the live estimate is lost. ``False`` ⇒ ``outputs()`` run-1-identical.
+    gate_memory: bool = False
+    #: How long a remembered pose stays usable as the fallback target (s).
+    gate_memory_fresh_s: float = 1.5
+    #: False-positive suppression sub-gates on the ``pick_fp`` / ``mis`` acquisition paths.
+    fp_suppress_pointer: bool = False
+    fp_suppress_memory: bool = False
+    fp_suppress_temporal: bool = False
+    #: Memory-consistency sub-gate: reject a candidate more than this far (course units) from the
+    #: remembered pose. Temporal sub-gate: require this many consecutive candidate frames.
+    fp_memory_tol: float = 2.0
+    fp_temporal_frames: int = 2
 
     def __post_init__(self) -> None:
         if self.lost_policy not in LOST_POLICIES:
@@ -296,6 +332,16 @@ class PerceptionConfig:
             raise ValueError(f"perception.mode must be one of {MODES}, got {self.mode!r}")
         if self.lost_timeout_s <= 0 or self.acquire_timeout_s < 0 or self.frame_period_s <= 0:
             raise ValueError("lost_timeout_s > 0, acquire_timeout_s >= 0, frame_period_s > 0")
+        if self.pointer_bias_sigma_rad < 0 or self.pointer_jitter_sigma_rad < 0:
+            raise ValueError("pointer bias / jitter sigmas must be >= 0")
+        if not 0.0 <= self.pointer_dropout_p <= 1.0:
+            raise ValueError("pointer_dropout_p must be in [0, 1]")
+        if self.pointer_bearing_tol_deg < 0 or self.fp_memory_tol < 0:
+            raise ValueError("pointer_bearing_tol_deg and fp_memory_tol must be >= 0")
+        if self.gate_memory_fresh_s <= 0:
+            raise ValueError("gate_memory_fresh_s must be > 0")
+        if int(self.fp_temporal_frames) < 1:
+            raise ValueError("fp_temporal_frames must be >= 1")
 
     @classmethod
     def from_model(cls, model: NoiseModel | None, mode: str, **over: Any) -> PerceptionConfig:
@@ -384,6 +430,23 @@ class GatePerception:
         self.hand_over = b()
         self.passed = b()
         self.status = torch.full((n,), HOLDING, dtype=torch.long, device=self.device)
+        # UC70 run-2 pointer: per-episode bias (az, el) + dropout; the noisy body-frame bearing
+        # (3) + availability bit computed each tick from the truth target centre and emitted in
+        # ``outputs()`` (the SAME value feeds the FP pointer sub-gate).
+        self.ptr_bias = z(n, 2)
+        self.ptr_dropped = b()
+        self.ptr_body = z(n, 3)
+        self.ptr_avail = b()
+        # UC70 run-2 gate memory: per-slot last confident world pose / yaw / stamp (+ validity).
+        self.tm_world, self.tm_yaw = z(n, 3), z(n)
+        self.tm_stamp = torch.zeros(n, dtype=torch.float64, device=self.device)
+        self.tm_valid = b()
+        self.nm_world, self.nm_yaw = z(n, 3), z(n)
+        self.nm_stamp = torch.zeros(n, dtype=torch.float64, device=self.device)
+        self.nm_valid = b()
+        # UC70 run-2 FP temporal persistence: consecutive candidate-frame streaks per slot.
+        self.t_streak = torch.zeros(n, dtype=torch.long, device=self.device)
+        self.n_streak = torch.zeros(n, dtype=torch.long, device=self.device)
 
     # ---- helpers ----
     def _draw(self, spec: tuple, draws: torch.Tensor | None) -> dict[str, torch.Tensor]:
@@ -428,6 +491,26 @@ class GatePerception:
             setattr(self, name, torch.where(m, t, getattr(self, name)))
         self.ticks_since = torch.where(m, torch.zeros_like(self.ticks_since), self.ticks_since)
         self.status = torch.where(m, torch.full_like(self.status, HOLDING), self.status)
+        # UC70 run-2: redraw the per-episode pointer bias / dropout; clear the pointer, the gate
+        # memory and the FP streaks of reset envs.
+        self.ptr_bias = torch.where(
+            m1, d["ptr_bias"] * c.pointer_bias_sigma_rad, self.ptr_bias
+        )
+        self.ptr_dropped = torch.where(m, d["ptr_drop"] < c.pointer_dropout_p, self.ptr_dropped)
+        self.ptr_body = torch.where(m1, torch.zeros_like(self.ptr_body), self.ptr_body)
+        self.ptr_avail = self.ptr_avail & ~m
+        for name in ("tm_world", "nm_world"):
+            v = getattr(self, name)
+            setattr(self, name, torch.where(m1, torch.zeros_like(v), v))
+        for name in ("tm_yaw", "nm_yaw"):
+            v = getattr(self, name)
+            setattr(self, name, torch.where(m, torch.zeros_like(v), v))
+        for name in ("tm_stamp", "nm_stamp"):
+            setattr(self, name, torch.where(m, t, getattr(self, name)))
+        self.tm_valid = self.tm_valid & ~m
+        self.nm_valid = self.nm_valid & ~m
+        self.t_streak = torch.where(m, torch.zeros_like(self.t_streak), self.t_streak)
+        self.n_streak = torch.where(m, torch.zeros_like(self.n_streak), self.n_streak)
         p = pos.to(self.dtype)
         self._pos = torch.where(m1, p, self._pos) if hasattr(self, "_pos") else p.clone()
 
@@ -546,6 +629,25 @@ class GatePerception:
         nb = nb / nb.norm(dim=-1, keepdim=True).clamp(min=1e-9)
         return body, nb
 
+    def _pointer(self, R: torch.Tensor, pos: torch.Tensor, center: torch.Tensor,
+                 jit: torch.Tensor, target_valid: torch.Tensor) -> None:  # fmt: skip
+        """Store the noisy body-frame pointer (3) + availability bit for this tick (UC70 run-2).
+
+        The truth bearing ``R^T (centre - pos)`` is normalised, then perturbed by the per-episode
+        bias and per-tick jitter in (azimuth, elevation); zeroed (bit = 0) when the target passage
+        is invalid or the episode drew a dropout. Mirrors ``ReferencePerception._pointer``.
+        """
+        rel_b = _mtv(R, center - pos)
+        unit = rel_b / rel_b.norm(dim=-1, keepdim=True).clamp(min=1e-9)
+        j = jit * self.cfg.pointer_jitter_sigma_rad
+        az = torch.atan2(unit[:, 1], unit[:, 0]) + self.ptr_bias[:, 0] + j[:, 0]
+        el = torch.asin(unit[:, 2].clamp(-1.0, 1.0)) + self.ptr_bias[:, 1] + j[:, 1]
+        ce = torch.cos(el)
+        ptr = torch.stack([ce * torch.cos(az), ce * torch.sin(az), torch.sin(el)], -1)
+        avail = target_valid & ~self.ptr_dropped
+        self.ptr_body = torch.where(avail.unsqueeze(-1), ptr, torch.zeros_like(ptr))
+        self.ptr_avail = avail
+
     # ---- the tick ----
     def step(
         self,
@@ -558,6 +660,8 @@ class GatePerception:
         crossed: torch.Tensor,
         scale: torch.Tensor,
         draws: torch.Tensor | None = None,
+        *,
+        target_valid: torch.Tensor | None = None,
     ) -> None:
         """Advance one control tick (see the module docstring); ``pos``/``quat`` = this tick."""
         d = self._draw(TICK_DRAWS, draws)
@@ -566,6 +670,16 @@ class GatePerception:
         R = quat_matrix(quat.to(self.dtype))
         c = self.cfg
         scale = scale.to(self.dtype)
+        tvalid = (
+            torch.ones(self.n, dtype=torch.bool, device=self.device)
+            if target_valid is None
+            else target_valid.to(torch.bool)
+        )
+        # UC70 run-2: the noisy next-gate pointer — a body-frame unit bearing to the TRUE target
+        # centre with a per-episode bias + per-tick jitter, and an availability bit (truth-driven,
+        # single-sourced here). The same value is read by the FP pointer sub-gate and emitted by
+        # ``outputs()``; parity-strict at sigma = 0 (the exact bearing).
+        self._pointer(R, pos, target["center"], d["ptr_jit"], tvalid)
         # 1. hand-over on a truth advance
         ho = crossed
         take = ho & self.n_known
@@ -743,6 +857,7 @@ class GatePerception:
             "matched": self.t_active & self.t_acq,
             "ticks_since_detection": self.ticks_since,
             "fp_target": self.t_fp,
+            "pointer": torch.cat([self.ptr_body, self.ptr_avail.to(self.dtype).unsqueeze(-1)], -1),
         }
 
 

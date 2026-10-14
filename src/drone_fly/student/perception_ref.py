@@ -46,6 +46,7 @@ from drone_fly.sim.perception import (
     TICK_DRAWS,
     TRACKING,
     PerceptionConfig,
+    draw_width,
 )
 
 
@@ -103,7 +104,7 @@ class ReferencePerception:
         self.spec: VisibilitySpec = model.visibility_spec()
         self.cn = model.class_noise()
         self.fp = model.data["false_positives"]
-        self.reset(0.0, np.zeros(3), np.array([1.0, 0, 0, 0]), np.zeros(2))
+        self.reset(0.0, np.zeros(3), np.array([1.0, 0, 0, 0]), np.zeros(draw_width(EPISODE_DRAWS)))
 
     # ---- state ----
     def reset(self, t: float, pos: Any, quat: Any, draws: Any) -> None:
@@ -127,6 +128,16 @@ class ReferencePerception:
         self.status = HOLDING
         self.pos = np.asarray(pos, np.float64).copy()
         self.t = float(t)
+        # UC70 run-2: per-episode pointer bias / dropout; the noisy pointer + availability bit; the
+        # per-slot gate memory and the FP temporal streaks (mirrors GatePerception).
+        self.ptr_bias = np.asarray(d["ptr_bias"], np.float64) * c.pointer_bias_sigma_rad
+        self.ptr_dropped = bool(d["ptr_drop"] < c.pointer_dropout_p)
+        self.ptr_body = np.zeros(3)
+        self.ptr_avail = False
+        self.tm_world, self.tm_yaw, self.tm_stamp, self.tm_valid = np.zeros(3), 0.0, float(t), False
+        self.nm_world, self.nm_yaw, self.nm_stamp, self.nm_valid = np.zeros(3), 0.0, float(t), False
+        self.t_streak = 0
+        self.n_streak = 0
 
     def push_pose(self, t: float, pos: Any, quat: Any) -> None:
         self.ring[self.ring_i % RING] = (float(t), np.asarray(pos, np.float64).copy(),
@@ -228,6 +239,21 @@ class ReferencePerception:
         nb[2] = 0.0
         return body, nb / max(np.linalg.norm(nb), 1e-9)
 
+    def _pointer(self, R: np.ndarray, pos: np.ndarray, center: np.ndarray, jit: np.ndarray,
+                 target_valid: bool) -> None:  # fmt: skip
+        """Store the noisy body-frame pointer (3) + availability bit (mirrors
+        :meth:`GatePerception._pointer`)."""
+        rel_b = R.T @ (np.asarray(center, np.float64) - pos)
+        unit = rel_b / max(float(np.linalg.norm(rel_b)), 1e-9)
+        j = np.asarray(jit, np.float64) * self.cfg.pointer_jitter_sigma_rad
+        az = math.atan2(unit[1], unit[0]) + self.ptr_bias[0] + j[0]
+        el = math.asin(float(np.clip(unit[2], -1.0, 1.0))) + self.ptr_bias[1] + j[1]
+        ce = math.cos(el)
+        ptr = np.array([ce * math.cos(az), ce * math.sin(az), math.sin(el)])
+        avail = bool(target_valid) and not self.ptr_dropped
+        self.ptr_body = ptr if avail else np.zeros(3)
+        self.ptr_avail = avail
+
     # ---- the tick ----
     def step(
         self,
@@ -239,6 +265,8 @@ class ReferencePerception:
         crossed: bool,
         scale: float,
         draws: Any,
+        *,
+        target_valid: bool = True,
     ) -> None:
         """One control tick (``nxt`` None = no valid next passage)."""
         d = unpack(draws, TICK_DRAWS)
@@ -246,6 +274,8 @@ class ReferencePerception:
         pos = np.asarray(pos, np.float64)
         R = quat_matrix_np(quat)
         tg, nx = self.tg, self.nx
+        # UC70 run-2: the noisy next-gate pointer (truth-driven, single-sourced here).
+        self._pointer(R, pos, target["center"], d["ptr_jit"], target_valid)
         # 1. hand-over
         self.hand_over = self.passed = bool(crossed)
         if crossed:
@@ -395,6 +425,8 @@ class ReferencePerception:
             "matched": tg.active and tg.acq,
             "ticks_since_detection": self.ticks_since,
             "fp_target": tg.fp,
+            "pointer": np.concatenate([np.asarray(self.ptr_body, np.float64),
+                                       [1.0 if self.ptr_avail else 0.0]]),  # fmt: skip
         }
 
     def estimate(self, k: float = 1.0, gate_index: int = 0) -> Any:
@@ -435,5 +467,9 @@ def estimate_from_raw(raw: dict[str, Any], pos: Any, cfg: PerceptionConfig, k: f
             "next_age_s": float(raw["next_age_s"]),
             "target_valid": bool(raw["target_valid"]),
             "hand_over": bool(raw["hand_over"]),
+            # UC70 run-2: the noisy next-gate pointer (body bearing 3 + bit) flows raw -> info ->
+            # the numpy obs builder; the torch builder reads perc["pointer"] (one source).
+            "pointer": None if raw.get("pointer") is None
+            else np.asarray(raw["pointer"], np.float32),
         },
     )

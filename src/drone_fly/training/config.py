@@ -460,6 +460,38 @@ class StudentSection:
 
 
 @dataclass(frozen=True)
+class PointerSection:
+    """``perception.pointer:`` — the next-gate HUD pointer obs (UC70 run-2). Defaults ⇒ the exact
+    truth bearing, always available (parity-strict)."""
+
+    bias_sigma_rad: float = 0.0
+    jitter_sigma_rad: float = 0.0
+    dropout_p: float = 0.0
+    bearing_tol_deg: float = 20.0
+
+
+@dataclass(frozen=True)
+class GateMemorySection:
+    """``perception.gate_memory:`` — world-frame gate memory (UC70 run-2). ``enabled=false`` ⇒
+    run-1 perception."""
+
+    enabled: bool = False
+    fresh_s: float = 1.5
+
+
+@dataclass(frozen=True)
+class FpSuppressionSection:
+    """``perception.fp_suppression:`` — the three toggleable false-positive sub-gates (UC70
+    run-2). All off ⇒ run-1 acquisition."""
+
+    pointer: bool = False
+    memory: bool = False
+    temporal: bool = False
+    memory_tol: float = 2.0
+    temporal_frames: int = 2
+
+
+@dataclass(frozen=True)
 class PerceptionSection:
     """``perception:`` — the simulated detector (``timing`` comes from the noise model)."""
 
@@ -474,6 +506,10 @@ class PerceptionSection:
     lost_policy: str = "reacquire"
     lost_hard_stop_s: float = 6.0
     drop_after_s: float = 0.5
+    #: UC70 run-2 features (all default-OFF ⇒ run-1 perception, bar the appended pointer block).
+    pointer: PointerSection = field(default_factory=PointerSection)
+    gate_memory: GateMemorySection = field(default_factory=GateMemorySection)
+    fp_suppression: FpSuppressionSection = field(default_factory=FpSuppressionSection)
 
 
 @dataclass(frozen=True)
@@ -584,6 +620,28 @@ class StudentConfig:
         return out
 
 
+def _perception_section(d: Any) -> PerceptionSection:
+    """Parse ``perception:`` with its UC70 run-2 nested sub-sections (pointer / gate_memory /
+    fp_suppression) built via :func:`_section` so unknown keys are still rejected."""
+    d = dict(d or {})
+    sub = {
+        "pointer": (PointerSection, d.pop("pointer", None)),
+        "gate_memory": (GateMemorySection, d.pop("gate_memory", None)),
+        "fp_suppression": (FpSuppressionSection, d.pop("fp_suppression", None)),
+    }
+    kw = {name: _section(cls, raw, f"perception.{name}") for name, (cls, raw) in sub.items()}
+    return _section_with(PerceptionSection, d, "perception", kw)
+
+
+def _section_with(cls: type, d: Any, key: str, extra: dict[str, Any]) -> Any:
+    """``_section`` but with already-built sub-objects merged in (nested sections)."""
+    d = dict(d or {})
+    unknown = set(d) - set(cls.__dataclass_fields__)
+    if unknown:
+        raise TrainConfigError(f"unknown {key} keys {sorted(unknown)}")
+    return cls(**d, **extra)
+
+
 def student_from_mapping(data: dict[str, Any], *, validate_tracks: bool = True) -> StudentConfig:
     base = teacher_from_mapping({k: v for k, v in data.items() if k not in STUDENT_KEYS},
                                 validate_tracks=validate_tracks)  # fmt: skip
@@ -593,7 +651,7 @@ def student_from_mapping(data: dict[str, Any], *, validate_tracks: bool = True) 
     return StudentConfig(
         base=base,
         student=_section(StudentSection, data.get("student"), "student"),
-        perception=_section(PerceptionSection, data.get("perception"), "perception"),
+        perception=_perception_section(data.get("perception")),
         distill=_section(DistillSection, data.get("distill"), "distill"),
         finetune=_section(FinetuneSection, data.get("finetune"), "finetune"),
         feasibility=_section(FeasibilitySection, feas, "feasibility"),

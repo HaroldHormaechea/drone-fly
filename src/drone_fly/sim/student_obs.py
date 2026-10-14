@@ -46,7 +46,7 @@ from drone_fly.sim.perception import NEXT_VISIBLE
 from drone_fly.sim.quat import gravity_body
 
 NAME = "student-obs"
-VERSION = 2
+VERSION = 3
 BLOCKS: tuple[tuple[str, int], ...] = (
     ("harness30", 30),
     ("attitude6", 6),
@@ -56,6 +56,11 @@ BLOCKS: tuple[tuple[str, int], ...] = (
     ("perception", 3),
     ("history", 12),
     ("battery", 2),
+    # v3 (UC70 run-2): the next-gate pointer — a body-frame unit bearing to the current target
+    # gate (3; Liftoff's on-screen next-gate HUD arrow) and an availability bit (1). A noisy HUD
+    # proxy; appended at the tail so the legacy [0:61] columns and offsets are unchanged and the
+    # warm start zeros these new columns.
+    ("pointer", 4),
 )
 DIM = sum(w for _, w in BLOCKS)
 HARNESS_LAYOUT: tuple[tuple[str, int], ...] = (
@@ -96,6 +101,7 @@ def input_scale() -> list[float]:
     out += [1.0] * 3  # perception
     out += [1 / 20.0] * 3 + [1.0] * 4 + [1.0] * 3 + [1.0, 1.0]  # history
     out += list(teacher_scale(2)[-2:])  # battery: as teacher-obs v2 (charge, volts / 4.2)
+    out += [1.0] * 4  # pointer: a unit bearing (3, already O(1)) + the availability bit (1)
     assert len(out) == DIM
     return out
 
@@ -111,6 +117,10 @@ def schema(
     lost_policy: str = "terminate",
     lost_hard_stop_s: float = 6.0,
     drop_after_s: float = 0.5,
+    pointer_bias_sigma_rad: float = 0.0,
+    pointer_jitter_sigma_rad: float = 0.0,
+    pointer_dropout_p: float = 0.0,
+    pointer_bearing_tol_deg: float = 20.0,
 ) -> dict[str, Any]:
     """The JSON-able ``obs_schema`` written into the student checkpoint (pins ``k``, the tracker
     timeouts and the camera the noise model and perception assumed)."""
@@ -151,6 +161,16 @@ def schema(
             "uptilt_deg": float(camera.get("uptilt_deg", 0.0)),
         },
         "history": {"ema_tau_s": EMA_TAU_S, "ticks_norm": TICKS_NORM},
+        "pointer": {
+            "dim": 4,
+            "layout": "body-frame unit bearing (3) + availability bit (1)",
+            "bias_sigma_rad": float(pointer_bias_sigma_rad),
+            "jitter_sigma_rad": float(pointer_jitter_sigma_rad),
+            "dropout_p": float(pointer_dropout_p),
+            "bearing_tol_deg": float(pointer_bearing_tol_deg),
+            "source": "sim: noisy truth bearing; live (pre-UC72): learned tracker leaves it "
+            "unavailable (bit = 0)",
+        },
         "input_scale": input_scale(),
         "battery": {**teacher_battery_schema(), "cells": int(battery_cells)},
         "requires": {
@@ -307,8 +327,9 @@ def build_student_obs(
         from drone_fly.sim.teacher_obs import FULL_CELL_V
 
         battery = pos.new_tensor([1.0, FULL_CELL_V]).expand(pos.shape[0], 2)
+    pointer = perc["pointer"].to(dt_)  # body bearing (3) + availability bit (1), already unitless
     parts = [h30, R[:, :, 0], R[:, :, 1], vb, prev_action.to(dt_),
-             arm_remaining_s.to(dt_).unsqueeze(-1), perc3, hist, battery.to(dt_)]  # fmt: skip
+             arm_remaining_s.to(dt_).unsqueeze(-1), perc3, hist, battery.to(dt_), pointer]  # fmt: skip
     return torch.cat(parts, -1)
 
 

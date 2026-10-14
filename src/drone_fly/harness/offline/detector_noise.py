@@ -1298,7 +1298,13 @@ def validation_replay(
     from drone_fly.harness.scale import WorldScale
     from drone_fly.harness.types import Frame
     from drone_fly.sim.noise_model import NoiseModel
-    from drone_fly.sim.perception import STATUS_NAMES, TICK_DRAWS, PerceptionConfig
+    from drone_fly.sim.perception import (
+        EPISODE_DRAWS,
+        STATUS_NAMES,
+        TICK_DRAWS,
+        PerceptionConfig,
+        draw_width,
+    )
     from drone_fly.student.perception_ref import ReferencePerception, sample
 
     cache = {i: dets for i, (_, dets) in enumerate(seq)}
@@ -1359,7 +1365,7 @@ def validation_replay(
             ref = ReferencePerception(model_, cfg)
             f0 = seq[0][0]
             ref.reset(f0.stamp, course.frame.to_course_point(f0.state.pos), f0.state.quat,
-                      np.zeros(2))  # fmt: skip
+                      np.zeros(draw_width(EPISODE_DRAWS)))  # fmt: skip
             sts = []
             for i, ((f, _), k) in enumerate(zip(seq, k_at, strict=True)):
                 pc = course.frame.to_course_point(f.state.pos)

@@ -97,11 +97,13 @@ class StudentCourseEnv:
         return self.coverage[self.env.cid]
 
     # ---- perception plumbing ----
-    def _passages(self) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], torch.Tensor]:
+    def _passages(
+        self,
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
         e = self.env
-        tgt, _ = e.target_index(0)
+        tgt, tvalid = e.target_index(0)
         nxt, nvalid = e.target_index(1)
-        return e.passage(tgt), e.passage(nxt), nvalid
+        return e.passage(tgt), e.passage(nxt), nvalid, tvalid
 
     def _reset_perception(self, mask: torch.Tensor) -> None:
         e = self.env
@@ -112,8 +114,9 @@ class StudentCourseEnv:
         e = self.env
         e_t = e.t
         self.perc.push_pose(e_t, e.pos, e.quat)
-        tg, nx, nvalid = self._passages()
-        self.perc.step(e_t, e.pos, e.quat, tg, nx, nvalid, crossed, self.scale())
+        tg, nx, nvalid, tvalid = self._passages()
+        self.perc.step(e_t, e.pos, e.quat, tg, nx, nvalid, crossed, self.scale(),
+                       target_valid=tvalid)  # fmt: skip
         self.last_lost = self.perc.lost.clone()
         if not self.terminate_on_lost:
             return torch.zeros_like(self.last_lost)
