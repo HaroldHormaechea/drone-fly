@@ -6,5 +6,6 @@
 * :mod:`~drone_fly.sysid.report`     ``drones/<id>/drone.yaml`` + ``sysid.md`` + PNGs
 * :mod:`~drone_fly.sysid.synthetic`  a known-parameter plant for dry runs and tests
 
-Raw sessions live under ``artifacts/sysid/<drone-id>/<session>/`` (gitignored).
+Raw sessions live under ``<data root>/sysid/<drone-id>/<session>/`` (:mod:`drone_fly.paths`;
+gitignored).
 """

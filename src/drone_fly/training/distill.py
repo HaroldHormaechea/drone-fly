@@ -67,6 +67,75 @@ CONTENTION_LABEL = "GPU CONTENTION: timing / throughput not representative"
 K_CANDIDATES = (4.0, 6.0, 10.0)
 RANGES_07 = {"aperture_m": (0.45, 1.5), "spacing_m": (1.0, 5.0)}
 
+# ----------------------------------------------------------------------------- default inputs
+# Each input: the flag / config value -> its environment variable -> the data root
+# (:mod:`drone_fly.paths`; the defaults below must exist there, else the input stays unset).
+TEACHER_ENV = "DRONE_FLY_TEACHER"
+NOISE_MODEL_ENV = "DRONE_FLY_NOISE_MODEL"
+#: The UC68 teacher UC70 distils from (``<data root>/models/teacher/<run>``).
+DEFAULT_TEACHER_RUN = "20261013T075647Z-teacher-liftoff-aug"
+#: The detector-v1 noise model UC70 trains under (``<data root>/models/detector-v1/...``).
+DEFAULT_NOISE_MODEL = ("detector-v1", "liftoff-gates-161f7a83", "noise_model.yaml")
+#: UC68's trackdata copy in the track library (track XMLs + the scene caches the teacher used).
+TRACK_LIBRARY_TRACKDATA = "trackdata-uc68"
+
+
+def default_teacher(explicit: str | os.PathLike[str] | None = None) -> str | None:
+    """``--teacher`` -> ``$DRONE_FLY_TEACHER`` -> ``<data root>/models/teacher/<UC68 run>``."""
+    from drone_fly import paths
+
+    raw = explicit or os.environ.get(TEACHER_ENV, "").strip()
+    if raw:
+        return str(raw)
+    p = paths.models_root("teacher") / DEFAULT_TEACHER_RUN
+    return str(p) if p.is_dir() else None
+
+
+def default_noise_model(
+    explicit: str | os.PathLike[str] | None = None, configured: str | None = None
+) -> str | None:
+    """``--noise`` -> ``perception.noise_model`` -> ``$DRONE_FLY_NOISE_MODEL`` -> the data root's
+    detector-v1 noise model."""
+    from drone_fly import paths
+
+    raw = explicit or configured or os.environ.get(NOISE_MODEL_ENV, "").strip()
+    if raw:
+        return str(raw)
+    kind, det, name = DEFAULT_NOISE_MODEL
+    p = paths.models_root(kind) / det / name
+    return str(p) if p.is_file() else None
+
+
+def student_tracks_root(explicit: str | os.PathLike[str] | None = None) -> str | None:
+    """``tracks.root`` / ``--trackdata-root`` -> ``$DRONE_FLY_TRACKDATA`` (the catalogue reads it)
+    -> ``<data root>/track-library/trackdata-uc68`` -> ``None`` (the catalogue's own default)."""
+    from drone_fly import paths
+    from drone_fly.tracks.catalogue import TRACKDATA_ENV
+
+    if explicit:
+        return str(explicit)
+    if os.environ.get(TRACKDATA_ENV):
+        return None
+    p = paths.track_library_root() / TRACK_LIBRARY_TRACKDATA
+    return str(p) if p.is_dir() else None
+
+
+def resolve_teacher_path(recorded: str | os.PathLike[str]) -> str:
+    """A teacher path recorded in a run (``inputs/teacher.json``); when it no longer exists (the
+    data moved), the same run / checkpoint under ``<data root>/models/teacher/``."""
+    from drone_fly import paths
+
+    p = Path(recorded)
+    if p.exists():
+        return str(p)
+    parts = p.parts
+    for i in range(len(parts) - 1, 0, -1):  # the run folder is the part before checkpoints/
+        if parts[i] == "checkpoints":
+            q = paths.models_root("teacher") / parts[i - 1] / Path(*parts[i:])
+            return str(q) if q.exists() else str(p)
+    q = paths.models_root("teacher") / p.name
+    return str(q) if q.exists() else str(p)
+
 
 class ContentionError(HarnessConfigError):
     """The GPU is in use by something UC70 must not disturb (exit 2)."""
@@ -535,7 +604,7 @@ def eval_pool(cfg: Any, conv: Any, selectors: list[str], model: Any) -> Any:
         [{"select": s} for s in selectors],
         "eval",
         conversion=conv,
-        root=cfg.base.tracks.root,
+        root=student_tracks_root(cfg.base.tracks.root),
         scenes_root=cfg.base.tracks.scenes_root,
     )
     if cfg.perception.uncovered == "exclude":
@@ -691,7 +760,7 @@ def teacher_speed_stats(
         [{"select": s} for s in selectors],
         "eval",
         conversion=conversion_from_sidecar(side),
-        root=cfg.tracks.root,
+        root=student_tracks_root(cfg.tracks.root),
         scenes_root=cfg.tracks.scenes_root,
     )
     keep = [i for i, c in enumerate(pool.courses) if c.meta.get("source") == "liftoff-xml"]
@@ -752,7 +821,7 @@ def scale_report(
 
     c = cat.load_named("liftoff")
     entries = cat.select(c, "liftoff:train", "stats")
-    root = cat.resolve_root(trackdata_root, c.header)
+    root = cat.resolve_root(student_tracks_root(trackdata_root), c.header)
     stats = aggregate_stats(entries, root, ConversionConfig.from_dict(None))
     q = {"aperture_m": stats["aperture_m"], "spacing_m": stats["spacing_m"]}
     ranges = dict(RANGES_07)
@@ -986,9 +1055,12 @@ def resolve_inputs(cfg: Any, teacher: str | Path, noise: str | Path | None) -> t
     from drone_fly.training.evaluate import conversion_from_sidecar
 
     ck = TeacherCheckpoint.resolve(teacher)
-    path = noise or cfg.perception.noise_model
+    path = default_noise_model(noise, cfg.perception.noise_model)
     if not path:
-        raise HarnessConfigError("train student needs --noise <noise_model.yaml>")
+        raise HarnessConfigError(
+            f"train student needs --noise <noise_model.yaml> (or ${NOISE_MODEL_ENV}, or the data "
+            "root's models/detector-v1 noise model)"
+        )
     model = NoiseModel.load(path)
     conv = conversion_from_sidecar(ck.sidecar)
     if ck.sidecar.get("drone") != cfg.base.drone:
@@ -1089,7 +1161,7 @@ def _train_student(
         list(cfg.base.tracks.mix),
         "train",
         conversion=conv,
-        root=cfg.base.tracks.root,
+        root=student_tracks_root(cfg.base.tracks.root),
         scenes_root=cfg.base.tracks.scenes_root,
     )
     if cfg.base.tracks.augment:  # training only, as the teacher (mirror / scales)
@@ -1582,7 +1654,7 @@ def load_student_run(path: str | Path, which: str = "val", k1_path: Any = None) 
     state = torch.load(ck, map_location="cpu", weights_only=True)
     actor = student_from_state(side["actor"], side.get("actor_arch") or {}, state, k1_path=k1_path)
     tinfo = json.loads((run / "inputs" / "teacher.json").read_text(encoding="utf-8"))
-    teacher = TeacherCheckpoint.resolve(tinfo["checkpoint"])
+    teacher = TeacherCheckpoint.resolve(resolve_teacher_path(tinfo["checkpoint"]))
     model = NoiseModel.load(run / "inputs" / "noise_model.yaml")
     return {
         "run": run,
@@ -1825,7 +1897,7 @@ def bench_student(
         list(cfg.base.tracks.mix),
         "train",
         conversion=conv,
-        root=cfg.base.tracks.root,
+        root=student_tracks_root(cfg.base.tracks.root),
         scenes_root=cfg.base.tracks.scenes_root,
     )
     if cfg.base.tracks.augment:

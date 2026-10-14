@@ -622,8 +622,12 @@ def cmd_student(args: argparse.Namespace) -> int:
             print(rep["speed_note"])
         print(f"chosen k = {rep['chosen_k']:g}; report: {rep.get('written')}")
         return 0
+    from drone_fly.training.distill import TEACHER_ENV, default_teacher
+
+    args.teacher = default_teacher(args.teacher)
     if not args.teacher:
-        print("train student: --teacher is required (or --scale-report)")
+        print(f"train student: --teacher is required (or ${TEACHER_ENV}, or the data root's "
+              "models/teacher run; or --scale-report)")  # fmt: skip
         return 2
     overrides: dict[str, Any] = {}
     for key in ("n_envs", "seed", "device"):
@@ -824,8 +828,12 @@ def add_parser(sub: Any) -> None:
     )
     p_dn.set_defaults(func=cmd_detector_noise)
     p_s = tsub.add_parser("student", help="distil the deployable student from a teacher (UC70)")
-    p_s.add_argument("--teacher", help="teacher run folder or teacher .pt")
-    p_s.add_argument("--noise", help="noise_model.yaml of the detector the student will fly with")
+    p_s.add_argument("--teacher", help="teacher run folder, run id under <data root>/models/"
+                     "teacher, or teacher .pt (default $DRONE_FLY_TEACHER, then the data root's "
+                     "UC68 teacher)")  # fmt: skip
+    p_s.add_argument("--noise", help="noise_model.yaml of the detector the student will fly with "
+                     "(default perception.noise_model, $DRONE_FLY_NOISE_MODEL, then the data "
+                     "root's detector-v1 noise model)")  # fmt: skip
     p_s.add_argument("--drone", help="drone profile id (default: the config's)")
     p_s.add_argument("--tracks", help="train selector, e.g. liftoff:train")
     p_s.add_argument("--procedural", type=float, help="procedural share of the mix, e.g. 0.4")
