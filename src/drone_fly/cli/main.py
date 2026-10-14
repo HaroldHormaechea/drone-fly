@@ -525,6 +525,7 @@ def _cmd_gates_train(args: argparse.Namespace) -> int:
         ).validate(),
         rotated_val=_floats(args.rotated_val, "--rotated-val") if args.rotated_val else (),
         live_roll_val=args.live_roll_val,
+        resume=args.resume,
     )
     print(f"weights: {meta['weights']} ({meta['purpose']}, epoch {meta['chosen_epoch']})")
     if meta.get("chosen_val_detection"):
@@ -1136,6 +1137,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_gt.add_argument("--deploy", action="store_true",
                       help="retrain on train + val maps (select last) -> *-deploy.pt")  # fmt: skip
     p_gt.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    p_gt.add_argument("--resume", action="store_true",
+                      help="continue <detector-id>/resume.pt after the last finished epoch "
+                           "(same captures and flags)")  # fmt: skip
     p_gt.add_argument("--aug-roll-p", type=float, default=0.0,
                       help="share of images rolled (0 = off, as R1)")  # fmt: skip
     p_gt.add_argument("--aug-roll-edges", default="0,15,35,60,90,135",

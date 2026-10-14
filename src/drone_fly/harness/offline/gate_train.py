@@ -52,6 +52,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass
@@ -79,6 +80,7 @@ from drone_fly.harness.recording import git_head
 log = logging.getLogger(__name__)
 
 LIVE_VAL_SEED = 71  # the fixed re-roll of the val frames for val_det_live_roll
+RESUME_NAME = "resume.pt"  # per-epoch training state in <out_root>/<detector-id>/ (--resume)
 
 MAX_TRAIN_RANGE_M = 80.0
 IN_FLIGHT_GAP_S = 1.0
@@ -627,9 +629,11 @@ def train_gates(
             loss, parts = gate_net_loss(out_t, tt)
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
+            scale = scaler.get_scale()
             scaler.step(opt)
             scaler.update()
-            sched.step()
+            if scaler.get_scale() >= scale:  # a lowered scale means AMP skipped opt.step()
+                sched.step()
             parts["total"] = float(loss.detach())
             for key, v in parts.items():
                 sums[key] = sums.get(key, 0.0) + v
@@ -1002,6 +1006,7 @@ def train_multi(
     roll: RollAug | None = None,
     rotated_val: tuple[float, ...] = (),
     live_roll_val: bool = False,
+    resume: bool = False,
 ) -> dict[str, Any]:
     """``drone-fly harness gates train`` (UC71 AC6): multi-capture, catalogue-split training.
 
@@ -1011,6 +1016,11 @@ def train_multi(
     ``<out_root>/<detector-id>/`` (weights, training log, ``data_manifest.json``).
     ``protect_holdout_of`` (default the v1 release weights) names weights whose held-out windows
     are never loaded.
+
+    After every epoch the full training state (network, optimiser, scheduler, AMP scaler, RNGs,
+    history, best-so-far) goes to ``<detector-id>/resume.pt``; ``resume`` continues from it when
+    the data manifest (captures and every training parameter) is unchanged. A finished run
+    removes the file.
     """
     torch = lazy_import("torch", purpose="gate-net training")
     from drone_fly.harness.liftoff.gate_cv import camera_from_config
@@ -1027,6 +1037,8 @@ def train_multi(
     from drone_fly.harness.offline.capture_index import resolve_captures
     from drone_fly.tracks import catalogue as cat
 
+    if resume and not detector_id:
+        raise HarnessConfigError("--resume needs the --detector-id of the interrupted run")
     if select not in SELECT_MODES:
         raise HarnessConfigError(f"--select must be one of {SELECT_MODES}, got {select!r}")
     if deploy:
@@ -1173,13 +1185,64 @@ def train_multi(
         net.train()
         return total / len(sel_idx)
 
+    # -- outputs: <out_root>/<detector-id>/ --
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M")
+    did = detector_id or f"{weights_name}-{stamp}"
+    out_dir = (Path(out_root) if out_root else gd.models_root() / "models") / did
+    out_dir.mkdir(parents=True, exist_ok=True)
+    resume_path = out_dir / RESUME_NAME
+
     history: list[dict[str, Any]] = []
     best: dict[str, Any] = {"epoch": None, "metric": None, "state": None}
     stopped_early = False
+    start_epoch, elapsed0 = 1, 0.0
+    if resume:
+        if not resume_path.is_file():
+            raise HarnessConfigError(f"--resume: no training state at {resume_path}")
+        ck = torch.load(resume_path, map_location="cpu", weights_only=False)
+        if ck["manifest_sha256"] != ds.manifest_sha():
+            raise HarnessConfigError(
+                f"--resume: {resume_path} was written for other data or training parameters"
+            )
+        net.load_state_dict(ck["net"])
+        opt.load_state_dict(ck["opt"])
+        sched.load_state_dict(ck["sched"])
+        scaler.load_state_dict(ck["scaler"])
+        rng.bit_generator.state = ck["rng"]
+        torch.set_rng_state(ck["torch_rng"])
+        if cuda and ck.get("cuda_rng") is not None:
+            torch.cuda.set_rng_state_all(ck["cuda_rng"])
+        history, best, stopped_early = ck["history"], ck["best"], ck["stopped_early"]
+        start_epoch = epochs + 1 if stopped_early else ck["epoch"] + 1
+        elapsed0 = float(ck["elapsed_s"])
+        log.info("resumed after epoch %d from %s", ck["epoch"], resume_path)
+
+    def save_resume(epoch: int) -> None:
+        tmp = resume_path.with_suffix(".tmp")
+        torch.save(
+            {
+                "manifest_sha256": ds.manifest_sha(),
+                "epoch": epoch,
+                "net": net.state_dict(),
+                "opt": opt.state_dict(),
+                "sched": sched.state_dict(),
+                "scaler": scaler.state_dict(),
+                "rng": rng.bit_generator.state,
+                "torch_rng": torch.get_rng_state(),
+                "cuda_rng": torch.cuda.get_rng_state_all() if cuda else None,
+                "history": history,
+                "best": best,
+                "stopped_early": stopped_early,
+                "elapsed_s": time.perf_counter() - t0,
+            },
+            tmp,
+        )
+        os.replace(tmp, resume_path)
+
     net.train()
-    t0 = time.perf_counter()
+    t0 = time.perf_counter() - elapsed0
     roll_applied: list[float] = []
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         roll_applied.clear()
         perm = rng.choice(train_idx, size=len(train_idx), replace=True, p=weights)
         sums: dict[str, float] = {}
@@ -1191,9 +1254,11 @@ def train_multi(
             loss, parts = gate_net_loss(out_t, tt)
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
+            scale = scaler.get_scale()
             scaler.step(opt)
             scaler.update()
-            sched.step()
+            if scaler.get_scale() >= scale:  # a lowered scale means AMP skipped opt.step()
+                sched.step()
             parts["total"] = float(loss.detach())
             for key, v in parts.items():
                 sums[key] = sums.get(key, 0.0) + v
@@ -1252,13 +1317,14 @@ def train_multi(
             log.info("  val_det_live_roll %.3f", entry["val_det_live_roll"]["detection_rate"])
         if "rotated_val" in entry:
             log.info("  rotated val: %s", {a: v["rate"] for a, v in entry["rotated_val"].items()})
-        if (
+        stopped_early = bool(
             patience
             and select != "last"
             and best["epoch"] is not None
             and epoch - best["epoch"] >= patience
-        ):
-            stopped_early = True
+        )
+        save_resume(epoch)
+        if stopped_early:
             break
 
     chosen_epoch = history[-1]["epoch"]
@@ -1266,11 +1332,6 @@ def train_multi(
         net.load_state_dict(best["state"])
         chosen_epoch = best["epoch"]
 
-    # -- outputs: <out_root>/<detector-id>/ --
-    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M")
-    did = detector_id or f"{weights_name}-{stamp}"
-    out_dir = (Path(out_root) if out_root else gd.models_root() / "models") / did
-    out_dir.mkdir(parents=True, exist_ok=True)
     stem = f"{weights_name}-deploy" if deploy else weights_name
     out_path = out_dir / f"{stem}.pt"
     manifest_path = out_dir / "data_manifest.json"
@@ -1352,6 +1413,7 @@ def train_multi(
         json.dumps({"meta": meta, "chosen_epoch": chosen_epoch, "history": history}, indent=2),
         encoding="utf-8",
     )
+    resume_path.unlink(missing_ok=True)
     meta["weights"] = str(out_path)
     meta["training_log"] = str(log_path)
     meta["data_manifest"] = str(manifest_path)
