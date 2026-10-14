@@ -71,7 +71,7 @@ scaling:
 gates:
   learned:
     # UC71: the published detector release (GitHub release liftoff-gates-<release>), resolved to
-    # artifacts/harness/liftoff/models/<its weights file> and downloaded sha256-verified when
+    # <data root>/models/detector-v1/<its weights file> and downloaded sha256-verified when
     # missing. An explicit `weights:` path always wins (e.g. a freshly trained detector).
     release: v1
     # MEASURED: synchronous inference took 24-38 ms/tick on the RTX 3050 with Liftoff rendering,

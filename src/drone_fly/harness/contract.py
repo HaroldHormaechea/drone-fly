@@ -128,7 +128,8 @@ def resolve_gpu_prototype_dir(explicit: str | os.PathLike[str] | None = None) ->
 
 
 def resolve_k1_path(explicit: str | os.PathLike[str] | None = None) -> Path | None:
-    """CLI/config value -> ``$DRONE_FLY_K1_PATH`` -> ``<repo-root>/artifacts/pruned/k1``.
+    """CLI/config value -> ``$DRONE_FLY_K1_PATH`` -> the data root's ``pruned/k1`` ->
+    ``<repo-root>/artifacts/pruned/k1`` (legacy).
 
     An explicit (CLI/config/env) path must exist. The repo default may be absent (the K1
     connectome is not committed to every checkout): then ``None`` is returned and loading a
@@ -142,6 +143,10 @@ def resolve_k1_path(explicit: str | os.PathLike[str] | None = None) -> Path | No
                 f"K1 connectome path {p} does not exist; pass --k1-path or set {K1_PATH_ENV}"
             )
         return p.resolve()
+    from drone_fly import paths
+
+    if (paths.pruned_root() / "k1").exists():
+        return (paths.pruned_root() / "k1").resolve()
     root = find_repo_root()
     if root is not None and (root / "artifacts" / "pruned" / "k1").exists():
         return (root / "artifacts" / "pruned" / "k1").resolve()

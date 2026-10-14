@@ -71,9 +71,31 @@ class TrackLeakageError(HarnessConfigError):
     """A held-out-map capture was offered to training (never silently filtered)."""
 
 
-def models_root() -> Path:
+def labels_root() -> Path:
+    """Detector labels: the data root's ``labels/``."""
+    from drone_fly import paths
+
+    return paths.labels_root()
+
+
+def detector_models_root() -> Path:
+    """Where ``gates train`` writes ``<detector-id>/``: the data root's ``models/detector-v2/``."""
+    from drone_fly import paths
+
+    return paths.models_root("detector-v2")
+
+
+def cache_root() -> Path:
+    """Frame caches (regenerable, so local, not in the data root):
+    ``<repo>/artifacts/harness/liftoff/datasets``."""
     root = find_repo_root()
-    return (root if root is not None else Path.cwd()) / "artifacts" / "harness" / "liftoff"
+    return (
+        (root if root is not None else Path.cwd())
+        / "artifacts"
+        / "harness"
+        / "liftoff"
+        / "datasets"
+    )
 
 
 #: uptilt difference (deg) still counted as the preset camera (the 20.03 drone file vs 20 preset)
@@ -87,7 +109,7 @@ def same_camera(meta: dict[str, Any], preset_uptilt_deg: float) -> bool:
 
 def labels_dir_for(capture_dir: Path, meta: dict[str, Any] | None) -> Path | None:
     """``labels/<Map>/<session>`` (new layout) or ``labels/<session>`` (legacy), if present."""
-    base = models_root() / "labels"
+    base = labels_root()
     cands = []
     if meta:
         cands.append(base / meta["map"] / capture_dir.name)
@@ -170,25 +192,52 @@ class Dataset:
         }
 
     def manifest_sha(self) -> str:
+        """Hash of the manifest without ``git_head`` and refusal reasons (which may quote
+        machine paths), so it survives a move to another machine or folder."""
+        return _sha_json(_hash_view(self.manifest()))
+
+    def legacy_manifest_sha(self, *, protect: str | None, catalogue_sha256: str) -> str:
+        """:meth:`manifest_sha` as computed before 2026-10-14 (refusal reasons included), with
+        ``params.protect_holdout_of`` and ``catalogue_sha256`` as given: for resuming older runs."""
         m = self.manifest()
         m.pop("git_head")
-        return hashlib.sha256(json.dumps(m, sort_keys=True).encode()).hexdigest()
+        m["params"] = {**m["params"], "protect_holdout_of": protect}
+        m["catalogue_sha256"] = catalogue_sha256
+        return _sha_json(m)
 
     def data_sha(self) -> str:
         """The manifest without the training hyper-parameters: what the frame cache depends on
         (captures, counts, tables, frame selection), so a cache built ahead of training is
         reused."""
-        m = self.manifest()
-        m.pop("git_head")
+        m = _hash_view(self.manifest())
         m["params"] = {k: m["params"].get(k) for k in DATA_PARAMS}
-        return hashlib.sha256(json.dumps(m, sort_keys=True).encode()).hexdigest()
+        return _sha_json(m)
+
+
+def _sha_json(m: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(m, sort_keys=True).encode()).hexdigest()
+
+
+def _hash_view(m: dict[str, Any]) -> dict[str, Any]:
+    m = {k: v for k, v in m.items() if k != "git_head"}
+    m["refused"] = sorted(r["name"] for r in m["refused"])
+    return m
+
+
+def catalogue_sha_variants(catalogue: Any) -> tuple[str, str]:
+    """``(LF, CRLF)`` sha256 of the catalogue file's text: a Windows checkout (autocrlf) holds
+    the CRLF bytes, a Linux one the LF bytes. ``("unknown", "unknown")`` without a file."""
+    path = getattr(catalogue, "path", None)
+    if path is None or not Path(path).is_file():
+        return "unknown", "unknown"
+    lf = Path(path).read_bytes().replace(b"\r\n", b"\n")
+    crlf = lf.replace(b"\n", b"\r\n")
+    return hashlib.sha256(lf).hexdigest(), hashlib.sha256(crlf).hexdigest()
 
 
 def _catalogue_sha(catalogue: Any) -> str:
-    from drone_fly.tracks.catalogue import sha256_file
-
-    path = getattr(catalogue, "path", None)
-    return sha256_file(path) if path is not None and Path(path).is_file() else "unknown"
+    """The catalogue's sha256 with LF line ends (the same on Windows and Linux checkouts)."""
+    return catalogue_sha_variants(catalogue)[0]
 
 
 def protected_windows(weights_meta: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
@@ -509,7 +558,7 @@ DATA_PARAMS = ("frame_stride", "max_frames_per_capture", "static_trim")
 
 
 def cache_dir(ds: Dataset, input_width: int) -> Path:
-    return models_root() / "datasets" / f"{ds.data_sha()[:8]}-w{input_width}"
+    return cache_root() / f"{ds.data_sha()[:8]}-w{input_width}"
 
 
 CACHE_FLUSH_EVERY = 256  # frames between progress checkpoints of a frame-cache build

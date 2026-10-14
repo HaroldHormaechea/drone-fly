@@ -9,6 +9,44 @@ telemetry) are in [liftoff-live-session.md](liftoff-live-session.md).
 **No game data is ever committed.** Captures, labels, datasets and models live under the gitignored
 `artifacts/`; Liftoff's own recordings stay where Liftoff keeps them and are only read.
 
+## Where the data lives (the data root)
+
+Since 2026-10-14 all training data sits under one gitignored **data root**
+(`drone_fly.paths.data_root()`):
+- If `$DRONE_FLY_DATA_ROOT` is set, the data root is that folder.
+- Otherwise it is `<repo>/artifacts/harness/liftoff/training-data`.
+
+Its layout is described in its `MANIFEST.md`. The defaults read and write there:
+
+| Data | Default location | Overrides, in order of precedence |
+|---|---|---|
+| captures | `captures/<Map>/<session>/` | `--captures-root` |
+| track XMLs | `trackdata/` | `--trackdata-root`, then `$DRONE_FLY_TRACKDATA` |
+| scene caches | `scenes/` | `--scenes-root`, then `$DRONE_FLY_SCENES` |
+| labels | `labels/` | `harness label --out` |
+| v1 weights | `models/detector-v1/` | `gates.learned.weights` |
+| `gates train` output | `models/detector-v2/<detector-id>/` | `train_multi(out_root=...)` (Python API only) |
+| K1 connectome | `pruned/k1` | `--k1-path`, then `$DRONE_FLY_K1_PATH`; legacy `artifacts/pruned/k1` is still read |
+
+An explicit flag always wins, then a specific environment variable, then the data root. Frame
+caches are regenerable and stay local under `<repo>/artifacts/harness/liftoff/datasets/`, not in
+the data root.
+
+**Set `DRONE_FLY_DATA_ROOT` in git worktrees and on Linux.** The default resolves against the
+checkout the code runs from, so a worktree (`drone-fly-uc-NN-...`) or a fresh clone does not see
+the main checkout's `training-data/`. Point the variable at the unpacked data, for example
+`export DRONE_FLY_DATA_ROOT=/data/drone-fly/training-data` on Linux or
+`$env:DRONE_FLY_DATA_ROOT = "C:\dev\drone-fly\artifacts\harness\liftoff\training-data"` on
+Windows.
+
+Dataset manifests (and so `gates train --resume`) are path-insensitive:
+- The protect weights are recorded by sha256, not by path.
+- The catalogue hash ignores CRLF/LF.
+- Refusal reasons, which may quote paths, are left out of the hash.
+
+A `resume.pt` written before this change (R2) is still accepted when today's protect weights have
+the content of the path it recorded. A notice is logged when that happens.
+
 ## AC1a. What a Liftoff recording contains (inspected 2026-10-13)
 
 Read-only listing and parsing of `%USERPROFILE%\AppData\LocalLow\LuGus Studios\Liftoff\Recordings\`

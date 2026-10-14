@@ -33,6 +33,7 @@ from typing import Any
 
 import numpy as np
 
+from drone_fly import paths
 from drone_fly.harness.config import HarnessConfig, find_repo_root, load_config
 from drone_fly.harness.errors import HarnessConfigError
 from drone_fly.harness.gate_types import GateType, GateTypeTable
@@ -489,7 +490,7 @@ def run_autolabel(
         props_warnings = check_gate_types_against_props(table, ids, prop_items)
     rows, counts = label_capture(cap, gates, camera, masks)
 
-    out_dir = Path(out) if out is not None else artifacts_root() / "labels" / cap.name
+    out_dir = Path(out) if out is not None else paths.labels_root() / cap.name
     out_dir.mkdir(parents=True, exist_ok=True)
     with (out_dir / "labels.jsonl").open("w", encoding="utf-8") as fh:
         for r in rows:

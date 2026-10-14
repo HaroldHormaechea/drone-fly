@@ -1053,7 +1053,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_label.add_argument("--race", help="Liftoff race XML (recorded in the metadata)")
     p_label.add_argument("--props", help="props.json: cross-check gate_types against colliders")
     _common(p_label)
-    p_label.add_argument("--out", help="label folder (default artifacts/harness/liftoff/labels/)")
+    p_label.add_argument("--out", help="label folder (default <data root>/labels/<capture>/)")
     p_label.add_argument("--preview", type=int, default=0, help="write N overlay previews")
     p_label.add_argument("--preview-dir", help="preview root (default .../reports/label-preview)")
     p_label.add_argument("--lag-ms", type=float, default=0.0, help="frame -> telemetry lag")
@@ -1116,13 +1116,15 @@ def build_parser() -> argparse.ArgumentParser:
     def _gate_inputs(p: argparse.ArgumentParser) -> None:
         p.add_argument("--captures", nargs="+", help="capture folders, globs or names")
         p.add_argument("--all-captures", action="store_true", help="every capture found")
-        p.add_argument("--captures-root", help="default artifacts/harness/captures")
+        p.add_argument("--captures-root", help="default <data root>/captures")
         p.add_argument("--split-source", help="track catalogue (default tracks/liftoff.yaml)")
         p.add_argument("--trackdata-root", help="trackdata root (track XMLs)")
         p.add_argument("--frame-stride", type=int, default=1)
         p.add_argument("--max-frames-per-capture", type=int)
         p.add_argument("--protect-holdout-of", default="release:v1",
-                       help="weights whose held-out windows stay out ('none' = off)")  # fmt: skip
+                       help="weights whose held-out windows stay out (default: v1 under "
+                            "<data root>/models/detector-v1; kept by sha256; 'none' = off)",
+                       )  # fmt: skip
         _common(p)
 
     p_gt = gsub.add_parser("train", help="train on train-map captures, select on val maps")

@@ -45,7 +45,7 @@ from drone_fly.harness.errors import HarnessConfigError
 
 SCHEMA_VERSION = 1
 META_FILE = "meta.json"
-CAPTURES_DIR = Path("artifacts") / "harness" / "captures"
+CAPTURES_DIR = Path("artifacts") / "harness" / "captures"  # legacy, before the data root
 SOURCES = ("manual", "replay")
 ORIGINS = ("user", "ai-attempt")
 POSE_SOURCES = ("udp", "recording-xml")
@@ -63,9 +63,10 @@ class CaptureMetaError(HarnessConfigError):
 
 
 def captures_root() -> Path:
-    """``<repo>/artifacts/harness/captures`` (the cwd when no repo root is found)."""
-    root = find_repo_root()
-    return (root if root is not None else Path.cwd()) / CAPTURES_DIR
+    """The data root's ``captures/`` (:func:`drone_fly.paths.captures_root`)."""
+    from drone_fly import paths
+
+    return paths.captures_root()
 
 
 def session_name(map_name: str, date: str, mode: str, nn: int) -> str:

@@ -80,7 +80,7 @@ RELEASES: dict[str, dict[str, str]] = {
 # fmt: on
 # ``gates.learned.release`` -> (tag, the weights file it selects when ``weights`` is unset).
 RELEASE_ALIASES = {"v1": ("liftoff-gates-v1", "liftoff-gates.pt")}
-# Where a release's weights live when ``gates.learned.weights`` is unset (repo-root relative).
+# Where a release's weights lived before the data root (repo-root relative; legacy).
 MODELS_DIR = "artifacts/harness/liftoff/models"
 
 RELEASE_URL = f"{RELEASE_BASE}/liftoff-gates-v1"  # the v1 release (kept for existing callers)
@@ -100,7 +100,8 @@ def configured_weights(learned: dict[str, Any] | None) -> str | None:
     """The weights path a ``gates.learned`` block selects (not resolved, never downloaded).
 
     An explicit ``weights`` always wins; otherwise ``release`` (``v1`` ...) selects that release's
-    weights under :data:`MODELS_DIR`; neither -> ``None``.
+    weights in the data root's ``models/detector-v1/`` (:func:`drone_fly.paths.models_root`);
+    neither -> ``None``.
     """
     lc = learned or {}
     if lc.get("weights"):
@@ -112,7 +113,9 @@ def configured_weights(learned: dict[str, Any] | None) -> str | None:
         raise HarnessConfigError(
             f"gates.learned.release must be one of {sorted(RELEASE_ALIASES)}, got {release!r}"
         )
-    return f"{MODELS_DIR}/{RELEASE_ALIASES[release][1]}"
+    from drone_fly import paths
+
+    return str(paths.models_root("detector-v1") / RELEASE_ALIASES[release][1])
 
 
 def _urlretrieve(url: str, dest: Path) -> None:

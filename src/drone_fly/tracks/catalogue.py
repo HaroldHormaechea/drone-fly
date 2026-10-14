@@ -45,7 +45,7 @@ DEFAULT_RATIOS = {"train": 0.70, "val": 0.15, "held-out": 0.15}
 MIN_MAPS_PER_SPLIT = 2
 TRACKDATA_ENV = "DRONE_FLY_TRACKDATA"
 SCENES_ENV = "DRONE_FLY_SCENES"
-DEFAULT_ROOT = "artifacts/harness/trackdata"
+DEFAULT_ROOT = "artifacts/harness/trackdata"  # legacy header value: means the data root
 ENTRY_KEYS = ("id", "source", "map", "gate_types", "laps", "split", "status")
 STATUS_OK = "ok"
 
@@ -293,8 +293,20 @@ def split_counts(entries: Iterable[dict[str, Any]], splits: dict[str, str]) -> d
 
 
 def resolve_root(explicit: str | os.PathLike[str] | None, header: dict[str, Any]) -> Path:
-    """``--root`` -> ``$DRONE_FLY_TRACKDATA`` -> the header's ``root`` (relative to the repo)."""
-    raw = explicit or os.environ.get(TRACKDATA_ENV) or header.get("root") or DEFAULT_ROOT
+    """``--root`` -> ``$DRONE_FLY_TRACKDATA`` -> the header's ``root`` -> the data root's
+    ``trackdata/`` (:func:`drone_fly.paths.trackdata_root`).
+
+    A header ``root`` equal to the legacy :data:`DEFAULT_ROOT` (or none) means the data root: the
+    committed catalogue keeps its bytes (its sha256 is part of every gate dataset manifest).
+    """
+    from drone_fly import paths
+
+    raw = explicit or os.environ.get(TRACKDATA_ENV)
+    if not raw:
+        header_root = header.get("root")
+        if not header_root or Path(header_root).as_posix() == DEFAULT_ROOT:
+            return paths.trackdata_root()
+        raw = header_root
     p = Path(raw).expanduser()
     return p if p.is_absolute() else repo_root() / p
 
@@ -302,10 +314,13 @@ def resolve_root(explicit: str | os.PathLike[str] | None, header: dict[str, Any]
 def resolve_scenes_root(
     explicit: str | os.PathLike[str] | None, header: dict[str, Any], root: Path
 ) -> Path:
-    """``--scenes-root`` -> ``$DRONE_FLY_SCENES`` -> header ``scenes_root`` -> ``<root>/scenes``."""
+    """``--scenes-root`` -> ``$DRONE_FLY_SCENES`` -> header ``scenes_root`` -> the data root's
+    ``scenes/`` when ``root`` is the data root's ``trackdata/``, else ``<root>/scenes``."""
+    from drone_fly import paths
+
     raw = explicit or os.environ.get(SCENES_ENV) or header.get("scenes_root")
     if not raw:
-        return root / "scenes"
+        return paths.scenes_root() if root == paths.trackdata_root() else root / "scenes"
     p = Path(raw).expanduser()
     return p if p.is_absolute() else repo_root() / p
 

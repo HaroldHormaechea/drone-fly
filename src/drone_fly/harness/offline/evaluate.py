@@ -738,14 +738,19 @@ def compare_protected(
 ) -> dict[str, Any]:
     """Both detectors on ``old``'s protected window of the Infinity Loop reference capture."""
     from drone_fly.harness.offline import gate_diagnose as gdg
-    from drone_fly.harness.offline.capture_index import captures_root
+    from drone_fly.harness.offline.capture_index import CaptureMetaError, resolve_captures
     from drone_fly.harness.offline.detector_noise import heldout_window
 
-    cap = (
-        Path(protected_capture)
-        if protected_capture
-        else (captures_root() / "2026-10-11-infinity-manual")
-    )
+    if protected_capture:
+        cap = Path(protected_capture)
+    else:
+        try:  # by name anywhere under the captures root (captures/<Map>/<session>/)
+            cap = resolve_captures(["2026-10-11-infinity-manual"])[0]
+        except CaptureMetaError as exc:
+            raise HarnessConfigError(
+                "the Infinity Loop reference capture 2026-10-11-infinity-manual is not under the "
+                "captures root; pass it explicitly"
+            ) from exc
     old_w = gdg.resolve_detector(old)
     out: dict[str, Any] = {"capture": cap.name, "class": cls}
     window = None

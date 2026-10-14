@@ -36,14 +36,14 @@
 * ``resnet18-hf`` downloads ``microsoft/resnet-18`` once; if that fails the error names the model
   id and the ``tiny-cnn`` fallback.
 
-Default output: ``artifacts/harness/liftoff/models/liftoff-gates.pt``.
+Default output: the data root's ``models/detector-v1/liftoff-gates.pt``.
 
 **UC71: multi-map training** (:func:`train_multi`, ``drone-fly harness gates train``) replaces the
 time split with the track catalogue's map split: train-map captures train, val-map captures select
 (``--select val-detection``: decode + PnP + the eval matching rule every ``--val-every`` epochs),
 held-out-map captures are refused (:mod:`~drone_fly.harness.offline.gate_dataset`). The frames
 come from a memmap cache, sampled map x class balanced; v1's held-out window stays held out.
-Outputs go to ``artifacts/harness/liftoff/models/<detector-id>/``. ``train-gates`` (above) stays
+Outputs go to the data root's ``models/detector-v2/<detector-id>/``. ``train-gates`` (above) stays
 for single-capture UC64 training.
 """
 
@@ -81,6 +81,41 @@ log = logging.getLogger(__name__)
 
 LIVE_VAL_SEED = 71  # the fixed re-roll of the val frames for val_det_live_roll
 RESUME_NAME = "resume.pt"  # per-epoch training state in <out_root>/<detector-id>/ (--resume)
+# One-off (R2, liftoff-gates-v2-r2-20261014-1021): runs started before 2026-10-14 recorded the
+# protect weights by this path; their resume.pt is accepted when today's weights have its content.
+LEGACY_PROTECT_PATHS = (r"C:\dev\drone-fly\artifacts\harness\liftoff\models\liftoff-gates.pt",)
+
+
+def _legacy_resume_match(want: str, ds: Any, catalogue: Any, protect_sha: str | None) -> str | None:
+    """Why a resume.pt written under the pre-2026-10-14 manifest hash still matches ``ds``, or
+    ``None``. The old hash held the protect weights' path and the catalogue's checkout bytes
+    (CRLF on Windows): each legacy path counts only when its weights' sha256 (the file if it is
+    still there, else the published release of that name) equals today's ``protect_sha``."""
+    from pathlib import PureWindowsPath
+
+    from drone_fly.harness.liftoff.gate_learned import RELEASED_WEIGHTS
+    from drone_fly.harness.offline import gate_dataset as gd
+    from drone_fly.tracks.catalogue import sha256_file
+
+    cands: list[str | None] = []
+    if protect_sha is None:
+        cands.append(None)
+    for legacy in LEGACY_PROTECT_PATHS:
+        p = Path(legacy)
+        known = (
+            sha256_file(p) if p.is_file() else RELEASED_WEIGHTS.get(PureWindowsPath(legacy).name)
+        )
+        if protect_sha is not None and known == protect_sha:
+            cands.append(legacy)
+    for legacy in cands:
+        for cat in dict.fromkeys(gd.catalogue_sha_variants(catalogue)):
+            if ds.legacy_manifest_sha(protect=legacy, catalogue_sha256=cat) == want:
+                return (
+                    f"accepted a pre-2026-10-14 resume.pt: protect weights recorded as {legacy!r} "
+                    f"(same sha256 as today's), catalogue sha {cat[:12]}"
+                )
+    return None
+
 
 MAX_TRAIN_RANGE_M = 80.0
 IN_FLIGHT_GAP_S = 1.0
@@ -676,16 +711,10 @@ def train_gates(
         net.load_state_dict(best["state"])
         chosen_epoch = best["epoch"]
     chosen = next((h for h in history if h["epoch"] == chosen_epoch), None)
-    root = find_repo_root()
+    from drone_fly import paths
+
     out_path = (
-        Path(out)
-        if out is not None
-        else (root if root is not None else Path.cwd())
-        / "artifacts"
-        / "harness"
-        / "liftoff"
-        / "models"
-        / "liftoff-gates.pt"
+        Path(out) if out is not None else paths.models_root("detector-v1") / "liftoff-gates.pt"
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     meta = {
@@ -721,7 +750,7 @@ def train_gates(
         "preset": preset,
         "final_train_loss": history[-1]["train"]["total"] if history else None,
         "final_val_loss": history[-1]["val_loss"] if history else None,
-        "git_head": git_head(root),
+        "git_head": git_head(find_repo_root()),
     }
     state = {
         k: (v.detach().float() if v.is_floating_point() else v.detach()).cpu()
@@ -1059,6 +1088,13 @@ def train_multi(
     if protect_holdout_of == "release:v1":
         protect_holdout_of = configured_weights({"release": "v1"})
     protect = gd.read_weights_meta(protect_holdout_of) if protect_holdout_of else None
+    protect_sha = None
+    if protect_holdout_of:
+        from drone_fly.harness.liftoff.gate_learned import resolve_weights_path
+        from drone_fly.tracks.catalogue import sha256_file
+
+        # by content, not path: the manifest (and --resume) survive moving the data
+        protect_sha = sha256_file(resolve_weights_path(protect_holdout_of))
     params = {
         "epochs": epochs,
         "backbone": backbone,
@@ -1069,7 +1105,7 @@ def train_multi(
         "val_every": val_every,
         "seed": seed,
         "deploy": deploy,
-        "protect_holdout_of": None if protect_holdout_of is None else str(protect_holdout_of),
+        "protect_holdout_of": None if protect_sha is None else f"sha256:{protect_sha}",
         "roll_aug": None if roll is None or not roll.enabled else asdict(roll.validate()),
         "rotated_val": list(rotated_val),
         "live_roll_val": live_roll_val,
@@ -1188,7 +1224,7 @@ def train_multi(
     # -- outputs: <out_root>/<detector-id>/ --
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M")
     did = detector_id or f"{weights_name}-{stamp}"
-    out_dir = (Path(out_root) if out_root else gd.models_root() / "models") / did
+    out_dir = (Path(out_root) if out_root else gd.detector_models_root()) / did
     out_dir.mkdir(parents=True, exist_ok=True)
     resume_path = out_dir / RESUME_NAME
 
@@ -1201,9 +1237,12 @@ def train_multi(
             raise HarnessConfigError(f"--resume: no training state at {resume_path}")
         ck = torch.load(resume_path, map_location="cpu", weights_only=False)
         if ck["manifest_sha256"] != ds.manifest_sha():
-            raise HarnessConfigError(
-                f"--resume: {resume_path} was written for other data or training parameters"
-            )
+            note = _legacy_resume_match(ck["manifest_sha256"], ds, catalogue, protect_sha)
+            if note is None:
+                raise HarnessConfigError(
+                    f"--resume: {resume_path} was written for other data or training parameters"
+                )
+            log.warning("--resume: %s", note)
         net.load_state_dict(ck["net"])
         opt.load_state_dict(ck["opt"])
         sched.load_state_dict(ck["sched"])
