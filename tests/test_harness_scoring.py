@@ -532,3 +532,21 @@ def test_score_attempt_ignores_telemetry_before_the_first_tick(tmp_path):
     write_telemetry_csv(d / "telemetry.csv", samples)
     s = score_attempt(load_attempt(d), course, RULES)
     assert s["k_raw"] == 0 and s["samples"] <= 106
+
+
+def test_score_attempt_refused_runs_get_no_failure_classification(tmp_path):
+    """A run refused before flying (e.g. start_misaligned) is not classified: the trajectory is
+    the previous flight's leftover, which read as "altitude_loss" before UC69."""
+    course = make_course()
+    sink = segments(((0, 0, 3.5), (2, 0, 3.5), 51), ((2, 0, 3.5), (2, 0, 1.0), 151))
+    samples = path_samples(course, sink, dt=DT)
+    flown = write_attempt(tmp_path, "a04", samples, stop_reason="episode_end:crash_settled",
+                          stop_class="episode_end", arm_end_clock=0.0)  # fmt: skip
+    refused = write_attempt(tmp_path, "a05", samples, stop_reason="start_misaligned",
+                            stop_class="refused", arm_end_clock=0.0)  # fmt: skip
+    assert score_attempt(load_attempt(flown), course, RULES)["failure"]["primary"] == (
+        "altitude_loss"
+    )
+    s = score_attempt(load_attempt(refused), course, RULES)
+    assert s["completion_raw"] is False and s["failure"] is None
+    assert s["stop_class"] == "refused"

@@ -368,6 +368,7 @@ class _LatestStateMixin:
         self._lock = threading.Lock()
         self._latest: FlightState | None = None
         self._raw: collections.deque[TelemetrySample] = collections.deque(maxlen=ring)
+        self._last_sample: TelemetrySample | None = None
         self.discontinuity_count = 0
         self.samples_received = 0
 
@@ -376,6 +377,7 @@ class _LatestStateMixin:
         state = self.converter.convert(sample, discontinuity=disc)
         with self._lock:
             self._latest = state
+            self._last_sample = sample
             self._raw.append(sample)
             self.samples_received += 1
             if disc:
@@ -388,6 +390,11 @@ class _LatestStateMixin:
     def age(self, now: float) -> float:
         with self._lock:
             return float("inf") if self._latest is None else now - self._latest.received_at
+
+    def latest_sample(self) -> TelemetrySample | None:
+        """The newest raw sample (not drained by ``drain_raw``; e.g. the pack reading)."""
+        with self._lock:
+            return self._last_sample
 
     def drain_raw(self) -> list[TelemetrySample]:
         with self._lock:

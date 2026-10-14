@@ -222,8 +222,10 @@ def unity_sample(
     gyro: Any = (0.0, 0.0, 0.0),
     received_at: float | None = None,
     rpm: Any = (1000.0, 1000.0, 1000.0, 1000.0),
+    battery: Any = (1.0, 12.6),
 ) -> TelemetrySample:
-    """A raw Unity sample of a course-frame pose (``world_scale`` 1)."""
+    """A raw Unity sample of a course-frame pose (``world_scale`` 1). ``battery`` is Liftoff's
+    ``(batt_charge, batt_volts)``: a full 3S pack by default (the gremlin's ``power.cells``)."""
     p = course.frame.to_contract_point(pos_course)
     v = course.frame.to_contract_vector(vel)
     return TelemetrySample(
@@ -233,7 +235,7 @@ def unity_sample(
         velocity=contract_to_unity_position(np.asarray(v, np.float32)).astype(np.float32),
         gyro=np.asarray(gyro, np.float32),
         inputs=np.zeros(4, np.float32),
-        battery=np.array([1.0, 4.2], np.float32),
+        battery=np.asarray(battery, np.float32),
         rpm=np.asarray(rpm, np.float32),
         received_at=float(t if received_at is None else received_at),
     )
@@ -317,16 +319,23 @@ def write_teacher_run(
     sidecar_overrides: dict[str, Any] | None = None,
     progress: dict[str, Any] | None = None,
     drone: str = DRONE,
+    version: int | None = None,
 ) -> Path:
     """A teacher run folder: ``config.yaml``, ``checkpoints/<files>`` (+ sidecars), optional
-    ``eval/val_selection.json`` and ``logs/progress.json``. Returns the run folder."""
+    ``eval/val_selection.json`` and ``logs/progress.json``. Returns the run folder.
+
+    ``version`` is the checkpoint's ``teacher-obs`` version (default: this build's current one).
+    """
     import torch
     import yaml
 
     from drone_fly.controller.mlp_teacher import MLPTeacher
     from drone_fly.sim.action import ActionSpec, write_sidecar
     from drone_fly.sim.multi_course import CRITIC_EXTRA_DIM
-    from drone_fly.sim.teacher_obs import DIM, input_scale, schema
+    from drone_fly.sim.teacher_obs import VERSION, dim, input_scale, schema
+
+    version = VERSION if version is None else int(version)
+    width = dim(version)
 
     run = root / name
     (run / "checkpoints").mkdir(parents=True, exist_ok=True)
@@ -337,13 +346,13 @@ def write_teacher_run(
     torch.manual_seed(seed)
     for i, f in enumerate(files):
         torch.manual_seed(seed + i)
-        actor = MLPTeacher(DIM, CRITIC_EXTRA_DIM, input_scale())
+        actor = MLPTeacher(width, CRITIC_EXTRA_DIM, input_scale(version))
         with torch.no_grad():  # a non-trivial policy (the init is ~0 at the last layer)
             actor.pi[-1].weight.normal_(0.0, 0.05)
         ck = run / "checkpoints" / f
         torch.save(actor.state_dict(), ck)
         kw: dict[str, Any] = {
-            "obs_schema": schema(),
+            "obs_schema": schema(version),
             "world_scale": 1.0,
             "course_conversion": conversion_record(),
         }
@@ -354,7 +363,7 @@ def write_teacher_run(
             else:
                 side[k] = v
         spec = ActionSpec.v2(1.0, 4.0, 3.0)
-        write_sidecar(ck, spec, extra_dim=DIM, actor="mlp-teacher", drone=drone,
+        write_sidecar(ck, spec, extra_dim=width, actor="mlp-teacher", drone=drone,
                       run_id=name, **kw)  # fmt: skip
         if side:
             from drone_fly.sim.action import sidecar_path

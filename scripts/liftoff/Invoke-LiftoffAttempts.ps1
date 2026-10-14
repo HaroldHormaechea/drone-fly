@@ -93,7 +93,11 @@ for ($n = 1; $n -le $Attempts; $n++) {
     }
     if ($code -ne 0 -and $code -ne 5) { throw "attempt $n failed to run (exit $code)" }
     $results += [pscustomobject]@{ Attempt = $n; Exit = $code; Recording = $recording }
-    if ($n -lt $Attempts) { Invoke-LiftoffUi reset }
+    if ($n -lt $Attempts) {
+        # A teacher run exits 0 when it finished the course: Liftoff then shows the post-race
+        # screen, where Esc -> Reset does not respawn; "Retry" restarts the race at the spawn.
+        if ($teacherMode -and $code -eq 0) { Invoke-LiftoffUi retry } else { Invoke-LiftoffUi reset }
+    }
 }
 $results | Format-Table -AutoSize | Out-String | Write-Host
 if ($Quit) {

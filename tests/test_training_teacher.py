@@ -2,10 +2,12 @@
 
 * A 2-iteration run writes ``<root>/<drone>/<run>/``: the config snapshot (kind teacher), the
   drone profile + hash, ``checkpoints/teacher.pt`` + ``teacher_it<N>.pt`` with sidecars
-  (``obs_schema`` teacher-obs v1, ``world_scale``, ``course_conversion``), ``resume.pt``, the logs
+  (``obs_schema`` teacher-obs v1 / v2 as the config says, ``world_scale``, ``course_conversion``),
+  ``resume.pt``, the logs
   (train.log, metrics.jsonl with per-group completion, episodes.csv, progress.json) and the
   ``tracks/`` snapshot (catalogues, courses.json, files.sha256).
-* The checkpoint loads as an ``MLPTeacher``; the actor starts near hover.
+* The checkpoint loads as an ``MLPTeacher`` of the schema's dim (v1 148, v2 150 with the battery
+  block); the actor starts near hover.
 * ``--resume`` continues the iteration count, appends to the logs and keeps ``config.yaml``; a
   ``STOP`` file saves and exits.
 * The CLI runs and ``--tracks / --procedural`` rebuild the mix.
@@ -28,7 +30,7 @@ from drone_fly import drones
 from drone_fly.cli.main import main
 from drone_fly.controller.mlp_teacher import MLPTeacher
 from drone_fly.sim.multi_course import CRITIC_EXTRA_DIM, EPISODE_COLUMNS, RewardConfig
-from drone_fly.sim.teacher_obs import DIM, input_scale
+from drone_fly.sim.teacher_obs import DIM, dim, input_scale, schema
 from drone_fly.training.config import (
     TrainConfigError,
     from_mapping,
@@ -56,6 +58,22 @@ def tiny_run(lib, tmp_path_factory):
         cfg = load_teacher_config(write_teacher_config(lib, base / "teacher.yaml"))
         res = train_teacher(cfg, drones.load(cfg.drone), run_root=base / "runs", run_id="r1",
                             max_iterations=2)  # fmt: skip
+    return res, cfg, base
+
+
+@pytest.fixture(scope="module")
+def tiny_run_v2(lib, tmp_path_factory):
+    """The same tiny run on ``teacher-obs`` v2 with the power model on (as teacher-liftoff-aug)."""
+    from drone_fly.training.ppo import train_teacher
+
+    base = tmp_path_factory.mktemp("teacher-v2")
+    with pytest.MonkeyPatch.context() as mp:
+        use_library(mp, lib)
+        cfg = load_teacher_config(write_teacher_config(lib, base / "teacher.yaml",
+                                                       obs="teacher-obs-v2",
+                                                       plant={"power": True}))  # fmt: skip
+        res = train_teacher(cfg, drones.load(cfg.drone), run_root=base / "runs", run_id="r2",
+                            max_iterations=1)  # fmt: skip
     return res, cfg, base
 
 
@@ -106,11 +124,34 @@ def test_teacher_config_validation():
     with pytest.raises(TrainConfigError, match="mix entries"):
         teacher_from_mapping({**base, "tracks": {**base["tracks"], "mix": [{"sel": "x"}]}},
                              validate_tracks=False)  # fmt: skip
-    with pytest.raises(TrainConfigError, match="obs must be"):
-        teacher_from_mapping({**base, "obs": "teacher-obs-v2"}, validate_tracks=False)
+    v2 = teacher_from_mapping({**base, "obs": "teacher-obs-v2"}, validate_tracks=False)
+    assert v2.obs_version == 2
+    assert teacher_from_mapping(base, validate_tracks=False).obs_version == 1
+    for bad in ("teacher-obs-v3", "teacher-obs", "teacher-obs-v0"):
+        with pytest.raises(TrainConfigError, match="obs must be"):
+            teacher_from_mapping({**base, "obs": bad}, validate_tracks=False)
     with pytest.raises(TrainConfigError, match="unknown env keys"):
         teacher_from_mapping({**base, "env": {**base["env"], "gravity": 1}},
                              validate_tracks=False)  # fmt: skip
+
+
+def test_packaged_aug_config_uses_teacher_obs_v2():
+    v1 = load_teacher_config("teacher-liftoff", validate_tracks=False)
+    aug = load_teacher_config("teacher-liftoff-aug", validate_tracks=False)
+    assert (v1.obs, v1.obs_version) == ("teacher-obs-v1", 1)
+    assert (aug.obs, aug.obs_version) == ("teacher-obs-v2", 2) and aug.plant.power is True
+
+
+def test_teacher_actor_is_built_at_the_config_version():
+    from drone_fly.training.ppo import build_teacher_actor
+
+    base = load_raw("teacher-liftoff")
+    for obs, d in (("teacher-obs-v1", 148), ("teacher-obs-v2", 150)):
+        cfg = teacher_from_mapping({**base, "obs": obs}, validate_tracks=False)
+        m = build_teacher_actor(cfg, torch.device("cpu"))
+        assert m.obs_dim == d == dim(cfg.obs_version)
+        torch.testing.assert_close(m.input_scale, torch.tensor(input_scale(cfg.obs_version)))
+        assert m.mean_action(torch.zeros(2, d)).shape == (2, 4)
 
 
 def test_teacher_mix_from_the_cli_flags():
@@ -182,8 +223,10 @@ def test_sidecar_keys(tiny_run):
     res, cfg, _ = tiny_run
     side = json.loads((res.run.path / "checkpoints" / "teacher.contract.json").read_text("utf-8"))
     assert side["contract_version"] == 2 and side["actor"] == "mlp-teacher"
-    assert side["drone"] == "liftoff-gremlin-micro" and side["extra_dim"] == DIM
+    assert cfg.obs_version == 1  # the test config extends teacher-liftoff (v1): no regression
+    assert side["drone"] == "liftoff-gremlin-micro" and side["extra_dim"] == dim(cfg.obs_version)
     assert side["obs_schema"]["name"] == "teacher-obs" and side["obs_schema"]["dim"] == 148
+    assert side["obs_schema"]["version"] == 1 and "battery" not in side["obs_schema"]
     assert side["world_scale"] == 1.0
     cc = side["course_conversion"]
     assert cc["version"] == CONVERSION_VERSION
@@ -195,10 +238,34 @@ def test_sidecar_keys(tiny_run):
 
 
 def test_checkpoint_loads_as_an_mlp_teacher(tiny_run):
-    res, _, _ = tiny_run
+    res, cfg, _ = tiny_run
     state = torch.load(res.checkpoint, map_location="cpu", weights_only=True)
     m = MLPTeacher.from_state_dict(state)
-    assert m.mean_action(torch.zeros(3, DIM)).shape == (3, 4)
+    assert m.obs_dim == dim(cfg.obs_version) == 148
+    assert m.mean_action(torch.zeros(3, m.obs_dim)).shape == (3, 4)
+
+
+def test_v2_sidecar_records_the_battery_block(tiny_run_v2):
+    res, cfg, _ = tiny_run_v2
+    assert cfg.obs_version == 2 and cfg.plant.power is True
+    side = json.loads((res.run.path / "checkpoints" / "teacher.contract.json").read_text("utf-8"))
+    sch = side["obs_schema"]
+    assert (sch["name"], sch["version"], sch["dim"]) == ("teacher-obs", 2, 150)
+    assert side["extra_dim"] == 150
+    assert sch["blocks"][-1] == {"name": "battery", "start": 148, "width": 2}
+    # the schema's battery definition, plus the run's pack (cells) and whether power was on
+    assert sch["battery"] == {**schema(2)["battery"], "cells": 3, "power_model": True}
+    assert sch["battery"]["features"] == ["charge", "volts_per_cell"]
+    assert sch["input_scale"] == pytest.approx(input_scale(2))
+
+
+def test_v2_checkpoint_loads_at_150(tiny_run_v2):
+    res, _, _ = tiny_run_v2
+    state = torch.load(res.checkpoint, map_location="cpu", weights_only=True)
+    m = MLPTeacher.from_state_dict(state)
+    assert m.obs_dim == 150
+    torch.testing.assert_close(m.input_scale, torch.tensor(input_scale(2)))
+    assert m.mean_action(torch.zeros(3, m.obs_dim)).shape == (3, 4)
 
 
 def test_tracks_snapshot(tiny_run):
