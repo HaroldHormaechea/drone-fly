@@ -382,3 +382,39 @@ rule is unchanged. **Limitation:** a rolled frame is not a real banked frame - t
 padded (mean colour) and the scene, lighting and motion blur are those of the level flight - so
 it measures roll robustness, not live accuracy. `--rotated-val 0,30,...` reports image-space
 detection at fixed angles alongside.
+
+**R2 (2026-10-14, suspended after epoch 13).** R1 plus roll augmentation, stride 1 and patience,
+with no heatmap head: `harness gates train --all-captures --frame-stride 1 --aug-roll-p 0.6
+--aug-shift 0.03 --live-roll-val --rotated-val 0,30,60,90,135 --select val-detection --val-every 2
+--epochs 40 --patience 10`, detector id `liftoff-gates-v2-r2-20261014-1021`.
+- Data: 16,306 train frames and 3,037 val frames (val |roll| p50 10, p90 31). There are 1,385
+  in-range val gates, the same set `gates diagnose` scores (R1's val_det used n 689 at stride 2).
+- Frame cache: 14.4 GB, keyed by the data-only `data_sha`. It was built ahead of training on CPU
+  (peak 0.9 GB RAM) with the streaming, resumable `build_frame_cache`.
+- Timing: epochs took about 250 s uncontended and 550-750 s while sharing the GPU with UC70 run 1.
+- Roll applied per epoch: |delta| p50 about 25 deg, p90 about 60 deg.
+
+| ep | val_det | airgate_big | inflatable_arch | live_roll | rotated 0 / 30 / 60 / 90 / 135 | val_loss |
+|---|---|---|---|---|---|---|
+| 2 | 0.323 | 0.127 | 0.512 | 0.293 | .51 / .44 / .37 / .24 / .06 | 3.66 |
+| 4 | 0.394 | 0.220 | 0.562 | 0.347 | .61 / .55 / .46 / .31 / .10 | 3.69 |
+| **6** | **0.503** | **0.364** | **0.635** | 0.438 | .67 / .65 / .62 / .52 / .32 | 3.62 |
+| 8 | 0.386 | 0.214 | 0.550 | 0.343 | .60 / .56 / .47 / .40 / .22 | 4.16 |
+| 10 | 0.450 | 0.308 | 0.586 | 0.407 | .59 / .56 / .48 / .38 / .19 | 4.44 |
+| 12 | 0.405 | ~0.18 (derived) | 0.618 | 0.365 | .60 / .58 / .53 / .44 / .28 | 4.27 |
+
+The ep12 airgate figure is derived from the overall and arch rates (n 678 / 707); it was not
+logged before the move. Readings so far:
+- The best is epoch 6. It is level with R1's best of 0.492, which was reached at epoch 20.
+- airgate_big peaks at 0.36 against R1's 0.29 on the same 4-25 m rule.
+- Roll robustness is clearly better: 90 deg holds about 0.5.
+- val_det oscillates and val_loss has risen again since epoch 8, the same overfit signature as R1.
+  Patience would stop the run at epoch 16.
+
+At the user's request R2 was **suspended after epoch 13** (11:55) because of RAM pressure with
+UC70. `resume.pt` (epoch 13, including the best-so-far state) moved with the data to
+`training-data/models.zip` (`detector-v2/`). The run resumes on the Linux machine with the same
+line plus `--resume`, and the R1-vs-R2 `gates diagnose` follows there; at most 3 epochs remain.
+If airgate_big stays below about 50 %, the candidate R3 levers are class-balanced sampling, a
+heatmap-peak loss weight for small or far gates, and a higher input resolution. None of them is
+implemented.
