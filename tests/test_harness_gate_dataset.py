@@ -3,12 +3,14 @@
 A synthetic world: one auto-labelled straight flight through five arches, copied as captures of
 four catalogue maps (FakeA / FakeB train, FakeC val, FakeD held-out), each with its own
 ``meta.json`` and label folder; a synthetic catalogue (``cat.Catalogue``) and synthetic weights
-metadata stand in for the v1 release. ``gate_dataset.models_root`` is redirected to a temp folder
-so nothing is written under ``artifacts/``. Tiny-cnn training on CPU only.
+metadata stand in for the v1 release. The data root and ``gate_dataset``'s labels / cache /
+detector roots are redirected to a temp folder (:func:`use_world_roots`), so nothing is written
+to a real data root or under ``artifacts/``. Tiny-cnn training on CPU only.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -52,6 +54,7 @@ CFG = load_config("liftoff", SMALL_CAMERA, preset="liftoff")
 TABLE = GateTypeTable.from_config(CFG.data["gate_types"])
 TELEMETRY = CFG.section("telemetry")
 MAPS = {"FakeA": "train", "FakeB": "train", "FakeC": "val", "FakeD": "held-out", "FakeU": "train"}
+CRLF, LF = bytes([13, 10]), bytes([10])
 ARCHES = [(str(i), (0.0, 0.0, 15.0 * i), 0.0) for i in range(1, 6)]
 
 
@@ -152,9 +155,19 @@ def world(tmp_path_factory):
     return w
 
 
+def use_world_roots(monkeypatch, w):
+    """Redirect every data location to the synthetic world: the data root (DRONE_FLY_DATA_ROOT),
+    labels (``labels_root``), frame caches (``cache_root``) and trained detectors
+    (``detector_models_root``) - nothing reaches a real data root or ``artifacts/``."""
+    monkeypatch.setenv("DRONE_FLY_DATA_ROOT", str(w.base / "data-root"))
+    monkeypatch.setattr(gd, "labels_root", lambda: w.models / "labels")
+    monkeypatch.setattr(gd, "cache_root", lambda: w.models / "datasets")
+    monkeypatch.setattr(gd, "detector_models_root", lambda: w.models / "models")
+
+
 @pytest.fixture(autouse=True)
-def _models_root(world, monkeypatch):
-    monkeypatch.setattr(gd, "models_root", lambda: world.models)
+def _world_roots(world, monkeypatch):
+    use_world_roots(monkeypatch, world)
 
 
 def build(world, dirs, **kw):
@@ -365,7 +378,8 @@ def test_manifest_contents_and_sha(world, tmp_path):
     ds = build(world, [world.a, world.c], max_frames_per_capture=12)
     m = ds.manifest()
     assert m["format"] == 1 and m["gate_types_hash"] == TABLE.hash()
-    assert m["catalogue_sha256"] == cat.sha256_file(world.catalogue.path)
+    lf = world.catalogue.path.read_bytes().replace(CRLF, LF)
+    assert m["catalogue_sha256"] == hashlib.sha256(lf).hexdigest()  # LF bytes on any checkout
     assert m["params"]["max_frames_per_capture"] == 12 and m["params"]["static_trim"] is True
     rec = {c["name"]: c for c in m["captures"]}
     assert rec[world.a.name]["split_role"] == "train" and rec[world.c.name]["split_role"] == (
@@ -408,7 +422,7 @@ def test_frame_cache_round_trip_and_reuse(world, tmp_path, monkeypatch):
     mm2, idx2 = build_frame_cache(ds, 128, CFG.section("camera"), out=out)
     assert idx2 == idx and np.array_equal(np.asarray(mm2), np.asarray(mm))
     monkeypatch.undo()
-    monkeypatch.setattr(gd, "models_root", lambda: world.models)
+    use_world_roots(monkeypatch, world)
     del mm, mm2  # Windows: an open memmap blocks rewriting its file
     _, idx3 = build_frame_cache(ds, 160, CFG.section("camera"), out=out)  # another width: rebuilt
     assert idx3["input_width"] == 160
@@ -468,7 +482,7 @@ def test_an_interrupted_cache_build_resumes_byte_identically(world, tmp_path, mo
     assert prog["done"] == 4  # the last checkpoint (every 2 frames), not the 5 attempted
     assert prog["input_width"] == 128 and prog["shape"][0] == 8
     monkeypatch.undo()
-    monkeypatch.setattr(gd, "models_root", lambda: world.models)
+    use_world_roots(monkeypatch, world)
     monkeypatch.setattr(gd, "CACHE_FLUSH_EVERY", 2)
     calls = _counting_loader(monkeypatch)
     mm, idx = build_frame_cache(ds, 128, cam, out=out)
@@ -866,3 +880,64 @@ def test_cli_dataset_report_build_cache(world, tmp_path, monkeypatch, capsys):
     main([*args, "--build-cache", "--input-width", "128"])  # a second run reuses it
     assert f"frame cache: {d} (4 frames)" in capsys.readouterr().out
     assert calls == []  # no frame read
+
+
+# ----------------------------------------------------------------------------- path-insensitive
+
+
+def _catalogue_copy(world, path, crlf):
+    text = world.catalogue.path.read_bytes().replace(CRLF, LF)
+    path.write_bytes(text.replace(LF, CRLF) if crlf else text)
+    return cat.Catalogue(path, dict(world.catalogue.header), list(world.catalogue.entries))
+
+
+def test_the_catalogue_sha_ignores_line_endings(world, tmp_path, monkeypatch):
+    lf_cat = _catalogue_copy(world, tmp_path / "lf.yaml", crlf=False)
+    crlf_cat = _catalogue_copy(world, tmp_path / "crlf.yaml", crlf=True)
+    lf_bytes = (tmp_path / "lf.yaml").read_bytes()
+    assert CRLF not in lf_bytes and CRLF in (tmp_path / "crlf.yaml").read_bytes()
+    want = (hashlib.sha256(lf_bytes).hexdigest(),
+            hashlib.sha256(lf_bytes.replace(LF, CRLF)).hexdigest())  # fmt: skip
+    assert gd.catalogue_sha_variants(lf_cat) == gd.catalogue_sha_variants(crlf_cat) == want
+    gone = cat.Catalogue(tmp_path / "missing.yaml", {}, [])
+    assert gd.catalogue_sha_variants(gone) == ("unknown", "unknown")
+    assert gd.catalogue_sha_variants(cat.Catalogue(None, {}, [])) == ("unknown", "unknown")
+    kw = {"table": TABLE, "telemetry_cfg": TELEMETRY, "max_frames_per_capture": 3}
+    a = assemble([world.a, world.c], catalogue=lf_cat, **kw)
+    b = assemble([world.a, world.c], catalogue=crlf_cat, **kw)
+    assert a.catalogue_sha256 == b.catalogue_sha256 == want[0]  # the LF one
+    assert a.manifest_sha() == b.manifest_sha() and a.data_sha() == b.data_sha()
+
+
+def test_refusal_reasons_do_not_change_the_hashes_but_refused_names_do(world, tmp_path):
+    nometa = world.add("FakeA", 61, meta=False)
+    moved = shutil.copytree(nometa, tmp_path / "elsewhere" / nometa.name)  # same name
+    a = build(world, [world.a, nometa], max_frames_per_capture=3)
+    b = build(world, [world.a, moved], max_frames_per_capture=3)
+    ra, rb = a.manifest()["refused"], b.manifest()["refused"]
+    assert [r["name"] for r in ra] == [r["name"] for r in rb] == [nometa.name]
+    assert ra[0]["reason"] != rb[0]["reason"]  # each quotes its own machine path
+    assert a.manifest_sha() == b.manifest_sha() and a.data_sha() == b.data_sha()
+    other = build(world, [world.a, world.add("FakeA", 62, meta=False)], max_frames_per_capture=3)
+    assert other.manifest_sha() != a.manifest_sha() and other.data_sha() != a.data_sha()
+    none = build(world, [world.a], max_frames_per_capture=3)
+    assert none.manifest_sha() != a.manifest_sha()  # a refused capture still counts by name
+
+
+def test_legacy_manifest_sha_reproduces_the_old_algorithm(world):
+    ds = build(world, [world.a, world.add("FakeA", 63, meta=False)], max_frames_per_capture=3)
+    protect, catalogue_sha = r"C:\old\liftoff-gates.pt", "c" * 64
+    m = ds.manifest()
+    m.pop("git_head")  # the old hash: everything but git_head, refusal reasons included
+    m["params"] = {**m["params"], "protect_holdout_of": protect}
+    m["catalogue_sha256"] = catalogue_sha
+    old = hashlib.sha256(json.dumps(m, sort_keys=True).encode()).hexdigest()
+    assert ds.legacy_manifest_sha(protect=protect, catalogue_sha256=catalogue_sha) == old
+    assert ds.legacy_manifest_sha(protect=None, catalogue_sha256=catalogue_sha) != old
+    # without refusals the old and new hashes agree on today's values
+    # (train_multi always records params.protect_holdout_of, so the old hash had that key)
+    clean = build(world, [world.a, world.c], max_frames_per_capture=3,
+                  params={"protect_holdout_of": "sha256:" + "d" * 64})  # fmt: skip
+    same = clean.legacy_manifest_sha(protect="sha256:" + "d" * 64,
+                                     catalogue_sha256=clean.catalogue_sha256)  # fmt: skip
+    assert same == clean.manifest_sha()

@@ -1077,13 +1077,14 @@ def test_train_multi_flips_negate_the_roll_and_records_the_roll_metrics(
 ):
     """hflip first and the frame roll negated for a flipped image; roll_applied_deg each epoch;
     val_det_live_roll on val steps (fixed re-roll); selection stays plain val detection."""
-    from drone_fly.harness.offline import gate_dataset as gd
     from drone_fly.harness.offline import roll as roll_mod
     from drone_fly.tracks import catalogue as cat
 
     gt = _gt()
     w = roll_world
-    monkeypatch.setattr(gd, "models_root", lambda: w.models)
+    from tests.test_harness_gate_dataset import use_world_roots
+
+    use_world_roots(monkeypatch, w)
     monkeypatch.setattr(cat, "load_catalogue", lambda path: w.catalogue)
     monkeypatch.setattr(roll_mod, "item_camera_rolls",
                         lambda ds, tel, cam: np.full(len(ds.items), 30.0))  # fmt: skip
@@ -1125,13 +1126,14 @@ def test_train_multi_flips_negate_the_roll_and_records_the_roll_metrics(
 
 
 def test_train_multi_without_roll_computes_no_rolls(roll_world, tmp_path, monkeypatch):
-    from drone_fly.harness.offline import gate_dataset as gd
     from drone_fly.harness.offline import roll as roll_mod
     from drone_fly.tracks import catalogue as cat
 
     gt = _gt()
     w = roll_world
-    monkeypatch.setattr(gd, "models_root", lambda: w.models)
+    from tests.test_harness_gate_dataset import use_world_roots
+
+    use_world_roots(monkeypatch, w)
     monkeypatch.setattr(cat, "load_catalogue", lambda path: w.catalogue)
 
     def never(*a, **k):
@@ -1245,10 +1247,10 @@ class _Killed(RuntimeError):
 
 
 def _resume_train(w, tmp_path, monkeypatch, **kw):
-    from drone_fly.harness.offline import gate_dataset as gd
     from drone_fly.tracks import catalogue as cat
+    from tests.test_harness_gate_dataset import use_world_roots
 
-    monkeypatch.setattr(gd, "models_root", lambda: w.models)
+    use_world_roots(monkeypatch, w)
     monkeypatch.setattr(cat, "load_catalogue", lambda path: w.catalogue)
     args = dict(trackdata_root=w.root, split_source=w.catalogue.path, config=SMALL_CAMERA,
                 epochs=3, backbone="tiny-cnn", batch_size=4, input_width=128,
@@ -1429,3 +1431,167 @@ def test_cli_passes_resume_through(tmp_path, monkeypatch):
     assert got["resume"] is True and got["detector_id"] == "r1"
     got.clear()
     assert main(base) == 0 and got["resume"] is False
+
+
+# ----------------------------------------------------------------------------- protect by sha256
+
+
+def _protect_weights(path):
+    import torch
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"state_dict": {}, "meta": {"holdout": {}, "captures": []}}, path)
+    return path
+
+
+def test_protect_weights_are_recorded_by_sha256_not_path(roll_world, tmp_path, monkeypatch):
+    from drone_fly.tracks.catalogue import sha256_file
+
+    here = _protect_weights(tmp_path / "a" / "liftoff-gates.pt")
+    there = tmp_path / "far" / "away" / "copy.pt"
+    there.parent.mkdir(parents=True)
+    there.write_bytes(here.read_bytes())
+    m1 = _resume_train(roll_world, tmp_path / "r1", monkeypatch, epochs=1,
+                       protect_holdout_of=here)  # fmt: skip
+    m2 = _resume_train(roll_world, tmp_path / "r2", monkeypatch, epochs=1,
+                       protect_holdout_of=there)  # fmt: skip
+    man = json.loads(Path(m1["data_manifest"]).read_text("utf-8"))
+    assert man["params"]["protect_holdout_of"] == "sha256:" + sha256_file(here)
+    assert m1["data_manifest_sha256"] == m2["data_manifest_sha256"]  # same weights, two paths
+    assert str(tmp_path) not in json.dumps(man["params"])  # no machine path in the params
+    none = _resume_train(roll_world, tmp_path / "r3", monkeypatch, epochs=1)
+    assert none["data_manifest_sha256"] != m1["data_manifest_sha256"]
+
+
+# ----------------------------------------------------------------------------- R2 compat
+
+
+def _interrupted(w, out, monkeypatch, protect):
+    """A 2-epoch run killed in epoch 2 (resume.pt after epoch 1) and the Dataset it trained on."""
+    gt = _gt()
+    probe = _count_batches(monkeypatch)
+    _resume_train(w, out / "probe", monkeypatch, epochs=1, protect_holdout_of=protect)
+    per_epoch = probe[0]
+    seen = {}
+    from drone_fly.harness.offline import gate_dataset as gd
+
+    real_sha = gd.Dataset.manifest_sha
+
+    def grab(self):
+        seen["ds"] = self
+        return real_sha(self)
+
+    monkeypatch.setattr(gd.Dataset, "manifest_sha", grab)
+    _count_batches(monkeypatch, kill_at=per_epoch + 1)
+    with pytest.raises(_Killed):
+        _resume_train(w, out, monkeypatch, epochs=2, protect_holdout_of=protect)
+    monkeypatch.setattr(gd.Dataset, "manifest_sha", real_sha)
+    _count_batches(monkeypatch)  # no more kills
+    return out / "resumable" / gt.RESUME_NAME, seen["ds"]
+
+
+def _forge(rp, sha):
+    import torch
+
+    ck = torch.load(rp, map_location="cpu", weights_only=False)
+    torch.save({**ck, "manifest_sha256": sha}, rp)
+
+
+@pytest.mark.parametrize("line_ends", ["crlf", "lf"])
+def test_a_pre_2026_10_14_resume_pt_is_accepted_when_the_weights_match(
+    roll_world, tmp_path, monkeypatch, caplog, line_ends
+):
+    """The old hash recorded the protect weights by PATH and the catalogue's checkout bytes. A
+    resume.pt hashed that way resumes when the legacy path's weights have today's sha256."""
+    import logging
+
+    gt = _gt()
+    from drone_fly.harness.offline import gate_dataset as gd
+
+    protect = _protect_weights(tmp_path / "today" / "liftoff-gates.pt")
+    legacy = tmp_path / "old-checkout" / "liftoff-gates.pt"  # the file is still there
+    legacy.parent.mkdir()
+    legacy.write_bytes(protect.read_bytes())
+    monkeypatch.setattr(gt, "LEGACY_PROTECT_PATHS", (str(legacy),))
+    rp, ds = _interrupted(roll_world, tmp_path / "run", monkeypatch, protect)
+    lf, crlf = gd.catalogue_sha_variants(roll_world.catalogue)
+    cat_sha = crlf if line_ends == "crlf" else lf
+    _forge(rp, ds.legacy_manifest_sha(protect=str(legacy), catalogue_sha256=cat_sha))
+    with caplog.at_level(logging.WARNING):
+        meta = _resume_train(roll_world, tmp_path / "run", monkeypatch, epochs=2,
+                             protect_holdout_of=protect, resume=True)  # fmt: skip
+    assert "pre-2026-10-14 resume.pt" in caplog.text and repr(str(legacy)) in caplog.text
+    assert meta["epochs_run"] == 2 and not rp.exists()
+
+
+def test_a_legacy_path_that_is_gone_uses_the_published_release_sha(
+    roll_world, tmp_path, monkeypatch, caplog
+):
+    import logging
+
+    from drone_fly.harness.liftoff import gate_learned
+    from drone_fly.tracks.catalogue import sha256_file
+
+    gt = _gt()
+    from drone_fly.harness.offline import gate_dataset as gd
+
+    protect = _protect_weights(tmp_path / "today" / "liftoff-gates.pt")
+    legacy = str(tmp_path / "gone" / "liftoff-gates.pt")  # never created
+    monkeypatch.setattr(gt, "LEGACY_PROTECT_PATHS", (legacy,))
+    monkeypatch.setitem(gate_learned.RELEASED_WEIGHTS, "liftoff-gates.pt", sha256_file(protect))
+    rp, ds = _interrupted(roll_world, tmp_path / "run", monkeypatch, protect)
+    _, crlf = gd.catalogue_sha_variants(roll_world.catalogue)
+    old = ds.legacy_manifest_sha(protect=legacy, catalogue_sha256=crlf)
+    _forge(rp, old)
+    with caplog.at_level(logging.WARNING):
+        meta = _resume_train(roll_world, tmp_path / "run", monkeypatch, epochs=2,
+                             protect_holdout_of=protect, resume=True)  # fmt: skip
+    assert "pre-2026-10-14 resume.pt" in caplog.text and meta["epochs_run"] == 2
+    # the release sha differs from today's weights: refused
+    rp, ds = _interrupted(roll_world, tmp_path / "run2", monkeypatch, protect)
+    _forge(rp, ds.legacy_manifest_sha(protect=legacy, catalogue_sha256=crlf))
+    monkeypatch.setitem(gate_learned.RELEASED_WEIGHTS, "liftoff-gates.pt", "0" * 64)
+    with pytest.raises(HarnessConfigError, match="written for other data or training"):
+        _resume_train(roll_world, tmp_path / "run2", monkeypatch, epochs=2,
+                      protect_holdout_of=protect, resume=True)  # fmt: skip
+    assert rp.exists()
+
+
+def test_a_legacy_resume_with_other_weights_or_another_hash_is_refused(
+    roll_world, tmp_path, monkeypatch
+):
+    gt = _gt()
+    from drone_fly.harness.offline import gate_dataset as gd
+
+    protect = _protect_weights(tmp_path / "today" / "liftoff-gates.pt")
+    legacy = tmp_path / "old" / "liftoff-gates.pt"
+    legacy.parent.mkdir()
+    legacy.write_bytes(protect.read_bytes() + b"different weights")  # another sha256
+    monkeypatch.setattr(gt, "LEGACY_PROTECT_PATHS", (str(legacy),))
+    rp, ds = _interrupted(roll_world, tmp_path / "run", monkeypatch, protect)
+    _, crlf = gd.catalogue_sha_variants(roll_world.catalogue)
+    _forge(rp, ds.legacy_manifest_sha(protect=str(legacy), catalogue_sha256=crlf))
+    with pytest.raises(HarnessConfigError, match="written for other data or training"):
+        _resume_train(roll_world, tmp_path / "run", monkeypatch, epochs=2,
+                      protect_holdout_of=protect, resume=True)  # fmt: skip
+    _forge(rp, "f" * 64)  # not a legacy hash of this dataset at all
+    with pytest.raises(HarnessConfigError, match="written for other data or training"):
+        _resume_train(roll_world, tmp_path / "run", monkeypatch, epochs=2,
+                      protect_holdout_of=protect, resume=True)  # fmt: skip
+
+
+def test_without_protect_a_legacy_hash_with_reasons_and_crlf_is_accepted(
+    roll_world, tmp_path, monkeypatch, caplog
+):
+    import logging
+
+    gt = _gt()
+    from drone_fly.harness.offline import gate_dataset as gd
+
+    monkeypatch.setattr(gt, "LEGACY_PROTECT_PATHS", (str(tmp_path / "unused.pt"),))
+    rp, ds = _interrupted(roll_world, tmp_path / "run", monkeypatch, None)
+    _, crlf = gd.catalogue_sha_variants(roll_world.catalogue)
+    _forge(rp, ds.legacy_manifest_sha(protect=None, catalogue_sha256=crlf))
+    with caplog.at_level(logging.WARNING):
+        meta = _resume_train(roll_world, tmp_path / "run", monkeypatch, epochs=2, resume=True)
+    assert "pre-2026-10-14 resume.pt" in caplog.text and meta["epochs_run"] == 2

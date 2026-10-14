@@ -505,8 +505,12 @@ def test_release_of_and_the_download_url_of_the_owning_release(tmp_path, monkeyp
     assert calls == [f"{gate_learned.RELEASE_BASE}/liftoff-gates-v9/gates-v9.pt"]
 
 
-def test_configured_weights_explicit_path_wins_then_release(tmp_path):
-    std = f"{gate_learned.MODELS_DIR}/liftoff-gates.pt"
+def test_configured_weights_explicit_path_wins_then_release(tmp_path, monkeypatch):
+    from drone_fly import paths
+
+    monkeypatch.setenv("DRONE_FLY_DATA_ROOT", str(tmp_path / "data"))
+    std = str(paths.models_root("detector-v1") / "liftoff-gates.pt")  # the data root's v1 folder
+    assert std == str(tmp_path / "data" / "models" / "detector-v1" / "liftoff-gates.pt")
     assert configured_weights({"release": "v1"}) == std
     assert configured_weights({"weights": "my/own.pt", "release": "v1"}) == "my/own.pt"
     assert configured_weights({"weights": "my/own.pt"}) == "my/own.pt"

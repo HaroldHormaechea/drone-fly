@@ -505,3 +505,32 @@ def test_cli_parsers():
     for missing in (["--captures", "c"], ["--weights", "w"]):
         with pytest.raises(SystemExit):
             p.parse_args(["harness", "gates", "diagnose", *missing])
+
+
+def test_compare_finds_the_reference_capture_by_name_in_the_data_root(heldout, tmp_path,
+                                                                       monkeypatch):  # fmt: skip
+    """No --protected-capture: the Infinity Loop reference is looked up by name anywhere under
+    the data root's captures/ (captures/<Map>/<session>/); absent -> a config error."""
+    w = heldout
+    monkeypatch.setenv("DRONE_FLY_DATA_ROOT", str(tmp_path / "data"))
+    with pytest.raises(HarnessConfigError, match="is not under the captures root"):
+        ev.compare_protected("new.pt", "old.pt")
+    ref = tmp_path / "data" / "captures" / "LiftoffArena" / PROTECTED
+    ref.mkdir(parents=True)
+    (ref / "frames.csv").write_text("t_wall_ns,file\n", "utf-8")
+    (ref / "telemetry_raw.csv").write_text("t_wall_ns,len,hex\n", "utf-8")
+    w.meta["old.pt"] = v1_meta()
+    w.meta["new.pt"] = {"captures": [{"name": "other"}]}
+    w.records[("old.pt", PROTECTED)] = many("inflatable_arch", 20, 10)
+    w.records[("new.pt", PROTECTED)] = many("inflatable_arch", 20, 10)
+    seen = []
+    real = gdg.capture_frames
+
+    def spy(d, cfg, window=None):
+        seen.append(Path(d))
+        return real(d, cfg, window)
+
+    monkeypatch.setattr(gdg, "capture_frames", spy)
+    c = ev.compare_protected("new.pt", "old.pt")
+    assert c["capture"] == PROTECTED and c["pass"] is True and c["window"] == WIN
+    assert seen == [ref, ref]

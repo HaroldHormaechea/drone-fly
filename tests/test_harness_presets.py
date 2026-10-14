@@ -158,7 +158,9 @@ def test_preset_values(cfg):
     assert cfg.parts.gate_estimator == "learned"
     learned = cfg.section("gates")["learned"]
     assert learned.get("weights") is None and learned["release"] == "v1"  # UC71: by release
-    assert configured_weights(learned) == "artifacts/harness/liftoff/models/liftoff-gates.pt"
+    from drone_fly import paths
+
+    assert configured_weights(learned) == str(paths.models_root("detector-v1") / "liftoff-gates.pt")
     d = cfg.section("depth")
     assert d["inverse"] is True
     assert d["calibration"]["scale"] == pytest.approx(-0.00535155)
