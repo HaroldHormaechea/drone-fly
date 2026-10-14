@@ -259,6 +259,84 @@ final evaluation. The report (`train eval <student run> --baseline <mlp run>`) g
 held-out completion in noise (headline) and exact modes, the teacher on the same tracks and seeds,
 the ratio, outcome shares incl. `gate_lost`, coverage strata and the gap attribution.
 
+### Run 1 result (2026-10-14): failed — an information gap, not capacity
+
+Run 1 (`20261013T223451Z-student-liftoff`, K1 csr32, 4096 envs, 8.02e7 steps, lost policy
+`reacquire`, ended 04:16 2026-10-14, now under the data root's `models/student/`) **failed**: the
+training-window completion followed beta down (it60 beta 0.61: 46 %; it100 0.35: 37 %; it120
+0.22: 24 %; it140 0.09: 8 %; it160 0: 0 %) and the DAgger loss rose to a flat ~0.47 from it160
+to it306. Val (noise) macro completion was 0.000 at it200 and it306; about 65 % of episodes ended
+out of bounds.
+
+**Diagnosis** (offline, on teacher-labelled states visited by the run-1 final student; MLP
+256-256-128 or the K1 readout fitted to convergence; held-out = 20 % of envs; the loss is the
+training loss, the MSE over decoded `[cg / max_g, tanh(rates)]`, so its scale is bounded by the
+label variance — collective 0.09, rates 0.73 / 0.76 / 0.52 on these states):
+
+| Fit (held-out MSE) | beta 0 states | beta 0.5 states |
+|---|---|---|
+| run-1 actor as trained | 0.474 | 0.618 |
+| K1 readout, fresh 07 warm start / from run 1 / + L2 residual (noise obs) | 0.351 / 0.354 / 0.350 | 0.100 / 0.099 / 0.095 |
+| MLP, student obs (noise) | 0.349 | 0.095 |
+| K1 / MLP, student obs (exact perception) | 0.142 / 0.136 | 0.084 / 0.080 |
+| MLP, teacher obs | **0.011** | 0.011 |
+
+- **Not capacity.** K1 equals the MLP everywhere; the L2 residual adds nothing. The 07 warm start
+  loads (the legacy readout columns match the file exactly). The 0.47 is almost entirely the three
+  rate outputs: on its own states run 1 explains none of their variance and stays timid, while
+  the teacher's rate commands sit near full deflection a lot of the time.
+- **Information.** On the student's own (off-nominal) states even exact perception leaves ~10x
+  the teacher-obs floor; the noise more than doubles it.
+
+**Ablation** (same kind of states, a second collection; MLP, 3k steps): exact student obs 0.120,
+teacher obs 0.015, noise student obs 0.358.
+
+| Exact student obs + one teacher group | held-out | share of the 0.120 -> 0.015 gap closed |
+|---|---|---|
+| obs12 truth (rel / velocity in truth) | 0.096 | 23 % |
+| gate10 truth (current + next gate) | 0.085 | 33 % |
+| obstacle_vision8 | 0.118 | 3 % |
+| obstacles64 | 0.105 | 15 % |
+| all obstacle groups | 0.103 | 16 % |
+| **gates39 (the route's gates beyond the next)** | **0.045** | **72 %** |
+| **all gate groups** | **0.040** | **76 %** |
+
+Leave one group out of the teacher obs (0.015): all gate groups 0.336 (the teacher's behaviour
+is unpredictable without them); gates39 0.058; all obstacle groups 0.039; obstacles64 0.036;
+everything else at most 0.021.
+
+Noise components (student obs from twin perceptions on the same states; full noise 0.356):
+without false positives 0.215, without misses 0.295, without position error 0.362, without
+latency 0.359; only misses 0.173, only position error 0.139 (exact 0.120). **False positives
+(wrong acquisitions / mis-associations) cost most, then misses; position error and latency
+cost nothing measurable.**
+
+**Reading.** Once the student leaves the teacher's nominal path, the teacher steers by gates the
+student cannot see — out of the camera's view or occluded, and the route beyond the next gate
+(gates39 alone closes 72 % of the gap, the current + next gate in truth only 33 %). A memoryless
+student on a 2-gate perceived view cannot imitate that, so DAgger converges to a timid average and
+flies out of bounds. Obstacles explain most of the rest (~16-24 %). Capacity, the warm start and
+the loss scale are not the cause; L2 (residual) cannot help and L4 (PPO) alone would have to
+discover the missing route knowledge by search from 0 % completion.
+
+**Run 2 (recommended, needs the user's decision on the first point):**
+
+1. **A route prior** (the user decides whether it is allowed): Liftoff tracks are known
+   before a race, so the student could get a gates39-equivalent block computed from the track
+   layout plus its own pose (telemetry position) instead of perception — offline it closes 72-76 %
+   of the gap. If allowed this is the cheapest and strongest fix.
+2. **If not allowed: an imitable teacher.** Retrain (or fine-tune) the teacher with its gate
+   observation restricted to what a student can know — the current and next gate only when
+   visible or remembered from an earlier sighting (a world-frame gate memory in the tracker), no
+   route beyond — so that its off-nominal behaviour includes searching. Then DAgger again, and L4
+   PPO on the student's own reward to finish.
+3. Either way: **a gate memory** in the tracker/student obs (world-frame positions of gates already
+   seen, carried across loss of sight), and the tracker's **false-positive handling** (the
+   costliest noise component; UC71/UC72 detector and tracker work).
+4. For the next DAgger run: a beta floor or slower decay, and more updates per collected sample
+   (run 1 made 8 x 8192 updates per 262k new samples); neither explains run 1's failure (the
+   converged offline fits share its floor), so they are secondary.
+
 ## Consequences
 
 - Every detector version carries its own noise model (per detector id, revisioned, multi-class
