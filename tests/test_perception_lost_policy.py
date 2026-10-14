@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 from drone_fly.harness.errors import HarnessConfigError, StudentSchemaError
 from drone_fly.harness.geometry import CameraModel
@@ -31,7 +32,14 @@ from drone_fly.harness.types import FlightState, Frame
 from drone_fly.sim.noise_model import camera_visible, gate_axes, gate_corners
 from drone_fly.sim.perception import EPISODE_DRAWS, TICK_DRAWS, PerceptionConfig
 from drone_fly.student.perception_ref import ReferencePerception
-from tests.student_support import gate_rot, load_model, yaw_quat
+from tests.student_support import (
+    StaticDrone,
+    gate_batch,
+    gate_rot,
+    load_model,
+    perception,
+    yaw_quat,
+)
 
 A = np.array([10.0, 0.0, 0.0])
 #: 4.7 m from A (outside the 2 m association gate), in view, NEARER than A (so the live
@@ -96,7 +104,7 @@ def run_pair(tmp_path: Path, policy: str, script, ticks: int):
                           drop_after_s=DROP)  # fmt: skip
     pos = np.zeros(3)
     yaw0, _ = script(0.0)
-    ref.reset(0.0, pos, yaw_quat(yaw0), np.zeros(len(EPISODE_DRAWS)))
+    ref.reset(0.0, pos, yaw_quat(yaw0), np.zeros(sum(w for _, w, _ in EPISODE_DRAWS)))
     trk.update(None, _state(pos, yaw_quat(yaw0), 0.0), 0.0)
     no_draws = np.zeros(sum(w for _, w, _ in TICK_DRAWS))
     out = []
@@ -263,6 +271,89 @@ def test_a_pass_is_a_good_event_under_reacquire():
     # last match 0.0 -> lost after 1.0 s without the pass; with it, only after 1.3 s
     assert rows[1.1].status == rows[1.3].status == "holding"
     assert rows[1.4].status == "lost"
+
+
+# ------------------------------------------------------------------- UC70 run-2: gate memory
+# These drive the batched torch twin (``GatePerception`` via ``StaticDrone``) in ``exact`` mode so
+# detection is purely geometric (facing -> seen, turned away -> not) and deterministic without
+# injected draws; ``reacquire`` is the student's policy, so a lost target is released and the
+# memory fallback becomes observable.
+
+A_GATE = (10.0, 0.0, 0.0)
+B_GATE = (14.0, 2.0, 0.0)
+FRESH = 0.3
+
+
+def _memory_perc(model, *, gate_memory):
+    return perception(model, 1, mode="exact", lost_policy="reacquire", lost_hard_stop_s=6.0,
+                      drop_after_s=0.05, gate_memory=gate_memory, gate_memory_fresh_s=FRESH,
+                      pointer_dropout_p=1.0)  # fmt: skip
+
+
+def test_gate_memory_fallback_supplies_the_target_and_true_age_while_the_pointer_is_off(tmp_path):
+    """UC70 run-2 (behavioural): with the pointer DROPPED for the whole episode, the student still
+    has a usable target through a lost window via the world-frame gate-memory fallback. Once the
+    live target is released (reacquire), memory supplies the remembered pose and the TRUE age (time
+    since the last confident sighting) while fresh; with memory OFF the released estimate reports
+    the saturated ``lost_timeout_s``. After ``fresh_s`` the fallback expires (age back to
+    ``lost_timeout_s``). The remembered target pose is the gate in both cases."""
+    model = load_model(tmp_path, timing=TIMING,
+                       tracker={"lost_timeout_s": 0.1, "acquire_timeout_s": 3.0})  # fmt: skip
+    gate = gate_batch(1, A_GATE)
+
+    def fly(gate_memory):
+        d = StaticDrone(_memory_perc(model, gate_memory=gate_memory), 1, DT)
+        for _ in range(5):  # face & match: memory records A's confident pose; pointer dropped
+            out = d.tick(gate)
+        assert bool(out["matched"][0]) and float(out["pointer"][0][3]) == 0.0
+        rows = []
+        for _ in range(40):  # turn away: no detection -> the live target is released
+            out = d.tick(gate, quat=yaw_quat(math.pi))
+            rows.append((round(d.t, 3), bool(out["acquired"][0]), bool(out["target_valid"][0]),
+                         out["target"][0].clone(), float(out["target_age_s"][0])))  # fmt: skip
+        return rows
+
+    off, on = fly(False), fly(True)
+    A = torch.tensor(A_GATE, dtype=torch.float32)
+    for (_, acq_o, _, tgt_o, _), (_, acq_n, _, tgt_n, _) in zip(off, on, strict=True):
+        assert acq_o and acq_n  # both keep a target through the window
+        torch.testing.assert_close(tgt_o, A, atol=1e-4, rtol=0)
+        torch.testing.assert_close(tgt_n, A, atol=1e-4, rtol=0)
+    # memory OFF: a released target reports the saturated lost_timeout age, never more
+    assert all(age == pytest.approx(0.1) for _, _, valid, _, age in off if not valid)
+    # memory ON: while fresh the age GROWS past lost_timeout (true time since the last sighting)
+    grew = [age for _, _, valid, _, age in on if not valid and age > 0.12]
+    assert grew and max(grew) > FRESH - 0.06
+    # ...then once stale (> fresh_s since the last confident match) the fallback stops
+    assert all(age == pytest.approx(0.1) for _, _, _, _, age in on[-5:])
+
+
+def test_hand_over_seeds_the_gate_memory_with_the_next_slot(tmp_path):
+    """UC70 run-2 (behavioural): hand-over seeding shifts the NEXT slot's memory into the target on
+    a pass, so a gate that is briefly lost right after the pass stays re-targetable. Here the next
+    gate B is confidently seen, then the drone passes gate A and immediately turns away — B is
+    never matched as the target, so the ONLY source of its remembered pose is the seeding. The
+    memory fallback must report B's pose (not the stale A), proving the seed shifted across."""
+    model = load_model(tmp_path, timing=TIMING,
+                       tracker={"lost_timeout_s": 0.1, "acquire_timeout_s": 3.0})  # fmt: skip
+    d = StaticDrone(_memory_perc(model, gate_memory=True), 1, DT)
+    gA, gB = gate_batch(1, A_GATE), gate_batch(1, B_GATE)
+    for _ in range(5):  # face forward: A is the target (matched), B is the next (matched -> nm)
+        out = d.tick(gA, gB)
+    assert bool(out["matched"][0]) and bool(out["acquired"][0])
+    # pass A AND turn away in the same tick: the hand-over makes B the target, but B is not seen
+    # again -> its remembered pose can only come from the next-slot memory seeded on the pass
+    out = d.tick(gB, None, crossed=torch.tensor([True]), quat=yaw_quat(math.pi))
+    assert bool(out["hand_over"][0])
+    B = torch.tensor(B_GATE, dtype=torch.float32)
+    seen_mem = []
+    for _ in range(12):  # B is released, then the (seeded) memory supplies it while fresh
+        out = d.tick(gB, None, quat=yaw_quat(math.pi))
+        if bool(out["acquired"][0]) and not bool(out["target_valid"][0]):
+            seen_mem.append(out["target"][0].clone())
+    assert seen_mem, "the memory fallback never engaged after the hand-over"
+    for tgt in seen_mem:  # the remembered target is B (seeded across the pass), NOT the stale A
+        torch.testing.assert_close(tgt, B, atol=1e-4, rtol=0)
 
 
 # ----------------------------------------------------------------------------- config

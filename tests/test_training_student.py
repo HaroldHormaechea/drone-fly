@@ -24,7 +24,13 @@ from drone_fly import drones
 from drone_fly.sim.action import ActionSpec
 from drone_fly.training import distill
 from tests.oracle_support import age_files, write_teacher_run
-from tests.student_support import tiny_pool, tiny_student_config, train_inputs
+from tests.student_support import (
+    TRAIN_TIMING,
+    load_model,
+    tiny_pool,
+    tiny_student_config,
+    train_inputs,
+)
 
 
 @pytest.fixture(scope="module")
@@ -70,7 +76,7 @@ def test_cpu_dagger_writes_the_run_folder_and_the_student_sidecar(inputs, tmp_pa
     assert side["actor"] == "k1-student" and side["extra_dim"] == DIM and side["world_scale"] == k
     sch = side["obs_schema"]
     assert (sch["name"], sch["version"], sch["dim"]) == (NAME, VERSION, DIM)
-    assert (NAME, VERSION, DIM) == ("student-obs", 2, 61)
+    assert (NAME, VERSION, DIM) == ("student-obs", 3, 65)
     assert sch["battery"]["cells"] == 3  # the gremlin profile's power.cells
     assert side["obs_schema"]["name"] == "student-obs" and side["obs_schema"]["world_scale"] == k
     assert side["contract_version"] == 2 and side["deployable"] is True
@@ -115,6 +121,68 @@ def test_mlp_baseline_trains_without_taps(inputs, tmp_path, tiny_val):
     side = read_sidecar(res.run.path / "checkpoints" / "student.pt")
     assert side["actor"] == "mlp-student" and side["deployable"] is False
     assert side["role"] == "baseline"
+
+
+# --------------------------------------------------------------- UC70 run-2: config + pipeline
+
+
+def test_run2_config_plumbs_the_perception_features(tmp_path):
+    """The shipped ``student-liftoff-run2`` config turns the three run-2 features ON (and drops to
+    2048 envs for the 6 GB card); run-1 (``student-liftoff``) keeps them all OFF. ``perception_
+    config`` maps the nested config sub-sections onto the flat ``PerceptionConfig`` overrides."""
+    from drone_fly.training.config import load_raw, student_from_mapping
+
+    raw = load_raw("student-liftoff-run2")
+    assert raw["n_envs"] == 2048  # VRAM default for the 6 GB card
+    cfg = student_from_mapping(raw, validate_tracks=False)
+    p = cfg.perception
+    assert (p.pointer.bias_sigma_rad, p.pointer.jitter_sigma_rad, p.pointer.dropout_p,
+            p.pointer.bearing_tol_deg) == (0.05, 0.03, 0.1, 20.0)  # fmt: skip
+    assert p.gate_memory.enabled and p.gate_memory.fresh_s == 1.5
+    assert (p.fp_suppression.pointer, p.fp_suppression.memory, p.fp_suppression.temporal) == (
+        True, True, True)  # fmt: skip
+    assert (p.fp_suppression.memory_tol, p.fp_suppression.temporal_frames) == (2.0, 2)
+    # run-1 keeps every run-2 feature OFF (parity-strict, bar the always-appended pointer block)
+    base = student_from_mapping(load_raw("student-liftoff"), validate_tracks=False).perception
+    assert (base.pointer.bias_sigma_rad, base.pointer.dropout_p) == (0.0, 0.0)
+    assert not base.gate_memory.enabled
+    assert not (base.fp_suppression.pointer or base.fp_suppression.memory
+                or base.fp_suppression.temporal)
+    # perception_config maps the sub-sections onto the flat PerceptionConfig the sim consumes
+    model = load_model(tmp_path, timing=TRAIN_TIMING)
+    pc = distill.perception_config(cfg, model)
+    assert (pc.pointer_bias_sigma_rad, pc.pointer_jitter_sigma_rad, pc.pointer_dropout_p,
+            pc.pointer_bearing_tol_deg) == (0.05, 0.03, 0.1, 20.0)  # fmt: skip
+    assert pc.gate_memory and pc.gate_memory_fresh_s == 1.5
+    assert pc.fp_suppress_pointer and pc.fp_suppress_memory and pc.fp_suppress_temporal
+    assert (pc.fp_memory_tol, pc.fp_temporal_frames) == (2.0, 2)
+
+
+def test_run2_features_train_end_to_end(inputs, tmp_path, tiny_val):
+    """QA's heaviest allowed check: a tiny (8-env, 2-iteration) DAgger run with ALL three run-2
+    features ON runs end to end — the sim builds, the student trains against the v3 obs, and the
+    sidecar records the pointer schema (v3 / DIM 65 + the noise params) and the perception toggles.
+    This is NOT the 80M-step training (that stays off the dev-team)."""
+    cfg = tiny_student_config(inputs.k07, perception={
+        "pointer": {"bias_sigma_rad": 0.05, "jitter_sigma_rad": 0.03, "dropout_p": 0.1},
+        "gate_memory": {"enabled": True},
+        "fp_suppression": {"pointer": True, "memory": True, "temporal": True},
+    })  # fmt: skip
+    assert cfg.perception.gate_memory.enabled and cfg.perception.fp_suppression.pointer
+    res = train(inputs, tmp_path, cfg)
+    assert res.iterations == 2 and res.steps == 2 * 4 * 8
+
+    from drone_fly.sim.action import read_sidecar
+
+    side = read_sidecar(res.run.path / "checkpoints" / "student.pt")
+    sch = side["obs_schema"]
+    assert (sch["name"], sch["version"], sch["dim"]) == ("student-obs", 3, 65)
+    assert sch["pointer"]["bias_sigma_rad"] == 0.05 and sch["pointer"]["dropout_p"] == 0.1
+    assert sch["pointer"]["jitter_sigma_rad"] == 0.03
+    perc = side["perception"]
+    assert perc["gate_memory"] is True and perc["pointer_jitter_sigma_rad"] == 0.03
+    assert perc["fp_suppress_pointer"] and perc["fp_suppress_memory"]
+    assert perc["fp_suppress_temporal"]
 
 
 # ----------------------------------------------------------------------------- beta + loss
@@ -232,7 +300,7 @@ def test_labels_come_from_teacher_obs_and_the_student_never_sees_them(inputs, tm
     assert seen["teacher"] == {sch["dim"]}  # the teacher run's own teacher-obs width, exact
     from drone_fly.sim.student_obs import DIM as STUDENT_DIM
 
-    assert seen["student"] == {STUDENT_DIM} == {61}  # student-obs v2 only
+    assert seen["student"] == {STUDENT_DIM} == {65}  # student-obs v3 only
     labs = torch.cat(seen["labels"])
     assert float(labs[:, 0].min()) >= 0.0 and float(labs[:, 0].max()) <= 1.0
     assert float(labs[:, 1:].abs().max()) <= 1.0

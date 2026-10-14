@@ -1,6 +1,6 @@
 """UC70 AC3 / AC6 / AC8: the deployable student export and the harness's version guard.
 
-* ``train export`` writes ONE ``drone-fly-student`` v1 file (``student-obs`` v2, 61 values;
+* ``train export`` writes ONE ``drone-fly-student`` v1 file (``student-obs`` v3, 65 values;
   readout only, ``k1.body.layer.*`` stripped) + a ``.contract.json``; it round-trips through the
   harness loader, and a dry-run ``harness run --checkpoint student.pt`` with fakes ticks the K1
   student and records its meta.
@@ -10,7 +10,7 @@
   ``--allow-slow-cpu``; a non-learned estimator or another camera is refused; a detector whose
   sha differs from the noise model's only warns (``noise_model_detector_mismatch``).
 * The checkpoint's world scale / tracker timeouts / free-space settings override the config.
-* ``student-obs`` v2 observes the pack: a ``telemetry.stream_format`` without ``battery`` is
+* ``student-obs`` v3 observes the pack: a ``telemetry.stream_format`` without ``battery`` is
   refused (exit 2); the dry run's replayed telemetry carries a 3S pack. The export's
   ``obs_schema.battery.cells`` must equal the config drone's ``power.cells`` (a mismatch or a
   profile without a power block is refused, exit 2).
@@ -74,7 +74,7 @@ def test_export_writes_one_versioned_file_with_a_sidecar(k1_export):
     validate_meta(m, out)
     assert m["deployable"] is True and m["role"] == "deployable" and m["actor"] == "k1-student"
     assert (m["obs_schema"]["name"], m["obs_schema"]["version"]) == (NAME, VERSION)
-    assert m["obs_schema"]["dim"] == DIM == 61 and m["obs_schema"]["battery"]["cells"] == 3
+    assert m["obs_schema"]["dim"] == DIM == 65 and m["obs_schema"]["battery"]["cells"] == 3
     assert m["world_scale"] == 6.0 and m["contract_version"] == 2
     assert m["requires"] == {"gate_estimator": "learned", "detector_sha256": "d" * 64,
                              "free_space_estimator": "none", "assume_no_obstacles": True,
@@ -388,6 +388,9 @@ def test_dry_run_session_ticks_the_exported_student(k1_export, harness_contract,
     assert all(len(t["extra"]) == DIM and np.all(np.isfinite(t["extra"])) for t in ticks)
     for t in ticks:
         assert t["extra"][59:61] == pytest.approx([0.8, 3.9], rel=1e-5)  # (charge, 11.7 V / 3)
+        # the v3 pointer block [61:65) is unavailable live pre-UC72 (the learned tracker leaves
+        # info["pointer"] unset) -> zeros / bit 0, the degraded state the student is trained for
+        assert t["extra"][61:65] == [0.0, 0.0, 0.0, 0.0]
     assert ticks[0]["extra"][43] == pytest.approx(0.5)  # arm_remaining_s counted from tick 0
     assert any(t.get("command") is not None for t in ticks)
     assert s.result.ticks == len(ticks)

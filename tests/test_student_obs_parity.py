@@ -1,4 +1,4 @@
-"""UC70 AC3 / AC9: student-observation parity (``student-obs`` v2, 61 float32).
+"""UC70 AC3 / AC9: student-observation parity (``student-obs`` v3, 65 float32).
 
 * The live harness (:class:`~drone_fly.harness.student.StudentObservationAssembler`) and the
   training-side reference (:func:`drone_fly.student.obs_ref.build_student_obs`) are BIT-identical
@@ -12,6 +12,10 @@
   tick's ``FlightState.battery`` (Liftoff's raw ``(charge, volts)``); a tick without the pack
   reading is a coverage error, and a reading outside 2.5-4.45 V per cell (a wrong cell count or a
   broken battery block) is refused on every tick.
+* v3's pointer block [61:65) is the next-gate HUD bearing (body unit vector 3 + availability bit 1;
+  UC70 run-2). It flows from ``est.info["pointer"]`` through BOTH builders identically (torch reads
+  ``perc["pointer"]``, numpy reads ``info["pointer"]`` — one value), so the appended columns are in
+  parity; a dropped / unavailable pointer reads as four zeros.
 """
 
 from __future__ import annotations
@@ -74,7 +78,19 @@ def rand_quat(g):
     return q / np.linalg.norm(q)
 
 
-def raw_perception(g, pos, *, mode=None, acquired=None, hand_over=None, matched=None):
+def rand_pointer(g, *, avail=None):
+    """A raw next-gate pointer: a body unit bearing (3) + availability bit (1); zeros when
+    unavailable (dropped / no target), as the sim / tracker emit."""
+    av = bool(g.random() < 0.85) if avail is None else avail
+    if not av:
+        return np.zeros(4, np.float32)
+    d = g.normal(size=3)
+    d = d / max(float(np.linalg.norm(d)), 1e-9)
+    return np.array([d[0], d[1], d[2], 1.0], np.float32)
+
+
+def raw_perception(g, pos, *, mode=None, acquired=None, hand_over=None, matched=None,
+                   pointer=None):  # fmt: skip
     acq = bool(g.random() < 0.8) if acquired is None else acquired
     mode = int(g.integers(0, 4)) if mode is None else mode
     if not acq and mode in (NEXT_VISIBLE, NEXT_UNSEEN_KNOWN):
@@ -100,6 +116,9 @@ def raw_perception(g, pos, *, mode=None, acquired=None, hand_over=None, matched=
         "hand_over": bool(g.random() < 0.15) if hand_over is None else hand_over,
         "passed": False,
         "matched": (acq and bool(g.random() < 0.6)) if matched is None else matched,
+        # UC70 run-2: the noisy next-gate pointer (body bearing 3 + availability bit 1) that
+        # estimate_from_raw threads into info["pointer"] and both obs builders read identically.
+        "pointer": rand_pointer(g) if pointer is None else pointer,
     }
 
 
@@ -279,6 +298,7 @@ def test_torch_twin_matches_the_reference(harness_contract):
             "target_valid": torch.tensor([r["target_valid"] for r in raws]),
             "hand_over": torch.tensor([r["hand_over"] for r in raws]),
             "matched": torch.tensor([r["matched"] for r in raws]),
+            "pointer": F([r["pointer"] for r in raws]),
         }
         got = build_torch(pos=F(pos), vel=F(vel), quat=F(quat), omega=F(omega), perc=perc, k=K,
                           nominal_aperture=NOMINAL, lost_timeout_s=LOST, prev_action=F(prev),
@@ -339,7 +359,9 @@ def test_torch_obs_at_k_equals_prescaled_inputs_at_k1():
             "target_age_s": F(g.uniform(0, 1, n)), "next_age_s": F(g.uniform(0, 1, n)),
             "target_valid": torch.ones(n, dtype=torch.bool),
             "hand_over": torch.zeros(n, dtype=torch.bool),
-            "matched": torch.ones(n, dtype=torch.bool)}  # fmt: skip
+            "matched": torch.ones(n, dtype=torch.bool),
+            # the pointer is a unit bearing + bit: unitless, so scale-invariant (same at k and k1)
+            "pointer": F([rand_pointer(g) for _ in range(n)])}  # fmt: skip
     common = dict(
         quat=quat,
         omega=omega,
@@ -358,12 +380,14 @@ def test_torch_obs_at_k_equals_prescaled_inputs_at_k1():
 
 def test_schema_pins_the_layout_and_parameters():
     s = schema(world_scale=K, lost_timeout_s=LOST, acquire_timeout_s=3.0, camera=CAMERA)
-    assert (NAME, VERSION, DIM) == ("student-obs", 2, 61)
+    assert (NAME, VERSION, DIM) == ("student-obs", 3, 65)
     assert (s["name"], s["version"], s["dim"], s["dtype"]) == (NAME, VERSION, DIM, "float32")
     assert [(b["name"], b["width"]) for b in s["blocks"]] == list(BLOCKS)
     assert sum(w for _, w in BLOCKS) == DIM
-    assert s["blocks"][-1] == {"name": "battery", "start": 59, "width": 2}
+    # v3 (UC70 run-2): the pointer block is appended at the tail; battery keeps its [59:61) offset
+    assert s["blocks"][-1] == {"name": "pointer", "start": 61, "width": 4}
     assert s["blocks"][-1]["start"] + s["blocks"][-1]["width"] == DIM
+    assert s["blocks"][-2] == {"name": "battery", "start": 59, "width": 2}
     # the battery block is teacher-obs v2's, plus the pack's cell count
     assert s["battery"] == {**teacher_battery_schema(), "cells": 3}
     assert s["battery"]["features"] == ["charge", "volts_per_cell"]
@@ -380,4 +404,23 @@ def test_schema_pins_the_layout_and_parameters():
     }
     assert len(s["input_scale"]) == DIM == len(input_scale())
     assert block_slice("perception") == slice(44, 47) and block_slice("history") == slice(47, 59)
+    assert block_slice("battery") == slice(59, 61) and block_slice("pointer") == slice(61, 65)
     assert input_scale()[59:61] == pytest.approx([1.0, 1 / 4.2])
+    # the pointer columns are already O(1) (a unit bearing + a bit): identity scale
+    assert input_scale()[61:65] == [1.0, 1.0, 1.0, 1.0]
+    # the pointer sub-schema pins the layout + the (default-off) noise / tolerance parameters
+    assert s["pointer"] == {
+        "dim": 4,
+        "layout": "body-frame unit bearing (3) + availability bit (1)",
+        "bias_sigma_rad": 0.0,
+        "jitter_sigma_rad": 0.0,
+        "dropout_p": 0.0,
+        "bearing_tol_deg": 20.0,
+        "source": "sim: noisy truth bearing; live (pre-UC72): learned tracker leaves it "
+        "unavailable (bit = 0)",
+    }
+    noisy = schema(world_scale=K, lost_timeout_s=LOST, acquire_timeout_s=3.0, camera=CAMERA,
+                   pointer_bias_sigma_rad=0.05, pointer_jitter_sigma_rad=0.03,
+                   pointer_dropout_p=0.1, pointer_bearing_tol_deg=15.0)["pointer"]  # fmt: skip
+    assert (noisy["bias_sigma_rad"], noisy["jitter_sigma_rad"], noisy["dropout_p"],
+            noisy["bearing_tol_deg"]) == (0.05, 0.03, 0.1, 15.0)  # fmt: skip
