@@ -85,7 +85,9 @@ def build_student_obs(
     ``pointer`` = the next-gate HUD bearing (body unit vector 3 + availability bit 1; UC70 run-2).
     When ``None`` it falls back to ``est_k.info["pointer"]`` (the reference / sim path, where
     :func:`~drone_fly.student.perception_ref.estimate_from_raw` put it) and finally to zeros — the
-    pre-UC72 live reality, where the learned tracker leaves the pointer unavailable (bit = 0).
+    pre-UC74 live reality, where the learned tracker leaves the pointer unavailable (bit = 0).
+    UC74's classic-OpenCV HUD reader fills ``info["pointer"]`` live when a ``camera.pointer`` reader
+    is configured.
     """
     from drone_fly.sim.teacher_obs import FULL_CELL_V
 

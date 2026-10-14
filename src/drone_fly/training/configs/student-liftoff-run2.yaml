@@ -5,7 +5,7 @@
 # information / false-positive gap WITHOUT touching the teacher or the frozen K1:
 #   1. the next-gate pointer OBS block (schema v3, DIM 65) — always appended; here it carries a
 #      NOISY HUD proxy (per-episode bias + per-tick jitter) with per-episode dropout so the student
-#      stays deployable pre-UC72 (where the live learned tracker leaves the pointer unavailable);
+#      stays deployable pre-UC74 (where the live learned tracker leaves the pointer unavailable);
 #   2. world-frame gate memory (perception-internal; feeds the existing obs fields);
 #   3. false-positive suppression (pointer / memory / temporal sub-gates on acquisition).
 # All three are independently toggleable so the experiment can attribute the gains; with them OFF
@@ -16,14 +16,14 @@
 # GPU, so run-2 defaults to n_envs 2048 (overridable with --n-envs). ~2x gradient-updates/sample is
 # retained; the DAgger buffer and everything else are unchanged from run-1.
 # The pointer-noise sigmas and bearing_tol_deg below are PROVISIONAL, pending real HUD
-# characterisation in UC72.
+# characterisation in UC74 (the classic-OpenCV HUD reader + offline calibration).
 extends: student-liftoff
 name: student-liftoff-run2
 n_envs: 2048                  # VRAM: fits 6 GB; override with --n-envs on an 8 GB+ dedicated GPU
 perception:
   pointer:
-    bias_sigma_rad: 0.05      # ~2.9 deg per-episode HUD bearing bias (provisional; UC72)
-    jitter_sigma_rad: 0.03    # ~1.7 deg per-tick jitter (provisional; UC72)
+    bias_sigma_rad: 0.05      # ~2.9 deg per-episode HUD bearing bias (provisional; UC74)
+    jitter_sigma_rad: 0.03    # ~1.7 deg per-tick jitter (provisional; UC74)
     dropout_p: 0.1            # 10 % of episodes fly with the pointer unavailable (bit = 0)
     bearing_tol_deg: 20.0     # FP pointer-consistency gate tolerance
   gate_memory:

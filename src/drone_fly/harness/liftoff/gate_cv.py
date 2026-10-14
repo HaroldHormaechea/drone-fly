@@ -177,6 +177,7 @@ class TrackingGateEstimator(GateEstimator):
         *,
         default_aperture: float,
         masks: Any = None,
+        pointer_reader: Any = None,
         assoc_radius: float = 1.0,
         lost_timeout_s: float = 1.0,
         acquire_timeout_s: float = 3.0,
@@ -197,6 +198,10 @@ class TrackingGateEstimator(GateEstimator):
         self.scale = scale or WorldScale(1.0)
         self.default_aperture = float(default_aperture)  # training scale; acquire fallback
         self.masks = masks
+        #: Optional UC74 HUD pointer reader (live only). When set, ``update`` populates
+        #: ``info["pointer"]`` from the RAW frame over its own ROI; the gate detector masks its own
+        #: copy, so the two never collide. ``None`` leaves ``info["pointer"]`` unset (sim / legacy).
+        self.pointer_reader = pointer_reader
         self.assoc_radius = assoc_radius
         self.lost_timeout_s = lost_timeout_s
         self.acquire_timeout_s = acquire_timeout_s
@@ -439,6 +444,10 @@ class TrackingGateEstimator(GateEstimator):
             info["frame_size"] = [int(w), int(h)]
             info["frame_index"] = int(frame.index)
         info.update(self.extra_info())
+        if frame is not None and self.pointer_reader is not None:
+            # UC74: the live HUD next-gate pointer (body unit bearing 3 + availability bit 1),
+            # read from the RAW frame. zeros + bit 0 when absent/ambiguous (the degraded block).
+            info["pointer"] = self.pointer_reader.read(frame.image)
         return GateEstimate(
             target=target,
             curr_gate=curr,
@@ -472,6 +481,7 @@ class OpenCvGateEstimator(TrackingGateEstimator):
         pass_area_frac: float = 0.2,
         gates_per_lap: int | None = None,
         masks: Any = None,
+        pointer_reader: Any = None,
         lost_policy: str = "terminate",
         lost_hard_stop_s: float = 6.0,
         drop_after_s: float = 0.5,
@@ -494,6 +504,7 @@ class OpenCvGateEstimator(TrackingGateEstimator):
             scale,
             default_aperture=scale.length(min(self.w, self.h)),
             masks=masks,
+            pointer_reader=pointer_reader,
             assoc_radius=assoc_radius,
             lost_timeout_s=lost_timeout_s,
             acquire_timeout_s=acquire_timeout_s,
@@ -507,8 +518,11 @@ class OpenCvGateEstimator(TrackingGateEstimator):
     @classmethod
     def from_config(cls, cfg: dict[str, Any], ctx: Any) -> OpenCvGateEstimator:
         from drone_fly.harness.liftoff.masks import FrameMasks
+        from drone_fly.harness.liftoff.pointer_cv import pointer_reader_from_config
 
         cam = ctx.config.section("camera")
+        camera = camera_from_config(cam)
+        masks = FrameMasks.from_config(cam)
         ranges = []
         for i, pair in enumerate(cfg.get("hsv_ranges") or []):
             if not isinstance(pair, (list, tuple)) or len(pair) != 2:
@@ -522,7 +536,7 @@ class OpenCvGateEstimator(TrackingGateEstimator):
         gpl = cfg.get("gates_per_lap")
         num = lambda k, d, **kw: float(require_number(cfg.get(k, d), f"gates.{k}", **kw))  # noqa: E731
         return cls(
-            camera_from_config(cam),
+            camera,
             num("nominal_width_m", 1.5, min_value=0.0, min_exclusive=True),
             num("nominal_height_m", 1.5, min_value=0.0, min_exclusive=True),
             ranges,
@@ -538,7 +552,8 @@ class OpenCvGateEstimator(TrackingGateEstimator):
             lost_policy=str(cfg.get("lost_policy", "terminate")),
             lost_hard_stop_s=num("lost_hard_stop_s", 6.0, min_value=0.0, min_exclusive=True),
             drop_after_s=num("drop_after_s", 0.5, min_value=0.0),
-            masks=FrameMasks.from_config(cam),
+            masks=masks,
+            pointer_reader=pointer_reader_from_config(camera, cam, masks),
         )
 
     # ------------------------------------------------------------------ detection

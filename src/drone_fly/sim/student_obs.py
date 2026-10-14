@@ -168,8 +168,8 @@ def schema(
             "jitter_sigma_rad": float(pointer_jitter_sigma_rad),
             "dropout_p": float(pointer_dropout_p),
             "bearing_tol_deg": float(pointer_bearing_tol_deg),
-            "source": "sim: noisy truth bearing; live (pre-UC72): learned tracker leaves it "
-            "unavailable (bit = 0)",
+            "source": "sim: noisy truth bearing; live: UC74 classic-OpenCV HUD reader when a "
+            "camera.pointer reader is configured, else unavailable (bit = 0)",
         },
         "input_scale": input_scale(),
         "battery": {**teacher_battery_schema(), "cells": int(battery_cells)},
