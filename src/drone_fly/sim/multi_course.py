@@ -29,7 +29,11 @@ env). It adds:
   terms times ``dt / reward_reference_dt_s``);
 * ``prev_action`` (the raw policy output of the previous tick), ``teacher_obs()`` (148 values,
   :mod:`~drone_fly.sim.teacher_obs`) and ``critic_extra()`` (dynamics + timing samples, time
-  fraction, route progress).
+  fraction, route progress);
+* one UC70 hook, ``step(action, terminate=...)``: a callable run after the physics and the route
+  progress (``terminate(crossed) -> bool (n,)``) that can end episodes as ``gate_lost`` (appended
+  to :data:`OUTCOMES`; crash penalty; completion and contacts take precedence). With
+  ``terminate=None`` the env is bit-identical to before.
 """
 
 from __future__ import annotations
@@ -59,7 +63,16 @@ from drone_fly.sim.timing import TIMING_LOG_COLUMNS, ControlTiming, TimingConfig
 
 START_GROUND, START_AIR, START_ROUTE = 1, 2, 3
 #: Outcome codes in the episode log and the evaluation report.
-OUTCOMES = ("none", "floor", "collision", "out-of-bounds", "timeout", "completed", "power_loss")
+OUTCOMES = (
+    "none",
+    "floor",
+    "collision",
+    "out-of-bounds",
+    "timeout",
+    "completed",
+    "power_loss",  # UC68 power model
+    "gate_lost",  # UC70 terminate hook
+)
 EPISODE_HEADER = (
     "env",
     "episode",
@@ -810,8 +823,12 @@ class MultiCourseEnv:
         return f"compl {float(self.comp_rate) * 100:4.1f}%"
 
     # ---- step ----
-    def step(self, action: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        """Raw policy action ``(n, 4)`` -> ``(reward, done)`` (auto-respawn)."""
+    def step(self, action: torch.Tensor, terminate: Any = None) -> tuple[torch.Tensor, ...]:
+        """Raw policy action ``(n, 4)`` -> ``(reward, done)`` (auto-respawn).
+
+        ``terminate`` (UC70): ``terminate(crossed) -> bool (n,)`` after the physics and the route
+        progress; a True env that neither completed nor crashed ends as ``gate_lost``.
+        """
         action = action.to(self.dtype)
         cg, rates = decode_torch(action, self.action_spec, max_g=self.plant.max_g)
         cfg = self.cfg
@@ -865,6 +882,11 @@ class MultiCourseEnv:
         crashed = (hit_floor | collision | oob | power_loss) & ~completed
         timeout = (t >= self.P["time_limit"][self.cid] - 1e-6) & ~completed & ~crashed
         done = completed | crashed | timeout
+        lost = None
+        if terminate is not None:
+            lost = terminate(crossed).to(torch.bool) & ~completed & ~crashed
+            timeout = timeout & ~lost
+            done = done | lost
 
         g_body = gravity_body(self.quat)
         cos_tilt = -g_body[:, 2]
@@ -881,9 +903,13 @@ class MultiCourseEnv:
             + rw.finish * completed.to(self.dtype)
             - rw.crash * crashed.to(self.dtype)
         )
+        if lost is not None:
+            reward = reward - rw.crash * lost.to(self.dtype)
         self.prev_action = action.detach().clone()
         self.ep_return = self.ep_return + reward
         outcome = torch.full_like(self.k, OUTCOMES.index("timeout"))
+        if lost is not None:
+            outcome = torch.where(lost, OUTCOMES.index("gate_lost"), outcome)
         outcome = torch.where(power_loss, OUTCOMES.index("power_loss"), outcome)
         outcome = torch.where(oob, OUTCOMES.index("out-of-bounds"), outcome)
         outcome = torch.where(collision, OUTCOMES.index("collision"), outcome)

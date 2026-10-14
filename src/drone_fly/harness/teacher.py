@@ -236,6 +236,11 @@ class TeacherCheckpoint:
         from drone_fly.training.evaluate import SELECTION_FILE, resolve_run
 
         p = Path(teacher).expanduser()
+        if not p.exists() and not p.is_absolute():  # a run id under <data root>/models/teacher
+            from drone_fly import paths
+
+            q = paths.models_root("teacher") / p
+            p = q if q.exists() else p
         if not p.exists():
             raise HarnessConfigError(f"--teacher {p}: no such run folder or checkpoint")
         run, ck = resolve_run(p)

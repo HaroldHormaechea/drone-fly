@@ -244,7 +244,10 @@ def write_sidecar(
     world_scale: float | None = None,
     course_conversion: dict[str, Any] | None = None,
     lineage: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> Path:
+    """Write ``<stem>.contract.json``; ``extra`` adds further keys (UC70 student sidecars:
+    ``teacher``, ``noise_model``, ``perception``, ``camera``, ``timing``, ``actor_arch`` ...)."""
     data: dict[str, Any] = {
         "contract_version": spec.version,
         "action": {k: v for k, v in spec.as_dict().items() if k != "version"},
@@ -262,6 +265,8 @@ def write_sidecar(
     ):
         if value is not None:
             data[key] = value
+    for key, value in (extra or {}).items():
+        data[key] = value
     path = sidecar_path(checkpoint)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return path

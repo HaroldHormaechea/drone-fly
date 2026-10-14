@@ -257,3 +257,71 @@ A teacher's `<stem>.contract.json` adds three keys to the §0 ones:
 - `drone-fly train eval` refuses a checkpoint whose schema name or version, or whose conversion
   version, it does not know.
 - A checkpoint without `obs_schema` is not a teacher.
+
+## 8. Student checkpoints: `student-obs` v2 and the `drone-fly-student` export (UC70)
+
+The deployable student is the K1 reservoir actor distilled from the teacher under a measured
+detector-noise model ([ADR 0009](adr/0009-student-distillation-and-detector-noise.md)). It sees only
+what the live harness can assemble.
+
+### Units
+
+**Student units**: Liftoff metres divided by the student's world scale `k`, exactly the harness's
+`WorldScale(k)` (the checkpoint's `world_scale`; 10 for the first student). Rates, quaternions and
+times are not scaled.
+
+### Layout (61 float32, `drone_fly.sim.student_obs`, v2)
+
+| Indices | Block | Contents |
+|---|---|---|
+| [0:30) | `harness30` | `ContractObservationAssembler.assemble(state_k, GateEstimate_k, FreeSpaceEstimate(obstacle_vision = zeros), 30)`: the contract `make_obs` (rel to the perceived target, gravity in body, velocity, body rates), `curr_gate` (perceived yaw, the detector class's nominal aperture / k), `next_lookahead`, `obstacle_vision` = zeros |
+| [30:36) | `attitude6` | R(body -> world) columns 0 and 1 |
+| [36:39) | `vel_body` | body-frame velocity / k |
+| [39:43) | `prev_action` | the previous tick's raw output (before decoding, clipping or the arm override) |
+| [43] | `arm_remaining_s` | the arming time left |
+| [44:47) | `perception` | `min(target_age, T)/T`, target valid, `min(next_age, T)/T`, with `T = lost_timeout_s`; age = now - the capture stamp of the frame behind the last match |
+| [47:59) | `history` | EMA (tau 0.25 s) of the body-frame target vector / k (3) and of `prev_action` (4); the world-frame target change since the previous tick, rotated into the body (3; zero unless matched this tick, zero on a hand-over); ticks since a match / 50, capped at 1 (1); the hand-over flag (1) |
+| [59:61) | `battery` | `charge` (Liftoff `batt_charge`, 0..1) and volts per cell (`batt_volts / cells`, V; `cells` = the drone profile's `power.cells`, recorded in `obs_schema.battery.cells`) — exactly `teacher-obs` v2's battery block (`tracks.teacher_obs_ref.battery_from_telemetry`); in the sim, the plant's power model |
+
+The history resets at episode / session start (its EMAs start from the first tick's values).
+
+v2 (UC70, after UC68's power model) appended the `battery` block; v1 (59 values) is no longer
+deployed and a v1 export is refused by the version guard. The live harness needs `battery` in the
+telemetry `StreamFormat`; without it a student run is refused (exit 2).
+
+`drone_fly.student.obs_ref.build_student_obs` builds it through the real assembler; the harness's
+`StudentObservationAssembler` calls the same function, and the batched training builder is
+tolerance-tested against it (1e-5).
+
+The gate tracker's `GateEstimate.info` carries the ages: `target_age_s`, `next_age_s`,
+`target_valid`, `hand_over` (and `matched`).
+
+### Export format
+
+`drone-fly train export <run> --out student.pt` writes ONE `torch.save` mapping plus a
+`student.contract.json` sidecar with the same `meta`:
+
+```json
+{"format": "drone-fly-student", "format_version": 1,
+ "state_dict": {"...": "the readout only (k1.body.layer.* is rebuilt from the K1 connectome)"},
+ "meta": {"contract_version": 2, "action": {"collective_scale_g": 1.0, "max_rate_rad_s": 4.0, "max_g": 4.23},
+          "actor": "k1-student", "actor_arch": {"encoder": true, "residual": false, "...": "..."},
+          "obs_schema": {"name": "student-obs", "version": 2, "dim": 61, "world_scale": 10.0,
+                         "tracker": {"lost_timeout_s": 1.3, "acquire_timeout_s": 3.0, "assoc_radius": 1.0},
+                         "camera": {"resolution": [2560, 1080], "hfov_deg": 120.0, "uptilt_deg": 20.0},
+                         "battery": {"features": ["charge", "volts_per_cell"], "cells": 3, "...": "..."},
+                         "...": "..."},
+          "world_scale": 10.0, "teacher": {"...": "..."}, "noise_model": {"sha256": "...", "detector_id": "..."},
+          "perception": {"...": "..."}, "camera": {"...": "..."}, "timing": {"...": "..."},
+          "course_conversion": {"...": "..."}, "k1": {"prune_provenance_sha256": "..."},
+          "latency": {"p50_ms": 0.0, "p99_ms": 0.0, "budget_ms": 10, "pass": true},
+          "deployable": true, "role": "deployable",
+          "requires": {"gate_estimator": "learned", "detector_sha256": "...",
+                       "free_space_estimator": "none", "assume_no_obstacles": true}}}
+```
+
+**Version guard** (`drone_fly.student.checkpoint.validate_meta`, run by `harness run` before
+arming): the embedded `obs_schema` must deep-equal this build's `student-obs` schema for the same
+parameters, the action contract must be v2 and the format version known; otherwise
+`StudentSchemaError` names both versions and the run exits 2. `--extra-dim` is not accepted with a
+student checkpoint.

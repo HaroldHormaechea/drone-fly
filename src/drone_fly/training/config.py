@@ -53,6 +53,9 @@ TOP_KEYS = (
     "slack",
     "checkpoint_every_s",
 )
+#: UC70 student-only sections (accepted by ``student_from_mapping`` only; a teacher or legacy
+#: config still refuses them, e.g. the UC69 leakage guard on ``perception``).
+STUDENT_KEYS = ("student", "perception", "distill", "finetune", "feasibility")
 #: Keys a teacher config inherits from ``proc-course-dr`` but does not use.
 TEACHER_IGNORED = ("course", "curriculum", "k1_path")
 ACTOR_KINDS = ("k1-reservoir-aug", "mlp-teacher")
@@ -432,3 +435,230 @@ def load_teacher_config(
     ref: str | Path, overrides: dict[str, Any] | None = None, *, validate_tracks: bool = True
 ) -> TeacherConfig:
     return teacher_from_mapping(load_raw(ref, overrides), validate_tracks=validate_tracks)
+
+
+# ----------------------------------------------------------------------------- UC70 student
+
+STUDENT_ACTORS = ("k1-student", "mlp-student")
+#: The feasibility gate: held-out teacher completion below 0.70 / 0.85 makes AC7's absolute
+#: target infeasible by construction (the student can reach at most ~85 % of the teacher).
+FEASIBILITY_THRESHOLD = 0.70 / 0.85
+
+
+@dataclass(frozen=True)
+class StudentSection:
+    """``student:`` — the actor and its world scale ``k`` (fixed a priori by the scale report)."""
+
+    actor: str = "k1-student"
+    world_scale: float | None = None  # k; required for training (``--scale-report`` picks it)
+    encoder: bool = True  # L1
+    residual: bool = False  # L2
+    logstd_init: float = -1.5
+    warm_start: str = "training/07-proc-course-flight/model_readout.pt"
+    #: The frozen K1 body's propagation kernel (``controller.student.BODY_KERNELS``).
+    body_kernel: str = "csr16"
+
+
+@dataclass(frozen=True)
+class PointerSection:
+    """``perception.pointer:`` — the next-gate HUD pointer obs (UC70 run-2). Defaults ⇒ the exact
+    truth bearing, always available (parity-strict)."""
+
+    bias_sigma_rad: float = 0.0
+    jitter_sigma_rad: float = 0.0
+    dropout_p: float = 0.0
+    bearing_tol_deg: float = 20.0
+
+
+@dataclass(frozen=True)
+class GateMemorySection:
+    """``perception.gate_memory:`` — world-frame gate memory (UC70 run-2). ``enabled=false`` ⇒
+    run-1 perception."""
+
+    enabled: bool = False
+    fresh_s: float = 1.5
+
+
+@dataclass(frozen=True)
+class FpSuppressionSection:
+    """``perception.fp_suppression:`` — the three toggleable false-positive sub-gates (UC70
+    run-2). All off ⇒ run-1 acquisition."""
+
+    pointer: bool = False
+    memory: bool = False
+    temporal: bool = False
+    memory_tol: float = 2.0
+    temporal_frames: int = 2
+
+
+@dataclass(frozen=True)
+class PerceptionSection:
+    """``perception:`` — the simulated detector (``timing`` comes from the noise model)."""
+
+    mode: str = "noise"
+    noise_model: str | None = None
+    uncovered: str = "proxy"
+    lost_timeout_s: float | None = None  # None: the noise model's recommendation
+    acquire_timeout_s: float | None = None
+    timing_from_noise_model: bool = True
+    #: The tracker's lost policy (sim.perception; ADR 0009 amendment). The student flies
+    #: ``reacquire``; the harness's legacy default is ``terminate``.
+    lost_policy: str = "reacquire"
+    lost_hard_stop_s: float = 6.0
+    drop_after_s: float = 0.5
+    #: UC70 run-2 features (all default-OFF ⇒ run-1 perception, bar the appended pointer block).
+    pointer: PointerSection = field(default_factory=PointerSection)
+    gate_memory: GateMemorySection = field(default_factory=GateMemorySection)
+    fp_suppression: FpSuppressionSection = field(default_factory=FpSuppressionSection)
+
+
+@dataclass(frozen=True)
+class DistillSection:
+    """``distill:`` — DAgger."""
+
+    rollout: int = 64
+    beta_start: float = 1.0
+    beta_end: float = 0.0
+    beta_schedule: str = "linear"  # linear | exp
+    beta_over: float = 0.5  # fraction of the budget
+    explore_std: float = 0.05
+    #: FIFO samples (K1: 1024 fp16 taps + obs + label each, ~2.3 KB): 1e6 ~ 2.3 GB (ADR 0009).
+    buffer: int = 1_000_000
+    #: Pin the buffer in host memory (faster host -> GPU copies; pinned pages cannot be paged
+    #: out). None = auto: pin only when the buffer is smaller than 1 GiB.
+    pin_memory: bool | None = None
+    updates: int = 8
+    minibatch: int = 8192
+    lr: float = 3.0e-4
+    lambda_raw: float = 0.01
+    val_every_iters: int = 200
+    val_episodes: int = 8
+    val_seed: int = 4321
+    #: Wall-clock cap of the DAgger phase (hours; None = budget only). D9: 2.5 h per run.
+    max_hours: float | None = None
+
+
+@dataclass(frozen=True)
+class FinetuneSection:
+    """``finetune:`` — the optional PPO phase (L4; ``--ppo-steps``)."""
+
+    steps: float = 0.0
+    lr: float = 1.0e-4
+    roll: int = 64
+    epochs: int = 4
+    minibatches: int = 16
+    gamma: float = 0.995
+    lam: float = 0.95
+    clip: float = 0.2
+    ent_coef: float = 0.0
+    max_grad_norm: float = 0.5
+    critic_warmup_iters: int = 20
+    bc_lambda: float = 0.1
+    bc_decay_frac: float = 0.5
+    logstd: float = -1.5
+    #: Wall-clock cap of the PPO phase (hours; None = steps only). D9: 3 h.
+    max_hours: float | None = None
+
+
+@dataclass(frozen=True)
+class FeasibilitySection:
+    threshold: float = FEASIBILITY_THRESHOLD
+    episodes: int = 32
+    seed: int = 1234
+    selectors: tuple[str, ...] = ("liftoff:held-out", "liftoff:val")
+
+
+@dataclass(frozen=True)
+class StudentConfig:
+    """A ``train student`` config (``configs/student-liftoff.yaml``, extends the teacher's)."""
+
+    base: TeacherConfig
+    student: StudentSection = field(default_factory=StudentSection)
+    perception: PerceptionSection = field(default_factory=PerceptionSection)
+    distill: DistillSection = field(default_factory=DistillSection)
+    finetune: FinetuneSection = field(default_factory=FinetuneSection)
+    feasibility: FeasibilitySection = field(default_factory=FeasibilitySection)
+
+    def __post_init__(self) -> None:
+        if self.student.actor not in STUDENT_ACTORS:
+            raise TrainConfigError(f"student.actor must be one of {STUDENT_ACTORS}")
+        from drone_fly.controller.student import BODY_KERNELS
+
+        if self.student.body_kernel not in BODY_KERNELS:
+            raise TrainConfigError(
+                f"student.body_kernel must be one of {BODY_KERNELS}, got "
+                f"{self.student.body_kernel!r}"
+            )
+        if self.perception.mode not in ("noise", "exact"):
+            raise TrainConfigError("perception.mode must be noise or exact")
+        if self.perception.lost_policy not in ("terminate", "reacquire"):
+            raise TrainConfigError("perception.lost_policy must be terminate or reacquire")
+        if self.perception.uncovered not in ("proxy", "exclude"):
+            raise TrainConfigError("perception.uncovered must be proxy or exclude")
+        if self.distill.beta_schedule not in ("linear", "exp"):
+            raise TrainConfigError("distill.beta_schedule must be linear or exp")
+        if self.student.world_scale is not None and self.student.world_scale <= 0:
+            raise TrainConfigError("student.world_scale must be > 0")
+
+    @property
+    def name(self) -> str:
+        return self.base.name
+
+    @property
+    def drone(self) -> str:
+        return self.base.drone
+
+    @property
+    def actor(self) -> ActorConfig:  # RunDir reads config.actor.kind
+        return ActorConfig(kind=self.student.actor)
+
+    def snapshot(self) -> dict[str, Any]:
+        out = self.base.snapshot()
+        out["kind"] = "student"
+        for k in ("student", "perception", "distill", "finetune", "feasibility"):
+            out[k] = _plain(asdict(getattr(self, k)))
+        return out
+
+
+def _perception_section(d: Any) -> PerceptionSection:
+    """Parse ``perception:`` with its UC70 run-2 nested sub-sections (pointer / gate_memory /
+    fp_suppression) built via :func:`_section` so unknown keys are still rejected."""
+    d = dict(d or {})
+    sub = {
+        "pointer": (PointerSection, d.pop("pointer", None)),
+        "gate_memory": (GateMemorySection, d.pop("gate_memory", None)),
+        "fp_suppression": (FpSuppressionSection, d.pop("fp_suppression", None)),
+    }
+    kw = {name: _section(cls, raw, f"perception.{name}") for name, (cls, raw) in sub.items()}
+    return _section_with(PerceptionSection, d, "perception", kw)
+
+
+def _section_with(cls: type, d: Any, key: str, extra: dict[str, Any]) -> Any:
+    """``_section`` but with already-built sub-objects merged in (nested sections)."""
+    d = dict(d or {})
+    unknown = set(d) - set(cls.__dataclass_fields__)
+    if unknown:
+        raise TrainConfigError(f"unknown {key} keys {sorted(unknown)}")
+    return cls(**d, **extra)
+
+
+def student_from_mapping(data: dict[str, Any], *, validate_tracks: bool = True) -> StudentConfig:
+    base = teacher_from_mapping({k: v for k, v in data.items() if k not in STUDENT_KEYS},
+                                validate_tracks=validate_tracks)  # fmt: skip
+    feas = dict(data.get("feasibility") or {})
+    if "selectors" in feas:
+        feas["selectors"] = tuple(feas["selectors"])
+    return StudentConfig(
+        base=base,
+        student=_section(StudentSection, data.get("student"), "student"),
+        perception=_perception_section(data.get("perception")),
+        distill=_section(DistillSection, data.get("distill"), "distill"),
+        finetune=_section(FinetuneSection, data.get("finetune"), "finetune"),
+        feasibility=_section(FeasibilitySection, feas, "feasibility"),
+    )
+
+
+def load_student_config(
+    ref: str | Path, overrides: dict[str, Any] | None = None, *, validate_tracks: bool = True
+) -> StudentConfig:
+    return student_from_mapping(load_raw(ref, overrides), validate_tracks=validate_tracks)

@@ -953,8 +953,10 @@ def run_sysid_liftoff(
     if plant not in ("liftoff", "synthetic", "synthetic-5inch"):
         raise HarnessConfigError(f"unknown --plant {plant!r}")
     live = plant == "liftoff"
+    from drone_fly import paths
+
     repo = find_repo_root()
-    root = Path(out_root) if out_root is not None else (repo or Path.cwd()) / "artifacts" / "sysid"
+    root = Path(out_root) if out_root is not None else paths.sysid_root()
     name = session or default_session_name()
     sdir = root / drone_id / name
     meta_path = sdir / META_FILE

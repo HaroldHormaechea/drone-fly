@@ -106,6 +106,13 @@ gates:
   assoc_radius: 1.0         # x aperture: association gate for re-detecting the tracked gate
   lost_timeout_s: 1.0       # hold the last estimate this long, then fail-safe
   acquire_timeout_s: 3.0    # hover in place this long waiting for the first gate
+  # UC70 lost policy: terminate (legacy: fail-safe once lost) | reacquire (release a target
+  # unmatched for lost_timeout_s and acquire again; re-acquire a held gate unmatched for more than
+  # drop_after_s when detections exist; fail-safe only after lost_hard_stop_s without a match,
+  # an acquisition or a pass). A student checkpoint pins its own value.
+  lost_policy: terminate
+  lost_hard_stop_s: 6.0
+  drop_after_s: 0.5
   pass_area_frac: 0.2       # gate area fraction that, once vanished nearby, counts as a pass
   gates_per_lap: null       # set to count laps
   # `learned` gate estimator (parts.gate_estimator: learned): keypoint net + PnP per gate type.

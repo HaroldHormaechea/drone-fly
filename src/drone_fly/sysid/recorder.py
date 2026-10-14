@@ -1,4 +1,4 @@
-"""The sysid session folder: ``artifacts/sysid/<drone-id>/<session>/`` (gitignored).
+"""The sysid session folder: ``<data root>/sysid/<drone-id>/<session>/`` (gitignored).
 
 * ``telemetry.csv`` — every raw telemetry sample (``recording.TELEMETRY_COLUMNS``: receive time on
   the session clock, game time, Unity-frame pose / velocity / gyro, echoed inputs, battery, RPM)

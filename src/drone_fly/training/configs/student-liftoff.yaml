@@ -1,0 +1,72 @@
+# UC70 deployable student (ADR 0009). `drone-fly train student --teacher <run> --noise <yaml>`.
+#  - the teacher's env, drone, action contract and course conversion (extends teacher-liftoff);
+#    the course conversion actually used is the TEACHER SIDECAR's (refused if it differs)
+#  - tracks: 60 % Liftoff TRAIN tracks (scene courses x2 in the group) + 40 % procedural
+#  - dynamics randomization 1, the UC68 power model on; timing from the noise model's measured
+#    live timing
+#  - starts: half ground, half air; 30 % of air starts before a route passage (the teacher's;
+#    perception starts unacquired there, as after a respawn)
+#  - pass slack 0 throughout
+#  - student: the K1 reservoir actor warm-started from 07 (v1 -> v2), L1 sense encoder on;
+#    world_scale k is set from `train student --scale-report` before run 1 (ADR parameter table)
+extends: teacher-liftoff-aug   # power model, battery obs, training-course augmentation (UC68 run 2)
+name: student-liftoff
+n_envs: 4096
+budget: 8.0e7               # compute-driven (ADR 0009): csr32 bench 7,403 env-steps/s x 3.5 h x 0.9 = 8.4e7
+randomization_scale: 1.0
+plant:
+  power: true                # UC68 battery + thrust-at-speed model, as the teacher (student-obs v2
+                             # observes the battery; power_loss is an episode outcome)
+tracks:
+  mix:                       # the plan's 60 / 40 (the teacher ran 50 / 50); augmentation inherited
+    - {select: "liftoff:train", weight: 0.6, scene_weight: 2.0}
+    - {select: "procedural:proc-liftoff", weight: 0.4}
+env:
+  start:
+    ground_fraction: 0.5
+slack:
+  init_m: 0.0
+  frac: 0.5
+student:
+  actor: k1-student
+  world_scale: 10.0          # k: scale report with it1374 + 07 speeds picks 10 (ADR 0009 parameter row)
+  encoder: true
+  residual: false
+  logstd_init: -1.5
+  warm_start: training/07-proc-course-flight/model_readout.pt
+  body_kernel: csr32         # exact CSR (2.8x the COO path). csr16 failed the closed-loop drift check:
+                             # 0.073 action divergence vs csr32's 6.9e-5 self-divergence (ADR 0009)
+perception:
+  mode: noise
+  noise_model: null          # --noise
+  uncovered: proxy
+  lost_timeout_s: null       # the noise model's recommendation (miss-burst p99 < 25 m)
+  acquire_timeout_s: null    # the noise model's tracker value
+  timing_from_noise_model: true
+distill:
+  rollout: 64
+  beta_start: 1.0
+  beta_end: 0.0
+  beta_schedule: linear
+  beta_over: 0.5
+  explore_std: 0.05
+  buffer: 1000000            # ~2.3 GB host RAM (run 1: 2e6 = 4.6 GB pinned paged a 15.8 GB machine)
+  pin_memory: null           # auto: pin only below 1 GiB
+  updates: 8
+  minibatch: 8192
+  lr: 3.0e-4
+  lambda_raw: 0.01
+  val_every_iters: 200
+  val_episodes: 8
+  val_seed: 4321
+  max_hours: 3.5            # wall-clock cap (the budget fits inside it at the bench rate)
+finetune:
+  steps: 0                   # --ppo-steps (L4)
+  lr: 1.0e-4
+  critic_warmup_iters: 20
+  bc_lambda: 0.1
+  bc_decay_frac: 0.5
+  logstd: -1.5
+feasibility:
+  episodes: 32
+  seed: 1234
