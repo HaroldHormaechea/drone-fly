@@ -704,6 +704,13 @@ class GatePerception:
         for name in ("n_known", "n_fp", "n_active", "n_miss"):
             setattr(self, name, getattr(self, name) & ~ho)
         self.n_z = torch.where(ho.unsqueeze(-1), torch.zeros_like(self.n_z), self.n_z)
+        if self.cfg.gate_memory:  # UC70 run-2: hand-over seeding — the passed slot's successor
+            ho1 = ho.unsqueeze(-1)  # memory shifts into the target so a briefly-lost gate re-targets
+            self.tm_world = torch.where(ho1, self.nm_world, self.tm_world)
+            self.tm_yaw = torch.where(ho, self.nm_yaw, self.tm_yaw)
+            self.tm_stamp = torch.where(ho, self.nm_stamp, self.tm_stamp)
+            self.tm_valid = torch.where(ho, self.nm_valid, self.tm_valid)
+            self.nm_valid = self.nm_valid & ~ho  # the next slot restarts with no memory
         # 2. frame arrival
         arrive = t >= self.next_frame_t - 1e-9
         step_t = (c.frame_period_s + c.frame_jitter_s * d["jitter"].to(torch.float64)).clamp(
@@ -790,6 +797,17 @@ class GatePerception:
         self.n_seen = torch.where(a_n, t, self.n_seen)
         self.ticks_since = torch.where(a_t, torch.zeros_like(self.ticks_since),
                                        self.ticks_since + 1)  # fmt: skip
+        if self.cfg.gate_memory:  # UC70 run-2: remember each slot's last CONFIDENT (non-FP) pose
+            conf_t = a_t & ~self.t_fp
+            self.tm_world = torch.where(conf_t.unsqueeze(-1), self.t_world, self.tm_world)
+            self.tm_yaw = torch.where(conf_t, self.t_yaw, self.tm_yaw)
+            self.tm_stamp = torch.where(conf_t, t, self.tm_stamp)
+            self.tm_valid = self.tm_valid | conf_t
+            conf_n = a_n & ~self.n_fp
+            self.nm_world = torch.where(conf_n.unsqueeze(-1), self.n_world, self.nm_world)
+            self.nm_yaw = torch.where(conf_n, self.n_yaw, self.nm_yaw)
+            self.nm_stamp = torch.where(conf_n, t, self.nm_stamp)
+            self.nm_valid = self.nm_valid | conf_n
         if self.reacq:
             self.t_good = torch.where(a_t, t, self.t_good)
             # (b) release a target unmatched for lost_timeout: keep its estimate, acquire again
@@ -824,9 +842,22 @@ class GatePerception:
         pos = self._pos
         t = t.to(torch.float64)
         c = self.cfg
-        # a target estimate exists: held, or (reacquire) the last released one
+        # a target estimate exists: live-held, or (reacquire) the last released one
         has = self.t_acq | self.t_last
         target = torch.where(has.unsqueeze(-1), self.t_world, pos)
+        target_yaw = torch.where(has, self.t_yaw, torch.zeros_like(self.t_yaw))
+        t_age = torch.where(self.t_acq, (t - self.t_src).to(self.dtype),
+                            torch.full_like(self.lat, c.lost_timeout_s))  # fmt: skip
+        if c.gate_memory:  # UC70 run-2: fall back to fresh memory when not live-held (before the
+            use_mem = (  # reacquire-released estimate). target_valid stays the LIVE bit.
+                self.tm_valid
+                & ((t - self.tm_stamp) <= c.gate_memory_fresh_s)
+                & ~self.t_acq
+            )
+            target = torch.where(use_mem.unsqueeze(-1), self.tm_world, target)
+            target_yaw = torch.where(use_mem, self.tm_yaw, target_yaw)
+            t_age = torch.where(use_mem, (t - self.tm_stamp).to(self.dtype), t_age)
+            has = has | use_mem
         mode = torch.where(
             self.n_active & self.n_known, NEXT_VISIBLE,
             torch.where(self.n_known, NEXT_UNSEEN_KNOWN,
@@ -834,17 +865,15 @@ class GatePerception:
         )  # fmt: skip
         next_center = torch.where((mode <= NEXT_UNSEEN_KNOWN).unsqueeze(-1), self.n_world,
                                   torch.where((mode == NEXT_UNSEEN_TARGET).unsqueeze(-1),
-                                              self.t_world, pos + torch.tensor(
+                                              target, pos + torch.tensor(
                                                   [1.0, 0.0, 0.0], dtype=self.dtype,
                                                   device=self.device)))  # fmt: skip
-        t_age = torch.where(self.t_acq, (t - self.t_src).to(self.dtype),
-                            torch.full_like(self.lat, c.lost_timeout_s))  # fmt: skip
         n_age = torch.where(self.n_known, (t - self.n_src).to(self.dtype),
                             torch.full_like(self.lat, c.lost_timeout_s))  # fmt: skip
         return {
             "status": self.status,
             "target": target,
-            "target_yaw": torch.where(has, self.t_yaw, torch.zeros_like(self.t_yaw)),
+            "target_yaw": target_yaw,
             "acquired": has,
             "next_mode": mode,
             "next_center": next_center,

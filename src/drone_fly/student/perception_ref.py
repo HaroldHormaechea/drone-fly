@@ -289,6 +289,10 @@ class ReferencePerception:
             if self.reacq:
                 self.t_good = float(t)
                 self.t_last = False
+            if c.gate_memory:  # UC70 run-2: hand-over seeding (mirrors GatePerception)
+                self.tm_world = np.asarray(self.nm_world, np.float64).copy()
+                self.tm_yaw, self.tm_stamp, self.tm_valid = self.nm_yaw, self.nm_stamp, self.nm_valid
+                self.nm_valid = False
             nx.acq = nx.fp = nx.active = nx.miss = False
             nx.z = np.zeros(4)
         # 2. frame arrival
@@ -366,6 +370,13 @@ class ReferencePerception:
             nx.yaw = _travel_yaw(R @ nx.nb, nx.world - pos)
             nx.seen = float(t)
         self.ticks_since = 0 if a_t else self.ticks_since + 1
+        if c.gate_memory:  # UC70 run-2: remember each slot's last CONFIDENT (non-FP) pose
+            if a_t and not tg.fp:
+                self.tm_world = np.asarray(tg.world, np.float64).copy()
+                self.tm_yaw, self.tm_stamp, self.tm_valid = tg.yaw, float(t), True
+            if nx.active and nx.acq and not nx.fp:
+                self.nm_world = np.asarray(nx.world, np.float64).copy()
+                self.nm_yaw, self.nm_stamp, self.nm_valid = nx.yaw, float(t), True
         if self.reacq:
             if a_t:
                 self.t_good = float(t)
@@ -394,6 +405,15 @@ class ReferencePerception:
     def outputs(self) -> dict[str, Any]:
         tg, nx, c = self.tg, self.nx, self.cfg
         has = tg.acq or self.t_last
+        target = tg.world.copy() if has else self.pos.copy()
+        target_yaw = tg.yaw if has else 0.0
+        target_age = (self.t - tg.src) if tg.acq else c.lost_timeout_s
+        if c.gate_memory:  # UC70 run-2: fresh-memory fallback (mirrors GatePerception.outputs)
+            if self.tm_valid and (self.t - self.tm_stamp) <= c.gate_memory_fresh_s and not tg.acq:
+                target = np.asarray(self.tm_world, np.float64).copy()
+                target_yaw = self.tm_yaw
+                target_age = self.t - self.tm_stamp
+                has = True
         if nx.active and nx.acq:
             mode = NEXT_VISIBLE
         elif nx.acq:
@@ -405,19 +425,19 @@ class ReferencePerception:
         nc = (
             nx.world
             if mode <= NEXT_UNSEEN_KNOWN
-            else tg.world
+            else target
             if mode == NEXT_UNSEEN_TARGET
             else self.pos + np.array([1.0, 0, 0])
         )
         return {
             "status": self.status,
-            "target": tg.world.copy() if has else self.pos.copy(),
-            "target_yaw": tg.yaw if has else 0.0,
+            "target": target,
+            "target_yaw": target_yaw,
             "acquired": has,
             "next_mode": mode,
             "next_center": np.asarray(nc, np.float64).copy(),
             "next_yaw": nx.yaw,
-            "target_age_s": self.t - tg.src if tg.acq else c.lost_timeout_s,
+            "target_age_s": target_age,
             "next_age_s": self.t - nx.src if nx.acq else c.lost_timeout_s,
             "target_valid": tg.acq,
             "hand_over": self.hand_over,
