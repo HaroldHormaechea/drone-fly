@@ -1235,3 +1235,197 @@ def test_score_per_class_counts_and_rates(monkeypatch):
     empty, _ = _deltas_scorer(monkeypatch, [[]], cam)
     none = empty.score(_IdentityNet(), data[:1])
     assert none["n"] == 0 and none["per_class"] == {} and none["detection_rate"] == 0.0
+
+
+# ----------------------------------------------------------------------------- resume (e5c9c95)
+
+
+class _Killed(RuntimeError):
+    pass
+
+
+def _resume_train(w, tmp_path, monkeypatch, **kw):
+    from drone_fly.harness.offline import gate_dataset as gd
+    from drone_fly.tracks import catalogue as cat
+
+    monkeypatch.setattr(gd, "models_root", lambda: w.models)
+    monkeypatch.setattr(cat, "load_catalogue", lambda path: w.catalogue)
+    args = dict(trackdata_root=w.root, split_source=w.catalogue.path, config=SMALL_CAMERA,
+                epochs=3, backbone="tiny-cnn", batch_size=4, input_width=128,
+                max_frames_per_capture=4, val_every=1, protect_holdout_of=None, device="cpu",
+                out_root=tmp_path, detector_id="resumable", seed=5)  # fmt: skip
+    args.update(kw)
+    return _gt().train_multi([w.a, w.b, w.c], **args)
+
+
+def _count_batches(monkeypatch, kill_at=None):
+    """Count training batches (one _augment_colour call each); raise on batch ``kill_at``."""
+    gt = _gt()
+    real, n = gt._augment_colour, [0]
+
+    def colour(*a, **k):
+        n[0] += 1
+        if kill_at is not None and n[0] == kill_at:
+            raise _Killed("killed mid-epoch")
+        return real(*a, **k)
+
+    monkeypatch.setattr(gt, "_augment_colour", colour)
+    return n
+
+
+def _weights_and_log(meta):
+    import torch
+
+    blob = torch.load(meta["weights"], map_location="cpu", weights_only=False)
+    log = json.loads(Path(meta["training_log"]).read_text("utf-8"))
+    return blob["state_dict"], log
+
+
+def _strip_elapsed(history):
+    return [{k: v for k, v in h.items() if k != "elapsed_s"} for h in history]
+
+
+def test_a_run_killed_mid_epoch_resumes_bit_identically(roll_world, tmp_path, monkeypatch):
+    torch = pytest.importorskip("torch")
+    gt = _gt()
+    clean_dir, killed_dir = tmp_path / "clean", tmp_path / "killed"
+    n = _count_batches(monkeypatch)
+    clean = _resume_train(roll_world, clean_dir, monkeypatch)
+    per_epoch = n[0] // 3
+    assert per_epoch >= 2 and n[0] == 3 * per_epoch
+    assert not (clean_dir / "resumable" / gt.RESUME_NAME).exists()  # 3. a finished run: removed
+    # kill in epoch 2, on its second batch
+    _count_batches(monkeypatch, kill_at=per_epoch + 2)
+    with pytest.raises(_Killed):
+        _resume_train(roll_world, killed_dir, monkeypatch)
+    rp = killed_dir / "resumable" / gt.RESUME_NAME
+    ck = torch.load(rp, map_location="cpu", weights_only=False)
+    assert ck["epoch"] == 1 and len(ck["history"]) == 1 and ck["stopped_early"] is False
+    assert {"net", "opt", "sched", "scaler", "rng", "torch_rng", "best", "elapsed_s",
+            "manifest_sha256"} <= set(ck)  # fmt: skip
+    assert not rp.with_suffix(".tmp").exists()  # written atomically
+    n = _count_batches(monkeypatch)
+    resumed = _resume_train(roll_world, killed_dir, monkeypatch, resume=True)
+    assert n[0] == 2 * per_epoch  # only epochs 2 and 3 were trained
+    w_clean, log_clean = _weights_and_log(clean)
+    w_res, log_res = _weights_and_log(resumed)
+    assert w_clean.keys() == w_res.keys()
+    assert all(torch.equal(w_clean[k], w_res[k]) for k in w_clean)  # bit-identical weights
+    assert _strip_elapsed(log_res["history"]) == _strip_elapsed(log_clean["history"])
+    assert [h["epoch"] for h in log_res["history"]] == [1, 2, 3]
+    assert resumed["chosen_epoch"] == clean["chosen_epoch"]
+    assert resumed["chosen_val_detection"] == clean["chosen_val_detection"]
+    assert log_res["history"][-1]["elapsed_s"] >= ck["elapsed_s"]  # time carries over
+    assert not rp.exists()  # finished: removed
+
+
+def test_resume_refusals(roll_world, tmp_path, monkeypatch):
+    gt = _gt()
+    with pytest.raises(HarnessConfigError, match="--resume needs the --detector-id"):
+        _resume_train(roll_world, tmp_path, monkeypatch, resume=True, detector_id=None)
+    with pytest.raises(HarnessConfigError, match="--resume: no training state at .*resume.pt"):
+        _resume_train(roll_world, tmp_path, monkeypatch, resume=True)
+    k = _count_batches(monkeypatch)
+    _resume_train(roll_world, tmp_path / "probe", monkeypatch, epochs=1)
+    per_epoch = k[0]
+    _count_batches(monkeypatch, kill_at=per_epoch + 1)  # dies on epoch 2's first batch
+    with pytest.raises(_Killed):
+        _resume_train(roll_world, tmp_path, monkeypatch, epochs=2)
+    assert (tmp_path / "resumable" / gt.RESUME_NAME).is_file()
+    # other data (the frame selection) or other training parameters: refused
+    for other in ({"max_frames_per_capture": 3}, {"lr": 5e-4}, {"epochs": 3}):
+        kw = {"epochs": 2, **other}
+        with pytest.raises(HarnessConfigError, match="written for other data or training"):
+            _resume_train(roll_world, tmp_path, monkeypatch, resume=True, **kw)
+    assert (tmp_path / "resumable" / gt.RESUME_NAME).is_file()  # a refusal keeps the state
+
+
+def test_resuming_a_stopped_early_run_goes_straight_to_the_output(
+    roll_world, tmp_path, monkeypatch
+):
+    torch = pytest.importorskip("torch")
+    gt = _gt()
+    rp = tmp_path / "resumable" / gt.RESUME_NAME
+    # a run that stopped early: patience 1 with val-loss selection on a constant "loss"
+    real_better = gt.better_selection
+    monkeypatch.setattr(gt, "better_selection", lambda a, b: b is None)  # only epoch 1 is best
+    keep = {}
+    real_save = torch.save
+
+    def save(obj, path, *a, **k):
+        if Path(path).name.startswith("resume"):  # keep a copy of the last training state
+            keep["ck"] = obj
+        return real_save(obj, path, *a, **k)
+
+    monkeypatch.setattr(torch, "save", save)
+    stopped = _resume_train(roll_world, tmp_path, monkeypatch, epochs=5, patience=1)
+    assert stopped["stopped_early"] is True and stopped["epochs_run"] == 2
+    assert not rp.exists()
+    monkeypatch.setattr(torch, "save", real_save)
+    real_save(keep["ck"], rp)  # the state as an interrupted, stopped run would leave it
+    assert keep["ck"]["stopped_early"] is True and keep["ck"]["epoch"] == 2
+    n = _count_batches(monkeypatch)
+    again = _resume_train(roll_world, tmp_path, monkeypatch, epochs=5, patience=1, resume=True)
+    assert n[0] == 0  # no further epochs
+    assert again["epochs_run"] == 2 and again["chosen_epoch"] == 1 and again["stopped_early"]
+    assert not rp.exists()
+    monkeypatch.setattr(gt, "better_selection", real_better)
+
+
+class _FakeScaler:
+    """GradScaler stand-in: the optimiser step always runs; get_scale drops after every update
+    when ``drop`` (what AMP does when it skips a step on inf / NaN gradients)."""
+
+    def __init__(self, *a, drop=False, **k):
+        self.scale_v, self.drop = 65536.0, drop
+
+    def scale(self, loss):
+        return loss
+
+    def step(self, opt):
+        opt.step()
+
+    def update(self):
+        if self.drop:
+            self.scale_v /= 2.0
+
+    def get_scale(self):
+        return self.scale_v
+
+    def state_dict(self):
+        return {"scale": self.scale_v}
+
+    def load_state_dict(self, d):
+        self.scale_v = d["scale"]
+
+
+@pytest.mark.parametrize("drop", [False, True])
+def test_the_scheduler_steps_only_when_the_scaler_did_not_skip(
+    roll_world, tmp_path, monkeypatch, drop
+):
+    torch = pytest.importorskip("torch")
+    monkeypatch.setattr(torch.amp, "GradScaler", lambda *a, **k: _FakeScaler(drop=drop))
+    meta = _resume_train(roll_world, tmp_path, monkeypatch, epochs=3, lr=1e-3, select="last")
+    lrs = [h["lr"] for h in _weights_and_log(meta)[1]["history"]]
+    if drop:  # every step "skipped": the cosine schedule never advanced
+        assert lrs == [pytest.approx(1e-3)] * 3
+    else:
+        assert lrs[0] < 1e-3 and lrs[0] > lrs[1] > lrs[2]  # cosine decay, step by step
+
+
+def test_cli_passes_resume_through(tmp_path, monkeypatch):
+    from drone_fly.cli.main import build_parser, main
+    from drone_fly.harness.offline import gate_train
+
+    got = {}
+    monkeypatch.setattr(gate_train, "train_multi", _fake_train(got))
+    cap = tmp_path / "cap"
+    (cap / "frames").mkdir(parents=True)
+    (cap / "frames.csv").write_text("t_wall_ns,file\n", "utf-8")
+    (cap / "telemetry_raw.csv").write_text("t_wall_ns,len,hex\n", "utf-8")
+    base = ["harness", "gates", "train", "--captures", str(cap), "--detector-id", "r1"]
+    assert build_parser().parse_args(base).resume is False
+    assert main([*base, "--resume"]) == 0
+    assert got["resume"] is True and got["detector_id"] == "r1"
+    got.clear()
+    assert main(base) == 0 and got["resume"] is False
