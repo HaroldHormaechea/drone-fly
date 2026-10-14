@@ -18,6 +18,7 @@ from drone_fly.cli.main import build_parser, main
 def roots(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
+    monkeypatch.setenv("DRONE_FLY_DATA_ROOT", str(repo / "artifacts"))
     droot = tmp_path / "drones"
     droot.mkdir()
     monkeypatch.setattr("drone_fly.harness.config.find_repo_root", lambda *a, **kw: repo)
