@@ -648,6 +648,33 @@ class GatePerception:
         self.ptr_body = torch.where(avail.unsqueeze(-1), ptr, torch.zeros_like(ptr))
         self.ptr_avail = avail
 
+    def _fp_suppress(self, slot: str, cand: torch.Tensor, fp_world: torch.Tensor, R: torch.Tensor,
+                     pos: torch.Tensor, t: torch.Tensor, frame: torch.Tensor) -> torch.Tensor:  # fmt: skip
+        """Reject (``True``) a false-positive candidate via the enabled sub-gates (UC70 run-2):
+        pointer-consistency (target slot only), memory-consistency, temporal persistence. Mirrors
+        :meth:`ReferencePerception._fp_suppress`; all sub-gates off ⇒ all ``False`` (run-1)."""
+        c = self.cfg
+        supp = torch.zeros_like(cand)
+        if slot == "t" and c.fp_suppress_pointer:
+            ptr_world = _mv(R, self.ptr_body)
+            fp_dir = fp_world - pos
+            fp_dirn = fp_dir / fp_dir.norm(dim=-1, keepdim=True).clamp(min=1e-9)
+            tol_cos = math.cos(math.radians(c.pointer_bearing_tol_deg))
+            supp = supp | (self.ptr_avail & ((ptr_world * fp_dirn).sum(-1) < tol_cos))
+        if c.fp_suppress_memory:
+            mw, mv, ms = ((self.tm_world, self.tm_valid, self.tm_stamp) if slot == "t"
+                          else (self.nm_world, self.nm_valid, self.nm_stamp))  # fmt: skip
+            fresh = mv & ((t - ms) <= c.gate_memory_fresh_s)
+            supp = supp | (fresh & ((fp_world - mw).norm(dim=-1) > c.fp_memory_tol))
+        if c.fp_suppress_temporal:
+            attr = "t_streak" if slot == "t" else "n_streak"
+            streak = torch.where(frame, torch.where(cand, getattr(self, attr) + 1,
+                                                    torch.zeros_like(getattr(self, attr))),
+                                 getattr(self, attr))  # fmt: skip
+            setattr(self, attr, streak)
+            supp = supp | (streak < int(c.fp_temporal_frames))
+        return supp
+
     # ---- the tick ----
     def step(
         self,
@@ -704,7 +731,7 @@ class GatePerception:
         for name in ("n_known", "n_fp", "n_active", "n_miss"):
             setattr(self, name, getattr(self, name) & ~ho)
         self.n_z = torch.where(ho.unsqueeze(-1), torch.zeros_like(self.n_z), self.n_z)
-        if self.cfg.gate_memory:  # UC70 run-2: hand-over seeding — the passed slot's successor
+        if self.cfg.gate_memory or self.cfg.fp_suppress_memory:  # UC70 run-2: hand-over seeding —
             ho1 = ho.unsqueeze(-1)  # memory shifts into the target so a briefly-lost gate re-targets
             self.tm_world = torch.where(ho1, self.nm_world, self.tm_world)
             self.tm_yaw = torch.where(ho, self.nm_yaw, self.tm_yaw)
@@ -736,6 +763,9 @@ class GatePerception:
             wrong = d["fp_any"] < self.tab["acq_wrong_present"]
         fp_relb, fp_nb = (self._fp_sample(d, pd, Rd, scale) if not self.exact
                           else (relb_t, nb_t))  # fmt: skip
+        # the false-positive candidate's world pose (shared by the FP-suppression sub-gates and,
+        # when a candidate is promoted below, by the fixed FP target / next mis-association)
+        fp_world = pd + _mv(Rd, fp_relb)
         # Markov / AR state advances on every processed frame
         self.t_miss = torch.where(frame & ~self.t_fp, miss_t, self.t_miss)
         self.t_z = torch.where(frame.unsqueeze(-1), z_t, self.t_z)
@@ -746,7 +776,12 @@ class GatePerception:
         if self.reacq:  # (a) a stale held target re-acquires from this frame's candidates
             stale = self.t_acq & ~self.t_active & (t - self.t_seen > c.drop_after_s)
             unacq = unacq | (frame & stale & (det_t | wrong))
-        pick_fp = unacq & wrong & (~det_t | (d["fp_pick"] < self.tab.get("acq_pick_wrong", 0.5)))
+        cand_fp = unacq & wrong & (~det_t | (d["fp_pick"] < self.tab.get("acq_pick_wrong", 0.5)))
+        # UC70 run-2: false-positive suppression sub-gates on the target acquisition candidate —
+        # pointer-consistency, memory-consistency, temporal persistence; each toggleable, no new
+        # draws. All off ⇒ ``pick_fp = cand_fp`` (run-1).
+        supp_t = self._fp_suppress("t", cand_fp, fp_world, R, pos, t, frame)
+        pick_fp = cand_fp & ~supp_t
         acq_true = unacq & det_t & ~pick_fp
         new_t = pos + _mv(R, relb_t)
         assoc = (new_t - self.t_world).norm(dim=-1) <= c.assoc_limit
@@ -761,16 +796,19 @@ class GatePerception:
         if self.reacq:
             self.t_good = torch.where(acq_true | pick_fp, t, self.t_good)
             self.t_last = self.t_last & ~(acq_true | pick_fp)
-        # a false-positive target is fixed in the world at its sighting
-        fp_world = pd + _mv(Rd, fp_relb)
+        # a false-positive target is fixed in the world at its sighting (``fp_world`` above)
         fp_n = _mv(Rd, fp_nb)
         self.t_world = torch.where(pick_fp.unsqueeze(-1), fp_world, self.t_world)
         self.t_yaw = torch.where(pick_fp, torch.atan2(fp_n[:, 1], fp_n[:, 0]), self.t_yaw)
         self.t_seen = torch.where(pick_fp, t, self.t_seen)
         # next slot (only while a target is held)
         nframe = frame & self.t_acq & ~pick_fp
-        mis = nframe & any_fp & (d["next_mis"] < (self.tab.get("fp_next_misassoc", 0.0)
-                                                  if not self.exact else 0.0))  # fmt: skip
+        cand_mis = nframe & any_fp & (d["next_mis"] < (self.tab.get("fp_next_misassoc", 0.0)
+                                                       if not self.exact else 0.0))  # fmt: skip
+        # UC70 run-2: FP suppression on the next-slot mis-association (memory + temporal; the
+        # pointer bears on the TARGET gate, not the next one, so it is not applied here).
+        supp_n = self._fp_suppress("n", cand_mis, fp_world, R, pos, t, frame)
+        mis = cand_mis & ~supp_n
         upd_n = nframe & det_n & ~mis
         self.n_active = torch.where(nframe, upd_n | mis, self.n_active)
         self.n_relb = torch.where(
@@ -797,8 +835,8 @@ class GatePerception:
         self.n_seen = torch.where(a_n, t, self.n_seen)
         self.ticks_since = torch.where(a_t, torch.zeros_like(self.ticks_since),
                                        self.ticks_since + 1)  # fmt: skip
-        if self.cfg.gate_memory:  # UC70 run-2: remember each slot's last CONFIDENT (non-FP) pose
-            conf_t = a_t & ~self.t_fp
+        if self.cfg.gate_memory or self.cfg.fp_suppress_memory:  # UC70 run-2: remember each slot's
+            conf_t = a_t & ~self.t_fp  # last CONFIDENT (non-FP) pose — for the fallback / FP gate
             self.tm_world = torch.where(conf_t.unsqueeze(-1), self.t_world, self.tm_world)
             self.tm_yaw = torch.where(conf_t, self.t_yaw, self.tm_yaw)
             self.tm_stamp = torch.where(conf_t, t, self.tm_stamp)

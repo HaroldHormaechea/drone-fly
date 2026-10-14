@@ -254,6 +254,33 @@ class ReferencePerception:
         self.ptr_body = ptr if avail else np.zeros(3)
         self.ptr_avail = avail
 
+    def _fp_suppress(self, slot: str, cand: bool, fp_world: np.ndarray, R: np.ndarray,
+                     pos: np.ndarray, t: float, frame: bool) -> bool:  # fmt: skip
+        """Reject a false-positive candidate via the enabled sub-gates (mirrors
+        :meth:`GatePerception._fp_suppress`); all off ⇒ ``False`` (run-1)."""
+        c = self.cfg
+        supp = False
+        if slot == "t" and c.fp_suppress_pointer:
+            fp_dir = np.asarray(fp_world, np.float64) - pos
+            fp_dirn = fp_dir / max(float(np.linalg.norm(fp_dir)), 1e-9)
+            tol_cos = math.cos(math.radians(c.pointer_bearing_tol_deg))
+            supp = supp or (self.ptr_avail and float(np.dot(R @ self.ptr_body, fp_dirn)) < tol_cos)
+        if c.fp_suppress_memory:
+            mw, mv, ms = ((self.tm_world, self.tm_valid, self.tm_stamp) if slot == "t"
+                          else (self.nm_world, self.nm_valid, self.nm_stamp))  # fmt: skip
+            fresh = mv and (t - ms) <= c.gate_memory_fresh_s
+            supp = supp or (fresh and float(np.linalg.norm(np.asarray(fp_world, np.float64)
+                                                           - np.asarray(mw, np.float64)))
+                            > c.fp_memory_tol)  # fmt: skip
+        if c.fp_suppress_temporal:
+            attr = "t_streak" if slot == "t" else "n_streak"
+            streak = getattr(self, attr)
+            if frame:
+                streak = streak + 1 if cand else 0
+                setattr(self, attr, streak)
+            supp = supp or (streak < int(c.fp_temporal_frames))
+        return bool(supp)
+
     # ---- the tick ----
     def step(
         self,
@@ -289,7 +316,7 @@ class ReferencePerception:
             if self.reacq:
                 self.t_good = float(t)
                 self.t_last = False
-            if c.gate_memory:  # UC70 run-2: hand-over seeding (mirrors GatePerception)
+            if c.gate_memory or c.fp_suppress_memory:  # UC70 run-2: hand-over seeding
                 self.tm_world = np.asarray(self.nm_world, np.float64).copy()
                 self.tm_yaw, self.tm_stamp, self.tm_valid = self.nm_yaw, self.nm_stamp, self.nm_valid
                 self.nm_valid = False
@@ -313,6 +340,7 @@ class ReferencePerception:
         p_present, p_pick = self.model.acquisition()
         wrong = (not self.exact) and d["fp_any"] < p_present
         fp_relb, fp_nb = self._fp_sample(d, scale) if not self.exact else (relb_t, nb_t)
+        fp_world = pd + Rd @ fp_relb  # the FP candidate's world pose (suppression + promotion)
         if frame:
             if not tg.fp:
                 tg.miss = miss_t
@@ -323,7 +351,12 @@ class ReferencePerception:
         if self.reacq:  # (a) a stale held target re-acquires from this frame's candidates
             stale = tg.acq and not tg.active and (t - tg.seen > c.drop_after_s)
             unacq = unacq or (frame and stale and (det_t or wrong))
-        pick_fp = unacq and wrong and ((not det_t) or d["fp_pick"] < p_pick)
+        cand_fp = unacq and wrong and ((not det_t) or d["fp_pick"] < p_pick)
+        # UC70 run-2: FP-suppression sub-gates on the target candidate (mirrors GatePerception).
+        # Call _fp_suppress UNCONDITIONALLY (no `and` short-circuit) so the temporal streak is
+        # advanced / reset every frame exactly as the torch twin does.
+        supp_t = self._fp_suppress("t", cand_fp, fp_world, R, pos, float(t), frame)
+        pick_fp = cand_fp and not supp_t
         acq_true = unacq and det_t and not pick_fp
         assoc = float(np.linalg.norm(pos + R @ relb_t - tg.world)) <= c.assoc_limit
         upd_t = (frame and tg.acq and not tg.fp and det_t and assoc) or acq_true
@@ -341,13 +374,17 @@ class ReferencePerception:
             self.t_good = float(t)
             self.t_last = False
         if pick_fp:
-            tg.world = pd + Rd @ fp_relb
+            tg.world = fp_world
             fn = Rd @ fp_nb
             tg.yaw = float(math.atan2(fn[1], fn[0]))
             tg.seen = float(t)
         nframe = frame and tg.acq and not pick_fp
         mis_rate = 0.0 if self.exact else float(self.fp.get("next_misassoc_rate", 0.0))
-        mis = nframe and any_fp and d["next_mis"] < mis_rate
+        cand_mis = nframe and any_fp and d["next_mis"] < mis_rate
+        # UC70 run-2: FP suppression on the next-slot mis-association (memory + temporal only);
+        # unconditional call so the next-slot streak advances exactly as the torch twin.
+        supp_n = self._fp_suppress("n", cand_mis, fp_world, R, pos, float(t), frame)
+        mis = cand_mis and not supp_n
         upd_n = nframe and det_n and not mis
         if nframe:
             nx.active = upd_n or mis
@@ -370,7 +407,7 @@ class ReferencePerception:
             nx.yaw = _travel_yaw(R @ nx.nb, nx.world - pos)
             nx.seen = float(t)
         self.ticks_since = 0 if a_t else self.ticks_since + 1
-        if c.gate_memory:  # UC70 run-2: remember each slot's last CONFIDENT (non-FP) pose
+        if c.gate_memory or c.fp_suppress_memory:  # UC70 run-2: last CONFIDENT (non-FP) pose
             if a_t and not tg.fp:
                 self.tm_world = np.asarray(tg.world, np.float64).copy()
                 self.tm_yaw, self.tm_stamp, self.tm_valid = tg.yaw, float(t), True
