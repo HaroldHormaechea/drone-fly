@@ -361,6 +361,168 @@ def write_calibration(report: PointerEvalReport, path: str | Path) -> Path:
     return out
 
 
+# ------------------------------------------------- real-frame calibration (telemetry + track GT)
+
+
+@dataclass
+class CaptureCalibration:
+    """Real-frame bearing error + calibration from a telemetry+track capture (AC3/AC9).
+
+    Ground truth is the body-frame bearing to the current target gate (``R^T (centre - pos)`` from
+    the paired telemetry pose + the track/race XML route — the UC64/UC70 auto-label machinery). It
+    is compared against the reader's bearing from the detected pointer pixel on frames where the
+    target gate is plausibly in view (``|az_gt| < ahead_deg``). Outliers (false detections /
+    wrong-gate / heavy blur) are trimmed to the ``inlier_pct`` best combined errors before the bias
+    / jitter stats, which are framed to replace the provisional run-2 sigmas.
+    """
+
+    n_frames: int
+    n_detected: int
+    n_evaluated: int
+    inlier_pct: float
+    bearing: BearingStats
+    bias_az_deg: float
+    bias_el_deg: float
+    jitter_std_deg: float
+    camera: dict[str, Any]
+    report_path: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        b = self.bearing.as_dict()
+        bias_rad = math.radians(math.hypot(self.bias_az_deg, self.bias_el_deg))
+        return {
+            "camera": self.camera,
+            "n_frames": self.n_frames,
+            "n_detected": self.n_detected,
+            "detection_rate": self.n_detected / self.n_frames if self.n_frames else float("nan"),
+            "n_evaluated_ahead_inlier": self.n_evaluated,
+            "bearing": b,
+            "bias_az_deg": self.bias_az_deg,
+            "bias_el_deg": self.bias_el_deg,
+            "jitter_std_deg": self.jitter_std_deg,
+            "suggested_bias_sigma_rad": bias_rad,
+            "suggested_jitter_sigma_rad": math.radians(self.jitter_std_deg),
+            "suggested_pointer_bearing_tol_deg": b["combined_deg_p95"] * 1.25,
+            "note": "replaces provisional student-liftoff-run2.yaml pointer sigmas (AC9); "
+            "re-running run-2 training with these is a downstream experiment",
+        }
+
+    def summary(self) -> str:
+        b = self.bearing.as_dict()
+        lines = [
+            f"camera {self.camera.get('width')}x{self.camera.get('height')} "
+            f"hfov {self.camera.get('hfov_deg')} uptilt {self.camera.get('uptilt_deg')}",
+            f"frames {self.n_frames}: detected {self.n_detected} "
+            f"({self.n_detected / max(self.n_frames, 1):.0%}), evaluated {self.n_evaluated}",
+            f"bearing (inlier): combined median {b['combined_deg_median']:.1f} deg, "
+            f"p95 {b['combined_deg_p95']:.1f} deg (az {b['az_error_deg_median']:.1f}, "
+            f"el {b['el_error_deg_median']:.1f})",
+            f"calibration: bias ({self.bias_az_deg:+.1f}, {self.bias_el_deg:+.1f}) deg, "
+            f"jitter std {self.jitter_std_deg:.1f} deg "
+            f"({math.radians(self.jitter_std_deg):.3f} rad)",
+        ]
+        if self.report_path:
+            lines.append(f"report: {self.report_path}")
+        return "\n".join(lines)
+
+
+def calibrate_from_capture(
+    reader: Any,
+    capture_root: str | Path,
+    track: str | Path,
+    *,
+    telemetry_cfg: dict[str, Any],
+    race: str | Path | None = None,
+    gate_aperture_m: float = 10.0,
+    ahead_deg: float = 50.0,
+    inlier_pct: float = 80.0,
+    world_scale: float = 1.0,
+    gate_types: Any = None,
+    item_table: list[dict[str, Any]] | None = None,
+    report_path: str | Path | None = None,
+) -> CaptureCalibration:
+    """Reconstruct next-gate-bearing ground truth from a capture and score ``reader`` (AC3/AC9).
+
+    ``reader`` carries the camera model (FOV / uptilt) the bearing conversion uses.
+    ``telemetry_cfg`` is the harness ``telemetry`` config section (datagram layout).
+    ``gate_aperture_m`` sets the pass
+    radius the route progression uses to pick the current target gate; make it comfortably larger
+    than the real gate when the default under-advances. Writes ``pointer_calibration.json`` when
+    ``report_path`` is given.
+    """
+    from drone_fly.harness.geometry import quat_to_matrix
+    from drone_fly.harness.offline.capture import load_capture
+    from drone_fly.harness.offline.evaluate import ground_truth_targets
+    from drone_fly.harness.offline.track_xml import load_track_course
+    from drone_fly.harness.scale import WorldScale
+
+    cap = load_capture(capture_root, telemetry_cfg, world_scale)
+    table = item_table or [
+        {
+            "match": "(?i)gate|arch",
+            "kind": "gate",
+            "width": gate_aperture_m,
+            "height": gate_aperture_m,
+        }
+    ]
+    course = load_track_course(track, race, table, WorldScale(world_scale), gate_types=gate_types)
+    targets = ground_truth_targets(cap.states, course)
+    rows: list[tuple[float, float, float]] = []  # (combined, d_az, d_el) in radians
+    n_detected = 0
+    for fr in cap.frames:
+        block = reader.read(_load_image(fr.path))
+        if block[3] < 0.5:
+            continue
+        n_detected += 1
+        g = course.gates[targets[fr.sample_index]]
+        rot = quat_to_matrix(np.asarray(fr.state.quat, np.float64))
+        rel = rot.T @ (np.asarray(g.center, np.float64) - np.asarray(fr.state.pos, np.float64))
+        gt = rel / max(float(np.linalg.norm(rel)), 1e-9)
+        gaz, gel = az_el(gt)
+        if abs(gaz) > math.radians(ahead_deg):
+            continue  # target gate not plausibly in view; the pointer would be absent/clamped
+        paz, pel = az_el(block[:3])
+        rows.append((angular_error(block[:3], gt), _wrap(paz - gaz), pel - gel))
+    bear = BearingStats()
+    bias_az = bias_el = jitter = float("nan")
+    if rows:
+        combined = np.array([r[0] for r in rows])
+        keep = combined <= np.percentile(combined, inlier_pct)
+        inl = [r for r, k in zip(rows, keep, strict=True) if k]
+        bear.combined_rad = [r[0] for r in inl]
+        bear.az_error_rad = [r[1] for r in inl]
+        bear.el_error_rad = [r[2] for r in inl]
+        az = np.array(bear.az_error_rad)
+        el = np.array(bear.el_error_rad)
+        bias_az = math.degrees(float(np.median(az)))
+        bias_el = math.degrees(float(np.median(el)))
+        jitter = math.degrees(
+            float(np.std(np.concatenate([az - np.median(az), el - np.median(el)])))
+        )
+    cam = reader.camera
+    out = CaptureCalibration(
+        n_frames=len(cap.frames),
+        n_detected=n_detected,
+        n_evaluated=len(bear.combined_rad),
+        inlier_pct=float(inlier_pct),
+        bearing=bear,
+        bias_az_deg=bias_az,
+        bias_el_deg=bias_el,
+        jitter_std_deg=jitter,
+        camera={
+            "width": cam.width,
+            "height": cam.height,
+            "hfov_deg": cam.hfov_deg,
+            "uptilt_deg": cam.uptilt_deg,
+        },
+    )
+    if report_path is not None:
+        p = Path(report_path)
+        p.write_text(json.dumps(out.as_dict(), indent=2), encoding="utf-8")
+        out.report_path = str(p)
+    return out
+
+
 __all__ = [
     "PointerLabel",
     "PointerSample",
@@ -375,4 +537,6 @@ __all__ = [
     "load_manifest",
     "run_pointer_eval",
     "write_calibration",
+    "CaptureCalibration",
+    "calibrate_from_capture",
 ]

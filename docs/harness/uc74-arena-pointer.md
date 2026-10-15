@@ -1,0 +1,122 @@
+# UC74 — Live HUD next-gate pointer: Liftoff Arena calibration & launch recipe
+
+The UC74 reader detects Liftoff's on-screen **next-gate pointer** (a white HUD ring) with classic
+OpenCV — no ML — and converts its screen position into the body-frame unit bearing + availability
+bit the UC70 run-2 student already consumes (`est.info["pointer"]`, schema v3). This doc records
+the real-frame calibration for **Arena "04 - Infinity Loop" @ 2560×1080** and the turnkey recipe
+to fly the run-2 student there with the pointer live.
+
+Nothing here retrains the student: the pointer is a body-frame unit vector in the obs tail, so the
+reader fills a signal that is otherwise zeros/bit-0 live (AC6).
+
+## What the pointer looks like (Arena, ACRO)
+
+- The next-gate pointer is a **clean white ring** (a see-through hole shows the background) that is
+  billboarded at the next gate, so it **roams** the central play area as the gate moves.
+- The fixed **ACRO aiming reticle** is an *identical-looking* white ring at the exact image centre,
+  with four tick marks. It is a permanent same-size confuser, so the reader separates the pointer
+  from the reticle **by position**: `camera.pointer.center_exclude_radius_frac` drops any detection
+  within ~35 px of the principal point.
+- Both are near-white (low S, high V); colour can't separate them. The pointer is keyed on white +
+  shape (circularity/solidity) inside `camera.pointer_roi`, with the centre-exclusion removing the
+  reticle and `ambiguity_ratio` rejecting frames with two equally-good blobs.
+
+## Calibration (from `uc74-captures/uc74-liftoff-arena-04`, 755 HUD-visible frames)
+
+Ground truth is the body-frame bearing to the current target gate, reconstructed from the paired
+telemetry pose + the track/race XML route (the UC64/UC70 auto-label machinery), compared to the
+reader's bearing on frames where the target gate is plausibly in view. Reproduce with
+`drone_fly.harness.offline.pointer_eval.calibrate_from_capture` (see "Reproduce" below).
+
+| Quantity | Value |
+|---|---|
+| Camera fit (hfov / uptilt) | **122° / 27.5°** (generic 120° / 25° defaults were within noise) |
+| Detection rate (all frames) | 52% (395 / 755) — the pointer is genuinely absent at the start line, gate passes, and hard off-axis turns |
+| Combined bearing error (inlier) | **median 3.7°, p95 13.1°** |
+| Azimuth / elevation error (inlier median) | 2.4° / 2.4° |
+| Systematic bias | (−0.4°, −0.1°) ⇒ ~0.007 rad |
+| Per-tick jitter (std) | **4.9° ⇒ 0.085 rad** |
+
+Machine-readable report: [`uc74-arena-pointer-calibration.json`](uc74-arena-pointer-calibration.json).
+
+### AC9 — inputs for a future run-2 noise re-tune
+
+The provisional `student-liftoff-run2.yaml` pointer sigmas vs. the real measurement:
+
+| Config key | Provisional | Measured (suggested) | Takeaway |
+|---|---|---|---|
+| `pointer.bias_sigma_rad` | 0.05 (~2.9°) | **~0.007** | sim **over**-modelled bias |
+| `pointer.jitter_sigma_rad` | 0.03 (~1.7°) | **~0.085** | sim **under**-modelled jitter (~2.8×) — the real HUD reader is noisier tick-to-tick than assumed |
+| `pointer.bearing_tol_deg` | 20.0 | **~16** | provisional tolerance was slightly conservative |
+
+Re-running run-2 training with these values is a **downstream experiment**, out of UC74's scope —
+this only produces the numbers. The tail (p95 13°) is driven by motion blur and the pointer's
+billboard offset from the gate centre, so a fat-tailed jitter model may fit better than a Gaussian.
+
+## Turnkey launch recipe (Windows + Liftoff)
+
+The camera/pointer calibration lives in the **`liftoff_arena` preset**
+(`src/drone_fly/harness/configs/liftoff_arena.yaml`), overlaid on the packaged `liftoff_5inch`
+default.
+
+```
+drone-fly harness run \
+  --harness liftoff \
+  --checkpoint <path/to/student-liftoff-run2 export.pt> \
+  --preset liftoff_arena \
+  --overlay            # optional: UC65 debug overlay to watch the pointer bearing live (AC8)
+```
+
+Before flying, confirm:
+
+1. **Gate detector = learned.** The run-2 student is validated against the learned gate detector
+   (`parts.gate_estimator: learned`) and its weights (`gates.learned.weights`; the released weights
+   auto-download, sha256-verified). Set these in a thin user `--config` if the default doesn't
+   already point at them.
+2. **Camera match.** `check_student_config` refuses to fly if the live camera
+   (resolution / hfov / uptilt) differs from what the student's noise model assumed. The preset is
+   2560×1080 @ 122°/27.5°; if the student was exported for a different camera, re-export/record at a
+   matching resolution, or adjust the preset to the student's camera (the pointer bearing itself is
+   resolution-independent — a body-frame unit vector — but the gate obs is not).
+3. **HUD on, ACRO mode.** The pointer is only present with the in-game next-gate HUD visible. The
+   centre-exclusion assumes the ACRO reticle at screen centre.
+4. **Telemetry StreamFormat** matches `telemetry.stream_format` (the student also observes the
+   battery — UC69/70).
+
+The pointer availability bit drops to 0 at the start line, at gate passes, and when the gate is far
+off-axis; the student was trained with per-episode pointer dropout for exactly this (AC4), so it
+keeps flying on the degraded signal.
+
+## Re-tuning for another track / resolution
+
+The masks, `pointer_roi`, HSV band and `center_exclude_radius_frac` are **layout-specific**. For a
+new track or resolution: copy `liftoff_arena.yaml`, set `camera.resolution`, re-draw `camera.masks`
++ `camera.pointer_roi` from a capture, confirm the white band on your HUD theme, and re-run the
+calibration below to refit hfov/uptilt and re-measure the bearing error.
+
+## Reproduce the calibration
+
+```python
+from drone_fly.harness.config import load_config
+from drone_fly.harness.liftoff.gate_cv import camera_from_config
+from drone_fly.harness.liftoff.masks import FrameMasks
+from drone_fly.harness.liftoff.pointer_cv import pointer_reader_from_config
+from drone_fly.harness.offline.pointer_eval import calibrate_from_capture
+
+cap = "uc74-captures/uc74-liftoff-arena-04"
+cfg = load_config("liftoff", preset="liftoff_arena")
+cam = cfg.section("camera")
+reader = pointer_reader_from_config(camera_from_config(cam), cam, FrameMasks.from_config(cam))
+rep = calibrate_from_capture(
+    reader, cap, f"{cap}/track.xml", race=f"{cap}/race.xml",
+    telemetry_cfg=cfg.section("telemetry"), gate_aperture_m=10.0,
+    report_path="docs/harness/uc74-arena-pointer-calibration.json",
+)
+print(rep.summary())
+```
+
+`gate_aperture_m` sets the route-progression pass radius used to pick the current target gate; make
+it comfortably larger than the real gate if the default under-advances (the Arena arches need ~10 m
+for the route to walk cleanly). Needs the `harness` extra (`opencv-python`); use
+`opencv-python-headless` on a server without X.
+```

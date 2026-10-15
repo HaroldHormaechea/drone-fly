@@ -130,6 +130,7 @@ class HudPointerReader:
         min_solidity: float = 0.8,
         morph_kernel: int = 3,
         ambiguity_ratio: float = 0.8,
+        center_exclude_radius_frac: float = 0.0,
         template: str | Path | None = None,
         template_threshold: float = 0.7,
         template_scales: tuple[float, ...] = (0.8, 1.0, 1.25),
@@ -143,6 +144,10 @@ class HudPointerReader:
         self.min_solidity = float(min_solidity)
         self.morph_kernel = int(morph_kernel)
         self.ambiguity_ratio = float(ambiguity_ratio)
+        #: Drop candidates within this fraction of ``min(frame_w, frame_h)`` of the principal
+        #: point. 0 disables it. Suppresses a fixed centre crosshair / aiming reticle (e.g.
+        #: Liftoff's ACRO reticle) that is otherwise an identical-looking white-ring confuser.
+        self.center_exclude_radius_frac = float(center_exclude_radius_frac)
         self.template_path = None if template is None else Path(template)
         self.template_threshold = float(template_threshold)
         self.template_scales = tuple(float(s) for s in template_scales)
@@ -177,6 +182,9 @@ class HudPointerReader:
             min_solidity=num("min_solidity", 0.8, min_value=0.0, max_value=1.0),
             morph_kernel=int(num("morph_kernel", 3, min_value=1.0)),
             ambiguity_ratio=num("ambiguity_ratio", 0.8, min_value=0.0, max_value=1.0),
+            center_exclude_radius_frac=num(
+                "center_exclude_radius_frac", 0.0, min_value=0.0, max_value=1.0
+            ),
             template=pc.get("template"),
             template_threshold=num("template_threshold", 0.7, min_value=0.0, max_value=1.0),
             template_scales=tuple(float(s) for s in scales),
@@ -285,8 +293,10 @@ class HudPointerReader:
         """Full-frame pixel ``(x, y)`` of the icon, or ``None`` (absent / ambiguous).
 
         Reads the raw frame over the resolved ROI. HSV + shape first; the template match is a
-        fallback when HSV finds nothing. Ambiguity reject: if the second-best candidate's score is
-        within ``ambiguity_ratio`` of the best, the detection is treated as unavailable.
+        fallback when HSV finds nothing. A fixed centre reticle (see
+        ``center_exclude_radius_frac``) is dropped *before* the uniqueness test, so it neither wins
+        nor spuriously triggers the ambiguity reject. Ambiguity reject: if the second-best
+        remaining candidate's score is within ``ambiguity_ratio`` of the best, it is unavailable.
         """
         h, w = image.shape[:2]
         x0, y0, x1, y1 = self.resolve_roi(w, h)
@@ -296,14 +306,20 @@ class HudPointerReader:
         cands = self._candidates_hsv(roi_img)
         if not cands:
             cands = self._candidates_template(roi_img)
-        if not cands:
+        # ROI-local -> full-frame pixels, then drop anything inside the centre-exclusion disk.
+        full = [(score, cx + x0, cy + y0) for score, cx, cy in cands]
+        if self.center_exclude_radius_frac > 0 and full:
+            cam = self._camera_for(w, h)
+            r2 = (self.center_exclude_radius_frac * min(w, h)) ** 2
+            full = [c for c in full if (c[1] - cam.cx) ** 2 + (c[2] - cam.cy) ** 2 >= r2]
+        if not full:
             return None
-        cands.sort(key=lambda t: -t[0])
-        top = cands[0][0]
-        if len(cands) >= 2 and top > 0 and cands[1][0] / top >= self.ambiguity_ratio:
+        full.sort(key=lambda t: -t[0])
+        top = full[0][0]
+        if len(full) >= 2 and top > 0 and full[1][0] / top >= self.ambiguity_ratio:
             return None  # best match is not unique enough -> unavailable
-        _, cx, cy = cands[0]
-        return np.array([cx + x0, cy + y0], np.float64)
+        _, cx, cy = full[0]
+        return np.array([cx, cy], np.float64)
 
     def read(self, image: np.ndarray) -> np.ndarray:
         """Raw BGR frame -> ``float32[4]`` pointer block (:data:`UNAVAILABLE` when no icon)."""
