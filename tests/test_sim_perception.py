@@ -339,7 +339,7 @@ def test_reset_clears_only_the_masked_envs(tmp_path):
 def test_pointer_block_is_the_truth_bearing_and_drops_out(tmp_path):
     """The appended pointer block is the EXACT body-frame unit bearing to the truth target centre
     (+ an availability bit) when the pointer noise is off; per-episode dropout forces the whole
-    episode to bit 0 / zeros (the pre-UC72 degraded state the student trains for)."""
+    episode to bit 0 / zeros (the pre-UC74 degraded state the student trains for)."""
     model = load_model(tmp_path, a=12.0, timing=FAST)
     # a forward gate -> body +x, available
     p, d, _ = run(model, 1, 0, 0.02)
