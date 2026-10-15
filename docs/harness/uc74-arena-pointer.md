@@ -53,6 +53,43 @@ Re-running run-2 training with these values is a **downstream experiment**, out 
 this only produces the numbers. The tail (p95 13°) is driven by motion blur and the pointer's
 billboard offset from the gate centre, so a fat-tailed jitter model may fit better than a Gaussian.
 
+### UC75 — run2b: the re-tuned noise model + off-axis guard
+
+UC75 applies these numbers as a **new variant**,
+`src/drone_fly/training/configs/student-liftoff-run2b.yaml` (`extends: student-liftoff-run2`,
+overriding only `perception.pointer`); `student-liftoff-run2.yaml` is unchanged as the A/B baseline.
+The student obs schema is unchanged (v3, DIM 65).
+
+| Config key | run2 (provisional) | run2b | Source (`uc74-arena-pointer-calibration.json`) |
+|---|---|---|---|
+| `pointer.bias_sigma_rad` | 0.05 | **0.0073** | `suggested_bias_sigma_rad` 0.00734 |
+| `pointer.jitter_sigma_rad` | 0.03 | **0.085** | `suggested_jitter_sigma_rad` 0.08503 (per-axis, as the sim draws it) |
+| `pointer.bearing_tol_deg` | 20.0 | **16.4** | `suggested_pointer_bearing_tol_deg` 16.38 |
+| `pointer.dropout_p` | 0.1 | **0.5** | `1 - detection_rate` = 1 - 0.523 |
+
+**Dropout.** `dropout_p` is drawn per *episode*, while the live pointer is missing on ~48 % of
+*frames*. The student policy is feedforward per tick and the pointer is not in its obs-history EMA,
+so what it learns about pointer absence is set by the marginal share of bit-0 ticks, which is
+`dropout_p`. 0.5 matches the live share (the off-axis guard below only raises it) and still leaves
+half the episodes pointer-on. A per-tick or state-conditioned availability model would need sim and
+reference-perception changes; it is a follow-up if the run2b re-eval shows pointer over-reliance.
+
+**Off-axis guard.** `camera.pointer.max_bearing_az_deg` (default `null` = off) makes the live
+reader report the pointer unavailable (bit 0, zero bearing) when the detection's body-frame
+`|az| = |atan2(by, bx)|` is strictly greater than it. The `liftoff_arena` preset sets **30°**, per
+the verdict below (this ROI reaches ~44° at 122° hfov, so it is a real cut). Note that this applies
+to **every** student flown with `--preset liftoff_arena`, including existing run-2 exports; to fly without it,
+pass a user `--config` that sets `camera.pointer.max_bearing_az_deg: null`.
+
+**Retrain / export / fly** (the CUDA retrain and the re-evaluation vs the run-2 baseline are
+user-side GPU follow-ups, not done in-sandbox):
+
+```
+drone-fly train student --config student-liftoff-run2b --teacher <run> --noise <noise_model.yaml>     --device cuda [--resume <run folder>]
+drone-fly train export <run> --out <student-run2b.pt>
+drone-fly harness run --harness liftoff --checkpoint <student-run2b.pt> --preset liftoff_arena
+```
+
 ## Conversion-model verdict (bounds AC3)
 
 Is the icon a faithful camera-frame projection of the gate (so pixel→ray→body holds), or a
@@ -75,8 +112,9 @@ physical camera (122°/27.5°) confirms it. So the **attitude-aware hook is not 
 on-axis regime** that matters when flying toward a gate. Beyond ~±30–40° the error climbs steeply:
 the icon **clamps toward the screen edge** (a direction indicator, no longer a true projection), so
 those readings are unreliable. The `pointer_roi` already excludes the screen edges, and the student
-trained with pointer dropout tolerates the resulting unavailability; a bearing-magnitude guard
-(treat `|az| ≳ 30°` as low-confidence) is the natural next refinement if the live run wants it.
+trained with pointer dropout tolerates the resulting unavailability. UC75 adds the bearing-magnitude
+guard: `camera.pointer.max_bearing_az_deg` (the `liftoff_arena` preset sets 30°) reads `|az| > 30°`
+as unavailable — see "UC75 — run2b" above.
 
 ## Turnkey launch recipe (Windows + Liftoff)
 
@@ -147,7 +185,11 @@ from drone_fly.harness.liftoff.pointer_cv import pointer_reader_from_config
 from drone_fly.harness.offline.pointer_eval import calibrate_from_capture
 
 cap = "uc74-captures/uc74-liftoff-arena-04"
-cfg = load_config("liftoff", preset="liftoff_arena")
+# UC75: the preset now enables the |az| guard, which would change these stats; turn it off to
+# reproduce the committed JSON (pointer_eval measures through reader.read()).
+cfg = load_config(
+    "liftoff", preset="liftoff_arena", overrides={"camera.pointer.max_bearing_az_deg": None}
+)
 cam = cfg.section("camera")
 reader = pointer_reader_from_config(camera_from_config(cam), cam, FrameMasks.from_config(cam))
 rep = calibrate_from_capture(

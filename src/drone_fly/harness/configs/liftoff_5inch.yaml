@@ -113,6 +113,9 @@ camera:
     template: null              # optional greyscale template image path (multi-scale fallback)
     template_threshold: 0.7
     template_scales: [0.8, 1.0, 1.25]
+    # Off-axis trust guard (UC75): a detection with body-frame |az| > this (deg) reads unavailable
+    # (bit 0), since the HUD pointer clamps toward the screen edge off-axis. null = off (default).
+    max_bearing_az_deg: null
   # Pointer ROI override [x, y, w, h] at `resolution` (wins over mask-derived ROI); null = derive
   # from `masks` (or `pointer_roi_mask` to pick one). The pointer roams here following the gate.
   pointer_roi: null

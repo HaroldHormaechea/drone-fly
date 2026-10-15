@@ -23,6 +23,14 @@ masking that region on its own copy, so the two consumers never fight. The ROI i
 **hybrid policy** (:class:`PointerRoi`): an explicit ``camera.pointer_roi`` rect wins; otherwise it
 is derived from the HUD ``camera.masks`` geometry; both scale with capture resolution.
 
+Off-axis trust guard (UC75). UC74's real-frame captures showed the HUD pointer is a faithful
+projection only within ``|az| ~20-25 deg`` and clamps toward the screen edge beyond ~30-40 deg
+(error 15-75 deg). ``camera.pointer.max_bearing_az_deg`` (default ``None`` = off) marks a detection
+whose body-frame ``|az| = |atan2(by, bx)|`` exceeds it as :data:`UNAVAILABLE`, so the live reader
+and the run2b noise model agree about where the pointer is trusted. A guarded block is identical
+to "no icon" downstream; the only pointer false-positive gate is sim-side and already masked by
+availability, so the guard composes with it consistently.
+
 OpenCV is imported lazily on first use (``_cv2()``), matching the gate estimator's pattern.
 """
 
@@ -134,6 +142,7 @@ class HudPointerReader:
         template: str | Path | None = None,
         template_threshold: float = 0.7,
         template_scales: tuple[float, ...] = (0.8, 1.0, 1.25),
+        max_bearing_az_deg: float | None = None,
     ) -> None:
         self.camera = camera
         self.roi = roi
@@ -152,6 +161,9 @@ class HudPointerReader:
         self.template_threshold = float(template_threshold)
         self.template_scales = tuple(float(s) for s in template_scales)
         self._template: np.ndarray | None = None
+        #: Off-axis trust guard (UC75): a detection whose body-frame ``|az|`` (deg) is strictly
+        #: greater than this reads :data:`UNAVAILABLE`. ``None`` disables it (pre-UC75 behaviour).
+        self.max_bearing_az_deg = None if max_bearing_az_deg is None else float(max_bearing_az_deg)
 
     @classmethod
     def from_config(
@@ -188,6 +200,15 @@ class HudPointerReader:
             template=pc.get("template"),
             template_threshold=num("template_threshold", 0.7, min_value=0.0, max_value=1.0),
             template_scales=tuple(float(s) for s in scales),
+            # Not via `num`: it float()s the result, and null (= guard off) must stay None.
+            max_bearing_az_deg=require_number(
+                pc.get("max_bearing_az_deg"),
+                "camera.pointer.max_bearing_az_deg",
+                min_value=0.0,
+                min_exclusive=True,
+                max_value=180.0,
+                allow_none=True,
+            ),
         )
 
     # ------------------------------------------------------------------ geometry
@@ -322,7 +343,11 @@ class HudPointerReader:
         return np.array([cx, cy], np.float64)
 
     def read(self, image: np.ndarray) -> np.ndarray:
-        """Raw BGR frame -> ``float32[4]`` pointer block (:data:`UNAVAILABLE` when no icon)."""
+        """Raw BGR frame -> ``float32[4]`` pointer block (:data:`UNAVAILABLE` when no icon).
+
+        Also :data:`UNAVAILABLE` when the off-axis guard is set and the bearing's ``|az|`` is
+        strictly greater than ``max_bearing_az_deg`` (exactly equal stays available).
+        """
         px = self.detect_icon(image)
         if px is None:
             return UNAVAILABLE.copy()
@@ -330,6 +355,10 @@ class HudPointerReader:
         bearing = self.body_bearing(px, w, h)
         if not np.any(bearing):
             return UNAVAILABLE.copy()
+        if self.max_bearing_az_deg is not None:
+            az_deg = np.degrees(abs(np.arctan2(float(bearing[1]), float(bearing[0]))))
+            if az_deg > self.max_bearing_az_deg:
+                return UNAVAILABLE.copy()  # off-axis: the HUD pointer clamps here (UC74)
         return np.concatenate([bearing, [1.0]]).astype(_F)
 
 

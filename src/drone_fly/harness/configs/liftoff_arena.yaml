@@ -36,6 +36,10 @@ camera:
     morph_kernel: 3
     ambiguity_ratio: 0.8
     center_exclude_radius_frac: 0.0324   # ~35 px at 1080 h — drops the centred ACRO reticle
+    # Off-axis trust guard (UC75): UC74 real-frame captures show the pointer is faithful within
+    # |az| ~20-25 deg (median error ~4 deg) and clamps toward the screen edge beyond ~30-40 deg
+    # (error 15-75 deg), so |az| > 30 deg reads unavailable. This ROI reaches ~44 deg at 122 hfov.
+    max_bearing_az_deg: 30.0
   # The pointer roams the central play area following the next gate; this rect excludes the top
   # HUD, the right ghost list and the bottom widgets. [x, y, w, h] at `resolution`.
   pointer_roi: [700, 130, 1200, 760]
