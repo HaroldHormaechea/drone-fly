@@ -311,6 +311,18 @@ def test_liftoff_arena_preset_loads_and_enables_the_pointer():
     assert len(reader.hsv_ranges) == 1
     assert reader.center_exclude_radius_frac == pytest.approx(0.0324)
     assert reader.camera.width == 2560 and reader.camera.height == 1080
+    assert reader.max_bearing_az_deg == 30.0  # UC75 off-axis trust guard opts in
+
+
+def test_uc75_default_liftoff_off_axis_guard_is_present_but_off():
+    """UC75 AC3: the 5-inch default carries ``max_bearing_az_deg`` (so the Arena overlay stays
+    strict) but as null = guard off; a pointer-enabled default-style reader has no guard."""
+    cam = load_config("liftoff").section("camera")
+    assert "max_bearing_az_deg" in cam["pointer"]
+    assert cam["pointer"]["max_bearing_az_deg"] is None
+    enabled = {**cam, "pointer": {**cam["pointer"], "enabled": True}}
+    reader = pointer_reader_from_config(camera_from_config(enabled), enabled)
+    assert reader is not None and reader.max_bearing_az_deg is None
 
 
 def test_liftoff_arena_pointer_roi_is_in_frame_and_clears_the_hud_masks():
@@ -337,7 +349,9 @@ def test_default_liftoff_pointer_surface_is_present_but_off():
     assert pointer_reader_from_config(camera_from_config(cam), cam) is None
 
 
-@pytest.mark.parametrize("pattern", [r"hfov_deg", r"uptilt_deg", r"center_exclude_radius_frac"])
+@pytest.mark.parametrize(
+    "pattern", [r"hfov_deg", r"uptilt_deg", r"center_exclude_radius_frac", r"max_bearing_az_deg"]
+)
 def test_arena_calibrated_values_name_their_source(pattern):
     """The calibrated Arena values cite a real-frame fit / CALIBRATE provenance nearby."""
     lines = _arena_text().splitlines()

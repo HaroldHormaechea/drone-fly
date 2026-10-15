@@ -31,9 +31,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from drone_fly.harness.errors import HarnessConfigError
 from drone_fly.harness.geometry import CameraModel
 from drone_fly.harness.liftoff.masks import FrameMasks
 from drone_fly.harness.liftoff.pointer_cv import (
+    UNAVAILABLE,
     HudPointerReader,
     PointerRoi,
     pointer_reader_from_config,
@@ -373,3 +375,107 @@ def test_pointer_reader_from_config_builds_reader_from_camera_block() -> None:
     assert reader.roi is not None and reader.roi.rect == (100, 120, 120, 60)
     assert len(reader.hsv_ranges) == 1 and reader.min_circularity == 0.5
     assert reader.center_exclude_radius_frac == pytest.approx(0.03)  # from_config key parsed
+
+
+# ------------------------------------------------------- UC75 off-axis |az| trust guard
+
+#: An off-centre glyph on the 320x180 / hfov-90 fixture camera (fx = 160): ~100 px right of the
+#: principal point, so |az| ~ 32 deg — well off-axis.
+_OFF_AXIS_PX = (260, 90)
+
+
+def _az_deg(bearing: np.ndarray) -> float:
+    return math.degrees(abs(math.atan2(float(bearing[1]), float(bearing[0]))))
+
+
+def _off_axis_ground_truth() -> tuple[np.ndarray, np.ndarray, float]:
+    """``(frame, unguarded block, |az| deg)`` for the off-axis fixture glyph."""
+    img = render_icon(_OFF_AXIS_PX)
+    reader = make_reader()
+    px = reader.detect_icon(img)
+    assert px is not None
+    bearing = reader.body_bearing(px, img.shape[1], img.shape[0])
+    block = reader.read(img)
+    assert block[3] == 1.0
+    return img, block, _az_deg(bearing)
+
+
+def _guard_cam_cfg(value: object = "absent") -> dict:
+    pointer = {"enabled": True, "hsv_ranges": [[[40, 100, 100], [80, 255, 255]]]}
+    if value != "absent":
+        pointer["max_bearing_az_deg"] = value
+    return {"resolution": [320, 180], "pointer": pointer}
+
+
+def test_uc75_guard_defaults_off_and_off_axis_icon_reads_as_before(cv2) -> None:
+    """AC3 default-off: no kwarg, a config without the key and an explicit null all leave the
+    guard off, and an off-axis icon reads available exactly as pre-UC75."""
+    img, block, az = _off_axis_ground_truth()
+    assert az > 30.0  # genuinely off-axis, so a 30 deg guard would have dropped it
+    assert make_reader().max_bearing_az_deg is None
+    cam = default_camera()
+    for cam_cfg in (_guard_cam_cfg(), _guard_cam_cfg(None)):
+        reader = pointer_reader_from_config(cam, cam_cfg)
+        assert reader is not None and reader.max_bearing_az_deg is None
+        np.testing.assert_array_equal(reader.read(img), block)
+
+
+@pytest.mark.parametrize("path", ["kwarg", "from_config"])
+def test_uc75_guard_boundary_just_inside_available_just_outside_unavailable(cv2, path) -> None:
+    """AC3/AC6 boundary: a threshold 0.5 deg above the icon's |az| keeps it available (bearing
+    unchanged); 0.5 deg below reads UNAVAILABLE (bit 0, bearing zeroed). Both readers are built
+    through the same path with an otherwise identical camera / ROI."""
+    img, block, az = _off_axis_ground_truth()
+
+    def build(threshold: float) -> HudPointerReader:
+        if path == "kwarg":
+            return make_reader(max_bearing_az_deg=threshold)
+        reader = pointer_reader_from_config(default_camera(), _guard_cam_cfg(threshold))
+        assert reader is not None
+        return reader
+
+    inside, outside = build(az + 0.5), build(az - 0.5)
+    assert inside.max_bearing_az_deg == pytest.approx(az + 0.5)
+    np.testing.assert_array_equal(inside.read(img), block)
+    guarded = outside.read(img)
+    assert guarded.dtype == UNAVAILABLE.dtype
+    np.testing.assert_array_equal(guarded, UNAVAILABLE)
+    assert guarded is not UNAVAILABLE  # a copy, never the shared constant
+
+
+def test_uc75_guard_keeps_an_on_axis_icon_and_is_symmetric_in_az(cv2) -> None:
+    """The guard is on |az|: a near-centre icon stays available under a 30 deg guard, and the
+    mirrored off-axis icon (left of centre) is dropped just like the right-hand one."""
+    reader = make_reader(max_bearing_az_deg=30.0)
+    assert reader.read(render_icon((170, 90)))[3] == 1.0
+    for px in (_OFF_AXIS_PX, (320 - _OFF_AXIS_PX[0], _OFF_AXIS_PX[1])):
+        np.testing.assert_array_equal(reader.read(render_icon(px)), UNAVAILABLE)
+
+
+def test_uc75_guard_exactly_at_threshold_stays_available() -> None:
+    """The comparison is strict: |az| exactly equal to the threshold stays available. Driven
+    through ``read`` with a stubbed detector so the bearing is exact."""
+    cam = default_camera()
+    px = (cam.cx + 60.0, cam.cy)
+    probe = HudPointerReader(cam, None)
+    az = _az_deg(probe.body_bearing(px, cam.width, cam.height))
+    img = np.zeros((cam.height, cam.width, 3), np.uint8)
+    for threshold, avail in ((az, 1.0), (az + 1e-6, 1.0), (az - 1e-6, 0.0)):
+        reader = HudPointerReader(cam, None, max_bearing_az_deg=threshold)
+        reader.detect_icon = lambda _img, _px=px: np.array(_px, np.float64)  # type: ignore[method-assign]
+        assert reader.read(img)[3] == avail, threshold
+
+
+@pytest.mark.parametrize("bad", [0, 0.0, -1, 181, 1e9, "30", True])
+def test_uc75_guard_from_config_rejects_out_of_range(bad) -> None:
+    """AC3/AC6 validation: the threshold must be in (0, 180]; bools / strings are rejected."""
+    with pytest.raises(HarnessConfigError):
+        pointer_reader_from_config(default_camera(), _guard_cam_cfg(bad))
+
+
+@pytest.mark.parametrize("ok", [None, 180, 30, 0.01])
+def test_uc75_guard_from_config_accepts_null_and_in_range(ok) -> None:
+    """Null (guard off) and any value in (0, 180] parse."""
+    reader = pointer_reader_from_config(default_camera(), _guard_cam_cfg(ok))
+    assert reader is not None
+    assert reader.max_bearing_az_deg == (None if ok is None else float(ok))
