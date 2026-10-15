@@ -130,5 +130,23 @@ The `liftoff_arena` preset is not used, because it refuses the gremlin-micro stu
 
 ## Results
 
-_Filled in after AC7 (train + fly): sim metrics against run2b (held-out `macro_completion`, the
-Infinity Loop score, outcome shares) and the live Infinity Loop outcome._
+Run `20261015T172229Z-student-liftoff-open`: RTX 3050, 2048 envs, 80M steps, 2026-10-15/16.
+It resumed once after a reboot at it 160. The export is `student-open.pt` (latency p50 0.70 ms, p99 1.19 ms).
+
+**Val selection (liftoff:val, noise).** The best checkpoint is it 611 at **1.8 %** macro
+completion (run2b 0.9 %, run-2 1.8 %).
+
+**Final report (32 episodes per track, seed 1234, obstacles `none`):**
+
+| set | teacher exact | student exact | student noise | student outcomes (noise) |
+|---|---|---|---|---|
+| liftoff:held-out (15 tracks) | 17.1 % | 0.0 % | 0.0 % | out-of-bounds 42 %, collision 29 %, floor 17 %, gate_lost 10 % |
+| liftoff:liftoff-arena-04 (Infinity Loop, train split) | **93.8 %** | **0.0 %** | 0.0 % | collision 50 %, out-of-bounds 44 %, floor 6 % |
+
+**Reading.** Removing obstacles did not unlock the student.
+- With **exact perception** the K1 student completes **0 %**, where the teacher completes 94 % on Infinity Loop and 17 % held-out.
+- The gap is therefore not perception (the noise and exact scores are equal) and not obstacles. The distilled K1 student simply does not reproduce the teacher's control once beta reaches 0. Training-episode completion fell from ~55 % at beta 0.9 to ~2–5 % at beta 0.
+- The remaining "collisions" on an obstacle-free Infinity Loop are scene and gate-frame contacts by an unstable trajectory, not props.
+- Next lever: the student/distillation itself, i.e. the K1 capacity vs DAgger setup. The report's "K1 capacity (MLP exact − K1 exact)" attribution is unmeasured; an `--actor mlp-student` run of the same config measures it.
+
+**Live Infinity Loop:** see the follow-up run notes (at most two recorded attempts, 2026-10-16).
