@@ -17,15 +17,19 @@ import math
 import numpy as np
 import pytest
 
+from drone_fly.harness.config import load_config
 from drone_fly.harness.errors import HarnessConfigError
+from drone_fly.harness.geometry import CameraModel
 from drone_fly.harness.offline.pointer_eval import (
     BearingStats,
     CalibrationReport,
+    CaptureCalibration,
     DetectionStats,
     PointerLabel,
     PointerSample,
     angular_error,
     az_el,
+    calibrate_from_capture,
     evaluate_pointer,
     load_manifest,
     run_pointer_eval,
@@ -33,7 +37,8 @@ from drone_fly.harness.offline.pointer_eval import (
     write_calibration,
 )
 
-from .pointer_fixtures import make_reader, render_icon
+from .liftoff_capture_support import arch_track, straight_flight, write_manual_capture
+from .pointer_fixtures import GREEN_HSV, make_reader, render_icon
 
 
 @pytest.fixture
@@ -230,3 +235,108 @@ def test_time_read_guardrail_is_positive(cv2) -> None:
     reader = make_reader()
     t = time_read(reader, render_icon((160, 90)), passes=10)
     assert math.isfinite(t) and t >= 0.0
+
+
+# ------------------------------------------- calibrate_from_capture (telemetry+track GT plumbing)
+#
+# AC3/AC9 real-frame calibration runs on the user's Windows captures; here we prove the plumbing
+# (load_capture + load_track_course + ground_truth_targets -> bearing error + bias/jitter) on a
+# SYNTHETIC capture: a level straight flight dead-ahead at a single arch, with a detectable icon
+# rendered at the image centre of each frame. With uptilt 0 the centre icon reads as the body
+# forward axis [1,0,0], which is exactly the true level dead-ahead gate bearing, so a correct
+# pipeline reports ~0 error.
+
+_CAP_SIZE = (256, 108)  # w, h
+# calibrate_from_capture's own default item table (gate aperture 10 m). We reuse it so the gate
+# centres we project against are identical to the ones the function reconstructs internally.
+_ITEM_TABLE = [{"match": "(?i)gate|arch", "kind": "gate", "width": 10.0, "height": 10.0}]
+
+
+def _synthetic_capture(tmp_path):
+    """A 4 s level straight flight toward two dead-ahead arches (load_track_course needs >= 2).
+
+    Frames start as plain grey (no icon); the recovery test overwrites each with an icon at the
+    *projected* target-gate pixel so the reader's bearing equals the reconstructed ground truth.
+    """
+    poses = straight_flight(duration_s=4.0)
+    frames = [1.0, 1.5, 2.0, 2.5, 3.0]
+    cap = write_manual_capture(
+        tmp_path / "cap",
+        poses,
+        frame_times_s=frames,
+        size=_CAP_SIZE,
+        image=lambda _k: np.full((_CAP_SIZE[1], _CAP_SIZE[0], 3), 40, np.uint8),
+    )
+    track = arch_track(
+        tmp_path / "track.xml", [("1", (0.0, 0.0, 30.0), 0.0), ("2", (0.0, 0.0, 60.0), 0.0)]
+    )
+    return cap, track
+
+
+def _paint_icons_at_projected_gate(cap_dir, track, cam):
+    """Overwrite each capture frame with a green icon at the true target-gate projection."""
+    import cv2
+
+    from drone_fly.harness.geometry import quat_to_matrix
+    from drone_fly.harness.offline.capture import load_capture
+    from drone_fly.harness.offline.evaluate import ground_truth_targets
+    from drone_fly.harness.offline.track_xml import load_track_course
+    from drone_fly.harness.scale import WorldScale
+
+    telem = load_config("liftoff").section("telemetry")
+    cap = load_capture(cap_dir, telem, 1.0)
+    course = load_track_course(track, None, _ITEM_TABLE, WorldScale(1.0))
+    targets = ground_truth_targets(cap.states, course)
+    for fr in cap.frames:
+        g = course.gates[targets[fr.sample_index]]
+        rot = quat_to_matrix(np.asarray(fr.state.quat, np.float64))
+        rel_b = rot.T @ (np.asarray(g.center, np.float64) - np.asarray(fr.state.pos, np.float64))
+        rel_cam = cam.body_to_camera() @ rel_b
+        px, front = cam.project(rel_cam.reshape(1, 3))
+        assert bool(front[0])
+        img = np.full((_CAP_SIZE[1], _CAP_SIZE[0], 3), 40, np.uint8)
+        cv2.circle(img, (int(round(px[0, 0])), int(round(px[0, 1]))), 6, (0, 255, 0), -1)
+        np.save(fr.path, img)
+
+
+def test_calibrate_from_capture_recovers_ground_truth(cv2, tmp_path) -> None:
+    """The real-frame calibration path runs end to end and recovers the reconstructed bearing
+    ground truth (icon painted at the true gate projection → ~0 error)."""
+    cap, track = _synthetic_capture(tmp_path)
+    cam = CameraModel(_CAP_SIZE[0], _CAP_SIZE[1], 90.0, 0.0)
+    _paint_icons_at_projected_gate(cap, track, cam)
+    reader = make_reader(cam, hsv_ranges=GREEN_HSV)
+    telem = load_config("liftoff").section("telemetry")
+    report = tmp_path / "pointer_calibration.json"
+    calib = calibrate_from_capture(
+        reader, cap, track, telemetry_cfg=telem, item_table=_ITEM_TABLE, report_path=report
+    )
+    assert isinstance(calib, CaptureCalibration)
+    assert calib.n_frames == 5
+    assert calib.n_detected == 5  # the icon is detected on every frame
+    assert calib.n_evaluated >= 4  # dead-ahead gate is well within ahead_deg
+    b = calib.bearing.as_dict()
+    assert b["combined_deg_median"] < 1.5  # reader bearing == reconstructed GT (sub-pixel rounding)
+    assert math.isfinite(calib.bias_az_deg) and math.isfinite(calib.jitter_std_deg)
+    # the report writes machine-readable JSON with the AC9 suggested sigmas
+    d = calib.as_dict()
+    assert d["detection_rate"] == 1.0
+    for key in ("suggested_bias_sigma_rad", "suggested_jitter_sigma_rad",
+                "suggested_pointer_bearing_tol_deg"):  # fmt: skip
+        assert key in d and math.isfinite(d[key])
+    assert report.is_file() and json.loads(report.read_text())["camera"]["uptilt_deg"] == 0.0
+    assert "bearing (inlier)" in calib.summary()
+
+
+def test_calibrate_from_capture_handles_no_detections(cv2, tmp_path) -> None:
+    """A capture whose icon the reader cannot see → zero detections, NaN stats, no crash."""
+    cap, track = _synthetic_capture(tmp_path)
+    cam = CameraModel(_CAP_SIZE[0], _CAP_SIZE[1], 90.0, 0.0)
+    _paint_icons_at_projected_gate(cap, track, cam)
+    # a reader keyed on red never matches the green icon.
+    red = [(np.array([0, 100, 100], np.uint8), np.array([10, 255, 255], np.uint8))]
+    reader = make_reader(cam, hsv_ranges=red)
+    telem = load_config("liftoff").section("telemetry")
+    calib = calibrate_from_capture(reader, cap, track, telemetry_cfg=telem, item_table=_ITEM_TABLE)
+    assert calib.n_detected == 0 and calib.n_evaluated == 0
+    assert math.isnan(calib.bias_az_deg) and math.isnan(calib.jitter_std_deg)
