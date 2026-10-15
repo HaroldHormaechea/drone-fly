@@ -158,6 +158,108 @@ def test_run2_config_plumbs_the_perception_features(tmp_path):
     assert (pc.fp_memory_tol, pc.fp_temporal_frames) == (2.0, 2)
 
 
+# ------------------------------------------------- UC75 run-2b: measured pointer-noise retune
+
+RUN2B_POINTER_KEYS = ("bias_sigma_rad", "jitter_sigma_rad", "dropout_p", "bearing_tol_deg")
+_REPO = Path(__file__).resolve().parent.parent
+_CALIBRATION = _REPO / "docs" / "harness" / "uc74-arena-pointer-calibration.json"
+
+
+def _flatten(d: dict, prefix: str = "") -> dict:
+    out: dict = {}
+    for k, v in d.items():
+        key = f"{prefix}{k}"
+        if isinstance(v, dict):
+            out.update(_flatten(v, key + "."))
+        else:
+            out[key] = v
+    return out
+
+
+def _run2b_text() -> str:
+    from importlib import resources
+
+    return (
+        resources.files("drone_fly.training")
+        .joinpath("configs", "student-liftoff-run2b.yaml")
+        .read_text("utf-8")
+    )
+
+
+def test_run2b_pointer_values_match_the_uc74_calibration_report():
+    """UC75 AC1/AC2/AC6 provenance guard: the committed run2b sigmas / tolerance cannot drift from
+    their measured source (the UC74 calibration JSON), and dropout_p tracks the live per-frame
+    unavailability (1 - detection_rate) within 0.05."""
+    import math
+
+    from drone_fly.training.config import load_raw
+
+    cal = json.loads(_CALIBRATION.read_text(encoding="utf-8"))
+    ptr = load_raw("student-liftoff-run2b")["perception"]["pointer"]
+    assert math.isclose(ptr["bias_sigma_rad"], cal["suggested_bias_sigma_rad"], rel_tol=0.01)
+    assert math.isclose(ptr["jitter_sigma_rad"], cal["suggested_jitter_sigma_rad"], rel_tol=0.01)
+    assert math.isclose(
+        ptr["bearing_tol_deg"], cal["suggested_pointer_bearing_tol_deg"], rel_tol=0.01
+    )
+    assert abs(ptr["dropout_p"] - (1.0 - cal["detection_rate"])) <= 0.05
+    assert 0.1 < ptr["dropout_p"] <= 1.0  # raised from run2's 0.1 (AC2)
+
+
+def test_run2b_overrides_exactly_the_pointer_block_over_run2():
+    """UC75 AC1/AC6: run2b differs from run2 ONLY in its name + the four pointer leaves, and run2
+    is left unchanged as the A/B baseline (its provisional values are still in place)."""
+    from drone_fly.training.config import load_raw
+
+    run2, run2b = load_raw("student-liftoff-run2"), load_raw("student-liftoff-run2b")
+    f2, f2b = _flatten(run2), _flatten(run2b)
+    f2.pop("extends", None)  # load_raw strips it; excluded defensively
+    f2b.pop("extends", None)
+    assert set(f2) == set(f2b)  # no added / dropped keys
+    differing = {k for k in f2 if f2[k] != f2b[k]}
+    assert differing == {"name", *(f"perception.pointer.{k}" for k in RUN2B_POINTER_KEYS)}
+    assert run2b["name"] == "student-liftoff-run2b"
+    assert tuple(run2["perception"]["pointer"][k] for k in RUN2B_POINTER_KEYS) == (
+        0.05, 0.03, 0.1, 20.0)  # fmt: skip
+
+
+def test_run2b_config_loads_and_plumbs_the_measured_pointer_model(tmp_path):
+    """UC75 AC4: run2b is a packaged config that loads through the strict student loader, and
+    ``perception_config`` maps the measured pointer values onto the flat PerceptionConfig."""
+    from drone_fly.training.config import load_raw, packaged_names, student_from_mapping
+
+    assert "student-liftoff-run2b" in packaged_names()
+    cfg = student_from_mapping(load_raw("student-liftoff-run2b"), validate_tracks=False)
+    p = cfg.perception.pointer
+    assert (p.bias_sigma_rad, p.jitter_sigma_rad, p.dropout_p, p.bearing_tol_deg) == (
+        0.0073, 0.085, 0.5, 16.4)  # fmt: skip
+    # the rest of run-2 is inherited unchanged
+    assert cfg.perception.gate_memory.enabled and cfg.perception.fp_suppression.pointer
+    model = load_model(tmp_path, timing=TRAIN_TIMING)
+    pc = distill.perception_config(cfg, model)
+    assert (pc.pointer_bias_sigma_rad, pc.pointer_jitter_sigma_rad, pc.pointer_dropout_p,
+            pc.pointer_bearing_tol_deg) == (0.0073, 0.085, 0.5, 16.4)  # fmt: skip
+
+
+def test_run2b_yaml_cites_uc74_provenance_and_is_not_provisional():
+    """UC75 AC1/AC7: every overridden pointer line cites UC74 + the calibration report, the file
+    never says "provisional", and the header records the real retrain / export / fly recipe."""
+    text = _run2b_text()
+    assert "provisional" not in text.lower()
+    for key in RUN2B_POINTER_KEYS:
+        line = next(ln for ln in text.splitlines() if ln.strip().startswith(f"{key}:"))
+        assert "UC74" in line and "calibration.json" in line, line
+    assert "uc74-arena-pointer-calibration.json" in text
+    assert "--config student-liftoff-run2b" in text and "--device cuda" in text
+    assert "train export" in text and "--out" in text and "--preset liftoff_arena" in text
+
+
+def test_student_obs_schema_unchanged_by_uc75():
+    """UC75 AC5: a values + reader-guard change only — the student obs schema stays v3 / DIM 65."""
+    from drone_fly.sim import student_obs
+
+    assert student_obs.VERSION == 3 and student_obs.DIM == 65
+
+
 def test_run2_features_train_end_to_end(inputs, tmp_path, tiny_val):
     """QA's heaviest allowed check: a tiny (8-env, 2-iteration) DAgger run with ALL three run-2
     features ON runs end to end — the sim builds, the student trains against the v3 obs, and the
