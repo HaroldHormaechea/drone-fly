@@ -1,0 +1,26 @@
+{
+  "camera": {
+    "width": 2560,
+    "height": 1080,
+    "hfov_deg": 122.0,
+    "uptilt_deg": 27.5
+  },
+  "n_frames": 755,
+  "n_detected": 395,
+  "detection_rate": 0.5231788079470199,
+  "n_evaluated_ahead_inlier": 284,
+  "bearing": {
+    "n": 284,
+    "az_error_deg_median": 2.419856055927604,
+    "el_error_deg_median": 2.3697373573650555,
+    "combined_deg_median": 3.650202480345916,
+    "combined_deg_p95": 13.102498901617885
+  },
+  "bias_az_deg": -0.4065720698863228,
+  "bias_el_deg": -0.10846783536462455,
+  "jitter_std_deg": 4.871778797530454,
+  "suggested_bias_sigma_rad": 0.007344210263806878,
+  "suggested_jitter_sigma_rad": 0.08502858044575662,
+  "suggested_pointer_bearing_tol_deg": 16.378123627022354,
+  "note": "replaces provisional student-liftoff-run2.yaml pointer sigmas (AC9); re-running run-2 training with these is a downstream experiment"
+}

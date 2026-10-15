@@ -92,6 +92,31 @@ camera:
   # Screen regions ignored by gate detection, auto-labelling and depth sampling (HUD, ghost list).
   # Each {name, rect: [x, y, w, h]} in pixels at `resolution` (required when masks are set).
   masks: []
+  # UC74 live next-gate HUD pointer reader (classic OpenCV, no ML). OFF by default; enable + tune
+  # per track/resolution (see the `liftoff_arena` preset, calibrated for Arena @2560x1080). When
+  # enabled it fills est.info["pointer"] so the run-2 student consumes the live pointer (AC6; no
+  # retrain). The reader reads the RAW frame over `pointer_roi`; gate detection still masks its own
+  # copy, so the two never collide.
+  pointer:
+    enabled: false
+    # White HUD-icon HSV range(s) [[h,s,v],[h,s,v]] (OpenCV H 0-179). CALIBRATE from real frames.
+    hsv_ranges: []
+    min_area_frac: 0.00005      # icon area / ROI area, lower bound. CALIBRATE
+    max_area_frac: 0.0006       # icon area / ROI area, upper bound. CALIBRATE
+    min_circularity: 0.72       # 4*pi*area/perimeter^2; a clean ring is high
+    min_solidity: 0.86          # area / convex-hull area
+    morph_kernel: 3
+    ambiguity_ratio: 0.8        # reject if the 2nd-best blob's score is >= this * the best (unsure)
+    # Drop detections within this fraction of min(frame_w, frame_h) of the image centre — suppresses
+    # the fixed ACRO aiming reticle (an identical-looking white ring). 0 disables it. CALIBRATE
+    center_exclude_radius_frac: 0.0
+    template: null              # optional greyscale template image path (multi-scale fallback)
+    template_threshold: 0.7
+    template_scales: [0.8, 1.0, 1.25]
+  # Pointer ROI override [x, y, w, h] at `resolution` (wins over mask-derived ROI); null = derive
+  # from `masks` (or `pointer_roi_mask` to pick one). The pointer roams here following the gate.
+  pointer_roi: null
+  pointer_roi_mask: null        # name of a camera.masks region to derive the ROI from (optional)
 
 gates:
   nominal_width_m: 1.5      # OUTER gate frame size in Liftoff metres. CALIBRATE per track

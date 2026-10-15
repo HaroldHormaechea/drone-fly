@@ -388,8 +388,8 @@ def test_dry_run_session_ticks_the_exported_student(k1_export, harness_contract,
     assert all(len(t["extra"]) == DIM and np.all(np.isfinite(t["extra"])) for t in ticks)
     for t in ticks:
         assert t["extra"][59:61] == pytest.approx([0.8, 3.9], rel=1e-5)  # (charge, 11.7 V / 3)
-        # the v3 pointer block [61:65) is unavailable live pre-UC72 (the learned tracker leaves
-        # info["pointer"] unset) -> zeros / bit 0, the degraded state the student is trained for
+        # the v3 pointer block [61:65) is unavailable here (no UC74 camera.pointer reader wired, so
+        # info["pointer"] stays unset) -> zeros / bit 0, the degraded state the student trains for
         assert t["extra"][61:65] == [0.0, 0.0, 0.0, 0.0]
     assert ticks[0]["extra"][43] == pytest.approx(0.5)  # arm_remaining_s counted from tick 0
     assert any(t.get("command") is not None for t in ticks)

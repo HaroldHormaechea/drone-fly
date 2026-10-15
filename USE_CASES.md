@@ -83,3 +83,5 @@ Statuses:
 | 71 | [use-cases/71-multi-map-gate-detector.md](use-cases/71-multi-map-gate-detector.md) | Gate detector generalization across Liftoff maps and gate types | pending | 2026-10-12 |
 | 72 | [use-cases/72-liftoff-eval-and-fine-tuning.md](use-cases/72-liftoff-eval-and-fine-tuning.md) | Liftoff evaluation on held-out tracks + fine-tuning from Liftoff episodes | pending | 2026-10-12 |
 | 73 | [use-cases/73-camera-obstacle-eyes-for-70-input-connectome.md](use-cases/73-camera-obstacle-eyes-for-70-input-connectome.md) | Camera-based obstacle "eyes" for the 70-input connectome (draft, needs refinement) | pending | 2026-10-14 |
+| 74 | [use-cases/74-hud-next-gate-pointer-reader.md](use-cases/74-hud-next-gate-pointer-reader.md) | Live HUD next-gate pointer reader (classic OpenCV, no ML) | done | 2026-10-15 |
+| 75 | [use-cases/75-retune-run2-pointer-noise.md](use-cases/75-retune-run2-pointer-noise.md) | Re-tune run-2 pointer-noise from UC-74 measurements (run2b) + off-axis trust guard | pending | 2026-10-15 |

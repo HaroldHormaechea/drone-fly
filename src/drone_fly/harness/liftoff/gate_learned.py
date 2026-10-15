@@ -54,6 +54,7 @@ from drone_fly.harness.liftoff.gate_cv import (
     solve_planar_pnp,
 )
 from drone_fly.harness.liftoff.masks import FrameMasks
+from drone_fly.harness.liftoff.pointer_cv import pointer_reader_from_config
 from drone_fly.harness.scale import WorldScale
 from drone_fly.harness.types import FlightState, Frame
 
@@ -186,6 +187,7 @@ class LearnedGateEstimator(TrackingGateEstimator):
         min_keypoints: int = 4,
         max_detections: int = 8,
         masks: FrameMasks | None = None,
+        pointer_reader: Any = None,
         async_inference: bool = False,
         **tracker: Any,
     ) -> None:
@@ -195,6 +197,7 @@ class LearnedGateEstimator(TrackingGateEstimator):
             scale,
             default_aperture=scale.length(table.types[0].min_aperture),
             masks=masks,
+            pointer_reader=pointer_reader,
             **tracker,
         )
         self.torch = lazy_import("torch", purpose="the learned gate estimator")
@@ -239,13 +242,15 @@ class LearnedGateEstimator(TrackingGateEstimator):
         weights_path = resolve_weights_path(lc.get("weights"))
         net, meta = load_weights(weights_path, table, dev)
         cam = conf.section("camera")
+        camera = camera_from_config(cam)
+        masks = FrameMasks.from_config(cam)
         gpl = cfg.get("gates_per_lap")
         num = lambda k, d, **kw: float(require_number(cfg.get(k, d), f"gates.{k}", **kw))  # noqa: E731
         est = cls(
             net,
             meta,
             table,
-            camera_from_config(cam),
+            camera,
             WorldScale(conf.world_scale),
             device=dev,
             fp16=require_bool(lc.get("fp16", True), "gates.learned.fp16"),
@@ -268,7 +273,8 @@ class LearnedGateEstimator(TrackingGateEstimator):
             max_detections=require_int(
                 lc.get("max_detections", 8), "gates.learned.max_detections", min_value=1
             ),
-            masks=FrameMasks.from_config(cam),
+            masks=masks,
+            pointer_reader=pointer_reader_from_config(camera, cam, masks),
             async_inference=require_bool(
                 lc.get("async_inference", False), "gates.learned.async_inference"
             ),

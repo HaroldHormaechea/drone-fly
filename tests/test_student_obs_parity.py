@@ -416,8 +416,8 @@ def test_schema_pins_the_layout_and_parameters():
         "jitter_sigma_rad": 0.0,
         "dropout_p": 0.0,
         "bearing_tol_deg": 20.0,
-        "source": "sim: noisy truth bearing; live (pre-UC72): learned tracker leaves it "
-        "unavailable (bit = 0)",
+        "source": "sim: noisy truth bearing; live: UC74 classic-OpenCV HUD reader when a "
+        "camera.pointer reader is configured, else unavailable (bit = 0)",
     }
     noisy = schema(world_scale=K, lost_timeout_s=LOST, acquire_timeout_s=3.0, camera=CAMERA,
                    pointer_bias_sigma_rad=0.05, pointer_jitter_sigma_rad=0.03,
