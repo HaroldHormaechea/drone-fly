@@ -22,6 +22,7 @@ validation, feasibility, the per-track evals and the final report.
   the harness list (the teacher's `obstacle_vision`) is empty. On procedural courses every obstacle is
   removed.
 - **Kept:** scene colliders (the real ground, arena structures, stands), route-gate frames, the
+  placed item the spawn stands on (its support, so the sim start matches the live one), the
   heightfield, `floor_z` and the world bounds (`bounds_hi.z` is the sim's only ceiling).
 - **Unchanged:** spawn, course origin, passages, bounds and time limit. The spawn support is computed
   on the full geometry first, so these equal the default conversion.
@@ -29,7 +30,8 @@ validation, feasibility, the per-track evals and the final report.
 The mode is not a `ConversionConfig` field, so the conversion fingerprint the student checks against
 the teacher sidecar does not change. Obstacle-free courses are cached under their own key in
 `artifacts/tracks/cache/` and carry the `obstacle-free` course flag. Their stats add `obstacles`,
-`obstacles_removed` (items) and `spawn_support_removed`. Default courses, configs, run snapshots and
+`obstacles_removed` (items), `spawn_support_kept` (true when the spawn stands on a placed item that
+would otherwise be removed) and `spawn_support_item` (`<item_id>#<instance_id>`). Default courses, configs, run snapshots and
 sidecars are byte-identical to before: `tracks.obstacles`, `distill.track_evals` and
 `distill.final_report` are left out of `config.yaml` at their defaults.
 
@@ -37,14 +39,15 @@ sidecars are byte-identical to before: `tracks.obstacles`, `distill.track_evals`
 
 | | default | obstacle-free |
 |---|---|---|
-| primitives | 6113 (5773 scene, 221 item, 119 item-table) | 5808 (5773 scene + 35 gate-arch) |
+| primitives | 6113 (5773 scene, 221 item, 119 item-table) | 5809 (5773 scene, 35 gate-arch, 1 spawn support) |
 | harness list | 247 | 0 |
-| `obstacles_removed` | — | 247 items |
+| `obstacles_removed` | — | 246 items |
 | `floor_z` | -0.865 (gate aperture bottoms) | -0.865 |
 | spawn support offset | -0.002 m | -0.002 m |
-| `spawn_support_removed` | — | **true** |
+| `spawn_support_kept` / `spawn_support_item` | — | true / `ConcreteBarrier01#146` |
 
-The 247 removed props are mostly flush with or below the arena floor:
+The 247 harness-list props (246 removed; the spawn's barrier is kept) are mostly flush with or
+below the arena floor:
 
 | item | count | distance from route | top z |
 |---|---|---|---|
@@ -58,10 +61,10 @@ The 247 removed props are mostly flush with or below the arena floor:
 
 **Spawn support.** The Infinity Loop spawn sits on that one `ConcreteBarrier01`. Its top (contract
 z 0.86) is the course origin; the scene floor under it is 0.76 m lower (contract z 0.10). The barrier
-is removed in obstacle-free mode, but the origin is kept. The drone still starts at course z 0
-because the plant holds the ground start at `ground_z = 0`. After take-off nothing is under the spawn
-until the scene floor 0.76 m below, and the floor terminal stays at `floor_z` -0.865. Live, the
-barrier is real and the drone takes off from it.
+is real in Liftoff and the drone takes off from it, so obstacle-free mode **keeps** it. Removing it
+would leave nothing under the start until the floor 0.76 m below, and the sim start would differ
+from the live one. Only the spawn's own support item is kept, and it stays off the (empty) harness
+list.
 
 ## Accepted risk: obstacle tracks
 

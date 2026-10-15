@@ -558,7 +558,7 @@ class DistillSection:
     final_report: bool = False
 
 
-#: DistillSection fields left out of a run snapshot at their default (UC77 N4).
+#: DistillSection fields left out of a run snapshot at their default (UC77 N6).
 _DISTILL_UC77_DEFAULTS = {"track_evals": [], "final_report": False}
 
 
@@ -641,7 +641,7 @@ class StudentConfig:
         out["kind"] = "student"
         for k in ("student", "perception", "distill", "finetune", "feasibility"):
             out[k] = _plain(asdict(getattr(self, k)))
-        for k, v in _DISTILL_UC77_DEFAULTS.items():  # UC77 N4: defaults stay byte-identical
+        for k, v in _DISTILL_UC77_DEFAULTS.items():  # UC77 N6: defaults stay byte-identical
             if out["distill"].get(k) == v:
                 out["distill"].pop(k)
         return out

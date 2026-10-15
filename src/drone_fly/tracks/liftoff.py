@@ -39,9 +39,11 @@ z, flag ``spawn-unsupported``. No spawn item -> a synthetic one behind passage 0
 **Obstacle-free mode (UC77).** ``convert_liftoff(..., obstacles="none")`` drops every placed
 non-route-gate item (the harness-list population before its size / corridor / cap filters) from
 the solids and empties the harness list. Scene colliders, route-gate frames, the heightfield,
-``floor_z`` and the bounds stay. The spawn support and origin are computed on the FULL geometry,
-so spawn, origin, passages, bounds and time limit equal the default conversion;
-``stats.obstacles_removed`` / ``stats.spawn_support_removed`` record what went. It is a keyword,
+``floor_z`` and the bounds stay, and so does the placed item the spawn stands on (its support).
+The spawn support and origin are computed on the FULL geometry, so spawn, origin, passages, bounds
+and time limit equal the default conversion; ``stats.obstacles_removed`` (items) and
+``stats.spawn_support_kept`` / ``stats.spawn_support_item`` (``<item_id>#<instance_id>``) record
+what went and what stayed. It is a keyword,
 not a :class:`ConversionConfig` field, so the conversion fingerprint is unchanged.
 """
 
@@ -741,7 +743,7 @@ def convert_liftoff(
 
     # ---- solids (contract frame) ----
     route_ids = set(geom.route.checkpoint_ids)
-    parts, item_slices = [], []
+    parts, item_slices, slice_items = [], [], []
     counts = {"sheared": 0, "mesh_flagged": 0, "unknown_items": 0, "nonsolid_items": 0}
     off = 0
     scene_prims = scene_primitives(scene_colliders or [])
@@ -759,6 +761,7 @@ def convert_liftoff(
             continue
         is_gate = it.instance_id is not None and it.instance_id in route_ids
         item_slices.append((off, off + len(prim), is_gate))
+        slice_items.append(f"{it.item_id}#{it.instance_id}")
         parts.append(prim)
         off += len(prim)
     prims_c = Primitives.concat(parts)
@@ -806,38 +809,40 @@ def convert_liftoff(
     obstacle_stats: dict[str, Any] = {}
     if obstacles == "none":
         off_scene = len(scene_prims)
+        # the placed item the spawn stands on stays (it is real in the sim being matched)
+        support_slice = None
+        if prim_supported:  # the support is a primitive (not the heightfield)
+            hit = [
+                int(i) for i in near
+                if (t := support_top(prims_c.subset(np.array([i])), sp[0], sp[1],
+                                     sp[2] + cfg.spawn_ray_up_m, sp[2] - cfg.spawn_window_m))
+                is not None and t >= top - 1e-9  # type: ignore[operator]
+            ]  # fmt: skip
+            for j, (a, b, is_gate) in enumerate(item_slices):
+                if not is_gate and any(a <= i < b for i in hit):
+                    support_slice = j
+                    break
         keep = [np.arange(off_scene)]
-        removed = 0
-        for a, b, is_gate in item_slices:
-            if is_gate:
+        kept_slices, removed = [], 0
+        for j, (a, b, is_gate) in enumerate(item_slices):
+            if is_gate or j == support_slice:
                 keep.append(np.arange(a, b))
+                kept_slices.append(b - a)
             else:
                 removed += 1
-        kept = np.concatenate(keep).astype(np.int64)
-        support_removed = False
-        if prim_supported:  # the support is a primitive (not the heightfield)
-            kept_near = near[np.isin(near, kept)]
-            kept_top = (
-                support_top(
-                    prims_c.subset(kept_near),
-                    sp[0],
-                    sp[1],
-                    sp[2] + cfg.spawn_ray_up_m,
-                    sp[2] - cfg.spawn_window_m,
-                )  # fmt: skip
-                if len(kept_near)
-                else None
-            )
-            support_removed = kept_top is None or kept_top < top - 1e-9  # type: ignore[operator]
-        prims_c = prims_c.subset(kept)
-        item_slices = [
-            (off_scene + a2, off_scene + a2 + (b - a), True)
-            for (a, b), a2 in _gate_offsets(item_slices)
-        ]
+        prims_c = prims_c.subset(np.concatenate(keep).astype(np.int64))
+        # every kept item is off the harness list (it stays empty), so all are flagged True
+        item_slices, at = [], off_scene
+        for k in kept_slices:
+            item_slices.append((at, at + k, True))
+            at += k
         obstacle_stats = {
             "obstacles": "none",
             "obstacles_removed": removed,
-            "spawn_support_removed": bool(support_removed),
+            "spawn_support_kept": support_slice is not None,
+            "spawn_support_item": (
+                slice_items[support_slice] if support_slice is not None else None
+            ),
         }
     frame = CourseFrame(tuple(float(x) for x in origin), float(cfg.world_scale))  # type: ignore[arg-type]
     ws = frame.world_scale
@@ -984,18 +989,6 @@ def convert_liftoff(
         meta={**meta, "flags": sorted(set(meta.get("flags", [])) | set(flags))},
         stats=stats,
     )
-
-
-def _gate_offsets(
-    item_slices: Sequence[tuple[int, int, bool]],
-) -> list[tuple[tuple[int, int], int]]:
-    """The gate slices' ``(a, b)`` with their start offset among the kept gate primitives."""
-    out, at = [], 0
-    for a, b, is_gate in item_slices:
-        if is_gate:
-            out.append(((a, b), at))
-            at += b - a
-    return out
 
 
 def passage_witness(
