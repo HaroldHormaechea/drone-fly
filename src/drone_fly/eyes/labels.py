@@ -42,7 +42,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -72,6 +72,8 @@ AUX_NONE, AUX_OBSTACLE, AUX_GATE, AUX_SCENE, AUX_ITEM, AUX_FLOOR = range(6)
 #: An item primitive within a passage's outer half-size + this (Liftoff m) is a ``gate``.
 AUX_GATE_MARGIN_M = 1.0
 EGO_DT_S = 0.1
+#: At or below this speed (Liftoff m/s) the warning time is ``inf`` (excluded from stats).
+MIN_WARNING_SPEED_MPS = 0.3
 PAIR_TOL_S = 0.03
 MAX_PREVIEW = 20
 _EPS = 1e-3
@@ -216,6 +218,9 @@ class AuxGeometry:
     heightfield: Any = None
     course: Any = None
 
+    passage_c: np.ndarray = None  # type: ignore[assignment]
+    passage_reach: np.ndarray = None  # type: ignore[assignment]
+
     @classmethod
     def from_course(
         cls, course: Any, obstacles: list[dict[str, Any]], gate_margin_m: float, world_scale: float
@@ -225,13 +230,9 @@ class AuxGeometry:
 
         p = course.prims
         kind = np.where(p.source == SOURCE_SCENE, AUX_SCENE, AUX_ITEM).astype(np.int8)
-        if len(p) and course.passages:
-            pc = np.array([q.center for q in course.passages])
-            reach = np.array([max(q.w, q.h) / 2.0 for q in course.passages])
-            reach = reach + gate_margin_m / float(world_scale)
-            dist = np.linalg.norm(p.center[:, None, :] - pc[None], axis=2)
-            near = (dist <= reach[None]).any(axis=1)
-            kind = np.where((kind == AUX_ITEM) & near, AUX_GATE, kind).astype(np.int8)
+        pc = np.array([q.center for q in course.passages], np.float64).reshape(-1, 3)
+        reach = np.array([max(q.w, q.h) / 2.0 for q in course.passages], np.float64)
+        reach = reach + gate_margin_m / float(world_scale)
         box = p.kind == PRIM_BOX
         cap = ~box
         oc = np.array([o["center"] for o in obstacles], np.float64).reshape(-1, 3)
@@ -242,45 +243,63 @@ class AuxGeometry:
             p.center[box], p.rot[box], p.size[box], kind[box],
             p.center[cap], p.rot[cap][:, :, 2] if cap.any() else np.zeros((0, 3)),
             p.size[cap][:, 1], p.size[cap][:, 0], kind[cap],
-            oc - oh, oc + oh, float(course.floor_z), course.heightfield, course,
+            oc - oh, oc + oh, float(course.floor_z), course.heightfield, course, pc, reach,
         )  # fmt: skip
 
+    def near_gate(self, points: np.ndarray) -> np.ndarray:
+        """``(N,)`` bool: points within a passage's outer half-size + margin of its centre."""
+        if self.passage_c is None or not len(self.passage_c):
+            return np.zeros(len(points), bool)
+        d = np.linalg.norm(points[:, None, :] - self.passage_c[None], axis=2)
+        return (d <= self.passage_reach[None]).any(axis=1)
+
     def cast(self, o: np.ndarray, rays: np.ndarray, rng: float) -> tuple[np.ndarray, np.ndarray]:
-        """``(t (R,), kind (R,))``: the nearest surface within ``rng`` along each ray."""
+        """``(t (R,), kind (R,))``: the nearest surface within ``rng`` along each ray.
+
+        Kind precedence among hits within 1e-3 of the nearest: obstacle (the harness AABBs, i.e.
+        the label's own hit), floor, gate, scene, item. A placed-item hit is a ``gate`` when its
+        HIT POINT lies within a passage's ``max(w, h) / 2`` + margin of the passage centre.
+        """
         o = np.asarray(o, np.float64)
+        rays = np.asarray(rays, np.float64)
         n = len(rays)
-        best = np.full(n, np.inf)
-        kind = np.zeros(n, np.int8)
+        t_scene = np.full(n, np.inf)
+        t_item = np.full(n, np.inf)
 
         def take(t: np.ndarray, k: np.ndarray) -> None:
-            if t.size == 0:
-                return
-            j = np.argmin(t, axis=1)
-            tm = t[np.arange(n), j]
-            better = tm < best
-            best[better] = tm[better]
-            kind[better] = k[j[better]]
+            for dest, code in ((t_scene, AUX_SCENE), (t_item, AUX_ITEM)):
+                sel = k == code
+                if sel.any():
+                    np.minimum(dest, t[:, sel].min(axis=1), out=dest)
 
         if len(self.box_c):
-            near = np.linalg.norm(self.box_c - o, axis=1) <= rng + np.linalg.norm(
-                self.box_half, axis=1
-            )
+            reach = rng + np.linalg.norm(self.box_half, axis=1)
+            near = np.linalg.norm(self.box_c - o, axis=1) <= reach
             if near.any():
-                take(ray_obb(o, rays, self.box_c[near], self.box_rot[near], self.box_half[near]),
-                     self.box_kind[near])  # fmt: skip
+                t = ray_obb(o, rays, self.box_c[near], self.box_rot[near], self.box_half[near])
+                take(t, self.box_kind[near])
         if len(self.cap_c):
             near = np.linalg.norm(self.cap_c - o, axis=1) <= rng + self.cap_half + self.cap_r
             if near.any():
                 t = ray_capsule(o, rays, self.cap_c[near], self.cap_axis[near],
                                 self.cap_half[near], self.cap_r[near])  # fmt: skip
                 take(t, self.cap_kind[near])
+        t_obs = np.full(n, np.inf)
         if len(self.obs_lo):
-            take(ray_aabb(o, rays, self.obs_lo, self.obs_hi),
-                 np.full(len(self.obs_lo), AUX_OBSTACLE, np.int8))  # fmt: skip
-        tf = self.floor_hit(o, rays, rng)
-        better = tf < best
-        best[better] = tf[better]
-        kind[better] = AUX_FLOOR
+            t_obs = ray_aabb(o, rays, self.obs_lo, self.obs_hi).min(axis=1)
+        t_floor = self.floor_hit(o, rays, rng)
+        fin = np.isfinite(t_item)
+        gate = np.zeros(n, bool)
+        if fin.any():
+            gate[fin] = self.near_gate(o[None] + t_item[fin, None] * rays[fin])
+        t_gate = np.where(gate, t_item, np.inf)
+        t_item = np.where(gate, np.inf, t_item)
+        order = ((t_obs, AUX_OBSTACLE), (t_floor, AUX_FLOOR), (t_gate, AUX_GATE),
+                 (t_scene, AUX_SCENE), (t_item, AUX_ITEM))  # fmt: skip
+        best = np.min(np.stack([t for t, _ in order]), axis=0)
+        kind = np.zeros(n, np.int8)
+        for t, code in reversed(order):  # highest precedence written last
+            kind = np.where(t <= best + 1e-3, code, kind).astype(np.int8)
         kind[best > rng] = AUX_NONE
         return np.minimum(best, rng), kind
 
@@ -422,7 +441,7 @@ def compute_labels(
             out["ego"][i] = ego_vector(st.quat, st.vel)
         sp = float(np.linalg.norm(vel)) * W
         out["speed_mps"][i] = sp
-        out["warning_s"][i] = settings.range_m / sp if sp > 1e-6 else np.inf
+        out["warning_s"][i] = settings.range_m / sp if sp > MIN_WARNING_SPEED_MPS else np.inf
         out["pos_c"][i] = pos_c
         out["vel"][i] = vel
         out["quat"][i] = st.quat
@@ -469,10 +488,24 @@ def load_label_course(
 # ----------------------------------------------------------------------------- run
 
 
-def default_out(capture_name: str) -> Path:
+def labels_root_default() -> Path:
     from drone_fly import paths
 
-    return paths.labels_root() / "eyes" / capture_name
+    return paths.labels_root() / "eyes"
+
+
+def default_out(capture_name: str, labels_root: str | Path | None = None) -> Path:
+    return Path(labels_root or labels_root_default()) / capture_name
+
+
+def read_labels_meta(labels_dir: str | Path) -> dict[str, Any] | None:
+    p = Path(labels_dir) / META_FILE
+    if not p.is_file() or not (Path(labels_dir) / LABELS_FILE).is_file():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
 
 
 def _skip(meta: CaptureMeta | None, capture: Path, reason: str) -> dict[str, Any]:
@@ -490,6 +523,16 @@ def _pct(a: np.ndarray) -> dict[str, float | None]:
             "p95": float(np.percentile(a, 95)), "max": float(a.max())}  # fmt: skip
 
 
+def warning_shares(w: np.ndarray) -> dict[str, float | int | None]:
+    """Shares of finite warning times below 0.3 s / 0.5 s (``inf`` = too slow, excluded)."""
+    w = np.asarray(w, np.float64)
+    w = w[np.isfinite(w)]
+    if not len(w):
+        return {"finite": 0, "share_lt_0_3": None, "share_lt_0_5": None}
+    return {"finite": int(len(w)), "share_lt_0_3": float(np.mean(w < 0.3)),
+            "share_lt_0_5": float(np.mean(w < 0.5))}  # fmt: skip
+
+
 def run_label(
     capture: str | Path,
     *,
@@ -505,8 +548,18 @@ def run_label(
     preview: int = 0,
     gpu_prototype_dir: str | Path | None = None,
     aux: bool = True,
+    world_scale: float | None = None,
+    ray_range_scale: float | None = None,
+    pair_tol_s: float = PAIR_TOL_S,
+    labels_root: str | Path | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
-    """Label one capture; returns its meta, or ``{"skipped": reason}``."""
+    """Label one capture; returns its meta, or ``{"skipped": reason}``.
+
+    ``world_scale`` / ``ray_range_scale`` default to the preset's. Unless ``force``, a capture
+    whose labels already exist with the same settings sha and capture sha is not relabelled
+    (its meta comes back with ``up_to_date: True``).
+    """
     from drone_fly.harness.offline.capture import load_capture
     from drone_fly.tracks.catalogue import TrackDataError
     from drone_fly.tracks.teacher_obs_ref import to_harness_course
@@ -517,10 +570,19 @@ def run_label(
         return _skip(None, capture, "no-meta")
     view = preset_view(preset, config, harness)
     contract = offline_contract(gpu_prototype_dir)
-    settings = settings_for(contract, view.world_scale, view.ray_range_scale)
+    W = float(view.world_scale if world_scale is None else world_scale)
+    s_ray = float(view.ray_range_scale if ray_range_scale is None else ray_range_scale)
+    if W <= 0 or s_ray <= 0:
+        raise HarnessConfigError("world_scale and ray_range_scale must be > 0")
+    settings = replace(settings_for(contract, W, s_ray), pair_tol_s=float(pair_tol_s))
+    out_dir = Path(out) if out is not None else default_out(capture.name, labels_root)
+    old = read_labels_meta(out_dir)
+    if (not force and old is not None and old.get("settings_sha256") == settings.sha256()
+            and old.get("capture_sha256") == capture_sha(capture)):  # fmt: skip
+        return {**old, "out_dir": str(out_dir), "up_to_date": True, "previews": []}
     try:
         course, entry, conv = load_label_course(
-            cmeta.catalogue_id, view.world_scale, trackdata_root=trackdata_root,
+            cmeta.catalogue_id, W, trackdata_root=trackdata_root,
             scenes_root=scenes_root, conversion=(view.config.get("tracks") or {}).get("conversion"),
             cache_dir=cache_dir,
         )  # fmt: skip
@@ -532,7 +594,7 @@ def run_label(
     if cmeta.map is not None and entry["map"] != cmeta.map:
         return _skip(cmeta, capture, f"map-mismatch: meta {cmeta.map} vs catalogue {entry['map']}")
     try:
-        cap = load_capture(capture, view.telemetry, view.world_scale, cmeta.lag_ms,
+        cap = load_capture(capture, view.telemetry, W, cmeta.lag_ms,
                            pair_tol_s=settings.pair_tol_s)  # fmt: skip
     except HarnessConfigError as exc:
         return _skip(cmeta, capture, f"no-telemetry: {exc}")
@@ -543,7 +605,7 @@ def run_label(
         from drone_fly.eyes.camera_rays import camera_from_meta
 
         camera = camera_from_meta({**camera_meta(view.camera), **cmeta.camera})
-    origin_c = course.frame.origin / float(view.world_scale)
+    origin_c = course.frame.origin / W
     obstacles = to_harness_course(course).raycast_obstacles()
     tgt_idx = route_targets(cap.states, cap.segments, course, origin_c)
     frames = cap.frames
@@ -551,7 +613,7 @@ def run_label(
     stamps = np.array([f.stamp for f in frames], np.float64)
     segs = np.array([f.segment for f in frames], np.int64)
     geom = (AuxGeometry.from_course(course, obstacles, settings.aux_gate_margin_m,
-                                    view.world_scale) if aux else None)  # fmt: skip
+                                    W) if aux else None)  # fmt: skip
     arr = compute_labels([f.state for f in frames], stamps, segs, targets, origin_c, obstacles,
                          contract, settings, camera, view.masks, geom)  # fmt: skip
     lag = cmeta.lag_ms / 1000.0
@@ -565,7 +627,6 @@ def run_label(
         "target_index": np.array([tgt_idx[f.sample_index] for f in frames], np.int64),
         "pair_dt_s": pair.astype(np.float32),
     })  # fmt: skip
-    out_dir = Path(out) if out is not None else default_out(cap.name)
     out_dir.mkdir(parents=True, exist_ok=True)
     tmp = out_dir / (LABELS_FILE + ".tmp.npz")
     np.savez_compressed(tmp, **arr)
@@ -591,7 +652,7 @@ def run_label(
         "lag_ms": cmeta.lag_ms,
         "hit_rule": HIT_RULE,
         "aux_kinds": list(AUX_KINDS),
-        "world_scale": {"preset": view.world_scale, "conversion": conv.world_scale},
+        "world_scale": {"preset": view.world_scale, "labels": W, "conversion": conv.world_scale},
         "range_m": settings.range_m,
         "range_train_m": settings.range_train,
         "n_obstacles": len(obstacles),
@@ -618,8 +679,7 @@ def run_label(
         "speed_mps": _pct(arr["speed_mps"]),
         "warning_s": {
             **_pct(arr["warning_s"]),
-            "share_lt_0_3": float(np.mean(arr["warning_s"] < 0.3)),
-            "share_lt_0_5": float(np.mean(arr["warning_s"] < 0.5)),
+            **warning_shares(arr["warning_s"]),
         },  # fmt: skip
     }
     (out_dir / META_FILE).write_text(json.dumps(meta, indent=2), encoding="utf-8")
@@ -638,7 +698,7 @@ def write_previews(capture: Path, arr: dict[str, np.ndarray], camera: CameraMode
     from drone_fly.harness.offline.evaluate import load_image
 
     cv2 = lazy_import("cv2", package="opencv-python", purpose="eyes label previews")
-    pdir = out_dir / "previews"
+    pdir = out_dir / "preview"
     pdir.mkdir(parents=True, exist_ok=True)
     rows = np.unique(np.linspace(0, len(arr["free"]) - 1, n).astype(int))
     paths = []
@@ -658,7 +718,7 @@ def write_previews(capture: Path, arr: dict[str, np.ndarray], camera: CameraMode
             if kind != "none":
                 cv2.putText(img, kind[:2], (int(u) + 16, int(v)), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                             (255, 255, 255), 2)  # fmt: skip
-        name = pdir / f"{Path(str(arr['frame_file'][i])).stem}.jpg"
+        name = pdir / f"{int(arr['frame_index'][i])}.jpg"
         cv2.imwrite(str(name), img)
         paths.append(str(name))
     return paths

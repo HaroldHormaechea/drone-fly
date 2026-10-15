@@ -124,14 +124,32 @@ def cone_angles(cone: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return az, el
 
 
-def sweep(cone: Any, camera: CameraModel, masks: list[list[float]] = ()) -> list[dict[str, Any]]:
+def pitch_range(lo: float = 0.0, hi: float = 60.0, step: float = 5.0) -> tuple[float, ...]:
+    if step <= 0 or hi < lo:
+        raise ValueError(f"bad pitch range {lo}..{hi} step {step}")
+    return tuple(float(x) for x in np.arange(lo, hi + step / 2, step))
+
+
+def fpa_range(fpa: float = 15.0, step: float = 5.0) -> tuple[float, ...]:
+    """``-fpa .. +fpa`` flight-path angles (always including 0)."""
+    k = int(np.floor(abs(fpa) / step + 1e-9))
+    return tuple(float(step * i) for i in range(-k, k + 1))
+
+
+def sweep(
+    cone: Any,
+    camera: CameraModel,
+    masks: list[list[float]] = (),
+    pitches: tuple[float, ...] = PITCH_DEG,
+    fpas: tuple[float, ...] = FLIGHT_PATH_DEG,
+) -> list[dict[str, Any]]:
     """One row per sweep pose: ``case``, ``pitch_deg``, ``flight_path_deg`` and ``in_view``."""
     ns = cone_namespace(cone)
     pos = np.zeros(3, np.float32)
     rows = []
-    for p in PITCH_DEG:
+    for p in pitches:
         q = pitch_quat(p)
-        for g in FLIGHT_PATH_DEG:
+        for g in fpas:
             gr = np.radians(g)
             vel = SWEEP_SPEED * np.array([np.cos(gr), 0.0, np.sin(gr)], np.float32)
             v = ray_view(pos, vel, q, None, ns, camera, masks)
@@ -186,10 +204,15 @@ def fov_report(
     *,
     labels: list[Path] | None = None,
     preset: str | None = None,
+    pitches: tuple[float, ...] = PITCH_DEG,
+    fpas: tuple[float, ...] = FLIGHT_PATH_DEG,
+    band: tuple[float, float] = BAND_DEG,
 ) -> dict[str, Any]:
     cone = np.asarray(cone, np.float32)
-    rows = sweep(cone, camera, masks)
-    frac = classify(rows)
+    if 0.0 not in fpas:
+        raise ValueError("the flight-path angles must include 0")
+    rows = sweep(cone, camera, masks, pitches, fpas)
+    frac = classify(rows, band)
     az, el = cone_angles(cone)
     rays = [
         {"ray": i, "azimuth_deg": round(float(az[i]), 2), "elevation_deg": round(float(el[i]), 2),
@@ -197,14 +220,14 @@ def fov_report(
         for i in range(len(cone))
     ]  # fmt: skip
     per_pitch = []
-    for p in PITCH_DEG:
+    for p in pitches:
         vel = [r["count"] for r in rows if r["pitch_deg"] == p and r["case"] == "velocity"]
         tgt = [r["count"] for r in rows if r["pitch_deg"] == p and r["case"] == "target"]
         lvl = [r["count"] for r in rows if r["pitch_deg"] == p and r["case"] == "velocity"
                and r["flight_path_deg"] == 0]  # fmt: skip
         per_pitch.append({"pitch_deg": p, "min": min(vel), "max": max(vel), "level_path": lvl[0],
                           "low_speed_target": tgt[0]})  # fmt: skip
-    band = [r["count"] for r in rows if BAND_DEG[0] <= r["pitch_deg"] <= BAND_DEG[1]]
+    in_band = [r["count"] for r in rows if band[0] <= r["pitch_deg"] <= band[1]]
     counts = {c: sum(1 for r in rays if r["class"] == c) for c in CLASSES}
     return {
         "format": 1,
@@ -215,12 +238,12 @@ def fov_report(
         "n_rays": int(len(cone)),
         "cone_sha256": array_sha(cone),
         "sweep_axes": {
-            "pitch_deg": list(PITCH_DEG),
-            "flight_path_deg": list(FLIGHT_PATH_DEG),
+            "pitch_deg": list(pitches),
+            "flight_path_deg": list(fpas),
             "speed_training_mps": SWEEP_SPEED,
-            "band_pitch_deg": list(BAND_DEG),
+            "band_pitch_deg": list(band),
         },  # fmt: skip
-        "band_summary": {**counts, "in_view_min": min(band), "in_view_max": max(band)},
+        "band_summary": {**counts, "in_view_min": min(in_band), "in_view_max": max(in_band)},
         "rays": rays,
         "per_pitch": per_pitch,
         "sweep": rows,
@@ -240,7 +263,9 @@ def report_markdown(rep: dict[str, Any]) -> str:
         f"`{rep['cone_sha256'][:12]}`).",
         "",
         f"Over the {rep['sweep_axes']['band_pitch_deg'][0]:g}-"
-        f"{rep['sweep_axes']['band_pitch_deg'][1]:g} deg pitch band (flight path -15..+15 deg): "
+        f"{rep['sweep_axes']['band_pitch_deg'][1]:g} deg pitch band (flight path "
+        f"{min(rep['sweep_axes']['flight_path_deg']):g}..{max(rep['sweep_axes']['flight_path_deg']):g}"
+        " deg): "
         f"**{b['always']} always**, **{b['never']} never**, **{b['attitude-dependent']} "
         f"attitude-dependent**; {b['in_view_min']}-{b['in_view_max']} rays in view per pose.",
         "",
@@ -280,12 +305,22 @@ def run_fov_report(
     *,
     out: str | Path | None = None,
     labels: list[str | Path] | None = None,
+    captures: list[str | Path] | None = None,
+    labels_root: str | Path | None = None,
+    pitch: tuple[float, float, float] = (0.0, 60.0, 5.0),
+    band: tuple[float, float] = BAND_DEG,
+    fpa: float = 15.0,
     gpu_prototype_dir: str | Path | None = None,
 ) -> dict[str, Any]:
+    """The report; ``captures`` add empirical fractions from their eyes labels (``labels_root``)."""
+    from drone_fly import paths
+
     view = preset_view(preset, config, harness)
     contract = offline_contract(gpu_prototype_dir)
-    rep = fov_report(contract.CONE, view.camera, view.masks,
-                     labels=[Path(p) for p in labels or []], preset=preset)  # fmt: skip
+    lroot = Path(labels_root) if labels_root else paths.labels_root() / "eyes"
+    dirs = [Path(p) for p in labels or []] + [lroot / Path(c).name for c in captures or []]
+    rep = fov_report(contract.CONE, view.camera, view.masks, labels=dirs, preset=preset,
+                     pitches=pitch_range(*pitch), fpas=fpa_range(fpa), band=band)  # fmt: skip
     out_dir = Path(out) if out is not None else default_out()
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "fov_report.json").write_text(json.dumps(rep, indent=2), encoding="utf-8")
