@@ -788,6 +788,11 @@ def add_parser(sub: Any) -> None:
     p_ev.add_argument("--tracks", action="append", help="teacher: e.g. liftoff:held-out")
     p_ev.add_argument("--mode", choices=("nominal", "randomized", "both"), default="both")
     p_ev.add_argument(
+        "--obstacles",
+        choices=("all", "none"),
+        help="teacher / student: course obstacles (UC77; default: the run config's)",
+    )
+    p_ev.add_argument(
         "--select-val",
         action="store_true",
         help="teacher: pick the checkpoint with the best val macro completion (randomized)",

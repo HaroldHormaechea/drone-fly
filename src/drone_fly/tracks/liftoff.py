@@ -35,6 +35,14 @@ set by ``tracks scan`` in the catalogue header; ``None`` = uncapped.
 **Spawn support (D3 a).** A ray cast down from the spawn + 0.5 m against the solids: the first top
 face within 1.0 m below is the support and its top is the course origin's z; none -> the XML spawn
 z, flag ``spawn-unsupported``. No spawn item -> a synthetic one behind passage 0 (``synthetic``).
+
+**Obstacle-free mode (UC77).** ``convert_liftoff(..., obstacles="none")`` drops every placed
+non-route-gate item (the harness-list population before its size / corridor / cap filters) from
+the solids and empties the harness list. Scene colliders, route-gate frames, the heightfield,
+``floor_z`` and the bounds stay. The spawn support and origin are computed on the FULL geometry,
+so spawn, origin, passages, bounds and time limit equal the default conversion;
+``stats.obstacles_removed`` / ``stats.spawn_support_removed`` record what went. It is a keyword,
+not a :class:`ConversionConfig` field, so the conversion fingerprint is unchanged.
 """
 
 from __future__ import annotations
@@ -78,6 +86,8 @@ from drone_fly.tracks.liftoff_extract.props import box_corners, hull, opening
 CONVERSION_VERSION = 4  # v2 gate rings; v3 floor under volumes, hairpins; v4 grounded spawn
 _M = np.asarray(UNITY_TO_CONTRACT, np.float64)
 SOURCE_SCENE, SOURCE_ITEM, SOURCE_TABLE, SOURCE_PROCEDURAL = 0, 1, 2, 3
+#: Course obstacle modes (UC77): ``all`` = the full geometry, ``none`` = obstacle-free.
+OBSTACLE_MODES = ("all", "none")
 NONSOLID_TYPES = ("TrackBlueprintAction", "TrackBlueprintSpawnpoint", "TrackBlueprintRibbon")
 NONSOLID_PREFIX = ("Checkpoint", "TriggerBox", "SpawnPoint")
 _CP_BOX = re.compile(r"^CheckpointBox(\d+(?:\.\d+)?)mX(\d+(?:\.\d+)?)m")
@@ -710,8 +720,15 @@ def convert_liftoff(
     scene_heightfields: Sequence[dict[str, Any]] | None = None,
     meta: dict[str, Any] | None = None,
     with_cells: bool = True,
+    obstacles: str = "all",
 ) -> SimCourse:
-    """Convert one track (see the module docstring); raises :class:`UnconvertibleError`."""
+    """Convert one track (see the module docstring); raises :class:`UnconvertibleError`.
+
+    ``obstacles="none"`` is the obstacle-free mode (module docstring); an unknown mode raises
+    :class:`~drone_fly.tracks.catalogue.TrackDataError`.
+    """
+    if obstacles not in OBSTACLE_MODES:
+        raise TrackDataError(f"unknown obstacles mode {obstacles!r} (one of {OBSTACLE_MODES})")
     meta = dict(meta or {})
     n = len(geom.passages)
     if geom.route is None or n < 2:
@@ -775,6 +792,7 @@ def convert_liftoff(
                 prims_c.subset(near), sp[0], sp[1], sp[2] + cfg.spawn_ray_up_m,
                 sp[2] - cfg.spawn_window_m,
             )  # fmt: skip
+    prim_supported = top is not None
     if top is None and hf_c is not None:
         hz = float(hf_c.sample(sp[0], sp[1]))
         if sp[2] - cfg.spawn_window_m <= hz <= sp[2] + cfg.spawn_ray_up_m:
@@ -783,6 +801,44 @@ def convert_liftoff(
     if not supported:
         flags.append("spawn-unsupported")
     origin = np.array([sp[0], sp[1], top if supported else sp[2]])
+
+    # ---- obstacle-free (UC77): keep the scene + route-gate frames, AFTER the spawn support ----
+    obstacle_stats: dict[str, Any] = {}
+    if obstacles == "none":
+        off_scene = len(scene_prims)
+        keep = [np.arange(off_scene)]
+        removed = 0
+        for a, b, is_gate in item_slices:
+            if is_gate:
+                keep.append(np.arange(a, b))
+            else:
+                removed += 1
+        kept = np.concatenate(keep).astype(np.int64)
+        support_removed = False
+        if prim_supported:  # the support is a primitive (not the heightfield)
+            kept_near = near[np.isin(near, kept)]
+            kept_top = (
+                support_top(
+                    prims_c.subset(kept_near),
+                    sp[0],
+                    sp[1],
+                    sp[2] + cfg.spawn_ray_up_m,
+                    sp[2] - cfg.spawn_window_m,
+                )  # fmt: skip
+                if len(kept_near)
+                else None
+            )
+            support_removed = kept_top is None or kept_top < top - 1e-9  # type: ignore[operator]
+        prims_c = prims_c.subset(kept)
+        item_slices = [
+            (off_scene + a2, off_scene + a2 + (b - a), True)
+            for (a, b), a2 in _gate_offsets(item_slices)
+        ]
+        obstacle_stats = {
+            "obstacles": "none",
+            "obstacles_removed": removed,
+            "spawn_support_removed": bool(support_removed),
+        }
     frame = CourseFrame(tuple(float(x) for x in origin), float(cfg.world_scale))  # type: ignore[arg-type]
     ws = frame.world_scale
 
@@ -903,6 +959,7 @@ def convert_liftoff(
         "spawn": "synthetic" if synthetic else ("real" if supported else "unsupported"),
         "spawn_support_offset_m": round(float(top - sp[2]), 3) if supported else None,
         "time_limit_s": round(float(time_limit), 2),
+        **obstacle_stats,
     }
     if geom.route.branches:
         flags.append("branching")
@@ -927,6 +984,18 @@ def convert_liftoff(
         meta={**meta, "flags": sorted(set(meta.get("flags", [])) | set(flags))},
         stats=stats,
     )
+
+
+def _gate_offsets(
+    item_slices: Sequence[tuple[int, int, bool]],
+) -> list[tuple[tuple[int, int], int]]:
+    """The gate slices' ``(a, b)`` with their start offset among the kept gate primitives."""
+    out, at = [], 0
+    for a, b, is_gate in item_slices:
+        if is_gate:
+            out.append(((a, b), at))
+            at += b - a
+    return out
 
 
 def passage_witness(
