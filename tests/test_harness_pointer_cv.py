@@ -190,6 +190,54 @@ def test_ac4_present_frame_sets_availability_bit(cv2) -> None:
     np.testing.assert_allclose(np.linalg.norm(block[:3]), 1.0, atol=1e-5)
 
 
+# ------------------------------------------- center_exclude_radius_frac (Arena ACRO-reticle fix)
+
+
+def _two_glyph_frame(cv2, *centers, size=(320, 180)):
+    img = render_icon(None, size=size)
+    for c in centers:
+        cv2.circle(img, (int(c[0]), int(c[1])), 6, (0, 255, 0), -1)
+    return img
+
+
+def test_center_exclude_default_zero_keeps_a_centred_icon(cv2) -> None:
+    """Backward compatible: the default (0.0) does not exclude anything — a centred icon reads."""
+    cam = default_camera(320, 180)
+    reader = make_reader(cam)  # center_exclude_radius_frac defaults to 0.0
+    assert reader.center_exclude_radius_frac == 0.0
+    px = reader.detect_icon(render_icon((160, 90), size=(320, 180)))
+    assert px is not None
+    np.testing.assert_allclose(px, [160, 90], atol=2.0)
+
+
+def test_center_exclude_drops_a_principal_point_detection(cv2) -> None:
+    """A detection within the exclusion radius of the principal point is dropped → unavailable;
+    an off-centre icon outside the radius is still read."""
+    cam = default_camera(320, 180)  # principal point (160, 90); min(w,h)=180
+    reader = make_reader(cam, center_exclude_radius_frac=0.22)  # ~40 px disk
+    assert reader.detect_icon(render_icon((160, 90), size=(320, 180))) is None
+    off = reader.detect_icon(render_icon((260, 70), size=(320, 180)))
+    assert off is not None
+    np.testing.assert_allclose(off, [260, 70], atol=2.0)
+
+
+def test_center_exclude_removes_reticle_before_the_uniqueness_test(cv2) -> None:
+    """The Arena fix: a centred reticle + an off-centre pointer. WITHOUT exclusion the two equal
+    candidates trip the ambiguity reject (→ unavailable); WITH exclusion the reticle is dropped
+    *before* the uniqueness test so the real pointer wins."""
+    cam = default_camera(320, 180)
+    reticle, pointer = (160, 90), (260, 70)
+    frame = _two_glyph_frame(cv2, reticle, pointer)
+
+    plain = make_reader(cam)  # no exclusion → ambiguous → unavailable
+    assert plain.detect_icon(frame) is None
+
+    fixed = make_reader(cam, center_exclude_radius_frac=0.22)
+    px = fixed.detect_icon(frame)
+    assert px is not None
+    np.testing.assert_allclose(px, [260, 70], atol=2.0)  # the off-centre pointer, not the reticle
+
+
 # ----------------------------------------------------------------------------- AC5: latency guard
 
 
@@ -317,9 +365,11 @@ def test_pointer_reader_from_config_builds_reader_from_camera_block() -> None:
             "enabled": True,
             "hsv_ranges": [[[40, 100, 100], [80, 255, 255]]],
             "min_circularity": 0.5,
+            "center_exclude_radius_frac": 0.03,
         },
     }
     reader = pointer_reader_from_config(cam, cam_cfg)
     assert isinstance(reader, HudPointerReader)
     assert reader.roi is not None and reader.roi.rect == (100, 120, 120, 60)
     assert len(reader.hsv_ranges) == 1 and reader.min_circularity == 0.5
+    assert reader.center_exclude_radius_frac == pytest.approx(0.03)  # from_config key parsed
