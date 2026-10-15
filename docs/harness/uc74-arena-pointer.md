@@ -53,6 +53,31 @@ Re-running run-2 training with these values is a **downstream experiment**, out 
 this only produces the numbers. The tail (p95 13°) is driven by motion blur and the pointer's
 billboard offset from the gate centre, so a fat-tailed jitter model may fit better than a Gaussian.
 
+## Conversion-model verdict (bounds AC3)
+
+Is the icon a faithful camera-frame projection of the gate (so pixel→ray→body holds), or a
+clamped/horizon-stabilized edge indicator? Binning the combined error by the gate's off-axis angle
+`|az_gt|` answers it (all detections, no inlier trim):
+
+| `|az_gt|` | n | median err | p90 |
+|---|---|---|---|
+| 0–10° | 129 | **4.0°** | 18.8° |
+| 10–20° | 117 | **3.8°** | 21.1° |
+| 20–30° | 60 | 8.5° | 32.4° |
+| 30–40° | 33 | 8.8° | 27.2° |
+| 40–50° | 16 | 14.8° | 58.7° |
+| 50–90° | 31 | 42.4° | 72.4° |
+| 90–180° | 9 | 74.6° | 116.6° |
+
+**Verdict:** the pointer is a *faithful* gate projection in the central cone (`|az| ≲ 20–25°`),
+where the no-attitude `pixel→ray→body` model holds to ~4° median — and the fit landing on the
+physical camera (122°/27.5°) confirms it. So the **attitude-aware hook is not needed for the
+on-axis regime** that matters when flying toward a gate. Beyond ~±30–40° the error climbs steeply:
+the icon **clamps toward the screen edge** (a direction indicator, no longer a true projection), so
+those readings are unreliable. The `pointer_roi` already excludes the screen edges, and the student
+trained with pointer dropout tolerates the resulting unavailability; a bearing-magnitude guard
+(treat `|az| ≳ 30°` as low-confidence) is the natural next refinement if the live run wants it.
+
 ## Turnkey launch recipe (Windows + Liftoff)
 
 The camera/pointer calibration lives in the **`liftoff_arena` preset**
@@ -66,6 +91,24 @@ drone-fly harness run \
   --preset liftoff_arena \
   --overlay            # optional: UC65 debug overlay to watch the pointer bearing live (AC8)
 ```
+
+**Is the pointer on by default with this preset? Yes — no extra flag.** The run-2 student *always*
+consumes the `("pointer", 4)` obs block: it is baked into the trained network's input dimension
+(schema v3, DIM 65), so there is nothing to "enable" at inference. What varies is only whether that
+block is *live* or *degraded*:
+
+- The live assembler always passes `pointer=(gate.info or {}).get("pointer")`
+  (`harness/student.py`).
+- `info["pointer"]` is populated iff the gate estimator was built with a pointer reader, which
+  happens iff `camera.pointer.enabled: true` (and the block is configured). **The `liftoff_arena`
+  preset sets `camera.pointer.enabled: true`**, so the reader is built and the pointer is fed from
+  the live HUD — automatically, for both the OpenCV and the learned gate estimators.
+- Without the preset (or with `camera.pointer.enabled: false`), `info["pointer"]` stays unset →
+  the obs block falls back to zeros / availability bit 0 (the pre-UC74 degraded behaviour the
+  student was trained to tolerate). No crash, just no pointer gain.
+
+So flying with `--preset liftoff_arena` is sufficient to turn the live pointer on. To fly the same
+student *without* it (A/B), drop the preset or override `camera.pointer.enabled=false`.
 
 Before flying, confirm:
 
