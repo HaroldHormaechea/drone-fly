@@ -89,4 +89,4 @@ Statuses:
 | 77 | [use-cases/77-obstacle-free-student-training.md](use-cases/77-obstacle-free-student-training.md) | Obstacle-free student training for open race tracks (Infinity Loop class) | done | 2026-10-15 |
 | 78 | [use-cases/78-vision-eyes-ray-estimator-v1.md](use-cases/78-vision-eyes-ray-estimator-v1.md) | Vision "eyes" v1: camera ray estimator for the 70-input connectome (dataset, labels, model, accuracy) | done | 2026-10-16 |
 | 79 | [use-cases/79-student-information-gap-ablation.md](use-cases/79-student-information-gap-ablation.md) | Student information-gap ablation (which privileged inputs the student needs) | pending | 2026-10-16 |
-| 80 | [use-cases/80-fix-student-distillation-training.md](use-cases/80-fix-student-distillation-training.md) | Fix the student distillation training (on-policy relabelling / PPO fine-tune / β schedule) | in-progress | 2026-10-16 |
+| 80 | [use-cases/80-fix-student-distillation-training.md](use-cases/80-fix-student-distillation-training.md) | Fix the student distillation training (on-policy relabelling / PPO fine-tune / β schedule) | done | 2026-10-16 |
