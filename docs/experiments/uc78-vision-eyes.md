@@ -271,5 +271,30 @@ Eval and bench reports are written next to the weights.
 
 ## Results
 
-_To be filled by the orchestrator after the GPU training run (`eyes train` on the RTX 3050, then
-`eyes eval --split held-out` / `--split val` and `eyes bench --with-gate-detector`)._
+First GPU run `eyes-v1-20261016`, 2026-10-16, RTX 3050, dataset `eyes-20261015T234706Z-d053fbd8`:
+17.5k train / 3.1k val / 14.2k held-out samples.
+
+**Training.** About 8 s per epoch. Early stopping ended the run at epoch 12; the best val was at epoch 4 (val loss 0.140), and the run overfit after that. With 7 train maps and ~5 % hit rays, the data is thin.
+
+**Accuracy, held-out (HangarC03, MinusTwo, ThePit; range 16 Liftoff m, tol 0.5 training m):**
+
+| | miss rate (all hits) | miss, in view | miss, nearest quarter (0-4 m) | FA on clear rays |
+|---|---:|---:|---:|---:|
+| eyes v1 | **0.958** | 0.913 | 0.990 | 0.031 |
+| always-clear baseline | 0.985 | 0.969 | 1.000 | 0.000 |
+
+- Per-map miss: HangarC03 0.92, MinusTwo 0.92, ThePit 0.98.
+- Calibration ECE 0.094 overall. It is good on clear rays (0.02) and poor on hits (0.45-0.92 per distance bin).
+- Warning time p50 1.17 s, and only 0.2 % of frames have < 0.5 s. The 4 m (16 Liftoff m) range is not the bottleneck at these speeds.
+
+**Reading.** v1 is only marginally better than always-clear. It mostly predicts "clear", and it misses about 99 % of the nearest obstacles, the ones that matter. It learned the far, in-view hits a little: in the 75-100 % range bin the miss rate is ~0.45. As a measured baseline (AC6) it shows that monocular ray ranging from 25 captures is far from usable. The likely levers, in order:
+1. much more and denser hit data, including captures flown close to obstacles;
+2. a hit/no-hit classification head with focal loss instead of mostly regression;
+3. pretraining or a depth-model backbone.
+
+The eyes are **not** ready to feed the 70-input connectome. The noise-model slice (UC-73 AC7) should wait for a better estimator.
+
+**Latency (AC7, RTX 3050, 2560x1080, fp16), p50 / p95 / p99:**
+- eyes: preprocess 2.3 / 3.1 / 4.4 ms; forward 1.9 / 3.5 / 4.1 ms; total **4.2 / 6.4 / 7.4 ms**.
+- eyes + gate detector tick: 11.3 / 14.4 / 15.5 ms, inside the 25 ms budget.
+- Peak CUDA memory: 83 MB for the eyes, 108 MB with the detector. The connectome's footprint is not measured.
