@@ -1,0 +1,23 @@
+# UC-81 combined-distillation-fix ablation — BASELINE (current UC-77/79/80 distillation).
+#
+# The like-for-like control for the two UC-81 intervention variants (combined / combined-ppo). It
+# is `student-liftoff-open` with the MLP actor and the UC-80 DAgger step budget, and NO new UC-81
+# fields, so the distillation is byte-identical to UC-77/79/80 (the β-mix selects execution, no
+# PPO, the default linear β 1.0→0.0 over half the budget, floor_clearance reward off). Every
+# UC-81 variant is compared against this row.
+#
+# Budget: 1.8e7 total env-steps of DAgger, matching the UC-80 baseline/variant budget. The
+# combined variant keeps this same 1.8e7; the combined-ppo variant deliberately ADDS a ~3e7 PPO
+# phase on top (total ≈4.8e7) — equal-budget is relaxed here on purpose (see AC4 and the
+# experiment doc), because UC-80 proved the short equal-budget PPO arm undertrains.
+#
+# Run it via scripts/uc81_combined_fix.sh (resumable driver) — see
+# docs/experiments/uc81-combined-distillation-fix.md.
+extends: student-liftoff-open
+name: student-liftoff-open-uc81-baseline
+n_envs: 2048
+budget: 1.8e7              # UC-81 DAgger budget (total env-steps); same as the combined variant
+student:
+  actor: mlp-student      # UC-81 scope is MLP-only (matches UC-79/80); default is k1-student, so explicit
+distill:
+  final_report: true      # held-out + Infinity Loop, exact + noise, 32 ep / seed 1234 (inherited; explicit)
