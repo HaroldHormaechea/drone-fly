@@ -53,7 +53,7 @@ from drone_fly.eyes.camera_rays import FWD_SOURCES, camera_meta, cone_namespace,
 from drone_fly.eyes.capture_meta import CaptureMeta, capture_sha, read_capture_meta
 from drone_fly.eyes.ego import EGO_DIM, ego_vector
 from drone_fly.eyes.fov import array_sha, contract_sha, offline_contract, preset_view
-from drone_fly.eyes.history import HIST_TOL_S, select_history
+from drone_fly.eyes.history import DT_S, HIST_TOL_S, select_history
 from drone_fly.harness.errors import HarnessConfigError
 from drone_fly.harness.geometry import CameraModel, ray_directions
 from drone_fly.harness.types import FlightState
@@ -71,7 +71,7 @@ AUX_KINDS = ("none", "obstacle", "gate", "scene", "item", "floor")
 AUX_NONE, AUX_OBSTACLE, AUX_GATE, AUX_SCENE, AUX_ITEM, AUX_FLOOR = range(6)
 #: An item primitive within a passage's outer half-size + this (Liftoff m) is a ``gate``.
 AUX_GATE_MARGIN_M = 1.0
-EGO_DT_S = 0.1
+EGO_DT_S = DT_S
 #: At or below this speed (Liftoff m/s) the warning time is ``inf`` (excluded from stats).
 MIN_WARNING_SPEED_MPS = 0.3
 PAIR_TOL_S = 0.03

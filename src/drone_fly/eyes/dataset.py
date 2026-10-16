@@ -37,7 +37,7 @@ from typing import Any
 import numpy as np
 
 from drone_fly.eyes.capture_meta import capture_sha, discover_captures, read_capture_meta
-from drone_fly.eyes.history import HIST_TOL_S, select_history
+from drone_fly.eyes.history import default_tol, history_dt, select_history
 from drone_fly.eyes.labels import (
     AUX_KINDS,
     LABELS_FILE,
@@ -224,7 +224,7 @@ def build_dataset(
     height: int = INPUT_HEIGHT,
     k_frames: int = K_FRAMES,
     stride_s: float = DT_S,
-    hist_tol_s: float = HIST_TOL_S,
+    hist_tol_s: float | None = None,
     uptilt_tol_deg: float = UPTILT_TOL_DEG,
     build_cache: bool = False,
     cache_root: str | Path | None = None,
@@ -240,6 +240,7 @@ def build_dataset(
     from drone_fly.eyes.fov import preset_view
     from drone_fly.tracks.catalogue import sha256_file
 
+    hist_tol_s = default_tol(stride_s) if hist_tol_s is None else float(hist_tol_s)
     croot = Path(captures_root or paths.captures_root())
     lroot = Path(labels_root or labels_root_default())
     view = preset_view(preset, config, harness)
@@ -311,7 +312,7 @@ def build_dataset(
 
     # ---- samples
     cols: dict[str, list[np.ndarray]] = {k: [] for k in (*SAMPLE_FIELDS, *FRAME_FIELDS)}
-    idx_cap, idx_row, idx_hist, idx_split = [], [], [], []
+    idx_cap, idx_row, idx_hist, idx_split, idx_hdt = [], [], [], [], []
     drops: Counter[str] = Counter()
     for ci, e in enumerate(entries):
         if not e["included"]:
@@ -329,6 +330,7 @@ def build_dataset(
                 continue
             keep.append(i)
             idx_hist.append(hist)
+            idx_hdt.append(history_dt(lab["stamp"], i, hist))
         keep_a = np.asarray(keep, np.int64)
         e["samples"] = int(len(keep_a))
         idx_cap += [ci] * len(keep_a)
@@ -340,6 +342,7 @@ def build_dataset(
         "capture": np.asarray(idx_cap, np.int32),
         "row": np.concatenate(idx_row) if idx_row else np.zeros(0, np.int64),
         "hist": np.asarray(idx_hist, np.int64).reshape(-1, max(k_frames - 1, 0)),
+        "hist_dt": np.asarray(idx_hdt, np.float32).reshape(-1, max(k_frames - 1, 0)),
         "split": np.asarray(idx_split, np.int8),
         **{k: np.concatenate(v) for k, v in cols.items()},
     }

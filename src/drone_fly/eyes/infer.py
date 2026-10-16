@@ -12,11 +12,12 @@ Per call
        the same frame stamp again returns the previous output (frames are never duplicated);
     2. the frame is prepared (:func:`~drone_fly.eyes.model.prepare_frame`) and buffered;
     3. history: :func:`~drone_fly.eyes.history.select_history` over the buffer (``K - 1`` frames
-       at ``t - j dt`` +- 40 ms). Missing (startup, a gap) -> ``history_ok = False``,
+       at ``t - j dt`` +- 50 % of ``dt``). Missing (startup, a gap) -> ``history_ok = False``,
        ``free = 1`` and ``conf = 0`` for every ray: no estimate, never a guess from duplicated
        frames;
-    4. rays (:func:`~drone_fly.eyes.camera_rays.ray_view`) and ego-motion
-       (:func:`~drone_fly.eyes.ego.ego_vector`, rates from the stride-1 history frame);
+    4. rays (:func:`~drone_fly.eyes.camera_rays.ray_view`), ego-motion
+       (:func:`~drone_fly.eyes.ego.ego_vector`, rates from the stride-1 history frame) and the
+       actual history offsets (:func:`~drone_fly.eyes.history.history_dt`);
     5. one forward pass.
 
 Wrapping this as a registered ``free_space_estimator`` part is a follow-up (UC-73).
@@ -34,7 +35,7 @@ import torch
 
 from drone_fly.eyes.camera_rays import camera_from_meta, cone_namespace, ray_view
 from drone_fly.eyes.ego import ego_vector
-from drone_fly.eyes.history import select_history
+from drone_fly.eyes.history import default_tol, history_dt, select_history
 from drone_fly.eyes.model import EyesNet, build_from_meta, prepare_frame
 from drone_fly.harness.types import FlightState, Frame
 
@@ -74,7 +75,7 @@ class EyesEstimator:
         self.width, self.height = int(inp["width"]), int(inp["height"])
         self.k_frames = int(inp["k_frames"])
         self.dt_s = float(inp["dt_s"])
-        self.tol_s = float(inp.get("hist_tol_s", 0.04))
+        self.tol_s = float(inp.get("hist_tol_s", default_tol(self.dt_s)))
         self.cone = cone_namespace(meta["cone"])
         self.camera = camera_from_meta(meta["camera"])
         self.masks = [list(m) for m in meta.get("masks") or []]
@@ -147,6 +148,7 @@ class EyesEstimator:
                 torch.from_numpy(view.rays_cam).to(dev).unsqueeze(0),
                 torch.from_numpy(view.in_view.astype(np.float32)).to(dev).unsqueeze(0),
                 torch.from_numpy(ego).to(dev).unsqueeze(0),
+                torch.from_numpy(history_dt(self._times, i, hist)).to(dev).unsqueeze(0),
             )
             free_np = free[0].float().cpu().numpy()
             conf_np = torch.sigmoid(logit[0]).float().cpu().numpy()

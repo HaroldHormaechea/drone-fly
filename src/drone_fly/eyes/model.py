@@ -5,7 +5,9 @@ Input
     (``t``, ``t - dt``, ...), each downscaled with :func:`prepare_frame` (area resize to
     ``192 x 80``, HUD masks zeroed at the low resolution). Per ray: ``uv`` ``(B, R, 2)`` in
     ``[-1, 1]``, the unit camera-frame direction ``rays_cam`` ``(B, R, 3)`` and ``in_view``
-    ``(B, R)``; plus ``ego`` ``(B, 10)`` (:mod:`drone_fly.eyes.ego`).
+    ``(B, R)``; plus ``ego`` ``(B, 10)`` (:mod:`drone_fly.eyes.ego`) and ``hist_dt``
+    ``(B, K - 1)``: the ACTUAL time offsets (seconds) of the history frames (the stride is chosen
+    within +-50 %, so the net is told the true one).
 
 Network
     Five stride-2 stages (32-48-64-96-128 channels; conv-BN-ReLU stride 2, then stride 1), a global
@@ -13,8 +15,8 @@ Network
     stride-16 maps at ``(u, v)`` -- **zeroed when the ray is out of view**, so an unseen ray is
     predicted from the global context, its direction and the ego-motion only (a learned prior).
     The query ``[stage-3 (64) || stage-4 (96) || global (128) || ray_cam (3) || in_view (1) ||
-    ego (10)]`` goes through a shared 256-128 MLP to two outputs: ``free = sigmoid(.)`` in
-    ``[0, 1]`` (1 = clear to the scaled range) and a confidence logit.
+    ego (10) || hist_dt (K - 1)]`` goes through a shared 256-128 MLP to two outputs:
+    ``free = sigmoid(.)`` in ``[0, 1]`` (1 = clear to the scaled range) and a confidence logit.
 
 Stacking K frames lets the forward rays use looming (the growth of an obstacle's image between
 frames, i.e. time-to-contact): parallax gives no depth at the focus of expansion, which is where
@@ -34,14 +36,15 @@ import torch.nn.functional as F
 from torch import nn
 
 FORMAT = "drone-fly-eyes"
-ARCH_VERSION = 1
+ARCH_VERSION = 2
 CHANNELS = (32, 48, 64, 96, 128)
 HIDDEN = (256, 128)
 #: Backbone stages (0-based) whose maps are sampled per ray (stride 8 and stride 16).
 SAMPLE_STAGES = (2, 3)
 INPUT_WIDTH, INPUT_HEIGHT = 192, 80
 K_FRAMES = 3
-DT_S = 0.1
+DT_S = 0.2
+HIST_TOL_S = 0.1
 #: Pixel normalisation after /255.
 PIX_MEAN, PIX_STD = 0.45, 0.25
 
@@ -71,6 +74,7 @@ class EyesNet(nn.Module):
             cin = c
         self.stages = nn.ModuleList(stages)
         q = sum(channels[s] for s in self.sample_stages) + channels[-1] + 3 + 1 + self.ego_dim
+        q += self.k_frames - 1
         layers: list[nn.Module] = []
         for h in hidden:
             layers += [nn.Linear(q, h), nn.ReLU(inplace=True)]
@@ -85,6 +89,7 @@ class EyesNet(nn.Module):
         rays_cam: torch.Tensor,
         in_view: torch.Tensor,
         ego: torch.Tensor,
+        hist_dt: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """``(free (B, R) in [0, 1], confidence logit (B, R))``."""
         x = normalise_frames(frames)
@@ -102,7 +107,8 @@ class EyesNet(nn.Module):
             feats.append(f.squeeze(-1).transpose(1, 2) * view)  # (B, R, C), zero when unseen
         g = maps[-1].mean(dim=(2, 3)).unsqueeze(1).expand(b, r, -1)
         e = ego.to(x.dtype).unsqueeze(1).expand(b, r, -1)
-        q = torch.cat([*feats, g, rays_cam.to(x.dtype), view, e], dim=-1)
+        h = hist_dt.to(x.dtype).reshape(b, -1).unsqueeze(1).expand(b, r, -1)
+        q = torch.cat([*feats, g, rays_cam.to(x.dtype), view, e, h], dim=-1)
         out = self.head(q)
         return torch.sigmoid(out[..., 0]), out[..., 1]
 
@@ -164,7 +170,7 @@ def default_meta(
     ray_range: float,
     k_frames: int = K_FRAMES,
     dt_s: float = DT_S,
-    hist_tol_s: float = 0.04,
+    hist_tol_s: float = HIST_TOL_S,
     width: int = INPUT_WIDTH,
     height: int = INPUT_HEIGHT,
     **extra: Any,
@@ -185,6 +191,7 @@ def default_meta(
             "k_frames": int(k_frames),
             "dt_s": float(dt_s),
             "hist_tol_s": float(hist_tol_s),
+            "hist_dt_input": True,
         },  # fmt: skip
         "n_rays": int(len(c)),
         "ego_dim": 10,

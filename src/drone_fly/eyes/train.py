@@ -111,6 +111,7 @@ def _batch(data: EyesSamples, idx: np.ndarray, device: str) -> dict[str, torch.T
         "rays_cam": t(d["rays_cam"][idx]),
         "in_view": t(d["in_view"][idx].astype(np.float32)),
         "ego": t(d["ego"][idx]),
+        "hist_dt": t(d["hist_dt"][idx]),
         "free": t(d["free"][idx]),
         "hit": t(d["hit"][idx].astype(np.float32)),
     }
@@ -147,7 +148,7 @@ def _evaluate(net: Any, data: EyesSamples, device: str, batch: int, kw: dict[str
         for a in range(0, len(data), batch):
             idx = np.arange(a, min(a + batch, len(data)))
             b = _batch(data, idx, device)
-            fp, lg = net(b["frames"], b["uv"], b["rays_cam"], b["in_view"], b["ego"])
+            fp, lg = net(b["frames"], b["uv"], b["rays_cam"], b["in_view"], b["ego"], b["hist_dt"])
             loss, parts = losses(fp, lg, b["free"], b["hit"], **kw)
             tot += float(loss) * len(idx)
             mae += parts["mae_m"] * len(idx)
@@ -277,7 +278,7 @@ def train_eyes(
                 b = _batch(train, idx, dev)
                 x = augment(b["frames"].float(), rng, k)
                 with torch.autocast("cuda", dtype=torch.float16, enabled=cuda):
-                    fp, lg = net(x, b["uv"], b["rays_cam"], b["in_view"], b["ego"])
+                    fp, lg = net(x, b["uv"], b["rays_cam"], b["in_view"], b["ego"], b["hist_dt"])
                 loss, _ = losses(fp, lg, b["free"], b["hit"], **kw)
                 opt.zero_grad(set_to_none=True)
                 scaler.scale(loss).backward()
