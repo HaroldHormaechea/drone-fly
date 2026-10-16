@@ -139,30 +139,45 @@ GPU run lands.
 | Run | Held-out (noise) | Held-out (exact) | Infinity (noise) | Infinity (exact) | Held-out outcomes noise (floor/coll/oob/lost/timeout) |
 |---|---|---|---|---|---|
 | teacher (exact) | — | 17.1% | — | 93.8% | — |
-| baseline | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
-| onpolicy | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
-| beta | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
-| ppo | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
+| baseline | 0.0% | 0.0% | 0.0% | 0.0% | 18.5% / 22.9% / 43.5% / 10.0% / 0.0% |
+| onpolicy | 0.0% | 0.0% | 0.0% | 0.0% | 14.0% / 29.2% / 42.3% / 10.2% / 0.0% |
+| beta | 0.0% | 0.0% | 0.0% | 0.0% | 48.8% / 10.6% / 19.4% / 19.2% / 0.0% |
+| ppo | 0.0% | 0.0% | 0.0% | 0.0% | 18.1% / 26.7% / 40.2% / 8.8% / 0.0% |
 | UC-77 student (MLP, ref) | 1.0% | 0.0% | 0.0% | 0.0% | — |
 | UC-79 `teacher_full` (ref) | 0.6% | 1.0% | — | — | 20.6% / 51.2% / 2.9% / 8.3% / 4.0% |
 
 ## Recommendation
 
-_To be filled from the completed table (generalisation = held-out noise; Infinity Loop is a
-train-split sanity check)._ Read it against these rules:
+**Result (run 2026-10-16, RTX A3000, equal 1.8e7-step budget): negative — no single lever clears the
+bar.** All four runs completed **0.0% held-out (noise and exact)** and **0.0% Infinity**, versus the
+teacher's 17.1% / 93.8%. None reach the ≥5% success threshold (AC8 negative branch). Single-lever
+fixes to the distillation — on-policy relabelling, a gentler β-floor, or a PPO completion-reward
+fine-tune — do **not** by themselves move the student off zero at this shortened budget.
 
-- **A lever lifts held-out noise to ≥ 5 %** (decisively above the baseline floor; AC8 met) → that is
-  the fix. Record it and the next step: apply it to the K1 connectome actor (a separate follow-up).
-- **A lever moves held-out markedly over baseline but below 5 %** → partial; name the combination to
-  try next (most likely `onpolicy` + `beta`'s β-floor, i.e. student-driven execution that still
-  receives teacher correction).
-- **`ppo` is the only mover, or it underperforms** → treat a low `ppo` score as undertraining given
-  its 1.2e7 imitation + 6e6 PPO split (see the budget note), not as PPO failing; the follow-up is a
-  denser completion-shaped reward and/or a longer PPO budget.
-- **Baseline and all variants read ~0 % at this budget (none reach 5 %)** → record the **negative
-  result** (AC8): the single-lever fixes do not clear the bar at 1.8e7 steps. Name the next lever —
-  combined interventions (on-policy + β-floor, then + PPO), a denser reward, or a longer budget —
-  rather than silently passing.
+What the runs *do* show (the levers change behaviour, just not completion):
+- **`onpolicy`** — indistinguishable from baseline (held-out outcomes ≈ 14/29/42/10). Making the
+  teacher label student-visited states, on its own, did not help: the student still has no policy that
+  survives its own trajectory.
+- **`beta`** (end-β 0.15, over the whole budget) — the clearest behavioural shift: sustained teacher
+  correction cut out-of-bounds (43.5% → 19.4%) and collisions (22.9% → 10.6%), but the drone now
+  **sinks into the floor** (18.5% → 48.8% held-out; 81% on Infinity). It stays in-course near gates
+  but cannot hold altitude — a control/stability failure, not a navigation one. Consistent with the
+  UC-79 reading.
+- **`ppo`** — the PPO fine-tune *was* learning its objective (reward/step climbed 0.237 → 0.288 and
+  was still rising at the budget end) but produced no completions. This is **undertraining**, exactly
+  the flagged risk of the 1.2e7 + 6e6 split — not evidence PPO fails. Its held-out mix (18/27/40/9) is
+  near baseline because PPO only touched the last third of the budget.
 
-Scope stays MLP-student on the obstacle-free `student-liftoff-open` config; applying the winning
-intervention(s) to the K1 connectome actor is the follow-up UC.
+**Recommendation / next lever.** The single-lever null result points at **combination + depth**, not a
+different information source (UC-79 already ruled out observation):
+1. **Combine `onpolicy` + `beta`'s β-floor** — student-driven execution that *still* receives teacher
+   correction on the states it visits (neither alone sufficed; together they attack covariate shift
+   and stability jointly).
+2. **Give PPO a real budget and a denser completion-shaped reward** — the reward was still climbing;
+   extend PPO well beyond 6e6 steps and/or shape altitude-hold / gate-approach explicitly, since the
+   dominant residual failure under teacher correction is floor-sinking.
+3. Then, if a combination clears ≥5% held-out, apply the winner to the K1 connectome actor (separate
+   follow-up). Scope here stayed MLP-student on obstacle-free `student-liftoff-open`.
+
+The budget is the shortened 1.8e7 equaliser; a longer-budget re-run of the combined fix is the cheap
+confirmation before concluding the distillation can't be salvaged by these levers.
