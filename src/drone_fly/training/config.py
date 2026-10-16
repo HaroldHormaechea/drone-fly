@@ -563,10 +563,20 @@ class DistillSection:
     #: labels the states the *student* actually visits (attacks covariate shift). Default-off ⇒
     #: the behaviour is byte-identical to UC77/79 (the β-mix selects execution as before).
     on_policy_relabel: bool = False
+    #: UC81 (AC2): combine on-policy relabelling with the β-floor. Only meaningful when
+    #: ``on_policy_relabel`` is true: when this is also true, the student drives execution but the
+    #: β-mix still blends in teacher correction on student-visited states (both levers active).
+    #: Default-off ⇒ ``on_policy_relabel`` alone stays pure-student (byte-identical to UC80).
+    on_policy_beta_floor: bool = False
 
 
-#: DistillSection fields left out of a run snapshot at their default (UC77 N6 + UC80).
-_DISTILL_UC77_DEFAULTS = {"track_evals": [], "final_report": False, "on_policy_relabel": False}
+#: DistillSection fields left out of a run snapshot at their default (UC77 N6 + UC80 + UC81).
+_DISTILL_UC77_DEFAULTS = {
+    "track_evals": [],
+    "final_report": False,
+    "on_policy_relabel": False,
+    "on_policy_beta_floor": False,
+}
 
 
 @dataclass(frozen=True)
