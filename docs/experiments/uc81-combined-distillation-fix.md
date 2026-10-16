@@ -150,32 +150,46 @@ UC-77, UC-79 and UC-80 reference rows below are known.
 | Run | Held-out (noise) | Held-out (exact) | Infinity (noise) | Infinity (exact) | Held-out outcomes noise (floor/coll/oob/lost/timeout) |
 |---|---|---|---|---|---|
 | teacher (exact) | — | 17.1% | — | 93.8% | — |
-| baseline | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| combined | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| combined-ppo | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+| baseline | 0.0% | 0.0% | 0.0% | 0.0% | 18.5% / 22.9% / 43.5% / 10.0% / 0.0% |
+| combined | 0.0% | 0.0% | 0.0% | 0.0% | 61.0% / 9.8% / 14.4% / 14.2% / 0.0% |
+| combined-ppo | 0.0% | 0.0% | — | — | 39.2% / 17.3% / 5.2% / 18.5% / 0.0% |
 | UC-77 student (MLP, ref) | 1.0% | 0.0% | 0.0% | 0.0% | — |
 | UC-79 `teacher_full` (ref) | 0.6% | 1.0% | — | — | 20.6% / 51.2% / 2.9% / 8.3% / 4.0% |
 | UC-80 `beta` (best behavioural, ref) | 0.0% | 0.0% | 0.0% | 0.0% | 48.8% / 10.6% / 19.4% / 19.2% / 0.0% |
 
 ### `combined-ppo` PPO reward curve (AC6 sanity check)
 
-_TBD after the run_: report reward/step over the 3e7 PPO fine-tune (from the run's `logs/`). Read it
-for (a) **undertraining** — still clearly rising at 3e7 ⇒ budget may need to grow (note it); and
-(b) **reward-hacking** — reward climbing while completions stay 0 and the drone parks at the
-clearance band ⇒ the shaping term is being gamed, not helping race.
+**Result:** reward/step over the 3e7 PPO fine-tune **plateaued at ≈0.17–0.19** (it did not keep
+climbing the way UC-80's unshaped 6e6 PPO did, 0.237→0.288). So this is **not undertraining** — PPO
+converged on the shaped objective within budget. And it is **not classic reward-hacking** either:
+completions stayed 0 but the drone did **not** park at the clearance band for free reward (the
+floor-clearance term is a one-sided penalty with no positive bonus). Instead the shaping worked
+*mechanically but not toward the goal* — floor-sinking fell (combined 61.0% → combined-ppo 39.2%) and
+out-of-bounds collapsed to 5.2% (best of any run across UC-79/80/81), but the avoided-floor episodes
+converted into **power_loss (0.6% → 19.8%)** and gate_lost (18.5%), not completions. The student
+learned to avoid the two penalised terminal states (floor, OOB) without learning to actually fly the
+course.
 
 ## Recommendation
 
-_TBD after the GPU run._ Per AC8:
+**Result (run 2026-10-16, RTX A3000): negative — pivot branch (AC8) triggered.** All three variants
+finished **0.0% held-out (noise and exact)** and 0.0% Infinity vs the teacher's 17.1% / 93.8%. Neither
+the combined lever nor the extended, reward-shaped PPO clears the ≥5% bar.
 
-- **If at least one variant reaches ≥5% held-out (noise):** record it as the distillation fix. If it
-  is `combined-ppo`, run the isolation follow-up first (extended-PPO with the floor-clearance reward
-  off, and/or the reward at the short budget) to attribute the gain to the PPO budget vs the reward
-  term before concluding. Then the broader follow-up: apply the winning recipe to the K1 connectome
-  actor (separate use case). Scope here stayed MLP-student on obstacle-free `student-liftoff-open`.
-- **If neither variant clears 5% (pivot branch, AC8):** record the negative result. **UC-81 is the
-  agreed last distillation attempt** — the project then pivots to **obstacle detection with the
-  70-input connectome model** (the UC-73/UC-78 vision line), rather than continuing to tune
-  distillation. The combined lever (on-policy + β-floor) and the extended, reward-shaped PPO are the
-  strongest distillation moves available short of a new information source (already ruled out by
-  UC-79); exhausting them without clearing the bar is the decisive signal to change direction.
+The runs are, however, a clean mechanistic story across UC-79 → UC-80 → UC-81:
+- **The student can be steered away from any *penalised* failure mode but not toward completion.**
+  β-floor killed out-of-bounds; the floor-clearance reward then killed floor-sinking (combined-ppo OOB
+  5.2%, floor down to 39.2% from combined's 61.0%) — yet completion stayed pinned at 0, with failures
+  simply migrating to the next-cheapest terminal state (power_loss 19.8%, gate_lost 18.5%). This is
+  the signature of a policy that never acquired the actual control skill (stable, repeated gate
+  passage); shaping only reshuffles *how* it fails.
+- Combined with UC-79 (observation is not the bottleneck — even `teacher_full` ≈1%) and UC-80 (no
+  single distillation lever helps), **UC-81 exhausts the distillation-tuning direction**: the strongest
+  moves available short of a new information source (combined on-policy + β-floor, plus a converged
+  reward-shaped PPO) do not move completion off zero.
+
+**Decision: pivot.** Per AC8 and the standing project instruction, UC-81 is the **last distillation
+attempt**. The project now pivots to **obstacle detection with the 70-input connectome model** (the
+UC-73 / UC-78 vision line) — a different control/perception substrate — rather than continuing to tune
+the MLP-student distillation. Applying any of these levers to the K1 connectome actor is deferred
+behind that pivot.
