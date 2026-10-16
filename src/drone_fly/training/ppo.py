@@ -341,6 +341,7 @@ def build_teacher_pool(cfg: Any, purpose: str = "train", mix: Any = None) -> Any
         conversion=teacher_conversion(cfg),
         root=cfg.tracks.root,
         scenes_root=cfg.tracks.scenes_root,
+        obstacles=cfg.tracks.obstacles,
     )
     if purpose == "train" and cfg.tracks.augment:
         from drone_fly.tracks.augment import augment_pool

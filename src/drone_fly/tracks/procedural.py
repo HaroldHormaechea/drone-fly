@@ -12,6 +12,10 @@ half-height, a conservative cap) and boxes axis-aligned boxes; every obstacle is
 harness list (the max-half-extent rule applies). The start is on the ground: the support is the
 floor plane z = 0.
 
+``convert_procedural(..., obstacles="none")`` (UC77 obstacle-free) drops every obstacle (zero
+primitives, an empty harness list) AFTER the draw, so the gates and the start are those of the
+default conversion (the ``no_obs`` spec key instead changes the course_gen draw's output).
+
 The ``spec`` keys (``tracks/procedural.yaml``): ``seed_base``, ``pool_size``, ``ng: [lo, hi)``,
 ``laps: [lo, hi)``, ``tier`` (``tractable`` / ``full``; recorded only), ``tunnels``,
 ``variety``, ``no_obs``, ``scale: [lo, hi]``, ``aperture_m: [lo, hi]``.
@@ -37,7 +41,7 @@ from drone_fly.sim.pool import (
     route_polyline,
 )
 from drone_fly.tracks.catalogue import TrackDataError
-from drone_fly.tracks.liftoff import SOURCE_PROCEDURAL, ConversionConfig
+from drone_fly.tracks.liftoff import OBSTACLE_MODES, SOURCE_PROCEDURAL, ConversionConfig
 
 SPEC_KEYS = ("seed_base", "pool_size", "ng", "laps", "tier", "tunnels", "variety", "no_obs",
              "scale", "aperture_m")  # fmt: skip
@@ -122,11 +126,21 @@ def sample_scaled(spec: dict[str, Any], seed: int) -> dict[str, Any]:
 
 
 def convert_procedural(
-    spec: dict[str, Any], index: int, cfg: ConversionConfig, meta: dict[str, Any] | None = None
+    spec: dict[str, Any],
+    index: int,
+    cfg: ConversionConfig,
+    meta: dict[str, Any] | None = None,
+    obstacles: str = "all",
 ) -> SimCourse:
+    if obstacles not in OBSTACLE_MODES:
+        raise TrackDataError(f"unknown obstacles mode {obstacles!r} (one of {OBSTACLE_MODES})")
     spec = validate_spec(spec)
     seed = spec["seed_base"] + index
     c = sample_scaled(spec, seed)
+    removed = 0
+    if obstacles == "none":
+        removed = len(c["obstacles"])
+        c = {**c, "obstacles": []}
     ws = cfg.world_scale
     start = np.asarray(c["start"], np.float64)
     origin = np.array([start[0], start[1], 0.0])
@@ -209,5 +223,6 @@ def convert_procedural(
             "route_length_m": round(route_len * ws, 2),
             "primitives": len(prims),
             "harness_list": len(harness),
+            **({"obstacles": "none", "obstacles_removed": removed} if obstacles == "none" else {}),
         },
     )

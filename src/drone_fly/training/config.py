@@ -298,6 +298,18 @@ class TracksConfig:
     conversion: dict[str, Any] = field(default_factory=dict)
     #: Training-only course augmentation (``tracks.augment``): ``{mirror: bool, scales: [..]}``.
     augment: dict[str, Any] = field(default_factory=dict)
+    #: UC77 course obstacles: ``all`` (default) or ``none`` (obstacle-free: no non-gate items in
+    #: contact or the teacher's privileged obstacle blocks; gates, floor and bounds stay). Applies
+    #: to every course this config builds (train, val, feasibility, eval). Not a conversion
+    #: parameter, so the conversion fingerprint is unchanged.
+    obstacles: str = "all"
+
+    def __post_init__(self) -> None:
+        from drone_fly.tracks.liftoff import OBSTACLE_MODES
+
+        if self.obstacles not in OBSTACLE_MODES:
+            raise ValueError(f"tracks.obstacles must be one of {OBSTACLE_MODES}, got "
+                             f"{self.obstacles!r}")  # fmt: skip
 
     def conversion_dict(self) -> dict[str, Any]:
         return {
@@ -356,6 +368,8 @@ class TeacherConfig:
         out["action"] = self.action.as_dict()
         out["contract_version"] = self.action.version
         out["kind"] = "teacher"
+        if self.tracks.obstacles == "all":  # UC77 N4: default snapshots stay byte-identical
+            out["tracks"].pop("obstacles", None)
         return _plain(out)
 
 
@@ -536,6 +550,16 @@ class DistillSection:
     val_seed: int = 4321
     #: Wall-clock cap of the DAgger phase (hours; None = budget only). D9: 2.5 h per run.
     max_hours: float | None = None
+    #: UC77: extra selectors (e.g. ``liftoff:liftoff-arena-04``) scored at every validation and
+    #: logged in ``val_history.jsonl`` under ``tracks``; checkpoint selection stays on val.
+    track_evals: tuple[str, ...] = ()
+    #: UC77: after an uninterrupted run, evaluate the val checkpoint on ``liftoff:held-out`` and
+    #: every ``track_evals`` selector (the ``train eval`` reports).
+    final_report: bool = False
+
+
+#: DistillSection fields left out of a run snapshot at their default (UC77 N6).
+_DISTILL_UC77_DEFAULTS = {"track_evals": [], "final_report": False}
 
 
 @dataclass(frozen=True)
@@ -617,6 +641,9 @@ class StudentConfig:
         out["kind"] = "student"
         for k in ("student", "perception", "distill", "finetune", "feasibility"):
             out[k] = _plain(asdict(getattr(self, k)))
+        for k, v in _DISTILL_UC77_DEFAULTS.items():  # UC77 N6: defaults stay byte-identical
+            if out["distill"].get(k) == v:
+                out["distill"].pop(k)
         return out
 
 
@@ -648,11 +675,14 @@ def student_from_mapping(data: dict[str, Any], *, validate_tracks: bool = True) 
     feas = dict(data.get("feasibility") or {})
     if "selectors" in feas:
         feas["selectors"] = tuple(feas["selectors"])
+    distill = dict(data.get("distill") or {})
+    if "track_evals" in distill:
+        distill["track_evals"] = tuple(str(x) for x in distill["track_evals"] or ())
     return StudentConfig(
         base=base,
         student=_section(StudentSection, data.get("student"), "student"),
         perception=_perception_section(data.get("perception")),
-        distill=_section(DistillSection, data.get("distill"), "distill"),
+        distill=_section(DistillSection, distill, "distill"),
         finetune=_section(FinetuneSection, data.get("finetune"), "finetune"),
         feasibility=_section(FeasibilitySection, feas, "feasibility"),
     )

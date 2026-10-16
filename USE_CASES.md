@@ -86,4 +86,4 @@ Statuses:
 | 74 | [use-cases/74-hud-next-gate-pointer-reader.md](use-cases/74-hud-next-gate-pointer-reader.md) | Live HUD next-gate pointer reader (classic OpenCV, no ML) | done | 2026-10-15 |
 | 75 | [use-cases/75-retune-run2-pointer-noise.md](use-cases/75-retune-run2-pointer-noise.md) | Re-tune run-2 pointer-noise from UC-74 measurements (run2b) + off-axis trust guard | done | 2026-10-15 |
 | 76 | [use-cases/76-release-for-liftoff-run-bundle.md](use-cases/76-release-for-liftoff-run-bundle.md) | Turnkey release-for-liftoff run bundle (download, run one script, fly) | pending | 2026-10-15 |
-| 77 | [use-cases/77-obstacle-free-student-training.md](use-cases/77-obstacle-free-student-training.md) | Obstacle-free student training for open race tracks (Infinity Loop class) | pending | 2026-10-15 |
+| 77 | [use-cases/77-obstacle-free-student-training.md](use-cases/77-obstacle-free-student-training.md) | Obstacle-free student training for open race tracks (Infinity Loop class) | done | 2026-10-15 |

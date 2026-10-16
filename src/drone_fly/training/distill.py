@@ -612,7 +612,10 @@ def evaluate_policy(
     }
 
 
-def eval_pool(cfg: Any, conv: Any, selectors: list[str], model: Any) -> Any:
+def eval_pool(
+    cfg: Any, conv: Any, selectors: list[str], model: Any, obstacles: str | None = None
+) -> Any:
+    """An evaluation pool; ``obstacles`` None = the config's ``tracks.obstacles`` (UC77)."""
     from drone_fly.tracks.loader import build_pool
 
     pool = build_pool(
@@ -621,6 +624,7 @@ def eval_pool(cfg: Any, conv: Any, selectors: list[str], model: Any) -> Any:
         conversion=conv,
         root=student_tracks_root(cfg.base.tracks.root),
         scenes_root=cfg.base.tracks.scenes_root,
+        obstacles=cfg.base.tracks.obstacles if obstacles is None else obstacles,
     )
     if cfg.perception.uncovered == "exclude":
         pool = filter_uncovered(pool, model)
@@ -641,6 +645,7 @@ def run_feasibility(teacher_ck: Any, cfg: Any, out_dir: Path, device: str | None
         "episodes": f.episodes,
         "seed": f.seed,
         "mode": "randomized",
+        "obstacles": cfg.base.tracks.obstacles,  # UC77: logged, never gating
     }
     for sel in f.selectors:
         r = evaluate_teacher(
@@ -652,6 +657,7 @@ def run_feasibility(teacher_ck: Any, cfg: Any, out_dir: Path, device: str | None
             device=device,
             checkpoint=teacher_ck.checkpoint,
             write=False,
+            obstacles=cfg.base.tracks.obstacles,
         )
         m = r["modes"]["randomized"]
         res[sel] = {
@@ -954,6 +960,9 @@ def student_sidecar(
     from drone_fly.sim.student_obs import schema
 
     cam = model.camera
+    extra = {}
+    if cfg.base.tracks.obstacles != "all":  # UC77: default sidecars stay unchanged
+        extra["course_obstacles"] = cfg.base.tracks.obstacles
     return {
         "obs_schema": schema(
             world_scale=float(cfg.student.world_scale),
@@ -1000,6 +1009,7 @@ def student_sidecar(
         "contention": contention,
         "deployable": cfg.student.actor == "k1-student",
         "role": "deployable" if cfg.student.actor == "k1-student" else "baseline",
+        **extra,
     }
 
 
@@ -1182,6 +1192,7 @@ def _train_student(
         conversion=conv,
         root=student_tracks_root(cfg.base.tracks.root),
         scenes_root=cfg.base.tracks.scenes_root,
+        obstacles=cfg.base.tracks.obstacles,
     )
     if cfg.base.tracks.augment:  # training only, as the teacher (mirror / scales)
         from drone_fly.tracks.augment import augment_pool
@@ -1246,6 +1257,7 @@ def _train_student(
                                    "memory_preflight": mem}  # fmt: skip
     gen = torch.Generator().manual_seed(cfg.base.seed + 17)
     val_pool = eval_pool(cfg, conv, ["liftoff:val"], model)
+    track_pools = track_eval_pools(cfg, conv, model)
     log.info(
         "student run %s: %s, k %g, drone %s, %d envs, %d courses, budget %.3g, device %s, "
         "trainable %.1fk, teacher %s (%s), noise %s r%s, built in %.0f s%s",
@@ -1376,7 +1388,10 @@ def _train_student(
                     json.dumps({k: round(v, 3) for k, v in (row.get("outcomes") or {}).items()}),
                 )
             if (it % d.val_every_iters == 0 and not finished) or finished or stop_file:
-                best = _val_select(actor, cfg, profile, val_pool, model, dev, sr, run, it, best)
+                best = _val_select(
+                    actor, cfg, profile, val_pool, model, dev, sr, run, it, best,
+                    track_pools=track_pools,
+                )  # fmt: skip
             if time.time() - last_ckpt >= cfg.base.checkpoint_every_s and not finished:
                 sr.save_student()
                 _save_resume(run, actor, opt, steps, it, elapsed0 + time.time() - t0, best)
@@ -1395,9 +1410,56 @@ def _train_student(
     result = TrainResult(run, last, steps, it, time.time() - t0)
     if cfg.finetune.steps > 0 and not interrupted:
         ppo_finetune(
-            cfg, profile, run, dev, actor, teacher, senv, pool, sr, spec, max_g, val_pool, model
-        )
+            cfg, profile, run, dev, actor, teacher, senv, pool, sr, spec, max_g, val_pool, model,
+            track_pools=track_pools,
+        )  # fmt: skip
+    if d.final_report and not interrupted:
+        final_report(run.path, cfg, device=str(dev), k1_path=k1_path)
     return result
+
+
+def track_eval_pools(cfg: Any, conv: Any, model: Any) -> dict[str, Any]:
+    """UC77: ``distill.track_evals`` selector -> its eval pool (an empty pool is skipped)."""
+    out = {}
+    for sel in cfg.distill.track_evals:
+        p = eval_pool(cfg, conv, [sel], model)
+        if not p.courses:
+            log.warning("track eval %s has no courses: skipped", sel)
+            continue
+        out[sel] = p
+    return out
+
+
+def final_report(
+    run_path: Path, cfg: Any, *, device: str | None = None, k1_path: Any = None
+) -> dict[str, Any]:
+    """UC77 AC5: the val checkpoint's ``train eval`` report on ``liftoff:held-out`` and on every
+    ``distill.track_evals`` selector, each on its own; a selector without courses is skipped."""
+    from drone_fly.tracks.catalogue import TrackDataError
+
+    out: dict[str, Any] = {}
+    for sel in ("liftoff:held-out", *cfg.distill.track_evals):
+        if sel in out:
+            continue
+        try:
+            res = evaluate_student_run(run_path, selectors=(sel,), device=device,
+                                       k1_path=k1_path)  # fmt: skip
+        except (HarnessConfigError, TrackDataError) as exc:
+            log.warning("final report %s skipped: %s", sel, exc)
+            continue
+        out[sel] = res
+        m = res["macro"]
+        log.info(
+            "final report %s (obstacles %s): student noise %.3f, exact %.3f; teacher exact %.3f; "
+            "outcomes (noise) %s",
+            sel,
+            res.get("obstacles"),
+            m["student_noise"] or 0.0,
+            m["student_exact"] or 0.0,
+            m["teacher_exact"] or 0.0,
+            json.dumps({k: round(v, 3) for k, v in res["outcomes"]["student_noise"].items()}),
+        )
+    return out
 
 
 def _save_resume(
@@ -1427,8 +1489,14 @@ def _val_select(
     run: Any,
     it: int,
     best: Any,
+    *,
+    track_pools: dict[str, Any] | None = None,
 ) -> Any:
-    """Evaluate on val (noise, seed 4321); keep ``student_it<N>.pt`` and select the best."""
+    """Evaluate on val (noise, seed 4321); keep ``student_it<N>.pt`` and select the best.
+
+    ``track_pools`` (UC77 ``distill.track_evals``) are scored the same way and logged under
+    ``tracks`` in ``val_history.jsonl``; they never take part in the selection.
+    """
     d = cfg.distill
     if not val_pool.courses:
         return best
@@ -1446,19 +1514,29 @@ def _val_select(
     name = f"student_it{it}.pt"
     sr.save_student(name)
     macro = res["macro_completion"] or 0.0
+    row = {"it": it, "checkpoint": name, "macro_completion": macro, "outcomes": res["outcomes"]}
+    tracks = {}
+    for sel, tp in (track_pools or {}).items():
+        if not tp.courses:  # N3: an empty pool is skipped, never fatal
+            log.warning("track eval %s has no courses: skipped", sel)
+            continue
+        tr = evaluate_policy(
+            actor, cfg, profile, tp, model, dev, mode="noise", episodes=d.val_episodes,
+            seed=d.val_seed,
+        )  # fmt: skip
+        tracks[sel] = {"macro_completion": tr["macro_completion"], "outcomes": tr["outcomes"]}
+        log.info(
+            "track eval (noise) it %d %s: macro %.3f outcomes %s",
+            it,
+            sel,
+            tr["macro_completion"] or 0.0,
+            json.dumps({k: round(v, 3) for k, v in tr["outcomes"].items()}),
+        )
+    if tracks:
+        row["tracks"] = tracks
     hist_p = run.eval_dir / "val_history.jsonl"
     with open(hist_p, "a", encoding="utf-8") as fh:
-        fh.write(
-            json.dumps(
-                {
-                    "it": it,
-                    "checkpoint": name,
-                    "macro_completion": macro,
-                    "outcomes": res["outcomes"],
-                }
-            )
-            + "\n"
-        )
+        fh.write(json.dumps(row) + "\n")
     if best is None or macro > float(best["macro_completion"]):
         best = {"it": it, "checkpoint": name, "macro_completion": macro}
         (run.eval_dir / SELECTION_FILE).write_text(
@@ -1503,6 +1581,7 @@ def ppo_finetune(
     val_pool: Any,
     model: Any,
     max_iterations: int | None = None,
+    track_pools: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The optional L4 phase (see the module docstring)."""
     from drone_fly.controller.student import StudentPPOAdapter
@@ -1611,11 +1690,13 @@ def ppo_finetune(
             )
         if it % cfg.distill.val_every_iters == 0 or steps >= f.steps:
             best = _val_select(
-                actor, cfg, profile, val_pool, model, dev, sr, run, 100000 + it, best
-            )
+                actor, cfg, profile, val_pool, model, dev, sr, run, 100000 + it, best,
+                track_pools=track_pools,
+            )  # fmt: skip
     if capped or (max_iterations is not None and it >= max_iterations and steps < f.steps):
         # stopped early: the final weights get their val check too (as DAgger's last iteration)
-        best = _val_select(actor, cfg, profile, val_pool, model, dev, sr, run, 100000 + it, best)
+        best = _val_select(actor, cfg, profile, val_pool, model, dev, sr, run, 100000 + it, best,
+                           track_pools=track_pools)  # fmt: skip
     sr.save_student()
     return {
         "iterations": it,
@@ -1698,9 +1779,14 @@ def evaluate_student_run(
     which: str = "val",
     k1_path: Any = None,
     write: bool = True,
+    obstacles: str | None = None,
 ) -> dict[str, Any]:
     """The AC7 report: student noise (headline) + exact, the teacher (exact) on the same tracks
-    and seeds, the MLP baseline, outcome shares, strata, bounds and the gap attribution."""
+    and seeds, the MLP baseline, outcome shares, strata, bounds and the gap attribution.
+
+    ``obstacles`` (UC77) None = the run config's ``tracks.obstacles``; an override is recorded
+    and suffixes the report files ``-obstacles-<mode>``. No courses -> HarnessConfigError.
+    """
     from drone_fly import drones
     from drone_fly.training.evaluate import load_teacher
     from drone_fly.training.ppo import resolve_device
@@ -1709,7 +1795,11 @@ def evaluate_student_run(
     cfg, model = s["cfg"], s["noise_model"]
     dev = resolve_device(device or cfg.base.device)
     profile = drones.load(cfg.base.drone)
-    pool = eval_pool(cfg, s["conversion"], list(selectors), model)
+    run_obstacles = cfg.base.tracks.obstacles
+    obs_mode = run_obstacles if obstacles is None else obstacles
+    pool = eval_pool(cfg, s["conversion"], list(selectors), model, obstacles=obs_mode)
+    if not pool.courses:
+        raise HarnessConfigError(f"no evaluation courses for {list(selectors)}")
     actor = s["actor"].to(dev).eval()
     teacher, _ = load_teacher(s["teacher"].checkpoint, dev)
     kw = {"episodes": episodes, "seed": seed}
@@ -1774,6 +1864,7 @@ def evaluate_student_run(
         "actor": s["sidecar"]["actor"],
         "world_scale": s["sidecar"].get("world_scale"),
         "selectors": list(selectors),
+        "obstacles": obs_mode,
         "episodes": episodes,
         "seed": seed,
         "device": str(dev),
@@ -1807,6 +1898,8 @@ def evaluate_student_run(
         d = s["run"] / "eval"
         d.mkdir(parents=True, exist_ok=True)
         name = "+".join(x.split(":", 1)[1] for x in selectors)
+        if obs_mode != run_obstacles:
+            name += f"-obstacles-{obs_mode}"
         (d / f"student-{name}.json").write_text(json.dumps(res, indent=2) + "\n", "utf-8")
         (d / f"student-{name}.md").write_text(student_markdown(res), encoding="utf-8")
         res["written"] = str(d / f"student-{name}.json")
@@ -1831,7 +1924,8 @@ def student_markdown(res: dict[str, Any]) -> str:
     L += [
         f"- Actor `{res['actor']}`, k {res['world_scale']}, checkpoint "
         f"`{Path(res['checkpoint']).name}`; {res['selectors']}, {res['episodes']} episodes per "
-        f"track, seed {res['seed']}; {res['settings']}",
+        f"track, seed {res['seed']}; {res['settings']}; course obstacles "
+        f"`{res.get('obstacles', 'all')}`",
         f"- Teacher {res['teacher'].get('run_id')} ({res['teacher'].get('selection_label')}); "
         f"noise model {(res.get('noise_model') or {}).get('detector_id')} "
         f"r{(res.get('noise_model') or {}).get('revision')}",
@@ -1918,6 +2012,7 @@ def bench_student(
         conversion=conv,
         root=student_tracks_root(cfg.base.tracks.root),
         scenes_root=cfg.base.tracks.scenes_root,
+        obstacles=cfg.base.tracks.obstacles,
     )
     if cfg.base.tracks.augment:
         from drone_fly.tracks.augment import augment_pool

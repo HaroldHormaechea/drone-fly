@@ -1,0 +1,36 @@
+# UC77 obstacle-free deployable student: run2b (UC75 measured pointer noise) trained and validated on
+# OBSTACLE-FREE courses. The K1 student is blind to obstacles (free_space_estimator: none, an all-zero
+# obstacle_vision block), yet run2b trains on courses that keep every placed prop, so it learns to dodge
+# things it cannot see. `tracks.obstacles: none` matches the training courses to what the student
+# actually perceives, for open race tracks such as Liftoff Arena "04 - Infinity Loop":
+#   * removed: every placed non-route-gate track item (props, barriers, flags, cones, placed
+#     platforms) from contact AND from the teacher's privileged obstacle blocks; procedural courses
+#     lose all their obstacles;
+#   * kept: scene colliders (the real ground, arena structures), route-gate frames, the placed item the
+#     spawn stands on (Infinity Loop: ConcreteBarrier01), the heightfield, floor_z and the world
+#     bounds; spawn / origin / passages / time limit equal the default conversion.
+# Feasibility, validation, track evals and the final report all use the obstacle-free courses. The
+# student will crash into real obstacles on tracks that have them (accepted; obstacle perception is the
+# UC73 "eyes" track). No obs-schema change (v3 / DIM 65); the teacher (teacher_it1374) is unchanged.
+#
+# Every validation also scores liftoff:liftoff-arena-04 (Infinity Loop, a TRAIN-split track: an
+# in-distribution check; held-out macro_completion stays the generalisation metric) and logs it under
+# `tracks` in eval/val_history.jsonl; selection stays on liftoff:val. final_report writes the held-out
+# and Infinity Loop `train eval` reports after an uninterrupted run.
+#
+# Train / evaluate / export / fly (docs/experiments/uc77-obstacle-free-student.md):
+#   drone-fly train student --config student-liftoff-open --teacher <teacher run> \
+#       --noise <noise_model.yaml> --device cuda [--resume <run folder>]
+#   drone-fly train eval <run> --tracks liftoff:liftoff-arena-04 [--obstacles all]
+#   drone-fly train export <run> --out <student-open.pt>
+#   drone-fly harness run --harness liftoff --preset liftoff --config <overlay.yaml> \
+#       --checkpoint <student-open.pt> --recordable
+# where <overlay.yaml> carries the UC74/UC75 camera.pointer block (incl. max_bearing_az_deg 30 and
+# pointer_roi) and the detector-v1 161f7a83 weights (see UC-76); `liftoff_arena` is not used.
+extends: student-liftoff-run2b
+name: student-liftoff-open
+tracks:
+  obstacles: none
+distill:
+  track_evals: ["liftoff:liftoff-arena-04"]
+  final_report: true
