@@ -193,6 +193,19 @@ free space.
 manifest records counts, hit shares, label vs aux kinds, drop reasons and warning-time stats per
 split and per map.
 
+**First full build (2026-10-16, all downloaded UC71 captures plus the manual Infinity Loop
+capture).** 36 captures; 25 included, 11 excluded as alignment-unverified (all of Permafrost,
+Rustline and StrawBale).
+
+| split | maps | samples | ray hit share | warning p50 |
+|---|---|---:|---:|---:|
+| train | BandoCity, Hannover, LiftoffArena, MarinaBay, PineValley, ShortCircuit, TheGreen | 17,499 | 0.052 | 1.20 s |
+| val | AutumnFields, Surtur | 3,062 | 0.031 | 1.17 s |
+| held-out | HangarC03, MinusTwo, ThePit | 14,204 | 0.117 | 1.29 s |
+
+221 samples were dropped as `no-history`. The ~6 fps manual capture contributes 1,542 samples at
+the 0.2 s stride.
+
 ## Commands
 
 ```
