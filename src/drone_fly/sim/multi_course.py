@@ -94,6 +94,9 @@ CRITIC_EXTRA_DIM = len(LOG_COLUMNS) + len(TIMING_LOG_COLUMNS) + 2 + 2
 FULL_CELL_V = 4.2
 #: Minimum clearance (m, beyond ``drone_radius_m`` / above the floor) of a route start.
 ROUTE_START_CLEARANCE_M = 0.3
+#: UC81 (AC1): target floor clearance (m) for the opt-in altitude-hold shaping term. Below this
+#: band the ``RewardConfig.floor_clearance`` penalty ramps in linearly; at/above it the term is 0.
+SAFE_CLEARANCE_M = 0.5
 
 
 @dataclass(frozen=True)
@@ -139,6 +142,10 @@ class RewardConfig:
     upright: float = 0.005  # pre-pilot rebalance (ADR 0007): hover must earn << flying
     spin: float = 0.005
     action_rate: float = 0.01
+    #: UC81 (AC1): opt-in altitude-hold shaping. One-sided, bounded dense penalty on the clearance
+    #: deficit below ``SAFE_CLEARANCE_M`` (see ``MultiCourseEnv.step``). 0.0 ⇒ no term, so the
+    #: reward is byte-identical to UC77/79/80. No positive bonus ⇒ it cannot be hover-hacked.
+    floor_clearance: float = 0.0
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> RewardConfig:
@@ -894,6 +901,13 @@ class MultiCourseEnv:
         r_dense = rw.upright * cos_tilt.clamp(0, 1) + rw.spin * torch.exp(
             -0.5 * self.omega.norm(dim=-1)
         )
+        # UC81 (AC1): opt-in altitude-hold shaping — one-sided, bounded penalty on the clearance
+        # deficit below ``SAFE_CLEARANCE_M``, gated by ``~grace`` (no floor pressure during the
+        # lift-off grace window). deficit ∈ [0, 1]; 0 at/above the band. Default weight 0.0 ⇒ this
+        # adds ``-0.0`` and the reward tensor stays bit-identical to UC77/79/80.
+        clearance = pos[:, 2] - fh
+        deficit = (SAFE_CLEARANCE_M - clearance).clamp(min=0.0) / SAFE_CLEARANCE_M
+        r_dense = r_dense - rw.floor_clearance * deficit * (~grace).to(self.dtype)
         da = action - self.prev_action
         r_rate = -rw.action_rate * (da * da).sum(-1)
         reward = (

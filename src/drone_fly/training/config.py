@@ -370,6 +370,8 @@ class TeacherConfig:
         out["kind"] = "teacher"
         if self.tracks.obstacles == "all":  # UC77 N4: default snapshots stay byte-identical
             out["tracks"].pop("obstacles", None)
+        if self.env.rewards.floor_clearance == 0.0:  # UC81 AC1: default-off ⇒ byte-identical
+            out["env"]["rewards"].pop("floor_clearance", None)
         return _plain(out)
 
 
