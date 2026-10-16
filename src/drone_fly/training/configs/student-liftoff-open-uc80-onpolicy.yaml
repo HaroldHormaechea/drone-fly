@@ -1,0 +1,24 @@
+# UC-80 distillation-training-fix ablation — variant `on_policy` (on-policy DAgger relabelling).
+#
+# `student-liftoff-open` + the MLP actor + the equal UC-80 budget, with `distill.on_policy_relabel`
+# ON: during rollouts the student action is executed UNCONDITIONALLY (student-driven), decoupled
+# from β, so the frozen teacher labels the states the STUDENT actually visits — attacking the
+# covariate shift that collapses the baseline once β anneals to 0. The teacher is still queried on
+# every visited state (as in baseline DAgger), so there is zero extra teacher throughput cost.
+#
+# Caveat (see the experiment doc): with execution student-driven from step 0 there is no
+# teacher-forcing warmup, so this run leans on the warm-started actor; the β-floor variant (`beta`)
+# is the complementary lever, and combining on-policy execution with a β-floor is the documented
+# follow-up if either moves completion.
+#
+# Equal-budget / budget-sizing / run instructions: see student-liftoff-open-uc80-baseline.yaml and
+# docs/experiments/uc80-distillation-training-fix.md.
+extends: student-liftoff-open
+name: student-liftoff-open-uc80-onpolicy
+n_envs: 2048
+budget: 1.8e7
+student:
+  actor: mlp-student
+distill:
+  on_policy_relabel: true   # UC-80: student-driven execution; teacher relabels student-visited states
+  final_report: true

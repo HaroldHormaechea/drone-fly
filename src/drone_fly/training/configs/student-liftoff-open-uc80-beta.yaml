@@ -1,0 +1,25 @@
+# UC-80 distillation-training-fix ablation — variant `beta` (gentler / longer β schedule).
+#
+# `student-liftoff-open` + the MLP actor + the equal UC-80 budget, with a gentler/longer
+# teacher-forcing anneal: `beta_end: 0.15` (floors teacher correction at ~15 % instead of 0) and
+# `beta_over: 1.0` (anneal stretched across the WHOLE budget instead of the first half). So
+# student-driven rollouts keep receiving teacher correction throughout training, rather than the
+# student drifting unaided to unseen states after β hits 0 — the baseline's compounding-error mode.
+# Schedule stays `linear` (inherited); only the endpoint and horizon change.
+#
+# This is the complementary lever to `on_policy`: `beta` keeps some β-gated teacher execution but
+# never zeroes it, whereas `on_policy` zeroes β-gating but relabels student-visited states. Both
+# attack covariate shift from opposite directions; combining them is the documented follow-up.
+#
+# Equal-budget / budget-sizing / run instructions: see student-liftoff-open-uc80-baseline.yaml and
+# docs/experiments/uc80-distillation-training-fix.md.
+extends: student-liftoff-open
+name: student-liftoff-open-uc80-beta
+n_envs: 2048
+budget: 1.8e7
+student:
+  actor: mlp-student
+distill:
+  beta_end: 0.15            # UC-80: floor teacher correction at ~15 % (baseline anneals to 0)
+  beta_over: 1.0            # UC-80: anneal over the whole budget (baseline: first half)
+  final_report: true

@@ -1,0 +1,25 @@
+# UC-80 distillation-training-fix ablation — variant `ppo` (PPO completion-reward fine-tune).
+#
+# `student-liftoff-open` + the MLP actor, with the equal 1.8e7 total split as 1.2e7 DAgger
+# imitation + 6.0e6 PPO fine-tune. After DAgger the distilled student is optimised with PPO against
+# the env reward — the gate-passage / completion `RewardConfig` the batched sim already applies
+# (gate 10 / finish 50 / progress 1.0) — instead of pure action-matching, so the objective is
+# trajectory/course success rather than matching the teacher's action.
+#
+# Budget note (see the experiment doc): to keep the TOTAL env-steps equal to the other three runs,
+# this run gets FEWER imitation steps (1.2e7 vs 1.8e7) — a comparability confound to flag. PPO
+# against a sparse gate/finish reward may also undertrain within 6e6 steps; if it underperforms the
+# doc records undertraining (per the AC8 rubric), not that the method fails.
+#
+# Equal-budget / budget-sizing / run instructions: see student-liftoff-open-uc80-baseline.yaml and
+# docs/experiments/uc80-distillation-training-fix.md.
+extends: student-liftoff-open
+name: student-liftoff-open-uc80-ppo
+n_envs: 2048
+budget: 1.2e7             # DAgger imitation phase (1.2e7) + finetune.steps below (6e6) = 1.8e7 total
+student:
+  actor: mlp-student
+distill:
+  final_report: true
+finetune:
+  steps: 6.0e+6          # UC-80: PPO completion-reward fine-tune; 1.2e7 + 6e6 = 1.8e7 equal total
