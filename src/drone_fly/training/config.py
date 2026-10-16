@@ -556,10 +556,16 @@ class DistillSection:
     #: UC77: after an uninterrupted run, evaluate the val checkpoint on ``liftoff:held-out`` and
     #: every ``track_evals`` selector (the ``train eval`` reports).
     final_report: bool = False
+    #: UC79: opt-in, sim-only, DIAGNOSTIC privileged teacher blocks appended to the student obs
+    #: (``drone_fly.sim.teacher_obs.PRIVILEGED_BLOCKS``), one ablation at a time. Default empty ⇒
+    #: everything is byte-identical to before (schema / sidecar / snapshot). MLP-student only (a
+    #: student with any privileged block is never deployable: ``train export`` / ``harness run``
+    #: refuse it). Canonicalised (fixed declaration order) and de-duplicated at parse time.
+    student_privileged: tuple[str, ...] = ()
 
 
-#: DistillSection fields left out of a run snapshot at their default (UC77 N6).
-_DISTILL_UC77_DEFAULTS = {"track_evals": [], "final_report": False}
+#: DistillSection fields left out of a run snapshot at their default (UC77 N6 / UC79).
+_DISTILL_UC77_DEFAULTS = {"track_evals": [], "final_report": False, "student_privileged": []}
 
 
 @dataclass(frozen=True)
@@ -623,6 +629,24 @@ class StudentConfig:
             raise TrainConfigError("distill.beta_schedule must be linear or exp")
         if self.student.world_scale is not None and self.student.world_scale <= 0:
             raise TrainConfigError("student.world_scale must be > 0")
+        priv = self.distill.student_privileged
+        if priv:
+            from drone_fly.sim.teacher_obs import PRIVILEGED_BLOCKS
+
+            unknown = [b for b in priv if b not in PRIVILEGED_BLOCKS]
+            if unknown:
+                raise TrainConfigError(
+                    f"distill.student_privileged has unknown block(s) {unknown}; choose from "
+                    f"{list(PRIVILEGED_BLOCKS)}"
+                )
+            if len(set(priv)) != len(priv):
+                raise TrainConfigError(f"distill.student_privileged has duplicates: {list(priv)}")
+            if self.student.actor != "mlp-student":
+                raise TrainConfigError(
+                    "distill.student_privileged is the UC79 MLP-only diagnostic ablation; it "
+                    f"needs student.actor 'mlp-student', not {self.student.actor!r} (the K1 "
+                    "deployable student stays byte-identical)"
+                )
 
     @property
     def name(self) -> str:
@@ -678,6 +702,13 @@ def student_from_mapping(data: dict[str, Any], *, validate_tracks: bool = True) 
     distill = dict(data.get("distill") or {})
     if "track_evals" in distill:
         distill["track_evals"] = tuple(str(x) for x in distill["track_evals"] or ())
+    if "student_privileged" in distill:
+        from drone_fly.sim.teacher_obs import PRIVILEGED_BLOCKS
+
+        names = tuple(str(x) for x in distill["student_privileged"] or ())
+        order = {b: i for i, b in enumerate(PRIVILEGED_BLOCKS)}
+        # canonical (declaration) order; unknown blocks sort last and are rejected in __post_init__
+        distill["student_privileged"] = tuple(sorted(names, key=lambda b: order.get(b, len(order))))
     return StudentConfig(
         base=base,
         student=_section(StudentSection, data.get("student"), "student"),
