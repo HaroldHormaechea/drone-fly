@@ -86,13 +86,13 @@ the GPU run lands (the reader regenerates all rows except the static UC-77 refer
 | Run | Held-out (noise) | Held-out (exact) | Infinity (noise) | Infinity (exact) | Held-out outcomes noise (floor/coll/oob/lost/timeout) |
 |---|---|---|---|---|---|
 | teacher (exact) | — | 17.1% | — | 93.8% | — |
-| baseline | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
-| altitude | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
-| floor | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
-| gate_next_next | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
-| gates_full | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
-| surfaces | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
-| teacher_full | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
+| baseline | 0.0% | 0.0% | 0.0% | 0.0% | 18.5% / 22.9% / 43.5% / 10.0% / 0.0% |
+| altitude | 0.2% | 0.0% | 0.0% | 0.0% | 14.0% / 27.3% / 44.0% / 9.6% / 0.0% |
+| floor | 0.0% | 0.0% | 0.0% | 0.0% | 14.0% / 29.8% / 42.1% / 9.6% / 0.0% |
+| gate_next_next | 0.0% | 0.0% | 0.0% | 0.0% | 17.7% / 27.7% / 40.6% / 9.0% / 0.0% |
+| gates_full | 0.0% | 0.0% | 0.0% | 0.0% | 31.9% / 48.1% / 3.8% / 5.2% / 0.6% |
+| surfaces | 0.2% | 0.2% | 0.0% | 0.0% | 11.9% / 31.0% / 40.2% / 11.0% / 1.0% |
+| teacher_full | 0.6% | 1.0% | — | — | 20.6% / 51.2% / 2.9% / 8.3% / 4.0% |
 | UC-77 student (K1, ref) | 0.0% | 0.0% | 0.0% | 0.0% | — |
 | UC-77 student (MLP, ref) | 1.0% | 0.0% | 0.0% | 0.0% | — |
 
@@ -117,3 +117,24 @@ check in the train split):
 
 All of these keep MLP-only scope; applying the winner(s) to the K1 connectome actor is the follow-up
 UC.
+
+## Result (run 2026-10-16, RTX A3000, equal 1.8e7-step budget)
+
+**The observation is not the bottleneck — the distillation setup is.** Even `teacher_full`, the student
+handed the *entire* 150-value teacher observation, reaches only 0.6% (noise) / 1.0% (exact) held-out
+against the teacher's 17.1%; no single block clears ~0.2%. This is the decisive-negative branch of the
+rubric ("even `teacher_full` collapses at beta→0"): adding inputs — telemetry, vision, or an
+asymmetric-actor teacher — will not close the gap. The follow-up must retarget the distillation itself
+(DAgger beta schedule / relabelling, the imitation loss, or on-policy RL), not the student's inputs.
+
+**Secondary signal — gate geometry fixes *where*, not *how*.** Both `gates_full` and `teacher_full`
+(the two runs carrying full gate poses) collapse out-of-bounds from ~44% to ~3% — the student does learn
+to orient toward and chase gates — but the saved episodes convert into collisions (48–51%) and floor
+strikes (21–32%) instead of completions. So the full gate field changes the failure mode without raising
+completion: the student can aim but cannot fly the control to pass through. This is consistent with the
+bottleneck being how the policy is trained, not what it can see.
+
+**Caveat (rubric's last rule).** The budget is the shortened 1.8e7-step ablation budget. baseline and the
+narrow blocks all read ~0%; `teacher_full`'s 1% is a real but tiny lift. Before treating "obs doesn't
+help" as final, the natural confirmation is to re-run `teacher_full` (and `gates_full`) at a longer budget
+— but the near-flat result across the full spread already points firmly at the distillation setup.
