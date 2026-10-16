@@ -121,6 +121,20 @@ def cmd_eval(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_noise_model(args: argparse.Namespace) -> int:
+    from drone_fly.eyes.ray_noise_model import run_noise_model
+
+    res = run_noise_model(
+        args.preset, args.config, args.harness, from_eval=args.from_eval, out=args.out
+    )  # fmt: skip
+    m = res["model"]
+    print(json.dumps({"source": m["source"], "miss_prob": m["miss_prob"],
+                      "false_alarm_clear": m["false_alarm_clear"],
+                      "sigma_m": m["sigma_m"]}, indent=2))  # fmt: skip
+    print(f"ray-noise model: {res['out']}")
+    return 0
+
+
 def cmd_bench(args: argparse.Namespace) -> int:
     from drone_fly.eyes.bench import run_bench
 
@@ -226,6 +240,14 @@ def add_parser(sub: Any) -> None:
     p.add_argument("--out", help="default: the weights' folder")
     p.add_argument("--cache-root")
     p.set_defaults(func=cmd_eval)
+
+    p = es.add_parser("noise-model", help="build the obstacle-ray noise model (UC-82 AC1)")
+    _common(p)
+    p.add_argument(
+        "--from-eval", help="derive miss / FA from an eyes eval report (eval_held-out.json)"
+    )
+    p.add_argument("--out", help="output YAML (default <repo>/artifacts/eyes/ray-noise.yaml)")
+    p.set_defaults(func=cmd_noise_model)
 
     p = es.add_parser("bench", help="estimator latency (AC7)")
     _common(p)

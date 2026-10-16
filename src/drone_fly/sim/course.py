@@ -124,6 +124,13 @@ class CourseConfig:
     gap: bool = False
     floor: bool = False
     raycast: bool = False
+    #: UC-82 obstacle-ray perception error. ``ray_noise`` is a path to a ``ray-noise.yaml``
+    #: (:class:`~drone_fly.sim.ray_noise.RayNoiseModel`) injected into the 40 raycast rays of the
+    #: observation; ``ray_blank`` replaces those rays with constant clear (1.0) — the AC8 control.
+    #: Both require ``raycast`` and are mutually exclusive. With both unset the ray path is
+    #: byte-identical to today (no extra RNG is drawn).
+    ray_noise: str | None = None
+    ray_blank: bool = False
     pool_size: int = 1024
     pool_base: int = 0
     episode_s: float = 28.0  # the prototype's 1400 steps of 20 ms
@@ -135,6 +142,10 @@ class CourseConfig:
             raise ValueError("course.reward_reference_dt_s must be positive")
         if self.tier not in ("tractable", "full"):
             raise ValueError("course.tier must be tractable or full")
+        if (self.ray_noise or self.ray_blank) and not self.raycast:
+            raise ValueError("course.ray_noise / ray_blank require course.raycast")
+        if self.ray_noise and self.ray_blank:
+            raise ValueError("course.ray_noise and course.ray_blank are mutually exclusive")
 
     @property
     def pool_kwargs(self) -> dict[str, Any]:
@@ -393,7 +404,33 @@ class CourseEnv:
         self.header = torch.zeros(n, len(EPISODE_HEADER), device=dev)
         self.log = EpisodeLog(log_capacity, dev) if log_capacity else None
         self._episode_counter = 0
+        # UC-82 obstacle-ray perception error (opt-in; the default path is untouched).
+        self._ray_noise: Any = None
+        self._ray_camera: Any = None
+        self._ray_gen: Any = None
+        if config.ray_noise:
+            from drone_fly.sim.ray_noise import RayNoiseModel
+
+            self._ray_noise = RayNoiseModel.load(self._resolve_ray_noise(config.ray_noise))
+            self._ray_camera = self._ray_noise.camera_twin()
+            # a dedicated generator so the injected noise is reproducible and never perturbs the
+            # plant / timing RNG stream (keeps the default-off path byte-identical)
+            self._ray_gen = torch.Generator(device=dev)
+            self._ray_gen.manual_seed(int(seed) ^ 0x52415953)  # "RAYS"
         self.reset_all()
+
+    @staticmethod
+    def _resolve_ray_noise(ref: str) -> str:
+        """A ray-noise path as given, or resolved relative to the repo root (config convention)."""
+        from pathlib import Path
+
+        p = Path(ref)
+        if p.is_absolute() or p.exists():
+            return str(p)
+        from drone_fly.harness.config import find_repo_root
+
+        root = find_repo_root()
+        return str((root / ref) if root is not None else p)
 
     # ---- state views (the plant owns the state) ----
     @property
@@ -670,12 +707,27 @@ class CourseEnv:
         follow = ((v / (sp + 1e-6)) * best_dir).sum(-1).clamp(min=0.0)
         return follow * sp.squeeze(-1).clamp(max=3.0) / 3.0
 
+    def _ray_obs(self) -> torch.Tensor:
+        """The 40 obstacle rays as the observation sees them: exact, blanked, or noise-injected.
+
+        The default (``ray_blank`` and ``ray_noise`` both off) returns the exact cast unchanged and
+        draws no extra randomness, so the observation path is byte-identical to today.
+        """
+        if self.cfg.ray_blank:  # AC8 control: constant clear (NOT zeroed)
+            return torch.ones(self.n, N_RAYS, dtype=self.dtype, device=self.device)
+        if self._ray_noise is not None:  # AC2: inject the measured ray error
+            basis = self._ray_basis()
+            free = self._cast(basis)
+            in_view = self._ray_camera.in_view(basis, self.quat)
+            return self._ray_noise.apply(free, in_view, self._ray_gen)
+        return self._raycast()
+
     def extra(self) -> torch.Tensor:
         _, cy, cap = self._gate(self.tgt)
         curr = torch.stack([torch.cos(cy), torch.sin(cy), cap], -1)
         feats = [self.obs(), curr, self._next_lookahead(), self._obstacle_vision()]
         if self.cfg.raycast:
-            feats.append(self._raycast())
+            feats.append(self._ray_obs())
         return torch.cat(feats, dim=-1)
 
     def metric(self) -> str:
