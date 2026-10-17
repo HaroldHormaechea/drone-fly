@@ -90,6 +90,41 @@ def calibration(conf: np.ndarray, correct: np.ndarray, n_bins: int = N_CAL_BINS)
     return {"n": int(len(c)), "ece": float(ece), "bins": bins}
 
 
+def hit_head_metrics(
+    hit_prob: np.ndarray, true: np.ndarray, in_view: np.ndarray, *, threshold: float = 0.5
+) -> dict[str, Any]:
+    """UC-83 diagnostic: hit-head classification quality vs the truth (pure NumPy, unit-testable).
+
+    A truth hit is ``true < 1`` (an obstacle within range); the head predicts a hit when
+    ``hit_prob >= threshold``. Reports recall / precision / F1 overall and split by view. This is a
+    diagnostic on the opt-in head, separate from the free-distance miss/FA that gate AC4.
+    """
+    p = np.asarray(hit_prob, np.float64)
+    t = np.asarray(true, np.float64)
+    iv = np.asarray(in_view, bool)
+    truth_hit = t < 1.0 - CLEAR_EPS
+    pred_hit = p >= threshold
+
+    def prf(mask: np.ndarray) -> dict[str, Any]:
+        th, ph = truth_hit[mask], pred_hit[mask]
+        tp = int((th & ph).sum())
+        fp = int((~th & ph).sum())
+        fn = int((th & ~ph).sum())
+        recall = tp / (tp + fn) if (tp + fn) else None
+        precision = tp / (tp + fp) if (tp + fp) else None
+        f1 = (
+            2 * precision * recall / (precision + recall)
+            if (precision and recall and precision + recall > 0)
+            else None
+        )
+        return {"n": int(mask.sum()), "n_hit": int(th.sum()), "tp": tp, "fp": fp, "fn": fn,
+                "recall": recall, "precision": precision, "f1": f1}  # fmt: skip
+
+    full = np.ones(t.shape, bool)
+    return {"threshold": float(threshold), "all": prf(full), "in_view": prf(iv),
+            "out_of_view": prf(~iv)}  # fmt: skip
+
+
 def distance_bin(true: np.ndarray) -> np.ndarray:
     """Bin index per ray: 0..3 = the range quarters, 4 = clear."""
     t = np.asarray(true, np.float64)
@@ -216,25 +251,37 @@ def evaluate_arrays(
 # ----------------------------------------------------------------------------- run
 
 
-def predict(net: Any, data: Any, device: str, batch: int = 64) -> tuple[np.ndarray, np.ndarray]:
-    """``(free, conf)`` ``(N, R)`` of a model over :class:`~drone_fly.eyes.dataset.EyesSamples`."""
+def predict(
+    net: Any, data: Any, device: str, batch: int = 64
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    """``(free, conf, hit_prob)`` ``(N, R)`` over :class:`~drone_fly.eyes.dataset.EyesSamples`.
+
+    ``hit_prob`` is ``sigmoid(hit_logit)`` when the weights carry the UC-83 hit head, else ``None``.
+    The ``free`` / ``conf`` outputs are unchanged whether or not the hit head is present, so the AC4
+    ray-accuracy metrics are computed identically for v1 and v2.
+    """
     import torch
 
     from drone_fly.eyes.train import _batch
 
     net.eval()
-    fr, cf = [], []
+    has_hit_head = bool(getattr(net, "has_hit_head", False))
+    fr, cf, hp = [], [], []
     with torch.no_grad():
         for a in range(0, len(data), batch):
             idx = np.arange(a, min(a + batch, len(data)))
             b = _batch(data, idx, device)
-            f, lg = net(b["frames"], b["uv"], b["rays_cam"], b["in_view"], b["ego"], b["hist_dt"])
+            out = net(b["frames"], b["uv"], b["rays_cam"], b["in_view"], b["ego"], b["hist_dt"])
+            f, lg = out[0], out[1]
             fr.append(f.float().cpu().numpy())
             cf.append(torch.sigmoid(lg).float().cpu().numpy())
+            if has_hit_head and len(out) > 2:
+                hp.append(torch.sigmoid(out[2]).float().cpu().numpy())
     r = int(data.data["free"].shape[1]) if len(data) else 0
     return (
         np.concatenate(fr) if fr else np.zeros((0, r)),
         np.concatenate(cf) if cf else np.zeros((0, r)),
+        (np.concatenate(hp) if hp else None),
     )
 
 
@@ -282,7 +329,7 @@ def run_eval(
         tr = z["split"] == SPLITS.index("train")
         train_mean = z["free"][tr].mean(axis=0) if tr.any() else None
     if len(data):
-        pred, conf = predict(net, data, dev, batch)
+        pred, conf, hit_prob = predict(net, data, dev, batch)
         d = data.data
         body = evaluate_arrays(
             pred,
@@ -299,11 +346,14 @@ def run_eval(
             thin_m=thin_m,
             large_m=large_m,
         )
+        if hit_prob is not None:
+            body["hit_head"] = hit_head_metrics(hit_prob, d["free"], d["in_view"])
     else:
         body = {"frames": 0, "note": f"no frames in the {split} split"}
     rep = {
         "format": 1,
         "weights": str(Path(weights).resolve()),
+        "arch_hit_head": bool((meta.get("arch") or {}).get("hit_head", False)),
         "dataset": man["id"],
         "split": split,
         "maps": man["split_maps"].get(split) or [],
@@ -320,6 +370,123 @@ def run_eval(
     (out_dir / f"eval_{split}.md").write_text(eval_markdown(rep), encoding="utf-8")
     rep["out_dir"] = str(out_dir)
     return rep
+
+
+# ----------------------------------------------------------------------------- v1-vs-v2 compare
+
+#: AC4 default gates (set + justified in the plan): >= 30 % relative reduction in nearest-quarter
+#: in-view miss vs the v1-baseline-on-identical-data, and a bounded clear false-alarm rate.
+DEFAULT_MIN_REL_REDUCTION = 0.30
+DEFAULT_MAX_FA_CLEAR = 0.10
+
+
+def _nearest_quarter_in_view_miss(rep: dict[str, Any]) -> float | None:
+    for row in rep.get("distance_bins", []):
+        if row.get("bin") == "0-25%":
+            return (row.get("in_view") or {}).get("miss_rate")
+    return None
+
+
+def _agg(rep: dict[str, Any], view: str, key: str) -> float | None:
+    return ((rep.get("aggregate") or {}).get(view) or {}).get(key)
+
+
+def compare_reports(
+    v1: dict[str, Any],
+    v2: dict[str, Any],
+    *,
+    min_rel_reduction: float = DEFAULT_MIN_REL_REDUCTION,
+    max_fa_clear: float = DEFAULT_MAX_FA_CLEAR,
+) -> dict[str, Any]:
+    """AC4 verdict: v2's nearest-quarter (0-4 m) in-view miss vs the v1-baseline eval (pure dict).
+
+    ``relative_reduction = (v1_miss - v2_miss) / v1_miss``. Passes when it is at least
+    ``min_rel_reduction`` AND v2's clear false-alarm rate stays at/below ``max_fa_clear``. Both
+    reports must be eval JSONs from :func:`run_eval` on the SAME held-out split so the comparison is
+    like-for-like. Pure arithmetic — unit-testable, no model or torch.
+    """
+    m1 = _nearest_quarter_in_view_miss(v1)
+    m2 = _nearest_quarter_in_view_miss(v2)
+    rel = (m1 - m2) / m1 if (m1 is not None and m2 is not None and m1 > 0) else None
+    abs_red = (m1 - m2) if (m1 is not None and m2 is not None) else None
+    fa2_all = _agg(v2, "all", "false_alarm_rate_clear")
+    fa2_in = _agg(v2, "in_view", "false_alarm_rate_clear")
+    miss_ok = rel is not None and rel >= min_rel_reduction
+    fa_ok = fa2_all is not None and fa2_all <= max_fa_clear
+    passed = bool(miss_ok and fa_ok)
+    return {
+        "metric": "nearest_quarter_in_view_miss",
+        "v1_nearest_quarter_in_view_miss": m1,
+        "v2_nearest_quarter_in_view_miss": m2,
+        "absolute_reduction": abs_red,
+        "relative_reduction": rel,
+        "min_rel_reduction": min_rel_reduction,
+        "v2_false_alarm_rate_clear_all": fa2_all,
+        "v2_false_alarm_rate_clear_in_view": fa2_in,
+        "max_fa_clear": max_fa_clear,
+        "v1_aggregate_in_view_miss": _agg(v1, "in_view", "miss_rate"),
+        "v2_aggregate_in_view_miss": _agg(v2, "in_view", "miss_rate"),
+        "v1_false_alarm_rate_clear_all": _agg(v1, "all", "false_alarm_rate_clear"),
+        "miss_passed": bool(miss_ok),
+        "fa_passed": bool(fa_ok),
+        "passed": passed,
+        "verdict": (
+            "PASS: eyes v2 cuts nearest-quarter in-view miss by >= the threshold without "
+            "breaching the clear false-alarm bound"
+            if passed
+            else "NEGATIVE: eyes v2 did not clear the AC4 bar (check miss_passed / fa_passed)"
+        ),
+    }
+
+
+def compare_markdown(cmp: dict[str, Any], v1_label: str = "v1", v2_label: str = "v2") -> str:
+    """One comparison table + verdict for :func:`compare_reports` output."""
+    lines = [
+        "# Eyes v1 vs v2 (AC4)",
+        "",
+        f"Gate: >= {cmp['min_rel_reduction']:.0%} relative reduction in nearest-quarter (0-4 m) "
+        f"in-view miss, clear false-alarm <= {cmp['max_fa_clear']:.2f}.",
+        "",
+        "| metric | " + v1_label + " | " + v2_label + " |",
+        "|---|---:|---:|",
+        f"| nearest-quarter in-view miss | {_f(cmp['v1_nearest_quarter_in_view_miss'])} | "
+        f"{_f(cmp['v2_nearest_quarter_in_view_miss'])} |",
+        f"| aggregate in-view miss | {_f(cmp['v1_aggregate_in_view_miss'])} | "
+        f"{_f(cmp['v2_aggregate_in_view_miss'])} |",
+        f"| clear false-alarm (all) | {_f(cmp['v1_false_alarm_rate_clear_all'])} | "
+        f"{_f(cmp['v2_false_alarm_rate_clear_all'])} |",
+        "",
+        f"Relative reduction: {_f(cmp['relative_reduction'])} "
+        f"(absolute {_f(cmp['absolute_reduction'])}); miss gate "
+        f"{'PASS' if cmp['miss_passed'] else 'FAIL'}, FA gate "
+        f"{'PASS' if cmp['fa_passed'] else 'FAIL'}.",
+        "",
+        f"**{cmp['verdict']}**",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def run_compare(
+    v1_report: str | Path,
+    v2_report: str | Path,
+    *,
+    min_rel_reduction: float = DEFAULT_MIN_REL_REDUCTION,
+    max_fa_clear: float = DEFAULT_MAX_FA_CLEAR,
+    out: str | Path | None = None,
+) -> dict[str, Any]:
+    """Load two eval reports, compute the AC4 verdict, write ``compare.json`` / ``.md``."""
+    v1 = json.loads(Path(v1_report).read_text(encoding="utf-8"))
+    v2 = json.loads(Path(v2_report).read_text(encoding="utf-8"))
+    cmp = compare_reports(v1, v2, min_rel_reduction=min_rel_reduction, max_fa_clear=max_fa_clear)
+    cmp["v1_report"] = str(Path(v1_report).resolve())
+    cmp["v2_report"] = str(Path(v2_report).resolve())
+    out_dir = Path(out) if out is not None else Path(v2_report).resolve().parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "compare.json").write_text(json.dumps(cmp, indent=2), encoding="utf-8")
+    (out_dir / "compare.md").write_text(compare_markdown(cmp), encoding="utf-8")
+    cmp["out_dir"] = str(out_dir)
+    return cmp
 
 
 def _f(v: Any, nd: int = 3) -> str:
@@ -381,5 +548,14 @@ def eval_markdown(rep: dict[str, Any]) -> str:
             f"Warning time: p05 {_f(w['p05'], 2)} s, p50 {_f(w['p50'], 2)} s, "
             f"< 0.3 s {_f(w['share_lt_0_3'])}, < 0.5 s {_f(w['share_lt_0_5'])}; miss rate "
             f"on frames with warning < 0.5 s: {_f(w['short'].get('miss_rate'))}.",
+        ]
+    if rep.get("hit_head"):
+        hh = rep["hit_head"]
+        iv = hh.get("in_view", {})
+        lines += [
+            "",
+            f"Hit head (threshold {_f(hh.get('threshold'), 2)}): in-view recall "
+            f"{_f(iv.get('recall'))}, precision {_f(iv.get('precision'))}, F1 {_f(iv.get('f1'))} "
+            f"(all-ray recall {_f(hh.get('all', {}).get('recall'))}).",
         ]
     return "\n".join(lines) + "\n"

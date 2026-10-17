@@ -125,6 +125,21 @@ def cmd_eval(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_compare(args: argparse.Namespace) -> int:
+    from drone_fly.eyes.evaluate import run_compare
+
+    cmp = run_compare(
+        args.v1, args.v2, min_rel_reduction=args.min_rel_reduction,
+        max_fa_clear=args.max_fa_clear, out=args.out,
+    )  # fmt: skip
+    print(json.dumps({k: cmp[k] for k in (
+        "v1_nearest_quarter_in_view_miss", "v2_nearest_quarter_in_view_miss", "relative_reduction",
+        "v2_false_alarm_rate_clear_all", "miss_passed", "fa_passed", "passed", "verdict",
+    )}, indent=2))  # fmt: skip
+    print(f"compare: {cmp['out_dir']}")
+    return 0
+
+
 def cmd_noise_model(args: argparse.Namespace) -> int:
     from drone_fly.eyes.ray_noise_model import run_noise_model
 
@@ -260,6 +275,17 @@ def add_parser(sub: Any) -> None:
     p.add_argument("--out", help="default: the weights' folder")
     p.add_argument("--cache-root")
     p.set_defaults(func=cmd_eval)
+
+    p = es.add_parser("compare", help="v1-vs-v2 ray-accuracy verdict from two eval reports (AC4)")
+    _common(p)
+    p.add_argument("--v1", required=True, help="v1-baseline eval_<split>.json")
+    p.add_argument("--v2", required=True, help="v2 eval_<split>.json (same held-out split)")
+    p.add_argument("--min-rel-reduction", type=float, default=0.30,
+                   help="min relative reduction in nearest-quarter in-view miss to pass")  # fmt: skip
+    p.add_argument("--max-fa-clear", type=float, default=0.10,
+                   help="max v2 clear false-alarm rate to pass")  # fmt: skip
+    p.add_argument("--out", help="default: the v2 report's folder")
+    p.set_defaults(func=cmd_compare)
 
     p = es.add_parser("noise-model", help="build the obstacle-ray noise model (UC-82 AC1)")
     _common(p)
