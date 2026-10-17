@@ -232,6 +232,8 @@ def train_eyes(
     w_focal: float = 1.0,
     hit_sampler: bool = False,
     hit_sample_w: float = HIT_SAMPLE_W,
+    depth_backbone: bool = False,
+    backbone_id: str | None = None,
 ) -> dict[str, Any]:
     """Train (see the module docstring); returns the training log.
 
@@ -242,6 +244,13 @@ def train_eyes(
       the hit head (requires ``hit_head``).
     * ``hit_sampler`` / ``hit_sample_w`` — oversample hit-bearing frames each epoch (train-time,
       no disk cost); the epoch size is unchanged (sampled with replacement).
+
+    UC-85 eyes-v3 lever (default-off => v1/v2 behaviour):
+
+    * ``depth_backbone`` / ``backbone_id`` — build :class:`EyesDepthNet` with a frozen pretrained
+      monocular-depth trunk (``backbone_id`` default Depth-Anything-V2-Small; ``tiny-depth`` for the
+      pure-torch stub). The backbone is non-registered, so the optimizer / ``MAX_PARAMS`` / budget
+      logic below are unchanged — no special-casing here.
     """
     from drone_fly.eyes.fov import array_sha, offline_contract
 
@@ -282,6 +291,8 @@ def train_eyes(
         height=int(inp["height"]),
         tol_m=float(tol_m),
         hit_head=hit_head,
+        depth_backbone=depth_backbone,
+        backbone_id=backbone_id,
         label_settings_sha256=man["label_settings_sha256"],
         dataset_id=man["id"],
         dataset_sha256=man["dataset_sha256"],
@@ -308,7 +319,8 @@ def train_eyes(
             "w_hit": w_hit, "tol_m": tol_m, "select": select, "patience": patience, "seed": seed,
             "max_samples": max_samples, "device": dev, "hit_head": hit_head, "focal": focal,
             "focal_alpha": focal_alpha, "focal_gamma": focal_gamma, "w_focal": w_focal,
-            "hit_sampler": hit_sampler, "hit_sample_w": hit_sample_w}  # fmt: skip
+            "hit_sampler": hit_sampler, "hit_sample_w": hit_sample_w,
+            "depth_backbone": depth_backbone, "backbone_id": backbone_id}  # fmt: skip
     hist: list[dict[str, Any]] = []
     start, best, best_epoch, best_state = 0, float("inf"), -1, None
     rp = out / RESUME_FILE
