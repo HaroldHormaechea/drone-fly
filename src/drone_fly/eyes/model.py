@@ -137,6 +137,133 @@ class EyesNet(nn.Module):
         return free, conf, hit_logit
 
 
+class EyesDepthNet(nn.Module):
+    """UC-85 eyes v3: a **frozen pretrained monocular-depth backbone** as the trunk, feeding the
+    exact per-ray query + 256-128 MLP head (and the optional UC-83 hit head) of :class:`EyesNet`.
+
+    A sibling of :class:`EyesNet` (NOT a branch inside it): the default, depth-off path therefore
+    stays byte-identical by construction. Per frame the frozen backbone predicts a depth map; the K
+    maps are stacked to **K channels** and run through a small learnable adapter CNN (the same
+    stride-2 stage stack as :class:`EyesNet`, but with ``k_frames`` input channels instead of
+    ``3 * k_frames``), so looming (an obstacle's depth map growing between frames), the ego-motion
+    and the 6-arg forward IO contract (``-> (free, conf[, hit])``) are all preserved.
+
+    The depth backbone is held as a **non-registered attribute** (:class:`DepthBackbone` is not an
+    ``nn.Module``), so it is auto-excluded from :func:`count_parameters`, the optimizer,
+    ``MAX_PARAMS`` and ``state_dict()``: checkpoints carry only the adapter + head and strict
+    ``load_state_dict`` round-trips without backbone keys.
+    """
+
+    def __init__(
+        self,
+        k_frames: int = K_FRAMES,
+        n_rays: int = 40,
+        ego_dim: int = 10,
+        channels: Sequence[int] = CHANNELS,
+        hidden: Sequence[int] = HIDDEN,
+        sample_stages: Sequence[int] = SAMPLE_STAGES,
+        hit_head: bool = False,
+        backbone_id: str | None = None,
+        backbone_input: str = "depth-map",
+        device: str = "cpu",
+    ) -> None:
+        super().__init__()
+        from drone_fly.eyes.depth_backbone import (
+            BACKBONE_INPUTS,
+            DEFAULT_BACKBONE_ID,
+            make_depth_backbone,
+        )
+
+        self.k_frames, self.n_rays, self.ego_dim = int(k_frames), int(n_rays), int(ego_dim)
+        self.sample_stages = tuple(int(s) for s in sample_stages)
+        self.backbone_id = str(backbone_id or DEFAULT_BACKBONE_ID)
+        self.backbone_input = str(backbone_input)
+        if self.backbone_input not in BACKBONE_INPUTS:
+            raise ValueError(
+                f"unknown backbone_input {self.backbone_input!r}; expected one of {BACKBONE_INPUTS}"
+            )
+        # Non-registered attribute: a DepthBackbone is NOT an nn.Module, so assigning it here does
+        # not add it to self._modules -> excluded from parameters()/state_dict() by construction.
+        self.backbone = make_depth_backbone(self.backbone_id, device)
+        # Adapter trunk: K depth channels in (one per stacked frame), same stride-2 stage stack.
+        stages, cin = [], self.k_frames
+        for c in channels:
+            stages.append(nn.Sequential(_conv_bn(cin, c, 2), _conv_bn(c, c, 1)))
+            cin = c
+        self.stages = nn.ModuleList(stages)
+        q = sum(channels[s] for s in self.sample_stages) + channels[-1] + 3 + 1 + self.ego_dim
+        q += self.k_frames - 1
+        self.query_dim = int(q)
+        layers: list[nn.Module] = []
+        for h in hidden:
+            layers += [nn.Linear(q, h), nn.ReLU(inplace=True)]
+            q = h
+        layers.append(nn.Linear(q, 2))
+        self.head = nn.Sequential(*layers)
+        self.has_hit_head = bool(hit_head)
+        if self.has_hit_head:
+            hlayers: list[nn.Module] = []
+            qh = self.query_dim
+            for h in hidden:
+                hlayers += [nn.Linear(qh, h), nn.ReLU(inplace=True)]
+                qh = h
+            hlayers.append(nn.Linear(qh, 1))
+            self.hit_head: nn.Module | None = nn.Sequential(*hlayers)
+        else:
+            self.hit_head = None
+
+    def _depth_input(self, frames: torch.Tensor) -> torch.Tensor:
+        """``(B, 3K, H, W)`` RGB frames -> ``(B, K, H, W)`` standardised predicted-depth maps."""
+        b, k = frames.shape[0], self.k_frames
+        h, w = frames.shape[-2], frames.shape[-1]
+        flat = frames.view(b, k, 3, h, w).reshape(b * k, 3, h, w)
+        self.backbone.to(frames.device)
+        d = self.backbone.predict(flat)  # (B*K, 1, hd, wd), frozen / no grad
+        if d.shape[-2:] != (h, w):
+            d = F.interpolate(d, size=(h, w), mode="bilinear", align_corners=False)
+        d = d.view(b, k, h, w).float()
+        # Standardise across the K frames JOINTLY (not per frame): this keeps cross-frame relative
+        # depth — the looming cue — intact, while normalising the absolute (metric / inverse) scale
+        # the adapter sees. Cross-frame depth-scale inconsistency is a documented UC-85 caveat.
+        mean = d.mean(dim=(1, 2, 3), keepdim=True)
+        std = d.std(dim=(1, 2, 3), keepdim=True)
+        return (d - mean) / (std + 1e-6)
+
+    def forward(
+        self,
+        frames: torch.Tensor,
+        uv: torch.Tensor,
+        rays_cam: torch.Tensor,
+        in_view: torch.Tensor,
+        ego: torch.Tensor,
+        hist_dt: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        """Same contract as :meth:`EyesNet.forward` (``(free, conf[, hit])``), depth-trunk input."""
+        x = self._depth_input(frames)
+        maps = []
+        for st in self.stages:
+            x = st(x)
+            maps.append(x)
+        b, r = uv.shape[0], uv.shape[1]
+        view = in_view.to(x.dtype).unsqueeze(-1)  # (B, R, 1)
+        grid = uv.to(x.dtype).view(b, r, 1, 2)
+        feats = []
+        for s in self.sample_stages:
+            f = F.grid_sample(maps[s], grid, mode="bilinear", padding_mode="zeros",
+                              align_corners=True)  # fmt: skip
+            feats.append(f.squeeze(-1).transpose(1, 2) * view)  # (B, R, C), zero when unseen
+        g = maps[-1].mean(dim=(2, 3)).unsqueeze(1).expand(b, r, -1)
+        e = ego.to(x.dtype).unsqueeze(1).expand(b, r, -1)
+        hdt = hist_dt.to(x.dtype).reshape(b, -1).unsqueeze(1).expand(b, r, -1)
+        q = torch.cat([*feats, g, rays_cam.to(x.dtype), view, e, hdt], dim=-1)
+        out = self.head(q)
+        free, conf = torch.sigmoid(out[..., 0]), out[..., 1]
+        if self.hit_head is None:
+            return free, conf
+        hit_logit = self.hit_head(q)[..., 0]
+        return free, conf, hit_logit
+
+
 def normalise_frames(frames: torch.Tensor) -> torch.Tensor:
     """uint8 (or 0-255 float) frames -> the network's normalised float input."""
     return (frames.float() / 255.0 - PIX_MEAN) / PIX_STD
@@ -198,23 +325,37 @@ def default_meta(
     width: int = INPUT_WIDTH,
     height: int = INPUT_HEIGHT,
     hit_head: bool = False,
+    depth_backbone: bool = False,
+    backbone_id: str | None = None,
+    backbone_input: str = "depth-map",
     **extra: Any,
 ) -> dict[str, Any]:
     """The weights meta: everything inference needs, so it never reads labels or the contract.
 
     ``hit_head`` records the opt-in UC-83 classification head (absent / false => a v1 net; v1
     metas load unchanged). ``ARCH_VERSION`` stays 2: the base architecture is unchanged.
+
+    ``depth_backbone`` records the opt-in UC-85 eyes-v3 depth trunk (:class:`EyesDepthNet`). The
+    depth keys are added to ``arch`` ONLY when it is enabled, so a default (or v1/v2) meta is
+    byte-for-byte unchanged and :func:`build_from_meta` dispatches to :class:`EyesNet`.
     """
     c = np.asarray(cone, np.float32).reshape(-1, 3)
+    arch: dict[str, Any] = {
+        "channels": list(CHANNELS),
+        "hidden": list(HIDDEN),
+        "sample_stages": list(SAMPLE_STAGES),
+        "hit_head": bool(hit_head),
+    }
+    if depth_backbone:
+        from drone_fly.eyes.depth_backbone import DEFAULT_BACKBONE_ID
+
+        arch["depth_backbone"] = True
+        arch["backbone_id"] = str(backbone_id or DEFAULT_BACKBONE_ID)
+        arch["backbone_input"] = str(backbone_input)
     return {
         "format": FORMAT,
         "version": ARCH_VERSION,
-        "arch": {
-            "channels": list(CHANNELS),
-            "hidden": list(HIDDEN),
-            "sample_stages": list(SAMPLE_STAGES),
-            "hit_head": bool(hit_head),
-        },  # fmt: skip
+        "arch": arch,
         "input": {
             "width": int(width),
             "height": int(height),
@@ -235,13 +376,20 @@ def default_meta(
     }
 
 
-def build_from_meta(meta: dict[str, Any]) -> EyesNet:
+def build_from_meta(meta: dict[str, Any]) -> EyesNet | EyesDepthNet:
+    """Rebuild the net from a weights meta.
+
+    Dispatches to :class:`EyesDepthNet` when ``arch.depth_backbone`` is set (UC-85 eyes v3), else to
+    :class:`EyesNet` (``depth_backbone`` absent / false => v1/v2 metas load unchanged). For a depth
+    net the frozen backbone is (re)instantiated from ``arch.backbone_id`` inside the constructor, so
+    every construct site (train, eval, infer) is covered by construction itself.
+    """
     if meta.get("format") != FORMAT:
         raise ValueError(f"not an eyes weights meta (format {meta.get('format')!r})")
     if int(meta.get("version", -1)) != ARCH_VERSION:
         raise ValueError(f"unsupported eyes arch version {meta.get('version')!r}")
     arch = meta.get("arch") or {}
-    return EyesNet(
+    common = dict(
         k_frames=int(meta["input"]["k_frames"]),
         n_rays=int(meta["n_rays"]),
         ego_dim=int(meta.get("ego_dim", 10)),
@@ -250,3 +398,10 @@ def build_from_meta(meta: dict[str, Any]) -> EyesNet:
         sample_stages=tuple(arch.get("sample_stages", SAMPLE_STAGES)),
         hit_head=bool(arch.get("hit_head", False)),
     )
+    if arch.get("depth_backbone"):
+        return EyesDepthNet(
+            **common,
+            backbone_id=arch.get("backbone_id"),
+            backbone_input=str(arch.get("backbone_input", "depth-map")),
+        )
+    return EyesNet(**common)
