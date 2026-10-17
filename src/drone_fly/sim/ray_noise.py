@@ -33,8 +33,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 log = logging.getLogger(__name__)
 
 SCHEMA = "ray-noise"
@@ -225,7 +223,11 @@ class RayNoiseModel:
         w, h = (int(v) for v in cam["resolution"])
         masks = tuple(tuple(float(v) for v in m) for m in cam.get("masks_norm") or [])
         return CameraTwin(
-            w, h, float(cam["hfov_deg"]), float(cam.get("uptilt_deg", 0.0)), masks  # type: ignore[arg-type]
+            w,
+            h,
+            float(cam["hfov_deg"]),
+            float(cam.get("uptilt_deg", 0.0)),
+            masks,  # type: ignore[arg-type]
         )
 
     def _tables(self, device: Any, dtype: Any) -> dict[str, Any]:
@@ -236,7 +238,10 @@ class RayNoiseModel:
             [d["miss_prob"]["in_view"], d["miss_prob"]["out_of_view"]], device=device, dtype=dtype
         )  # (2, N_DIST_BINS): row 0 in-view, row 1 out-of-view
         fa = torch.tensor(
-            [float(d["false_alarm_clear"]["in_view"]), float(d["false_alarm_clear"]["out_of_view"])],
+            [
+                float(d["false_alarm_clear"]["in_view"]),
+                float(d["false_alarm_clear"]["out_of_view"]),
+            ],
             device=device,
             dtype=dtype,
         )  # (2,)

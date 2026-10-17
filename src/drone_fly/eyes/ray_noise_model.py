@@ -48,14 +48,22 @@ _DOC_NOTES = {
         "these documented anchors (bin 2 interpolated)."
     ),
     "miss_prob.out_of_view": (
-        "An out-of-view ray gets no image features (in_view=0 -> predicts clear), so an out-of-view "
-        "hit is almost always missed; set to 0.99 across quarters (always-clear out-of-view "
-        "baseline 0.969)."
+        "An out-of-view ray gets no image features (in_view=0 -> predicts clear), so an "
+        "out-of-view hit is almost always missed; set to 0.99 across quarters (always-clear "
+        "out-of-view baseline 0.969)."
     ),
-    "false_alarm_clear.in_view": "UC-78 eyes v1 held-out false-alarm rate on truth-clear rays (0.031).",
-    "false_alarm_clear.out_of_view": "Out-of-view rays predict clear from zeroed features; ~no false alarm.",
-    "radial_bias_m": "0: dropout + false alarm dominate; the few detected rays have no documented systematic bias.",
-    "sigma_m": "The eval confidence tolerance (tol_m = 0.5 training m): a detected ray scatters within ~tol.",
+    "false_alarm_clear.in_view": (
+        "UC-78 eyes v1 held-out false-alarm rate on truth-clear rays (0.031)."
+    ),
+    "false_alarm_clear.out_of_view": (
+        "Out-of-view rays predict clear from zeroed features; ~no false alarm."
+    ),
+    "radial_bias_m": (
+        "0: dropout + false alarm dominate; the few detected rays have no documented bias."
+    ),
+    "sigma_m": (
+        "The eval confidence tolerance (tol_m = 0.5 training m): detected rays scatter within ~tol."
+    ),
 }
 
 
