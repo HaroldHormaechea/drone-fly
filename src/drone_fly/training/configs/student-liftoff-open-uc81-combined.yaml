@@ -1,0 +1,31 @@
+# UC-81 combined-distillation-fix ablation — variant `combined` (on-policy + β-floor together).
+#
+# `student-liftoff-open` + the MLP actor + the UC-80 DAgger budget, combining the two UC-80 levers
+# that each helped separately but neither cleared 5 %:
+#   * `on_policy_relabel: true`  — the student drives execution (teacher relabels student-visited
+#     states), attacking covariate shift; and
+#   * `on_policy_beta_floor: true` — the UC-81 flag that makes the β-mix STILL blend teacher
+#     correction into those student-driven rollouts (without it, on-policy is pure-student and β is
+#     ignored — the UC-80 `onpolicy` behaviour).
+# With both on, the student drives ~85 % of steps from step 0 while the teacher corrects the
+# remaining ~15 % (a constant β-floor: `beta_start`/`beta_end` both 0.15 over the whole budget) —
+# sustained teacher correction on the states the student actually visits, the composition UC-80's
+# doc named as the follow-up.
+#
+# Equal-budget with baseline (both 1.8e7 DAgger). The combined-ppo variant adds PPO on top.
+#
+# Budget-sizing / run instructions: see student-liftoff-open-uc81-baseline.yaml and
+# docs/experiments/uc81-combined-distillation-fix.md.
+extends: student-liftoff-open
+name: student-liftoff-open-uc81-combined
+n_envs: 2048
+budget: 1.8e7
+student:
+  actor: mlp-student
+distill:
+  on_policy_relabel: true   # UC-80: student-driven execution; teacher relabels student-visited states
+  on_policy_beta_floor: true # UC-81: keep the β-mix blending teacher correction under on-policy
+  beta_start: 0.15          # constant 15 % teacher floor from step 0 (no high-β warmup)
+  beta_end: 0.15            # ...held to the end (student drives ~85 % throughout)
+  beta_over: 1.0            # anneal horizon = whole budget (constant since start==end)
+  final_report: true

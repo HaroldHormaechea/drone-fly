@@ -524,9 +524,15 @@ def test_world_scale_must_be_set(inputs, tmp_path):
         train(inputs, tmp_path, cfg)
 
 
-def test_noise_model_is_required_and_drone_must_match(inputs, tmp_path):
+def test_noise_model_is_required_and_drone_must_match(inputs, tmp_path, monkeypatch):
     from drone_fly.harness.errors import HarnessConfigError
 
+    # Env-independent: honour only an explicit/configured noise path, dropping the data-root
+    # detector-v1 fallback so "no noise configured" is the tested condition regardless of what this
+    # machine's data root happens to contain (otherwise a present default silently satisfies it).
+    monkeypatch.setattr(distill, "default_noise_model",
+                        lambda explicit=None, configured=None:  # fmt: skip
+                        str(explicit or configured) if (explicit or configured) else None)
     cfg = tiny_student_config(inputs.k07)
     with pytest.raises(HarnessConfigError, match="--noise"):
         train(inputs, tmp_path, cfg, noise=None)
