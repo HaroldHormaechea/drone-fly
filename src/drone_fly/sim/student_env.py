@@ -31,6 +31,7 @@ from drone_fly.sim.multi_course import MultiCourseEnv
 from drone_fly.sim.noise_model import NoiseModel
 from drone_fly.sim.perception import GatePerception, PerceptionConfig
 from drone_fly.sim.student_obs import HistoryState, build_student_obs
+from drone_fly.sim.teacher_obs import teacher_privileged_blocks
 
 COVERED, PROXY, INVISIBLE = 0, 1, 2
 STRATA = ("covered", "proxy", "invisible")
@@ -60,12 +61,16 @@ class StudentCourseEnv:
         course_scale: Any,
         coverage: Any = None,
         seed: int = 0,
+        privileged: tuple[str, ...] = (),
     ) -> None:
         self.env = env
         self.n = env.n
         self.device = env.device
         self.k = float(k)
         self.pcfg = perception
+        #: UC79 opt-in diagnostic privileged teacher blocks appended to the student obs; empty ⇒
+        #: the obs is byte-identical to before (AC3). ``teacher_privileged_blocks`` canonicalises.
+        self.privileged = tuple(privileged)
         self.gen = torch.Generator(device=env.device).manual_seed(int(seed) + 7919)
         self.perc = GatePerception(model, env.n, env.device, config=perception,
                                    generator=self.gen, dtype=env.dtype)  # fmt: skip
@@ -126,12 +131,17 @@ class StudentCourseEnv:
         e = self.env
         out = self.perc.outputs(e.t)
         arm = (e.arm_until - e.t).clamp(min=0.0)
-        return build_student_obs(
+        obs = build_student_obs(
             pos=e.pos, vel=e.vel, quat=e.quat, omega=e.omega, perc=out, k=self.k,
             nominal_aperture=self.pcfg.nominal_aperture, lost_timeout_s=self.pcfg.lost_timeout_s,
             prev_action=e.prev_action, arm_remaining_s=arm, history=self.hist, dt=dt,
             battery=e.battery(),
         )  # fmt: skip
+        if self.privileged:
+            priv = teacher_privileged_blocks(e, self.privileged, e.obs_version)
+            if priv is not None:
+                obs = torch.cat([obs, priv.to(obs.dtype)], dim=-1)
+        return obs
 
     # ---- the env API ----
     def reset_all(self, course_ids: Any = None) -> None:

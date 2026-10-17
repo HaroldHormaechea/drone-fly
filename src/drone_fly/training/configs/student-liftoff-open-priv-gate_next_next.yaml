@@ -1,0 +1,16 @@
+# UC-79 student information-gap ablation — variant `gate_next_next` (13 values).
+#
+# student-liftoff-open + the MLP actor + the shortened ablation budget, appending ONLY the next-next
+# gate pose in the teacher's gate encoding (the 3rd 13-wide row of the teacher's `gates` block), 13
+# values. Always exact, sim-only, diagnostic, never deployable. Obs dim = 65 + 13 = 78. See
+# student-liftoff-open-priv-baseline.yaml for the budget/equalizer rationale and
+# docs/experiments/uc79-student-information-gap.md.
+extends: student-liftoff-open
+name: student-liftoff-open-priv-gate_next_next
+n_envs: 2048
+budget: 1.8e7              # EQUAL across all 7 (AC6)
+student:
+  actor: mlp-student
+distill:
+  max_hours: null
+  student_privileged: [gate_next_next]

@@ -206,6 +206,31 @@ def _body(R: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     return (R.unsqueeze(1) * v.unsqueeze(-1)).sum(-2)
 
 
+def surface_feature(
+    R: torch.Tensor,
+    pos: torch.Tensor,
+    pt: torch.Tensor,
+    dist: torch.Tensor,
+    nrm: torch.Tensor,
+    valid: torch.Tensor,
+) -> torch.Tensor:
+    """One surface's 8 features, masked by ``valid`` — the SINGLE shared per-surface encoding of
+    the ``obstacles`` block (:func:`build_teacher_obs`) and the UC79 ``floor`` privileged block,
+    so both go through the same code path and are byte-identical for the same surface.
+
+    ``pt`` / ``nrm`` are ``(n, k, 3)`` (nearest surface point / outward normal, course frame),
+    ``dist`` is ``(n, k)`` (range to the surface) and ``valid`` is ``(n, k, 1)``. Returns
+    ``(n, k, 8)``: the body-frame surface point relative to the drone (3), the range (1), the
+    body-frame outward normal (3) and the valid flag (1), all zeroed where ``valid`` is 0.
+    """
+    feat = torch.cat(
+        [_body(R, pt - pos.unsqueeze(1)),
+         torch.nan_to_num(dist, posinf=0.0).unsqueeze(-1), _body(R, nrm),
+         torch.ones_like(valid)], -1,
+    )  # fmt: skip
+    return feat * valid
+
+
 def _harness_chunk(
     hc4: torch.Tensor, pos: torch.Tensor, seg: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -316,12 +341,7 @@ def build_teacher_obs(env: Any, version: int | None = None) -> torch.Tensor:
     ds, order = ds[:, :kk], order[:, :kk]
     ar = env._ar_n.unsqueeze(1)
     valid = (torch.isfinite(ds) & (ds <= OBS_RANGE_M)).to(pos.dtype).unsqueeze(-1)
-    ob = torch.cat(
-        [_body(R, pt_all[ar, order] - pos.unsqueeze(1)),
-         torch.nan_to_num(ds, posinf=0.0).unsqueeze(-1), _body(R, n_all[ar, order]),
-         torch.ones_like(valid)], -1,
-    )  # fmt: skip
-    ob = (ob * valid).reshape(env.n, -1)
+    ob = surface_feature(R, pos, pt_all[ar, order], ds, n_all[ar, order], valid).reshape(env.n, -1)
     if kk < N_OBSTACLES:
         ob = torch.cat([ob, ob.new_zeros(env.n, OBSTACLE_FEATURES * (N_OBSTACLES - kk))], -1)
     parts.append(ob)
@@ -337,4 +357,136 @@ def build_teacher_obs(env: Any, version: int | None = None) -> torch.Tensor:
     parts.append(arm)
     if version >= 2:
         parts.append(env.battery().to(pos.dtype))
+    return torch.cat(parts, dim=-1)
+
+
+# ----------------------------------------------------------------------------- UC79 privileged
+#: The selectable UC79 diagnostic privileged blocks, in canonical declaration order. Each is a
+#: (part of the) teacher observation appended OPT-IN to the student obs (``distill.student_privileged``),
+#: computed by the teacher's own code path so it is numerically the teacher's value (always exact):
+#:   * ``altitude``       — the teacher's altitude-above-surface value (1);
+#:   * ``floor``          — the floor/terrain surface only, the teacher's ``obstacles`` encoding (8);
+#:   * ``gate_next_next`` — the next-next gate pose, the teacher's gate encoding (13);
+#:   * ``gates_full``     — target + next + next-next gate poses, the teacher's ``gates`` block (39);
+#:   * ``surfaces``       — the teacher's full 8-nearest-surfaces ``obstacles`` block (64);
+#:   * ``teacher_full``   — the complete teacher observation, as an upper bound (``dim(version)``).
+PRIVILEGED_BLOCKS: tuple[str, ...] = (
+    "altitude",
+    "floor",
+    "gate_next_next",
+    "gates_full",
+    "surfaces",
+    "teacher_full",
+)
+#: Fixed per-block widths (``teacher_full`` depends on the version; see :func:`privileged_width`).
+_PRIVILEGED_FIXED_WIDTHS = {
+    "altitude": 1,
+    "floor": OBSTACLE_FEATURES,
+    "gate_next_next": GATE_FEATURES,
+    "gates_full": GATES_AHEAD * GATE_FEATURES,
+    "surfaces": N_OBSTACLES * OBSTACLE_FEATURES,
+}
+
+
+def _privileged_canonical(names: Any) -> tuple[str, ...]:
+    """``names`` restricted to :data:`PRIVILEGED_BLOCKS` in canonical order, de-duplicated."""
+    s = set(names)
+    return tuple(b for b in PRIVILEGED_BLOCKS if b in s)
+
+
+def privileged_width(name: str, version: int = VERSION) -> int:
+    """The appended width of one privileged block (``teacher_full`` = ``dim(version)``)."""
+    if name == "teacher_full":
+        return dim(version)
+    try:
+        return _PRIVILEGED_FIXED_WIDTHS[name]
+    except KeyError:
+        raise KeyError(f"unknown privileged block {name!r} (choose from {PRIVILEGED_BLOCKS})") from None
+
+
+def privileged_total_width(names: Any, version: int = VERSION) -> int:
+    """Σ of :func:`privileged_width` over ``names`` (any order; duplicates collapsed)."""
+    return sum(privileged_width(n, version) for n in _privileged_canonical(names))
+
+
+def privileged_input_scale(names: Any, version: int = VERSION) -> list[float]:
+    """The actor's per-value input scales for the privileged tail, canonical order. Each block
+    reuses the teacher's own scales (sliced from :func:`input_scale`); ``floor`` reuses one
+    surface's scale pattern (as the ``obstacles`` block)."""
+    scale = input_scale(version)
+    gates = block_slice("gates")
+    out: list[float] = []
+    for name in _privileged_canonical(names):
+        if name == "altitude":
+            out += scale[block_slice("altitude")]
+        elif name == "floor":
+            out += [1 / OBS_RANGE_M] * 4 + [1.0] * 4
+        elif name == "gate_next_next":
+            off = gates.start + (GATES_AHEAD - 1) * GATE_FEATURES
+            out += scale[off : off + GATE_FEATURES]
+        elif name == "gates_full":
+            out += scale[gates]
+        elif name == "surfaces":
+            out += scale[block_slice("obstacles")]
+        elif name == "teacher_full":
+            out += scale
+    return out
+
+
+def privileged_layout(names: Any, version: int = VERSION) -> list[dict[str, Any]]:
+    """Block layout entries (``privileged.<name>`` / start / width) for the privileged tail, in
+    canonical order, offsets starting at 0 (the caller shifts by the base obs dim)."""
+    start = 0
+    out = []
+    for name in _privileged_canonical(names):
+        w = privileged_width(name, version)
+        out.append({"name": f"privileged.{name}", "start": start, "width": w})
+        start += w
+    return out
+
+
+def _floor_block(env: Any) -> torch.Tensor:
+    """The ``floor`` privileged block ``(n, 8)``: the teacher's floor/terrain surface encoded with
+    the SAME :func:`surface_feature` the ``obstacles`` block uses, so it is byte-identical to the
+    floor row of :func:`build_teacher_obs` when the floor is the nearest in-range surface."""
+    pos, q = env.pos, env.quat
+    R = quat_matrix(q)
+    fh = env.floor_height(pos)
+    fpt = torch.stack([pos[:, 0], pos[:, 1], fh], -1)
+    fn = torch.zeros_like(fpt)
+    fn[:, 2] = 1.0
+    dist = (pos[:, 2] - fh).unsqueeze(1)
+    valid = (torch.isfinite(dist) & (dist <= OBS_RANGE_M)).to(pos.dtype).unsqueeze(-1)
+    return surface_feature(R, pos, fpt.unsqueeze(1), dist, fn.unsqueeze(1), valid).reshape(env.n, -1)
+
+
+def teacher_privileged_blocks(
+    env: Any, names: Any, version: int | None = None
+) -> torch.Tensor | None:
+    """``(n, Σ widths)`` privileged teacher blocks appended to the student obs (UC79), in
+    canonical order; ``None`` for an empty selection. Each block is computed by the teacher's own
+    code path on the env's TRUTH state (via :func:`build_teacher_obs` / :func:`surface_feature`),
+    so it is numerically the teacher's value for the same state — always exact, regardless of the
+    student's perception ``mode``."""
+    names = _privileged_canonical(names)
+    if not names:
+        return None
+    version = int(version or getattr(env, "obs_version", VERSION))
+    t = build_teacher_obs(env, version)
+    gates = block_slice("gates")
+    parts = []
+    for name in names:
+        if name == "altitude":
+            parts.append(t[:, block_slice("altitude")])
+        elif name == "floor":
+            parts.append(_floor_block(env))
+        elif name == "gate_next_next":
+            off = gates.start + (GATES_AHEAD - 1) * GATE_FEATURES
+            parts.append(t[:, off : off + GATE_FEATURES])
+        elif name == "gates_full":
+            parts.append(t[:, gates])
+        elif name == "surfaces":
+            parts.append(t[:, block_slice("obstacles")])
+        elif name == "teacher_full":
+            parts.append(t)
     return torch.cat(parts, dim=-1)

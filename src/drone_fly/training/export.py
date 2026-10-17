@@ -127,6 +127,12 @@ def export_student(
     actor_kind = side.get("actor")
     if actor_kind not in ("k1-student", "mlp-student"):
         raise ExportError(f"{ck}: actor {actor_kind!r} is not a student")
+    privileged = side.get("privileged")
+    if privileged:  # UC79: unconditional (fires even with --baseline-export) — AC4
+        raise ExportError(
+            f"{ck}: diagnostic privileged student, not deployable "
+            f"(privileged blocks {list(privileged)})"
+        )
     if actor_kind == "mlp-student" and not baseline_export:
         raise ExportError(
             f"{ck} is the MLP comparison baseline: the deployable export is always the K1 "
