@@ -10,8 +10,8 @@ the retrain (see `docs/experiments/uc84-liftoff-obstacle-capture.md` for the AC5
 
 Capture **execution and assembly are user-side** (Liftoff is Windows-only; the CUDA sandbox has no
 Liftoff). There is no in-repo writer of the `captures/<Map>/<cap>/` layout on this branch — only
-readers (`drone_fly.eyes.capture_meta`, `drone_fly.harness.offline.capture`). The 8 captures already
-on disk were assembled off-branch by the UC-71 tooling from saved Liftoff race recordings. So the
+readers (`drone_fly.eyes.capture_meta`, `drone_fly.harness.offline.capture`). The 36 captures already
+on disk (17 train, plus the 19 frozen val/held-out eval captures) were assembled off-branch by the UC-71 tooling from saved Liftoff race recordings. So the
 dev-team deliverable for AC1/AC2 is this protocol plus the in-sandbox backstop (`eyes ingest`, AC3)
 and the retrain driver (`scripts/uc84_obstacle_capture.sh`, AC4). Nothing here flies a drone or
 re-verifies an alignment.
@@ -40,8 +40,9 @@ BardwellsYard, Hall26, ParisDroneFestival, Permafrost, ShortCircuit, StrawBale, 
 
 Every new map must be catalogued **`split: train`** (it already is for the seven above). Do **not**
 capture on any `val` or `held-out` map — those are frozen so the UC-83-vs-UC-84 comparison stays
-valid (see *Held-out-split invariant*). `eyes ingest` hard-fails on any non-train capture, so a
-mistake here is caught before it can shift the baseline.
+valid (see *Held-out-split invariant*). `eyes ingest` accepts only the existing frozen eval captures
+on those maps and hard-fails (exit 2) on any new one, so a mistake here is caught before it can
+shift the baseline.
 
 ## Course selection (AC1b)
 
@@ -100,9 +101,35 @@ UC-84 **only grows the train split.** The val maps (AutumnFields, DubaiLegends, 
 and the held-out maps (HangarC03, MinusTwo, ThePit, TheRussianWoodpecker) are **frozen** — no new
 captures — so `eyes eval` on the intact held-out split measures the same thing before and after
 UC-84. The split is resolved from `tracks/liftoff.yaml` (`maps.<map>.split`), never from a capture's
-`meta.json`. `eyes ingest` asserts every ingested capture resolves to `train` and hard-fails
-otherwise; `scripts/uc84_obstacle_capture.sh` additionally logs the frozen set + the catalogue
-sha256 so a shifted baseline is detectable after the fact.
+`meta.json`.
+
+The captures that already exist on those maps are the **frozen eval baseline** that `eyes dataset`
+/ `eyes eval` read from the same captures root. They are the 19 captures listed in the committed
+manifest `tracks/liftoff-frozen-eval-captures.json`, each keyed by its capture folder name **and**
+its `capture_sha256` (sha256 over `meta.json` + `frames.csv` + telemetry, the same identity used for
+label staleness). For every capture that resolves to `val` / `held-out`, `eyes ingest` decides:
+
+- name listed **and** sha matches → `frozen-eval`: reported, not counted toward the fraction, not a
+  failure;
+- name listed but sha differs (the capture was edited) → `frozen-eval-modified`: violation;
+- name not listed (a new capture, or a copy under a new name) → `wrong-split`: violation.
+
+Any violation makes `eyes ingest` **exit 2** (after writing the report and printing the summary), so
+`scripts/uc84_obstacle_capture.sh` aborts at step 0. Only the name and sha are checked; the
+manifest's `map` / `split` / `catalogue_id` fields are informational. A manifest entry that is not
+found under the captures root is only a warning (`frozen_eval_missing`). The driver also logs the
+frozen map set, the catalogue sha256 and the manifest path / sha256 / entry count in
+`00_provenance.txt`, so a shifted baseline is detectable after the fact.
+
+**Re-baselining** the frozen eval set is deliberate and has no CLI flag: regenerate the manifest
+from the current captures root, review the diff, and commit it.
+
+```bash
+DRONE_FLY_DATA_ROOT=<data root> uv run python -c "from drone_fly.eyes.ingest import build_frozen_manifest; build_frozen_manifest()"
+```
+
+This rewrites `tracks/liftoff-frozen-eval-captures.json` with every val / held-out capture under
+`<data root>/captures` and its current sha.
 
 ## Capture tooling: Fly → Assemble → Drop (AC2)
 
@@ -207,9 +234,13 @@ uv run drone-fly eyes ingest --label-missing
 It writes `ingest.json` + `ingest.md` (default `<data root>/reports/eyes/ingest/`) with the overall
 and per-map in-view hit-ray fraction, `below_target` (< 15 %), and a per-capture reason for anything
 excluded (`no-meta`, `bad-meta`, `no-catalogue`, `map-mismatch`, `alignment-unverified`,
-`wrong-split`, `no-split`, `no-trackdata`, `no-scene`, `no-telemetry`, `no-labels`, `stale-labels`).
-It **exits non-zero** if any capture resolves to a non-train split. If `below_target`, fly more or
-use the fallback above, then re-ingest.
+`frozen-eval`, `frozen-eval-modified`, `wrong-split`, `no-split`, `no-trackdata`, `no-scene`,
+`no-telemetry`, `no-labels`, `stale-labels`). `frozen-eval` captures (the committed val/held-out
+eval set) are listed but not counted. It also prints a summary on stdout: the overall fraction with
+hits/rays, the target and baseline, BELOW TARGET / meets target, one line per map, and the counts of
+included / frozen-eval / excluded / violating captures. It **exits 2** if any capture is a
+`wrong-split` or `frozen-eval-modified` violation (see *Held-out-split invariant*). If
+`below_target`, fly more or use the fallback above, then re-ingest.
 
 ## Run the retrain/compare (AC4)
 
@@ -221,6 +252,7 @@ Once the fraction clears 15 %:
 scripts/uc84_obstacle_capture.sh artifacts/uc84
 #   --force / UC84_FORCE=1   proceed even if the fraction is still below target
 #   UC84_TARGET=0.15         gate threshold
+#   UC84_FROZEN_MANIFEST=p   frozen-eval manifest (default tracks/liftoff-frozen-eval-captures.json)
 #   UC83_RUN_AC5=1           also run the heavy AC5 / UC-82 rays-vs-blank re-run (off by default)
 ```
 

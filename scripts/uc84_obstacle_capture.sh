@@ -7,8 +7,10 @@
 # Step 0 (this script)  ingest gate: validate the dropped-in captures and measure the in-view
 #                       hit-ray fraction; ABORT if the overall fraction is below the 15 % target
 #                       (so you fly more / use the degraded-flying fallback before spending GPU),
-#                       unless --force. `eyes ingest` itself hard-fails on any non-train (val /
-#                       held-out) capture, so the held-out split can never leak in here.
+#                       unless --force. `eyes ingest` accepts the frozen val / held-out eval
+#                       captures listed (name + capture sha) in the committed manifest
+#                       tracks/liftoff-frozen-eval-captures.json, and hard-fails (exit 2) on any
+#                       new or modified non-train capture, so the held-out split can never leak in.
 # Steps 1-6 (delegated) scripts/uc83_eyes_v2.sh "$OUT_DIR": one dense dataset over the enlarged
 #                       train captures (--label-missing picks up the new drops with no code change),
 #                       train v1-baseline + v2, eval both on the intact held-out split, compare
@@ -25,6 +27,7 @@
 #   --force / UC84_FORCE=1   proceed to the retrain even if the fraction is below target
 #   UC84_CAPTURES_ROOT=path  captures root to ingest (default: the harness captures root)
 #   UC84_TARGET=0.15         in-view hit-ray target the gate enforces
+#   UC84_FROZEN_MANIFEST=p   frozen-eval manifest (default tracks/liftoff-frozen-eval-captures.json)
 #   plus everything scripts/uc83_eyes_v2.sh honours (UC83_EPOCHS, MAX_HOURS, UC83_RUN_AC5, ...)
 set -euo pipefail
 
@@ -70,7 +73,14 @@ sha = sha256_file(cat.path) if cat.path is not None else 'none'
 print('catalogue: ' + str(cat.path))
 print('catalogue_sha256: ' + sha)
 print('held_out_frozen (no new captures): ' + ', '.join(held))
-print('train_maps: ' + ', '.join(sorted(m for m, s in ms.items() if s == 'train')))"
+print('train_maps: ' + ', '.join(sorted(m for m, s in ms.items() if s == 'train')))
+import os
+from pathlib import Path
+from drone_fly.eyes.ingest import frozen_manifest_default, load_frozen_manifest
+fm = Path(os.environ.get('UC84_FROZEN_MANIFEST') or frozen_manifest_default())
+print('frozen_manifest: ' + str(fm))
+print('frozen_manifest_sha256: ' + (sha256_file(fm) if fm.is_file() else 'missing'))
+print('frozen_manifest_entries: ' + str(len(load_frozen_manifest(fm))))"
   python3 -c "$py" 2>/dev/null || uv run python -c "$py"
 }
 log "recording provenance -> $PROVENANCE"
@@ -86,8 +96,14 @@ else
     CR_ARGS=(--captures-root "$UC84_CAPTURES_ROOT")
     log "ingesting captures root: $UC84_CAPTURES_ROOT"
   fi
+  if [ -n "${UC84_FROZEN_MANIFEST:-}" ]; then
+    CR_ARGS+=(--frozen-manifest "$UC84_FROZEN_MANIFEST")
+    log "frozen-eval manifest: $UC84_FROZEN_MANIFEST"
+  fi
   log "ingest gate: validate captures + measure in-view hit-ray fraction (target >= $TARGET)"
-  # eyes ingest hard-fails (nonzero) on any non-train capture => set -e aborts here (held-out guard).
+  # eyes ingest exits 2 on any new / modified val or held-out capture (not a matching entry of the
+  # frozen-eval manifest) => set -e + pipefail abort here (held-out guard). The frozen eval
+  # captures themselves are reported as frozen-eval and not counted.
   # shellcheck disable=SC2086
   $DRONE_FLY eyes ingest --label-missing --target "$TARGET" --out "$INGEST_DIR" \
     "${CR_ARGS[@]}" | tee "$OUT_DIR/00_ingest.log"
