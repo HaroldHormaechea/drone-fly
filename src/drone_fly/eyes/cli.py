@@ -225,8 +225,9 @@ def add_parser(sub: Any) -> None:
     p.add_argument("--cache-root", help="default <data root>/cache/eyes")
     p.add_argument("--disk-margin-gb", type=float, default=1.0)
     # UC-83 AC2: opt-in hit-biased frame filter on the train split (default off => v1 dataset).
-    p.add_argument("--hit-frac", type=float,
-                   help="subsample clear train frames to reach ~this hit-bearing-frame fraction")  # fmt: skip
+    p.add_argument(
+        "--hit-frac", type=float, help="subsample clear train frames to ~this hit-bearing fraction"
+    )
     p.add_argument("--mining-seed", type=int, default=0, help="seed for the hit-biased filter")
     p.set_defaults(func=cmd_dataset)
 
@@ -256,11 +257,18 @@ def add_parser(sub: Any) -> None:
                    help="add the focal term on the hit head (needs --hit-head)")  # fmt: skip
     p.add_argument("--focal-alpha", type=float, default=0.25, help="focal class weight on hits")
     p.add_argument("--focal-gamma", type=float, default=2.0, help="focal easy-ray down-weighting")
-    p.add_argument("--w-focal", type=float, default=1.0, help="weight of the focal term in the loss")
-    p.add_argument("--hit-sampler", action="store_true",
-                   help="oversample hit-bearing frames each epoch (train-time; v2 primary lever)")  # fmt: skip
-    p.add_argument("--hit-sample-w", type=float, default=8.0,
-                   help="relative sampling weight of a hit-bearing frame when --hit-sampler")  # fmt: skip
+    p.add_argument("--w-focal", type=float, default=1.0, help="weight of the focal term")
+    p.add_argument(
+        "--hit-sampler",
+        action="store_true",
+        help="oversample hit-bearing frames each epoch (v2 primary lever)",
+    )
+    p.add_argument(
+        "--hit-sample-w",
+        type=float,
+        default=8.0,
+        help="sampling weight of a hit frame when --hit-sampler",
+    )
     p.set_defaults(func=cmd_train)
 
     p = es.add_parser("eval", help="accuracy report on held-out / val maps (AC6)")
@@ -280,10 +288,15 @@ def add_parser(sub: Any) -> None:
     _common(p)
     p.add_argument("--v1", required=True, help="v1-baseline eval_<split>.json")
     p.add_argument("--v2", required=True, help="v2 eval_<split>.json (same held-out split)")
-    p.add_argument("--min-rel-reduction", type=float, default=0.30,
-                   help="min relative reduction in nearest-quarter in-view miss to pass")  # fmt: skip
-    p.add_argument("--max-fa-clear", type=float, default=0.10,
-                   help="max v2 clear false-alarm rate to pass")  # fmt: skip
+    p.add_argument(
+        "--min-rel-reduction",
+        type=float,
+        default=0.30,
+        help="min relative nearest-quarter in-view miss reduction to pass",
+    )
+    p.add_argument(
+        "--max-fa-clear", type=float, default=0.10, help="max v2 clear false-alarm rate to pass"
+    )
     p.add_argument("--out", help="default: the v2 report's folder")
     p.set_defaults(func=cmd_compare)
 

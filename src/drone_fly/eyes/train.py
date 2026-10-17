@@ -361,9 +361,7 @@ def train_eyes(
                 b = _batch(train, idx, dev)
                 x = augment(b["frames"].float(), rng, k)
                 with torch.autocast("cuda", dtype=torch.float16, enabled=cuda):
-                    fp, lg, hl = _net_forward(
-                        net, {**b, "frames": x}
-                    )
+                    fp, lg, hl = _net_forward(net, {**b, "frames": x})
                 loss, _ = losses(fp, lg, b["free"], b["hit"], hit_logit=hl, **kw)
                 opt.zero_grad(set_to_none=True)
                 scaler.scale(loss).backward()

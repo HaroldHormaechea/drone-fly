@@ -214,9 +214,7 @@ def _catalogue() -> Any:
     return cat.load_named("liftoff")
 
 
-def hit_bias_select(
-    hit_rows: np.ndarray, hit_frac: float, seed: int
-) -> np.ndarray:
+def hit_bias_select(hit_rows: np.ndarray, hit_frac: float, seed: int) -> np.ndarray:
     """Indices (into ``hit_rows``) of a hit-biased subset reaching ~``hit_frac`` hit-bearing frames.
 
     ``hit_rows`` is ``(M,)`` bool: whether each candidate frame carries any hit ray. All hit-bearing

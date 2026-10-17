@@ -1,0 +1,31 @@
+# UC-83 AC5 — obstacle-avoidance retrain of the 70-input connectome under the EYES-V2 obstacle-ray
+# noise. Identical recipe to `uc82-obstacle-rays` (warm-started fine-tune of the lineage-10/11/12
+# avoider, PROC_TRACTABLE + PROC_RAYCAST + PROC_SHAPING + PROC_OBS_TERMINAL on obstacle-bearing
+# courses) — the ONLY change is the injected ray-noise model: the re-derived eyes-v2 noise instead
+# of the UC-78 documented fallback. This isolates "do better eyes help the connectome?" from every
+# other variable, and lets the rays-v2 arm be compared against the REUSED UC-82 blanked control
+# (`uc82-obstacle-blank`, noise-independent) so only this arm retrains.
+#
+# Build the v2 noise model first (driven by scripts/uc83_eyes_v2.sh step 6):
+#   drone-fly eyes noise-model --from-eval <v2 run>/eval_held-out.json --out artifacts/eyes/ray-noise-v2.yaml
+extends: proc-course-dr
+name: uc83-obstacle-rays-v2
+n_envs: 256            # A3000 6 GB
+budget: 5.0e6          # warm-started fine-tune (~2-4 h)
+seed: 0
+course:
+  no_obs: false        # obstacle-bearing courses
+  raycast: true        # the 40 obstacle rays -> extra_dim 70
+  shaping: true        # potential-based clearance shaping (the proven avoider recipe)
+  obs_terminal: true   # any obstacle touch = crash
+  ray_noise: artifacts/eyes/ray-noise-v2.yaml   # EYES-V2 injection (relative to the repo root)
+actor:
+  extra_dim: 70        # == course.extra_dim with raycast on
+curriculum:
+  difficulty_frac: null   # fine-tune: full difficulty + all obstacles on-path from step 0
+  obs_pos_frac: null
+  obs_count_frac: null
+warm_start:
+  checkpoint: training/11-count-curriculum/model_readout.pt   # the true 70-input avoider
+  src_extra_dim: 70        # NOT uc70-diag-run1 (in_dim 61); NOT the 177M exp11_count.pt
+  legacy_v1: false         # the 11 readout is already action-contract v2
