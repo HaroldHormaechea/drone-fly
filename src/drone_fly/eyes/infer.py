@@ -142,7 +142,10 @@ class EyesEstimator:
         frames = torch.cat([self._frames[i], *[self._frames[j] for j in hist]], dim=0)
         dev = self.device
         with torch.no_grad():
-            free, logit = self.net(
+            # A v2 (hit-head) net returns a third output; deployment uses only free + conf (the
+            # hit head's gain is carried into the sim via the re-derived ray-noise model), so we
+            # take the first two outputs and ignore any extra.
+            net_out = self.net(
                 frames.unsqueeze(0),
                 torch.from_numpy(view.uv).to(dev).unsqueeze(0),
                 torch.from_numpy(view.rays_cam).to(dev).unsqueeze(0),
@@ -150,6 +153,7 @@ class EyesEstimator:
                 torch.from_numpy(ego).to(dev).unsqueeze(0),
                 torch.from_numpy(history_dt(self._times, i, hist)).to(dev).unsqueeze(0),
             )
+            free, logit = net_out[0], net_out[1]
             free_np = free[0].float().cpu().numpy()
             conf_np = torch.sigmoid(logit[0]).float().cpu().numpy()
         t2 = time.perf_counter()
