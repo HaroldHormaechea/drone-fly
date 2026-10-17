@@ -95,15 +95,36 @@ def cmd_dataset(args: argparse.Namespace) -> int:
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
-    from drone_fly.eyes.ingest import run_ingest
+    from drone_fly.eyes.ingest import check_held_out_invariant, run_ingest
 
     label_kw = {"trackdata_root": args.trackdata_root, "scenes_root": args.scenes_root}
+    # strict=False: print the summary first, then enforce the held-out invariant (exit 2 on stderr).
     r = run_ingest(
         args.captures_root, labels_root=args.labels_root, out=args.out,
         label_missing=args.label_missing, baseline=args.baseline, target=args.target,
         preset=args.preset, config=args.config, harness=args.harness, label_kwargs=label_kw,
+        frozen_manifest=args.frozen_manifest, strict=False,
     )  # fmt: skip
     ov = r["overall"]
+    share = ov["in_view_hit_ray_share"]
+    tgt, base = r["target_in_view_hit_ray_share"], r["baseline_in_view_hit_ray_share"]
+    verdict = "BELOW TARGET" if r["below_target"] else "meets target"
+    n_bad = len(r["wrong_split"])
+    excluded = ov["captures_total"] - ov["captures_included"] - ov["captures_frozen_eval"] - n_bad
+    print(
+        "overall in-view hit-ray fraction: "
+        f"{'-' if share is None else f'{share:.4f}'} "
+        f"({ov['in_view_hits']}/{ov['in_view_rays']} rays) -- target >= {tgt:.2f}, "
+        f"baseline ~{base:.2f} -- {verdict}"
+    )
+    for m, v in r["per_map"].items():
+        s = v["in_view_hit_ray_share"]
+        print(f"  {m}: {'-' if s is None else f'{s:.4f}'} ({v['captures']} captures)")
+    print(
+        f"captures: {ov['captures_included']} included, {ov['captures_frozen_eval']} frozen-eval "
+        f"(not counted), {excluded} excluded, {n_bad} violations"
+    )
+    print(f"report dir: {r['out_dir']}")
     print(json.dumps({
         "overall_in_view_hit_ray_share": ov["in_view_hit_ray_share"],
         "target": r["target_in_view_hit_ray_share"],
@@ -111,9 +132,12 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         "below_target": r["below_target"],
         "captures_included": ov["captures_included"],
         "captures_total": ov["captures_total"],
+        "captures_frozen_eval": ov["captures_frozen_eval"],
+        "violations": r["wrong_split"],
         "per_map": {m: v["in_view_hit_ray_share"] for m, v in r["per_map"].items()},
     }, indent=2))  # fmt: skip
-    print(f"ingest report: {r['out_dir']}")
+    print(f"ingest report: {r['out_dir']}", flush=True)
+    check_held_out_invariant(r)
     return 0
 
 
@@ -266,6 +290,9 @@ def add_parser(sub: Any) -> None:
     p.add_argument("--out", help="default <data root>/reports/eyes/ingest")
     p.add_argument("--baseline", type=float, default=0.05, help="UC-83 in-view hit-ray baseline")
     p.add_argument("--target", type=float, default=0.15, help="UC-84 in-view hit-ray target")
+    p.add_argument(
+        "--frozen-manifest", help="frozen eval set (tracks/liftoff-frozen-eval-captures.json)"
+    )
     p.set_defaults(func=cmd_ingest)
 
     p = es.add_parser("train", help="train the estimator (AC4)")
