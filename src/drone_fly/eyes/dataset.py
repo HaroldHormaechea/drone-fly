@@ -460,6 +460,25 @@ def split_stats(samples: dict[str, np.ndarray], entries: list[dict[str, Any]]) -
     return out
 
 
+def in_view_hit_counts(hit: np.ndarray, in_view: np.ndarray) -> tuple[int, int]:
+    """``(in-view rays that hit, in-view rays total)`` over matching ``(frames, rays)`` arrays.
+
+    The single source of truth for the UC-84 **in-view hit-ray fraction** -- the share of rays the
+    camera actually sees that strike an obstacle (``hit[in_view].mean()``). Shared by the dataset
+    stats (:func:`_group_stats`) and ``eyes ingest`` so both read one definition; ``eyes ingest``
+    sums the counts across captures to aggregate per map / overall.
+    """
+    hit = np.asarray(hit, bool)
+    iv = np.asarray(in_view, bool)
+    return int((hit & iv).sum()), int(iv.sum())
+
+
+def in_view_hit_ray_fraction(hit: np.ndarray, in_view: np.ndarray) -> float | None:
+    """In-view hit-ray fraction (``None`` when no ray is in view); see :func:`in_view_hit_counts`."""
+    hits, total = in_view_hit_counts(hit, in_view)
+    return (hits / total) if total else None
+
+
 def _group_stats(samples: dict[str, np.ndarray], sel: np.ndarray) -> dict[str, Any]:
     n = int(sel.sum())
     if not n:
@@ -471,6 +490,8 @@ def _group_stats(samples: dict[str, np.ndarray], sel: np.ndarray) -> dict[str, A
         "rays_hit_share": float(hit.mean()),
         "frames_with_hit_share": float(hit.any(axis=1).mean()),
         "in_view_share": float(samples["in_view"][sel].mean()),
+        # UC-84: share of *in-view* rays that strike an obstacle (additive; one shared helper).
+        "in_view_hit_ray_share": in_view_hit_ray_fraction(hit, samples["in_view"][sel]),
         "label_kinds": {"obstacle": int(hit.sum()), "none": int((~hit).sum())},
         "aux_kinds": {k: int((kinds == i).sum()) for i, k in enumerate(AUX_KINDS)},
         "warning_s": warning_stats(samples["warning_s"][sel]),
