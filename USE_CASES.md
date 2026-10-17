@@ -94,4 +94,4 @@ Statuses:
 | 82 | [use-cases/82-obstacle-detection-70-input-connectome.md](use-cases/82-obstacle-detection-70-input-connectome.md) | Obstacle detection for the 70-input connectome — ray noise model + obstacle-avoidance retrain (sim-only) | done | 2026-10-16 |
 | 83 | [use-cases/83-eyes-v2-estimator.md](use-cases/83-eyes-v2-estimator.md) | Eyes v2 — cut the obstacle-ray miss rate (classification head + focal loss + denser mining) | done | 2026-10-17 |
 | 84 | [use-cases/84-liftoff-obstacle-capture-protocol.md](use-cases/84-liftoff-obstacle-capture-protocol.md) | Liftoff obstacle-capture protocol — richer hit-ray data for the vision eyes | done | 2026-10-17 |
-| 85 | [use-cases/85-eyes-v3-depth-backbone.md](use-cases/85-eyes-v3-depth-backbone.md) | Eyes v3 — pretrained monocular-depth backbone for the obstacle-ray estimator | in-progress | 2026-10-17 |
+| 85 | [use-cases/85-eyes-v3-depth-backbone.md](use-cases/85-eyes-v3-depth-backbone.md) | Eyes v3 — pretrained monocular-depth backbone for the obstacle-ray estimator | done | 2026-10-17 |
