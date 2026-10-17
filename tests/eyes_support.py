@@ -236,3 +236,36 @@ def tiny_run(tmp: Path, contract: Any, **train: Any) -> tuple[Path, Path, dict[s
         **train,
     }
     return tmp / "ds", Path(kw["out"]), train_eyes(tmp / "ds", **kw)
+
+
+# ------------------------------------------------------------------- UC-85 eyes v3 depth backbone
+
+#: The pure-torch sentinel backbone id (no transformers / network / download): the hermetic
+#: CI/test stub for every UC-85 depth test. Mirrors ``depth_backbone.TINY_DEPTH_ID``.
+TINY_DEPTH_ID = "tiny-depth"
+
+
+def eyes_inputs(
+    b: int = 2, r: int = 40, k: int = 3, h: int = SMALL_H, w: int = SMALL_W, seed: int = 0
+):
+    """Synthetic forward inputs for the eyes net (``EyesNet`` / ``EyesDepthNet``): the 6-arg dict
+    ``(frames, uv, rays_cam, in_view, ego, hist_dt)``. Same shapes for both nets (shared IO
+    contract), so a depth-on forward is a drop-in for the v1 one."""
+    import torch
+
+    g = torch.Generator().manual_seed(seed)
+    return {
+        "frames": torch.randint(0, 256, (b, 3 * k, h, w), generator=g, dtype=torch.uint8),
+        "uv": torch.rand(b, r, 2, generator=g) * 2 - 1,
+        "rays_cam": torch.nn.functional.normalize(torch.randn(b, r, 3, generator=g), dim=-1),
+        "in_view": (torch.rand(b, r, generator=g) < 0.6).float(),
+        "ego": torch.randn(b, 10, generator=g),
+        "hist_dt": torch.full((b, k - 1), 0.2) * torch.arange(1, k).float(),
+    }
+
+
+def tiny_depth_run(tmp: Path, contract: Any, **train: Any) -> tuple[Path, Path, dict[str, Any]]:
+    """:func:`tiny_run` with the UC-85 depth trunk on, wired to the hermetic ``tiny-depth`` stub
+    backbone (no transformers / network / GPU), so the whole train path stays CI-hermetic (AC8)."""
+    train.setdefault("backbone_id", TINY_DEPTH_ID)
+    return tiny_run(tmp, contract, depth_backbone=True, **train)

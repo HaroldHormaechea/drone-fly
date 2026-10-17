@@ -40,6 +40,12 @@ ALLOWED_ROOTS = {
 ALLOWED_DRONE_FLY = {
     "drone_fly.harness.geometry",
     "drone_fly.harness.types",
+    # UC-85: ``model.py`` lazily (function-level) imports the eyes-v3 depth-backbone factory for the
+    # opt-in ``EyesDepthNet`` trunk. It is allow-listed for the static import check but deliberately
+    # kept OUT of ``DEPLOYABLE`` — v3-depth is not part of the lean vision-only core (it needs the
+    # ``harness``-extra ``transformers``), and the dynamic test below still proves the DEFAULT
+    # v1/v2 path loads neither ``depth_backbone`` nor ``transformers``.
+    "drone_fly.eyes.depth_backbone",
     *(f"drone_fly.eyes.{m}" for m in DEPLOYABLE),
 }
 FORBIDDEN_PREFIXES = (

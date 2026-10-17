@@ -156,3 +156,39 @@ def test_hit_head_metrics_no_predicted_hits_precision_none():
     assert m["all"]["precision"] is None  # tp + fp == 0
     assert m["all"]["recall"] == pytest.approx(0.0)
     assert m["all"]["f1"] is None
+
+
+# -------------------------------------------------------- UC-85 AC4 / AC6: v1-baseline vs v3-depth
+
+# The compare gate is the SAME arithmetic for UC-85: eyes v3-depth is passed as ``--v2`` and judged
+# against the v1-baseline-on-identical-data by the nearest-quarter (0-4 m) in-view miss reduction
+# (>= 30 %) with clear false-alarm <= 0.10. These lock the UC-85 decision branches.
+
+
+def test_v3_depth_adopt_when_both_accuracy_bars_pass():
+    """AC6 adopt branch (accuracy half): >= 30 % relative nearest-quarter miss cut, FA <= 0.10."""
+    v1 = _report(0.99, 0.04)  # UC-83 near-miss ceiling ~0.99
+    v3 = _report(0.60, 0.08)  # ~39 % relative reduction, FA 0.08 <= 0.10
+    cmp = ev.compare_reports(v1, v3)
+    assert cmp["relative_reduction"] == pytest.approx((0.99 - 0.60) / 0.99)
+    assert cmp["miss_passed"] is True and cmp["fa_passed"] is True
+    assert cmp["passed"] is True and cmp["verdict"].startswith("PASS")
+
+
+def test_v3_depth_negative_routes_to_uc84_when_accuracy_unmoved():
+    """AC6 negative branch: the depth prior does not clear the near-miss bar on the thin 5-map
+    data -> an informative negative (defer to the UC-84 richer-data re-run), not a pass."""
+    v1 = _report(0.99, 0.04)
+    v3 = _report(0.98, 0.04)  # ~1 % reduction: the ceiling persists
+    cmp = ev.compare_reports(v1, v3)
+    assert cmp["miss_passed"] is False
+    assert cmp["passed"] is False and cmp["verdict"].startswith("NEGATIVE")
+
+
+def test_v3_depth_accuracy_win_but_false_alarm_breach_is_not_adopt():
+    """An accuracy cut that breaches the clear false-alarm bound does not pass the gate."""
+    v1 = _report(0.99, 0.04)
+    v3 = _report(0.50, 0.20)  # big miss cut but FA 0.20 > 0.10
+    cmp = ev.compare_reports(v1, v3)
+    assert cmp["miss_passed"] is True and cmp["fa_passed"] is False
+    assert cmp["passed"] is False
