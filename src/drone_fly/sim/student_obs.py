@@ -121,18 +121,36 @@ def schema(
     pointer_jitter_sigma_rad: float = 0.0,
     pointer_dropout_p: float = 0.0,
     pointer_bearing_tol_deg: float = 20.0,
+    privileged: tuple[str, ...] = (),
+    privileged_version: int | None = None,
 ) -> dict[str, Any]:
     """The JSON-able ``obs_schema`` written into the student checkpoint (pins ``k``, the tracker
-    timeouts and the camera the noise model and perception assumed)."""
+    timeouts and the camera the noise model and perception assumed).
+
+    UC79: ``privileged`` (default empty) is the opt-in list of diagnostic teacher blocks appended
+    to the obs. When empty the schema is **byte-identical** to before (nothing added; AC3). When
+    set, ``dim`` grows by the privileged widths, the privileged block layout is appended to
+    ``blocks`` and a top-level ``privileged`` key records the names/widths (always exact).
+    ``privileged_version`` is the teacher-obs version whose encoding the blocks mirror (only
+    ``teacher_full``'s width depends on it); defaults to the current teacher-obs version."""
+    from drone_fly.sim import teacher_obs as _t
+
+    priv = _t._privileged_canonical(privileged)
+    pv = int(privileged_version) if privileged_version is not None else _t.VERSION
     start = 0
     blocks = []
     for n, w in BLOCKS:
         blocks.append({"name": n, "start": start, "width": w})
         start += w
-    return {
+    dim = DIM
+    if priv:
+        for entry in _t.privileged_layout(priv, pv):
+            blocks.append({**entry, "start": entry["start"] + DIM})
+        dim = DIM + _t.privileged_total_width(priv, pv)
+    out = {
         "name": NAME,
         "version": VERSION,
-        "dim": DIM,
+        "dim": dim,
         "dtype": "float32",
         "units": "student units = Liftoff metres / world_scale (harness WorldScale); rates, "
         "quaternions, times unscaled; body FLU",
@@ -181,6 +199,18 @@ def schema(
         },  # fmt: skip
         "prev_action": "raw policy output of the previous tick, before decoding / clipping",
     }
+    if priv:
+        out["input_scale"] = input_scale() + _t.privileged_input_scale(priv, pv)
+        out["privileged"] = {
+            "blocks": list(priv),
+            "widths": {b: _t.privileged_width(b, pv) for b in priv},
+            "teacher_obs_version": pv,
+            "exactness": "always exact (computed by the teacher's own code path on env truth, "
+            "regardless of the student's perception mode)",
+            "role": "diagnostic; a student with any privileged block is NOT deployable "
+            "(train export / harness run refuse it)",
+        }
+    return out
 
 
 def teacher_battery_schema() -> dict[str, Any]:

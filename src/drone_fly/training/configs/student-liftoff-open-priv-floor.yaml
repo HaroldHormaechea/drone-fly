@@ -1,0 +1,16 @@
+# UC-79 student information-gap ablation — variant `floor` (8 values).
+#
+# student-liftoff-open + the MLP actor + the shortened ablation budget, appending ONLY the floor/
+# terrain surface — the floor entry of the teacher's 8-nearest-surfaces block, encoded by the SAME
+# per-surface code path (teacher_obs.surface_feature), 8 values. Always exact, sim-only, diagnostic,
+# never deployable. Obs dim = 65 + 8 = 73. See student-liftoff-open-priv-baseline.yaml for the
+# budget/equalizer rationale and docs/experiments/uc79-student-information-gap.md.
+extends: student-liftoff-open
+name: student-liftoff-open-priv-floor
+n_envs: 2048
+budget: 1.8e7              # EQUAL across all 7 (AC6)
+student:
+  actor: mlp-student
+distill:
+  max_hours: null
+  student_privileged: [floor]

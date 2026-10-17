@@ -439,14 +439,30 @@ def build_student_env(
         course_scale=[c.frame.world_scale for c in pool.courses],
         coverage=coverage_of(pool, model),
         seed=cfg.base.seed if seed is None else seed,
+        # UC79 single choke point: the privileged list is sourced from the config here, so BOTH
+        # training and eval/report build the same obs width (no AC8 train/eval mismatch).
+        privileged=tuple(getattr(cfg.distill, "student_privileged", ())),
     )
 
 
-def build_actor(cfg: Any, dev: Any, *, k1_path: Any = None, warm: bool = True) -> nn.Module:
+def build_actor(
+    cfg: Any, dev: Any, *, k1_path: Any = None, warm: bool = True,
+    teacher_obs_version: int | None = None,
+) -> nn.Module:  # fmt: skip
     from drone_fly.controller.student import build_student
+    from drone_fly.sim import student_obs as _so
+    from drone_fly.sim import teacher_obs as _to
     from drone_fly.training.ppo import resolve_repo_path
 
     s = cfg.student
+    # UC79: a privileged (MLP-only, config-enforced) actor is wired for DIM + Σ block widths and
+    # carries the matching per-value input scales; the default (empty) path is byte-identical.
+    priv = tuple(getattr(cfg.distill, "student_privileged", ()))
+    obs_dim = input_scale_vec = None
+    if priv:
+        pv = int(teacher_obs_version) if teacher_obs_version is not None else _to.VERSION
+        obs_dim = _so.DIM + _to.privileged_total_width(priv, pv)
+        input_scale_vec = _so.input_scale() + _to.privileged_input_scale(priv, pv)
     actor = build_student(
         s.actor,
         k1_path=k1_path,
@@ -454,6 +470,9 @@ def build_actor(cfg: Any, dev: Any, *, k1_path: Any = None, warm: bool = True) -
         residual=s.residual,
         logstd_init=s.logstd_init,
         body_kernel=s.body_kernel,
+        obs_dim=obs_dim,
+        input_scale_vec=input_scale_vec,
+        privileged=priv,
     )
     if warm and s.actor == "k1-student":
         actor.warm_start(
@@ -955,6 +974,7 @@ def student_sidecar(
     conversion: dict[str, Any],
     contention: dict,
     battery_cells: int = 3,
+    teacher_obs_version: int | None = None,
 ) -> dict:
     """The student sidecar keys (``write_sidecar(extra=...)``)."""
     from drone_fly.sim.student_obs import schema
@@ -963,6 +983,21 @@ def student_sidecar(
     extra = {}
     if cfg.base.tracks.obstacles != "all":  # UC77: default sidecars stay unchanged
         extra["course_obstacles"] = cfg.base.tracks.obstacles
+    # UC79: an opt-in privileged (diagnostic) student records its block list + obs dim and is
+    # marked non-deployable; the default (empty) path leaves the sidecar byte-identical (AC3).
+    priv = tuple(getattr(cfg.distill, "student_privileged", ()))
+    if priv:
+        from drone_fly.sim.teacher_obs import privileged_total_width
+
+        pv = int(teacher_obs_version) if teacher_obs_version is not None else None
+        extra["privileged"] = list(priv)
+        from drone_fly.sim import teacher_obs as _to
+        from drone_fly.sim.student_obs import DIM as _SDIM
+
+        extra["obs_dim"] = _SDIM + privileged_total_width(priv, pv or _to.VERSION)
+        # override the trailing deployable/role keys (spread last) — never deployable (AC4).
+        extra["deployable"] = False
+        extra["role"] = "diagnostic"
     return {
         "obs_schema": schema(
             world_scale=float(cfg.student.world_scale),
@@ -978,6 +1013,8 @@ def student_sidecar(
             pointer_jitter_sigma_rad=pcfg.pointer_jitter_sigma_rad,
             pointer_dropout_p=pcfg.pointer_dropout_p,
             pointer_bearing_tol_deg=pcfg.pointer_bearing_tol_deg,
+            privileged=priv,
+            privileged_version=teacher_obs_version,
         ),
         "world_scale": float(cfg.student.world_scale),
         "actor_arch": actor.arch(),
@@ -1213,7 +1250,8 @@ def _train_student(
         teacher_obs_version=teacher_obs_version_of(ck.sidecar),
     )
     teacher, _ = load_teacher(ck.checkpoint, dev)
-    actor = build_actor(cfg, dev, k1_path=k1_path, warm=not resuming)
+    t_obs_ver = teacher_obs_version_of(ck.sidecar)
+    actor = build_actor(cfg, dev, k1_path=k1_path, warm=not resuming, teacher_obs_version=t_obs_ver)
     spec = cfg.base.action
     max_g = float(spec.max_g or profile.max_g)
     sidecar = student_sidecar(
@@ -1226,6 +1264,7 @@ def _train_student(
         conversion=conversion_record(pool, conv),
         contention=contention,
         battery_cells=battery_cells_of(profile),
+        teacher_obs_version=t_obs_ver,
     )
     sr = StudentRun(run, cfg, profile, actor, sidecar)
     sr.write_inputs(ck, model)
@@ -2039,7 +2078,9 @@ def bench_student(
         teacher_obs_version=teacher_obs_version_of(ck.sidecar),
     )
     tch, _ = load_teacher(ck.checkpoint, dev)
-    actor = build_actor(cfg, dev, k1_path=k1_path).eval()
+    actor = build_actor(
+        cfg, dev, k1_path=k1_path, teacher_obs_version=teacher_obs_version_of(ck.sidecar)
+    ).eval()
     spec = cfg.base.action
     max_g = float(spec.max_g or profile.max_g)
 

@@ -213,10 +213,33 @@ class MLPStudent(nn.Module):
 
     kind = "mlp-student"
 
-    def __init__(self, *, logstd_init: float = -1.5) -> None:
+    def __init__(
+        self,
+        *,
+        logstd_init: float = -1.5,
+        obs_dim: int = DIM,
+        input_scale_vec: Any = None,
+        privileged: tuple[str, ...] = (),
+    ) -> None:
         super().__init__()
-        self.register_buffer("input_scale", torch.tensor(input_scale(), dtype=torch.float32))
-        self.pi = _mlp(DIM, MLP_HIDDEN, ACT_DIM)
+        #: UC79: the obs width the actor is wired for (``DIM`` + Σ privileged-block widths); the K1
+        #: path is untouched. ``privileged`` is recorded in :meth:`arch` for round-trip.
+        self.obs_dim = int(obs_dim)
+        self.privileged = tuple(privileged)
+        if input_scale_vec is not None:
+            scale = torch.as_tensor(list(input_scale_vec), dtype=torch.float32)
+        elif self.obs_dim == DIM:
+            scale = torch.tensor(input_scale(), dtype=torch.float32)
+        else:
+            # rebuild placeholder; the real per-value scales live in the checkpoint buffer and are
+            # restored by load_state_dict (student_from_state). Fresh privileged builds pass the vec.
+            scale = torch.ones(self.obs_dim, dtype=torch.float32)
+        if scale.numel() != self.obs_dim:
+            raise ValueError(
+                f"input_scale_vec length {scale.numel()} != obs_dim {self.obs_dim}"
+            )
+        self.register_buffer("input_scale", scale)
+        self.pi = _mlp(self.obs_dim, MLP_HIDDEN, ACT_DIM)
         nn.init.zeros_(self.pi[-1].bias)
         with torch.no_grad():
             self.pi[-1].weight.mul_(0.01)
@@ -243,17 +266,26 @@ class MLPStudent(nn.Module):
         return []
 
     def arch(self) -> dict[str, Any]:
-        return {"kind": self.kind, "hidden": list(MLP_HIDDEN)}
+        out: dict[str, Any] = {"kind": self.kind, "hidden": list(MLP_HIDDEN),
+                               "obs_dim": self.obs_dim}  # fmt: skip
+        if self.privileged:
+            out["privileged"] = list(self.privileged)
+        return out
 
 
 def build_student(kind: str, *, k1_path: Any = None, connectome: Any = None,
                   encoder: bool = True, residual: bool = False,
-                  logstd_init: float = -1.5, body_kernel: str = "csr16") -> nn.Module:  # fmt: skip
+                  logstd_init: float = -1.5, body_kernel: str = "csr16",
+                  obs_dim: int | None = None, input_scale_vec: Any = None,
+                  privileged: tuple[str, ...] = ()) -> nn.Module:  # fmt: skip
     if kind == "k1-student":
+        # UC79 privileged ablation is MLP-only (config-enforced); K1 ignores the extra args.
         return K1Student(k1_path, connectome=connectome, encoder=encoder, residual=residual,
                          logstd_init=logstd_init, body_kernel=body_kernel)  # fmt: skip
     if kind == "mlp-student":
-        return MLPStudent(logstd_init=logstd_init)
+        return MLPStudent(logstd_init=logstd_init,
+                          obs_dim=DIM if obs_dim is None else int(obs_dim),
+                          input_scale_vec=input_scale_vec, privileged=tuple(privileged))  # fmt: skip
     raise ValueError(f"unknown student actor {kind!r} ({STUDENT_KINDS})")
 
 
@@ -263,7 +295,9 @@ def student_from_state(kind: str, arch: dict[str, Any], state: dict[str, torch.T
     m = build_student(kind, k1_path=k1_path, connectome=connectome,
                       encoder=bool(arch.get("encoder", True)),
                       residual=bool(arch.get("residual", False)),
-                      body_kernel=str(arch.get("body_kernel", "coo")))  # fmt: skip
+                      body_kernel=str(arch.get("body_kernel", "coo")),
+                      obs_dim=arch.get("obs_dim"),
+                      privileged=tuple(arch.get("privileged", ())))  # fmt: skip
     missing, unexpected = m.load_state_dict(state, strict=False)
     bad = [k for k in missing if not k.startswith("k1.body.layer.")]
     if bad or unexpected:

@@ -177,6 +177,14 @@ def plan_student(checkpoint: str | Path, *, allow_baseline: bool = False) -> Stu
     if not is_student_checkpoint(p):
         return None
     state, meta = load_export(p)
+    # UC79: a diagnostic privileged student is never deployable — refuse unconditionally (even
+    # with --allow-baseline), before validate_meta's generic dim-mismatch error (AC4).
+    privileged = meta.get("privileged") or (meta.get("obs_schema") or {}).get("privileged")
+    if privileged:
+        blocks = privileged.get("blocks") if isinstance(privileged, dict) else list(privileged)
+        raise StudentSchemaError(
+            f"{p}: diagnostic privileged student, not deployable (privileged blocks {blocks})"
+        )
     validate_meta(meta, p)
     if not meta.get("deployable", False) and not allow_baseline:
         raise StudentSchemaError(

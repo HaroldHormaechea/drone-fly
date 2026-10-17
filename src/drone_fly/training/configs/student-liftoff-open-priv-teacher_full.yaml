@@ -1,0 +1,21 @@
+# UC-79 student information-gap ablation — variant `teacher_full` (the full teacher obs; UPPER BOUND).
+#
+# student-liftoff-open + the MLP actor + the shortened ablation budget, appending the COMPLETE teacher
+# observation (teacher-obs v2, 150 values) to the student obs — the upper bound of what any added
+# input could give. Always exact, sim-only, diagnostic, never deployable. Obs dim = 65 + 150 = 215
+# (teacher-obs v1 teachers → 65 + 148 = 213; the extractor uses the teacher run's obs_version).
+#
+# Interpretation (AC10 rubric): if even this variant collapses at beta→0, the observation is NOT the
+# bottleneck — retarget the distillation setup itself (beta schedule / DAgger relabelling / loss).
+#
+# See student-liftoff-open-priv-baseline.yaml for the budget/equalizer rationale and
+# docs/experiments/uc79-student-information-gap.md.
+extends: student-liftoff-open
+name: student-liftoff-open-priv-teacher_full
+n_envs: 2048
+budget: 1.8e7              # EQUAL across all 7 (AC6)
+student:
+  actor: mlp-student
+distill:
+  max_hours: null
+  student_privileged: [teacher_full]

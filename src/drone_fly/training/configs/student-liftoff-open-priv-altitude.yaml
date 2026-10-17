@@ -1,0 +1,16 @@
+# UC-79 student information-gap ablation — variant `altitude` (1 value).
+#
+# student-liftoff-open + the MLP actor + the shortened ablation budget, appending ONLY the teacher's
+# altitude-above-surface value (teacher-obs `altitude` block, 1) to the student obs. Always exact
+# (computed on env truth), sim-only, diagnostic — never deployable (train export / harness run refuse
+# it). Obs dim = 65 + 1 = 66. See student-liftoff-open-priv-baseline.yaml for the budget/equalizer
+# rationale and docs/experiments/uc79-student-information-gap.md for the hypothesis and driver.
+extends: student-liftoff-open
+name: student-liftoff-open-priv-altitude
+n_envs: 2048
+budget: 1.8e7              # EQUAL across all 7 (AC6)
+student:
+  actor: mlp-student
+distill:
+  max_hours: null
+  student_privileged: [altitude]
