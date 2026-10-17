@@ -83,10 +83,12 @@ def cmd_dataset(args: argparse.Namespace) -> int:
         stride_s=args.stride_s, hist_tol_s=args.history_tol_s, uptilt_tol_deg=args.uptilt_tol_deg,
         build_cache=args.build_cache, cache_root=args.cache_root,
         disk_margin_gb=args.disk_margin_gb, preset=args.preset, config=args.config,
-        harness=args.harness, label_kwargs=label_kw,
+        harness=args.harness, label_kwargs=label_kw, hit_frac=args.hit_frac,
+        mining_seed=args.mining_seed,
     )  # fmt: skip
     print(json.dumps({"id": m["id"], "split_maps": m["split_maps"],
                       "samples": {s: v["samples"] for s, v in m["splits"].items()},
+                      "mining": m.get("mining"),
                       "drop_reasons": m["drop_reasons"]}, indent=2))  # fmt: skip
     print(f"dataset: {m['out_dir']}")
     return 0
@@ -207,6 +209,10 @@ def add_parser(sub: Any) -> None:
     p.add_argument("--build-cache", action="store_true", help="also build the frame cache now")
     p.add_argument("--cache-root", help="default <data root>/cache/eyes")
     p.add_argument("--disk-margin-gb", type=float, default=1.0)
+    # UC-83 AC2: opt-in hit-biased frame filter on the train split (default off => v1 dataset).
+    p.add_argument("--hit-frac", type=float,
+                   help="subsample clear train frames to reach ~this hit-bearing-frame fraction")  # fmt: skip
+    p.add_argument("--mining-seed", type=int, default=0, help="seed for the hit-biased filter")
     p.set_defaults(func=cmd_dataset)
 
     p = es.add_parser("train", help="train the estimator (AC4)")

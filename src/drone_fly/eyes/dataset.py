@@ -214,6 +214,31 @@ def _catalogue() -> Any:
     return cat.load_named("liftoff")
 
 
+def hit_bias_select(
+    hit_rows: np.ndarray, hit_frac: float, seed: int
+) -> np.ndarray:
+    """Indices (into ``hit_rows``) of a hit-biased subset reaching ~``hit_frac`` hit-bearing frames.
+
+    ``hit_rows`` is ``(M,)`` bool: whether each candidate frame carries any hit ray. All hit-bearing
+    frames are kept; clear frames are subsampled (seeded, without replacement) so the kept set's
+    hit-bearing fraction is about ``hit_frac``. No-op (returns all) when already at/above the target
+    or there are no hits to bias toward. Never duplicates frames (filter, not oversample).
+    """
+    has_hit = np.asarray(hit_rows, bool)
+    m = len(has_hit)
+    n_hit = int(has_hit.sum())
+    if m == 0 or n_hit == 0 or n_hit >= hit_frac * m:
+        return np.arange(m)
+    n_clear_keep = int(round(n_hit * (1.0 - hit_frac) / hit_frac))
+    clear_idx = np.flatnonzero(~has_hit)
+    n_clear_keep = min(n_clear_keep, len(clear_idx))
+    rng = np.random.default_rng(seed)
+    chosen = rng.choice(clear_idx, size=n_clear_keep, replace=False) if n_clear_keep else []
+    mask = has_hit.copy()
+    mask[np.asarray(chosen, np.int64)] = True
+    return np.flatnonzero(mask)
+
+
 def build_dataset(
     captures_root: str | Path | None = None,
     *,
@@ -234,12 +259,22 @@ def build_dataset(
     harness: str = "liftoff",
     catalogue: Any = None,
     label_kwargs: dict[str, Any] | None = None,
+    hit_frac: float | None = None,
+    mining_seed: int = 0,
 ) -> dict[str, Any]:
-    """Build the dataset (see the module docstring); returns the manifest."""
+    """Build the dataset (see the module docstring); returns the manifest.
+
+    UC-83 AC2: ``hit_frac`` (default ``None`` => off, byte-identical to v1) applies an opt-in
+    hit-biased frame filter to the **train split only** (val / held-out are untouched so evaluation
+    stays comparable): clear frames are subsampled so train hit-bearing frames reach ~``hit_frac``.
+    The resulting hit-ray fraction is recorded in the manifest's ``mining`` block and ``splits``.
+    """
     from drone_fly import paths
     from drone_fly.eyes.fov import preset_view
     from drone_fly.tracks.catalogue import sha256_file
 
+    if hit_frac is not None and not (0.0 < float(hit_frac) < 1.0):
+        raise HarnessConfigError(f"--hit-frac must be in (0, 1), got {hit_frac!r}")
     hist_tol_s = default_tol(stride_s) if hist_tol_s is None else float(hist_tol_s)
     croot = Path(captures_root or paths.captures_root())
     lroot = Path(labels_root or labels_root_default())
@@ -322,15 +357,27 @@ def build_dataset(
         n = len(lab["stamp"])
         e["rows"] = int(n)
         e["cache_key"] = cache_key(e["capture_sha256"], width, height, masks_hash(view.masks))
-        keep = []
+        keep: list[int] = []
+        hists: list[np.ndarray] = []
+        hdts: list[np.ndarray] = []
         for i in range(n):
             hist = select_history(lab["stamp"], i, k_frames, stride_s, hist_tol_s, lab["segment"])
             if hist is None:
                 drops["no-history"] += 1
                 continue
             keep.append(i)
-            idx_hist.append(hist)
-            idx_hdt.append(history_dt(lab["stamp"], i, hist))
+            hists.append(hist)
+            hdts.append(history_dt(lab["stamp"], i, hist))
+        if hit_frac is not None and e["split"] == "train" and keep:
+            keep_rows = np.asarray(keep, np.int64)
+            has_hit = np.asarray(lab["hit"][keep_rows], bool).any(axis=1)
+            sel = hit_bias_select(has_hit, float(hit_frac), mining_seed + ci)
+            drops["hit-bias-filtered"] += len(keep) - len(sel)
+            keep = [keep[j] for j in sel]
+            hists = [hists[j] for j in sel]
+            hdts = [hdts[j] for j in sel]
+        idx_hist.extend(hists)
+        idx_hdt.extend(hdts)
         keep_a = np.asarray(keep, np.int64)
         e["samples"] = int(len(keep_a))
         idx_cap += [ci] * len(keep_a)
@@ -357,6 +404,7 @@ def build_dataset(
     tmp.replace(out_dir / SAMPLES_FILE)
     dataset_sha = sha256_file(out_dir / SAMPLES_FILE)
     first = read_labels_meta(inc[0]["labels_dir"]) or {}
+    splits = split_stats(samples, entries)
     manifest = {
         "format": 1,
         "id": ds_id,
@@ -382,7 +430,15 @@ def build_dataset(
         "split_maps": {s: sorted({e["map"] for e in inc if e["split"] == s}) for s in SPLITS},
         "captures": entries,
         "drop_reasons": dict(drops),
-        "splits": split_stats(samples, entries),
+        "splits": splits,
+        "mining": {
+            "hit_frac_target": float(hit_frac) if hit_frac is not None else None,
+            "mining_seed": int(mining_seed),
+            "applied": hit_frac is not None,
+            # resulting train-split fractions after any hit-biased filtering (AC2 requirement):
+            "train_rays_hit_share": splits.get("train", {}).get("rays_hit_share"),
+            "train_frames_with_hit_share": splits.get("train", {}).get("frames_with_hit_share"),
+        },
     }
     (out_dir / MANIFEST).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     (out_dir / MANIFEST_MD).write_text(manifest_markdown(manifest), encoding="utf-8")
