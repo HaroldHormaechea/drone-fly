@@ -15,7 +15,9 @@ records the achieved capture density and the v2-on-new-data vs UC-83 v1/v2-on-ol
 - **Capture protocol:** `docs/experiments/uc84-capture-protocol.md` — fly the 70-input
   `training/11-count-curriculum` model (teacher backup) through obstacle-dense train-map courses via
   the `liftoff-episodes` skill; assemble with the off-branch UC-71 tool; drop into the captures root.
-  Val + held-out maps are frozen (no new captures) so the held-out comparison stays valid.
+  Val + held-out maps are frozen: only the captures in the committed manifest
+  `tracks/liftoff-frozen-eval-captures.json` (name + capture sha) are allowed there, so the held-out
+  comparison stays valid.
 - **Density gate (AC3):** `drone-fly eyes ingest --label-missing` measures the in-view hit-ray
   fraction (`hit[in_view].mean()`, the shared `in_view_hit_counts` helper) per map and overall, and
   flags `below_target` until it clears 15 %.
@@ -24,8 +26,9 @@ records the achieved capture density and the v2-on-new-data vs UC-83 v1/v2-on-ol
   enlarged train captures → train v1-baseline + v2 (`--hit-head --focal --hit-sampler`) on the same
   dataset → `eyes eval` both on the intact held-out split → `eyes compare`. tol 0.5 training m, same
   as UC-83, so the numbers are directly comparable.
-- **Provenance:** the driver logs the frozen held-out/val map set + the catalogue sha256
-  (`artifacts/uc84/00_provenance.txt`) so a shifted baseline is detectable.
+- **Provenance:** the driver logs the frozen held-out/val map set, the catalogue sha256 and the
+  frozen-eval manifest path / sha256 / entry count (`artifacts/uc84/00_provenance.txt`) so a shifted
+  baseline is detectable.
 
 ## Capture density (AC3)
 

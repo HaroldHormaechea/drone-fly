@@ -7,13 +7,20 @@ to what the eyes pipeline needs, and reports how obstacle-dense they are:
 * **Discovery / conformance** -- reuses :func:`~drone_fly.eyes.capture_meta.discover_captures` and
   the same meta / catalogue / alignment checks the dataset build applies. Each capture that cannot
   be used is reported with an actionable reason (``no-meta``, ``bad-meta``, ``no-catalogue``,
-  ``map-mismatch``, ``alignment-unverified``, ``wrong-split``, ``no-trackdata``, ``no-scene``,
-  ``no-telemetry``, ``no-labels``, ``stale-labels``).
+  ``map-mismatch``, ``alignment-unverified``, ``frozen-eval``, ``frozen-eval-modified``,
+  ``wrong-split``, ``no-trackdata``, ``no-scene``, ``no-telemetry``, ``no-labels``,
+  ``stale-labels``).
 * **Held-out-split invariant** -- the split is resolved from the **track catalogue** (never the
   capture ``meta.json``), exactly as :mod:`~drone_fly.eyes.dataset`. UC-84 only grows the *train*
-  split, so any capture that resolves to ``val`` / ``held-out`` is a ``wrong-split`` integrity
-  violation: it is reported and then :func:`run_ingest` raises, so a leaked capture can never
-  silently shift the cross-run comparison baseline.
+  split; the existing val / held-out captures are the **frozen eval baseline** that ``eyes
+  dataset`` / ``eyes eval`` read from the same root, recorded in the committed manifest
+  ``tracks/liftoff-frozen-eval-captures.json`` keyed by (capture folder name, :func:`capture_sha`).
+  A non-train capture whose name is listed **and** whose current sha matches is ``frozen-eval``
+  (reported, not counted, not a failure). A listed name whose content changed is
+  ``frozen-eval-modified``; an unlisted one is ``wrong-split``. Both are integrity violations:
+  they are reported and then :func:`check_held_out_invariant` raises, so a new or edited eval
+  capture can never silently shift the cross-run comparison baseline. Re-baselining the frozen set
+  is a deliberate act: regenerate the manifest with :func:`build_frozen_manifest` and commit it.
 * **In-view hit-ray fraction** -- for each usable capture, labels (via
   :func:`~drone_fly.eyes.labels.run_label`; existing labels are reused unless ``label_missing``)
   carry per-ray ``hit`` + ``in_view`` arrays. The fraction ``hit[in_view].mean()`` is computed with
@@ -63,9 +70,16 @@ REPORT_MD = "ingest.md"
 
 #: Reasons a capture is not counted toward the in-view hit-ray fraction (see the module docstring).
 REASONS = (
-    "no-meta", "bad-meta", "no-catalogue", "map-mismatch", "alignment-unverified", "wrong-split",
-    "no-split", "no-trackdata", "no-scene", "no-telemetry", "no-labels", "stale-labels",
+    "no-meta", "bad-meta", "no-catalogue", "map-mismatch", "alignment-unverified", "frozen-eval",
+    "frozen-eval-modified", "wrong-split", "no-split", "no-trackdata", "no-scene", "no-telemetry",
+    "no-labels", "stale-labels",
 )  # fmt: skip
+#: Reasons that violate the held-out-split invariant (reported, then raised).
+VIOLATIONS = ("wrong-split", "frozen-eval-modified")
+
+FROZEN_MANIFEST_FILE = "liftoff-frozen-eval-captures.json"
+FROZEN_MANIFEST_FORMAT = 1
+FROZEN_SPLITS = ("val", "held-out")
 
 
 def _skip_reason(skipped: str) -> str:
@@ -93,6 +107,99 @@ def _share(hits: int, rays: int) -> float | None:
     return (hits / rays) if rays else None
 
 
+def frozen_manifest_default() -> Path:
+    """The committed frozen-eval capture manifest (``tracks/liftoff-frozen-eval-captures.json``)."""
+    from drone_fly.tracks.catalogue import catalogue_dir
+
+    return catalogue_dir() / FROZEN_MANIFEST_FILE
+
+
+def load_frozen_manifest(path: str | Path | None = None) -> dict[str, dict[str, Any]]:
+    """``{capture name: entry}`` from the frozen-eval manifest.
+
+    A missing file is an empty mapping (safe default: every non-train capture then fails); a
+    malformed one raises :class:`HarnessConfigError`.
+    """
+    p = Path(path) if path is not None else frozen_manifest_default()
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HarnessConfigError(f"cannot read frozen-eval manifest {p}: {exc}") from exc
+    if not isinstance(data, dict) or data.get("format") != FROZEN_MANIFEST_FORMAT:
+        raise HarnessConfigError(f"{p}: unsupported frozen-eval manifest (format must be 1)")
+    entries = data.get("captures")
+    if not isinstance(entries, list):
+        raise HarnessConfigError(f"{p}: 'captures' must be a list")
+    out: dict[str, dict[str, Any]] = {}
+    for i, e in enumerate(entries):
+        if not (isinstance(e, dict) and isinstance(e.get("name"), str)
+                and isinstance(e.get("capture_sha256"), str)):  # fmt: skip
+            raise HarnessConfigError(f"{p}: captures[{i}] needs string 'name' + 'capture_sha256'")
+        if e["name"] in out:
+            raise HarnessConfigError(f"{p}: duplicate capture name {e['name']!r}")
+        out[e["name"]] = e
+    return out
+
+
+def build_frozen_manifest(
+    captures_root: str | Path | None = None,
+    *,
+    out: str | Path | None = None,
+    catalogue: Any = None,
+) -> dict[str, Any]:
+    """(Re)write the frozen-eval manifest from every val / held-out capture under ``captures_root``.
+
+    This is the deliberate **re-baseline** procedure (no CLI flag on purpose): it records the
+    current :func:`capture_sha` of each capture whose catalogue split is val / held-out, so
+    afterwards ``eyes ingest`` treats exactly those captures as the frozen eval baseline. Commit
+    the result. Returns the manifest dict (also written to ``out``, default
+    :func:`frozen_manifest_default`).
+    """
+    from drone_fly import paths
+    from drone_fly.tracks.catalogue import TrackDataError, sha256_file
+
+    croot = Path(captures_root or paths.captures_root())
+    cat = catalogue or _catalogue()
+    map_split = {m: (v or {}).get("split") for m, v in cat.maps().items()}
+    entries: list[dict[str, Any]] = []
+    for cdir in sorted(discover_captures(croot)):
+        try:
+            cm = read_capture_meta(cdir)
+            entry = cat.by_id(cm.catalogue_id) if cm is not None else None
+        except (HarnessConfigError, TrackDataError):
+            continue
+        if entry is None or (cm.map is not None and cm.map != entry["map"]):
+            continue
+        split = map_split.get(entry["map"])
+        if split not in FROZEN_SPLITS:
+            continue
+        entries.append({
+            "name": cdir.name, "map": entry["map"], "split": split,
+            "catalogue_id": cm.catalogue_id, "capture_sha256": capture_sha(cdir),
+        })  # fmt: skip
+    entries.sort(key=lambda e: e["name"])
+    manifest = {
+        "format": FROZEN_MANIFEST_FORMAT,
+        "why": (
+            "Frozen val/held-out eval captures (UC-84). `eyes ingest` accepts a val/held-out "
+            "capture only if its folder name is listed here AND its capture_sha256 still matches; "
+            "anything else violates the held-out-split invariant. Only name + capture_sha256 are "
+            "checked; map/split/catalogue_id are informational. Re-baseline deliberately with "
+            "drone_fly.eyes.ingest.build_frozen_manifest() and commit the result."
+        ),
+        "catalogue": cat.path.name if cat.path is not None else None,
+        "catalogue_sha256_at_freeze": sha256_file(cat.path) if cat.path is not None else None,
+        "captures": entries,
+    }
+    p = Path(out) if out is not None else frozen_manifest_default()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # Always LF, so the committed file's sha (logged in the UC-84 provenance) is stable.
+    p.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n")
+    return manifest
+
+
 def run_ingest(
     captures_root: str | Path | None = None,
     *,
@@ -106,12 +213,16 @@ def run_ingest(
     harness: str = "liftoff",
     catalogue: Any = None,
     label_kwargs: dict[str, Any] | None = None,
+    frozen_manifest: str | Path | None = None,
+    strict: bool = True,
 ) -> dict[str, Any]:
     """Validate the captures under ``captures_root`` and report the in-view hit-ray fraction.
 
-    Returns the report dict (also written to ``<out>``). Raises :class:`HarnessConfigError` when a
-    capture resolves to a non-train catalogue split (``wrong-split``) -- the held-out-split
-    invariant -- after writing the report, so the offending captures are visible.
+    Returns the report dict (also written to ``<out>``). When ``strict`` (the default) it then calls
+    :func:`check_held_out_invariant`, which raises :class:`HarnessConfigError` if a non-train
+    capture is not a matching entry of the frozen-eval manifest (``wrong-split`` /
+    ``frozen-eval-modified``) -- after writing the report, so the offending captures are visible.
+    ``strict=False`` returns the report and leaves that check to the caller.
     """
     from drone_fly import paths
 
@@ -120,12 +231,14 @@ def run_ingest(
     cat = catalogue or _catalogue()
     map_split = {m: (v or {}).get("split") for m, v in cat.maps().items()}
     lkw = dict(label_kwargs or {})
+    fpath = Path(frozen_manifest) if frozen_manifest is not None else frozen_manifest_default()
+    frozen = load_frozen_manifest(fpath)
 
     captures: list[dict[str, Any]] = []
     for cdir in sorted(discover_captures(croot)):
         captures.append(_ingest_one(
             cdir, cat=cat, map_split=map_split, lroot=lroot, label_missing=label_missing,
-            preset=preset, config=config, harness=harness, label_kwargs=lkw,
+            preset=preset, config=config, harness=harness, label_kwargs=lkw, frozen=frozen,
         ))  # fmt: skip
 
     # ---- aggregate per map + overall (sum counts, never average fractions) ----
@@ -149,7 +262,11 @@ def run_ingest(
 
     overall_share = _share(tot_hits, tot_rays)
     below_target = overall_share is None or overall_share < target
-    wrong_split = [c["name"] for c in captures if c.get("reason") == "wrong-split"]
+    # ``wrong_split`` keeps its name but lists every invariant violation (wrong-split + modified).
+    wrong_split = [c["name"] for c in captures if c.get("reason") in VIOLATIONS]
+    frozen_eval = [c["name"] for c in captures if c.get("reason") == "frozen-eval"]
+    seen = {c["name"] for c in captures}
+    frozen_missing = sorted(n for n in frozen if n not in seen)
 
     report = {
         "format": 1,
@@ -166,9 +283,13 @@ def run_ingest(
             "frames": tot_frames,
             "captures_included": included,
             "captures_total": len(captures),
+            "captures_frozen_eval": len(frozen_eval),
         },
         "below_target": below_target,
         "wrong_split": wrong_split,
+        "frozen_eval": frozen_eval,
+        "frozen_eval_missing": frozen_missing,
+        "frozen_manifest": str(fpath),
         "per_map": {m: per_map[m] for m in sorted(per_map)},
         "captures": captures,
     }
@@ -179,13 +300,24 @@ def run_ingest(
     (out_dir / REPORT_MD).write_text(_markdown(report), encoding="utf-8")
     report["out_dir"] = str(out_dir)
 
-    if wrong_split:
-        raise HarnessConfigError(
-            "held-out-split invariant violated: these captures resolve to a non-train catalogue "
-            f"split and must not be added for UC-84: {wrong_split}. UC-84 only grows the train "
-            f"split (frozen: val + held-out maps). See {out_dir / REPORT_JSON}."
-        )
+    if strict:
+        check_held_out_invariant(report)
     return report
+
+
+def check_held_out_invariant(report: dict[str, Any]) -> None:
+    """Raise :class:`HarnessConfigError` if the ingest ``report`` lists invariant violations."""
+    bad = report.get("wrong_split") or []
+    if not bad:
+        return
+    where = Path(report["out_dir"]) / REPORT_JSON if report.get("out_dir") else REPORT_JSON
+    raise HarnessConfigError(
+        "held-out-split invariant violated: these new or modified captures on frozen val/held-out "
+        f"maps are not in {report.get('frozen_manifest')}: {bad}. UC-84 only grows the train "
+        "split; remove them. To deliberately re-baseline the frozen eval set, regenerate the "
+        "manifest (drone_fly.eyes.ingest.build_frozen_manifest, see "
+        f"docs/experiments/uc84-capture-protocol.md) and commit it. See {where}."
+    )
 
 
 def _catalogue() -> Any:
@@ -205,6 +337,7 @@ def _ingest_one(
     config: Any,
     harness: str,
     label_kwargs: dict[str, Any],
+    frozen: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     from drone_fly.tracks.catalogue import TrackDataError
 
@@ -212,7 +345,7 @@ def _ingest_one(
         "name": cdir.name, "capture": str(cdir), "included": False, "reason": None,
         "map": None, "split": None, "catalogue_id": None,
         "in_view_hits": 0, "in_view_rays": 0, "in_view_hit_ray_share": None, "frames": 0,
-        "pairing": None,
+        "pairing": None, "capture_sha256": None,
     }  # fmt: skip
 
     def fail(reason: str) -> dict[str, Any]:
@@ -240,8 +373,16 @@ def _ingest_one(
     if split is None:
         return fail("no-split")
     if split != "train":
-        # Held-out-split invariant: reported here, hard-raised by run_ingest after the report.
-        return fail("wrong-split")
+        # Held-out-split invariant: only the frozen eval captures (name + sha in the manifest) are
+        # allowed; violations are reported here and raised by check_held_out_invariant.
+        sha = capture_sha(cdir)
+        rec["capture_sha256"] = sha
+        fe = (frozen or {}).get(cdir.name)
+        if fe is None:
+            return fail("wrong-split")
+        if fe["capture_sha256"] != sha:
+            return fail("frozen-eval-modified")
+        return fail("frozen-eval")
 
     if not cm.alignment_verified:
         return fail("alignment-unverified")
@@ -295,10 +436,23 @@ def _markdown(r: dict[str, Any]) -> str:
             "flying fallback (capture protocol doc, Section f), then re-run `eyes ingest`.",
             "",
         ]
+    nfrozen = len(r.get("frozen_eval") or [])
+    if nfrozen:
+        lines += [
+            f"{nfrozen} frozen val/held-out eval captures recognised (manifest "
+            f"`{r.get('frozen_manifest')}`) -- not counted toward the fraction.",
+            "",
+        ]
     if r["wrong_split"]:
         lines += [
-            f"> **Held-out-split violation** -- non-train captures present: {r['wrong_split']}. "
-            "Remove them; UC-84 only grows the train split.",
+            "> **Held-out-split violation** -- new or modified captures on frozen val/held-out "
+            f"maps: {r['wrong_split']}. Remove them; UC-84 only grows the train split.",
+            "",
+        ]
+    if r.get("frozen_eval_missing"):
+        lines += [
+            "> Warning: frozen-eval manifest entries not found under the captures root: "
+            f"{r['frozen_eval_missing']}.",
             "",
         ]
     lines += [
@@ -318,7 +472,12 @@ def _markdown(r: dict[str, Any]) -> str:
         "|---|---|---|---:|---:|---|",
     ]
     for c in r["captures"]:
-        status = "included" if c["included"] else f"excluded: {c['reason']}"
+        if c["included"]:
+            status = "included"
+        elif c["reason"] == "frozen-eval":
+            status = "frozen-eval (not counted)"
+        else:
+            status = f"excluded: {c['reason']}"
         lines.append(
             f"| {c['name']} | {c['map'] or '-'} | {c['split'] or '-'} | {c['frames']} | "
             f"{_fmt(c['in_view_hit_ray_share'])} | {status} |"

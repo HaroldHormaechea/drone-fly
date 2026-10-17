@@ -1,0 +1,141 @@
+{
+  "format": 1,
+  "why": "Frozen val/held-out eval captures (UC-84). `eyes ingest` accepts a val/held-out capture only if its folder name is listed here AND its capture_sha256 still matches; anything else violates the held-out-split invariant. Only name + capture_sha256 are checked; map/split/catalogue_id are informational. Re-baseline deliberately with drone_fly.eyes.ingest.build_frozen_manifest() and commit the result.",
+  "catalogue": "liftoff.yaml",
+  "catalogue_sha256_at_freeze": "a1b57b24a313493b07ea8824cb87bc80b5e66c798b8fc57a9ad100b4402e5aaf",
+  "captures": [
+    {
+      "name": "autumn-fields-2026-10-13-replay-01",
+      "map": "AutumnFields",
+      "split": "val",
+      "catalogue_id": "autumn-fields-06",
+      "capture_sha256": "14551db986750ac784fbfb7d6d49af9113fa29a663ef3e268c7b0682462d4aae"
+    },
+    {
+      "name": "autumn-fields-2026-10-13-replay-02",
+      "map": "AutumnFields",
+      "split": "val",
+      "catalogue_id": "autumn-fields-06",
+      "capture_sha256": "550386b3d101c18cf987dd0f64b13450770166a3e90a203b6f45116b02d478aa"
+    },
+    {
+      "name": "autumn-fields-2026-10-13-replay-03",
+      "map": "AutumnFields",
+      "split": "val",
+      "catalogue_id": "autumn-fields-06",
+      "capture_sha256": "90a513f20399f47a3aaadeae41902c5bb221f022f961d9bbd89c49970b46466f"
+    },
+    {
+      "name": "autumn-fields-2026-10-13-replay-04",
+      "map": "AutumnFields",
+      "split": "val",
+      "catalogue_id": "autumn-fields-04",
+      "capture_sha256": "b07cdaa20831d2f585285e8c7effcb9017cd3432c3eedc02e30aa9dd335a616d"
+    },
+    {
+      "name": "hangar-c03-2026-10-13-replay-01",
+      "map": "HangarC03",
+      "split": "held-out",
+      "catalogue_id": "hangar-c03-02",
+      "capture_sha256": "6d2eaa75d7bd621d1c0f948b5ab89b67c531d6b4ca57fe5080bda600d2d50313"
+    },
+    {
+      "name": "hangar-c03-2026-10-13-replay-02",
+      "map": "HangarC03",
+      "split": "held-out",
+      "catalogue_id": "hangar-c03-02",
+      "capture_sha256": "5a92374deafdf06287736553f96970a8da753ebdabe4915db9c8a5b88bac8838"
+    },
+    {
+      "name": "minus-two-2026-10-13-replay-01",
+      "map": "MinusTwo",
+      "split": "held-out",
+      "catalogue_id": "minus-two-01",
+      "capture_sha256": "d422a992c04565d5a269609df4b8e9b2d806c74d6757493fb8cea43e7791f4d7"
+    },
+    {
+      "name": "minus-two-2026-10-13-replay-02",
+      "map": "MinusTwo",
+      "split": "held-out",
+      "catalogue_id": "minus-two-01",
+      "capture_sha256": "a48edc2946c39c09fc55143c923dbbac60a7aa43f09ef2d63ce5aab38432d674"
+    },
+    {
+      "name": "rustline-2026-10-13-replay-01",
+      "map": "Rustline",
+      "split": "val",
+      "catalogue_id": "rustline-01",
+      "capture_sha256": "36fe094df2bd8a77cc26f6fe072aea7c825dd9f6971dd49c1bd89612c4b50368"
+    },
+    {
+      "name": "rustline-2026-10-13-replay-02",
+      "map": "Rustline",
+      "split": "val",
+      "catalogue_id": "rustline-01",
+      "capture_sha256": "773c2414d9d953b75aad205db59ac5cfd59e0d620cdc236c0c7462c423fc3518"
+    },
+    {
+      "name": "rustline-2026-10-13-replay-03",
+      "map": "Rustline",
+      "split": "val",
+      "catalogue_id": "rustline-01",
+      "capture_sha256": "a609fd1132daca09f4bd6138f4165336a8a33fe8fd65e2bbdcd4d8226d29a952"
+    },
+    {
+      "name": "surtur-2026-10-13-replay-01",
+      "map": "Surtur",
+      "split": "val",
+      "catalogue_id": "surtur-01",
+      "capture_sha256": "e9fb2109abda1c2479fd7fbf9acc447fb6e891af0f8ae4927cfd48793ff22280"
+    },
+    {
+      "name": "surtur-2026-10-13-replay-02",
+      "map": "Surtur",
+      "split": "val",
+      "catalogue_id": "surtur-02",
+      "capture_sha256": "b7007db861b4f3d9f616dd1b0fa7ab65f75c4a0686024e2b550e14ee8603a7ea"
+    },
+    {
+      "name": "surtur-2026-10-13-replay-03",
+      "map": "Surtur",
+      "split": "val",
+      "catalogue_id": "surtur-02",
+      "capture_sha256": "1ff0ba4eadb5add4ecf369d9411a7e006a876bf28ddf5f6d856996204f845037"
+    },
+    {
+      "name": "the-pit-2026-10-13-replay-01",
+      "map": "ThePit",
+      "split": "held-out",
+      "catalogue_id": "the-pit-02",
+      "capture_sha256": "5d12115bb6b8cad6d161583818f532001df10cd199cb23913989134116fce0c4"
+    },
+    {
+      "name": "the-pit-2026-10-13-replay-02",
+      "map": "ThePit",
+      "split": "held-out",
+      "catalogue_id": "the-pit-02",
+      "capture_sha256": "447f6c3bb42f3762262285bf4cc0ae37ffd30f83db4636810fcc8249f6c0b585"
+    },
+    {
+      "name": "the-pit-2026-10-13-replay-03",
+      "map": "ThePit",
+      "split": "held-out",
+      "catalogue_id": "the-pit-05",
+      "capture_sha256": "a98188fcb09647522150ec2e096f528e19235f4abea1db87fb986adb9f7e62f3"
+    },
+    {
+      "name": "the-pit-2026-10-13-replay-04",
+      "map": "ThePit",
+      "split": "held-out",
+      "catalogue_id": "the-pit-06",
+      "capture_sha256": "8fa8b4d4886cbea5494f4f8225ab6c3efe79af4683460e06d6d42706533a4eb9"
+    },
+    {
+      "name": "the-pit-2026-10-13-replay-05",
+      "map": "ThePit",
+      "split": "held-out",
+      "catalogue_id": "the-pit-06",
+      "capture_sha256": "064a26cee836199b15e0afe3b5959b03e48e992fb679e0759bd37957e4c0f63d"
+    }
+  ]
+}
