@@ -91,3 +91,45 @@ def test_result_flags_numbers_as_pending(result):
     # honest skeleton: the verdict/numbers are explicitly TBD, not copied/invented.
     assert "TBD" in result
     assert "AC4 verdict" in result
+
+
+# --------------------------------------------------------------------------- frozen eval manifest
+
+
+def _section(text: str, heading: str) -> str:
+    """The body of the ``##``/``###`` section whose heading contains ``heading``."""
+    m = re.search(rf"^#{{2,3}} [^\n]*{re.escape(heading)}[^\n]*\n(.*?)(?=^#{{2,3}} |\Z)", text,
+                  flags=re.M | re.S)  # fmt: skip
+    assert m, heading
+    return m.group(1)
+
+
+def test_protocol_invariant_names_frozen_manifest_and_reasons(protocol):
+    sec = _section(protocol, "Held-out-split invariant")
+    assert "tracks/liftoff-frozen-eval-captures.json" in sec
+    for reason in ("frozen-eval", "frozen-eval-modified", "wrong-split"):
+        assert f"`{reason}`" in sec, reason
+    assert "exit 2" in sec
+    assert "frozen_eval_missing" in sec
+
+
+def test_protocol_gives_the_rebaseline_command(protocol):
+    # challenger minor #1: one exact, copy-pasteable re-baseline command naming the helper.
+    sec = _section(protocol, "Held-out-split invariant")
+    assert (
+        'uv run python -c "from drone_fly.eyes.ingest import build_frozen_manifest; '
+        'build_frozen_manifest()"'
+    ) in sec
+    assert "DRONE_FLY_DATA_ROOT=" in sec
+
+
+def test_protocol_ingest_reasons_list_and_exit_code(protocol):
+    for reason in ("frozen-eval", "frozen-eval-modified"):
+        assert f"`{reason}`" in protocol
+    assert "exits 2" in protocol
+    assert "exits non-zero" not in protocol  # replaced by the exact exit code
+
+
+def test_result_points_at_frozen_manifest_and_provenance_sha(result):
+    assert "tracks/liftoff-frozen-eval-captures.json" in result
+    assert "sha256" in result and "00_provenance.txt" in result

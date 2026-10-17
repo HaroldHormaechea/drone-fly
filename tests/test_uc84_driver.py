@@ -18,6 +18,7 @@ Covered:
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +27,9 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 DRIVER = REPO / "scripts" / "uc84_obstacle_capture.sh"
+# PATH lookup, not a bare "bash": on Windows CreateProcess searches System32 first and would pick
+# the WSL bash, which cannot see C:\ paths; shutil.which honours PATH (Git Bash there, /bin on CI).
+BASH = shutil.which("bash") or "bash"
 
 STUB = """\
 import json, os, sys
@@ -70,10 +74,22 @@ sys.exit(0)
 def _env(bindir: Path, log: Path, stub: Path, **over: str) -> dict[str, str]:
     env = dict(os.environ)
     env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
-    env["DRONE_FLY"] = f"{sys.executable} {stub}"
+    env["DRONE_FLY"] = f"{Path(sys.executable).as_posix()} {stub.as_posix()}"
     env["STUB_LOG"] = str(log)
     env.update(over)
     return env
+
+
+def _python3_shim(bindir: Path) -> None:
+    """``bindir/python3``: a bash wrapper exec'ing this interpreter (no symlink privilege needed).
+
+    A symlink needs SeCreateSymbolicLinkPrivilege on Windows (WinError 1314); a ``#!`` script runs
+    under Git Bash and Linux alike. Forward slashes keep the path intact inside bash.
+    """
+    shim = bindir / "python3"
+    exe = Path(sys.executable).as_posix()
+    shim.write_text(f'#!/usr/bin/env bash\nexec "{exe}" "$@"\n', encoding="utf-8", newline="\n")
+    shim.chmod(0o755)
 
 
 @pytest.fixture
@@ -82,7 +98,7 @@ def harness(tmp_path):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     # a real python3 (the venv interpreter) for the driver's JSON reads + provenance import.
-    (bindir / "python3").symlink_to(sys.executable)
+    _python3_shim(bindir)
     stub = tmp_path / "fake_drone_fly.py"
     stub.write_text(STUB, encoding="utf-8")
     out = tmp_path / "out"
@@ -90,7 +106,7 @@ def harness(tmp_path):
 
     def run(*flags: str, **over: str) -> subprocess.CompletedProcess:
         return subprocess.run(
-            ["bash", str(DRIVER), str(out), *flags],
+            [BASH, DRIVER.as_posix(), out.as_posix(), *flags],
             env=_env(bindir, log, stub, **over),
             cwd=REPO,
             capture_output=True,
