@@ -12,11 +12,16 @@ Covered:
 * step/skip/resume markers: a pre-existing ``00_ingest.txt`` skips the gate;
 * the ``STOP`` file early-exits before any work;
 * ``eyes ingest`` hard-failing (non-train capture, nonzero exit) aborts the driver;
-* the provenance file is written.
+* the provenance file is written;
+* step 0 against the **real** ``eyes ingest`` (stub forwards it; the rest stays stubbed) over a
+  synthetic data root: the frozen val capture listed in ``UC84_FROZEN_MANIFEST`` passes the gate,
+  an unlisted val capture aborts with exit 2, and the provenance logs the manifest sha.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -24,6 +29,9 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from drone_fly.eyes.capture_meta import capture_sha
+from tests.eyes_support import write_capture
 
 REPO = Path(__file__).resolve().parent.parent
 DRIVER = REPO / "scripts" / "uc84_obstacle_capture.sh"
@@ -49,8 +57,12 @@ out = opt("--out")
 if out:
     Path(out).mkdir(parents=True, exist_ok=True)
 
-if sub == "ingest":
-    below = os.environ.get("STUB_BELOW", "false").lower() == "true"
+if sub == "ingest" and os.environ.get("STUB_REAL_INGEST") == "1":
+    # forward step 0 to the real CLI (only dataset / train / eval / compare stay stubbed).
+    from drone_fly.cli.main import main
+    sys.exit(main(argv))
+elif sub == "ingest":
+    below =os.environ.get("STUB_BELOW", "false").lower() == "true"
     share = float(os.environ.get("STUB_SHARE", "0.2"))
     Path(out, "ingest.json").write_text(json.dumps({
         "below_target": below,
@@ -190,3 +202,120 @@ def test_ingest_hard_fail_aborts_driver(harness):
     assert "eyes ingest" in calls()
     assert "eyes dataset" not in calls()
     assert not (out / "00_ingest.txt").exists()
+
+
+# --------------------------------------------------------------------------- step 0, real ingest
+#
+# Synthetic data root (DRONE_FLY_DATA_ROOT=tmp): a train capture on BandoCity (``bando-city-01``)
+# with pre-written, up-to-date labels -- so the driver's ``--label-missing`` reuses them and never
+# needs track data -- plus a frozen val capture on Rustline (``rustline-01``) listed in a tmp
+# fixture manifest passed via UC84_FROZEN_MANIFEST.
+
+# Runs in a subprocess under the data-root env: the label settings sha needs the inference contract,
+# which is process-global (a second load with other args raises): keep it out of pytest's process.
+_WRITE_TRAIN_LABELS = """\
+import sys
+from dataclasses import replace
+from pathlib import Path
+
+from drone_fly.eyes.fov import offline_contract, preset_view
+from drone_fly.eyes.labels import PAIR_TOL_S, default_out, settings_for
+from tests.eyes_support import write_labels
+
+cap = Path(sys.argv[1])
+view = preset_view("liftoff", None, "liftoff")
+s = replace(settings_for(offline_contract(None), view.world_scale, view.ray_range_scale),
+            pair_tol_s=PAIR_TOL_S)
+write_labels(default_out(cap.name), cap, s, catalogue_id="bando-city-01", map_name="BandoCity",
+             split="train")
+"""
+
+
+@pytest.fixture
+def real_root(tmp_path):
+    """(data_root, frozen manifest, env overrides) for step 0 against the real ``eyes ingest``."""
+    root = tmp_path / "data"
+    croot = root / "captures"
+    train = write_capture(
+        croot / "bando-train-01", catalogue_id="bando-city-01", map_name="BandoCity", seed=1
+    )
+    val = write_capture(
+        croot / "rustline-frozen-01", catalogue_id="rustline-01", map_name="Rustline", seed=2
+    )
+    env = dict(os.environ, DRONE_FLY_DATA_ROOT=str(root))
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(REPO), env.get("PYTHONPATH")]))
+    subprocess.run(
+        [sys.executable, "-c", _WRITE_TRAIN_LABELS, str(train)],
+        env=env, cwd=REPO, check=True, capture_output=True, text=True, timeout=300,
+    )  # fmt: skip
+    manifest = tmp_path / "frozen.json"
+    manifest.write_text(
+        json.dumps({
+            "format": 1, "why": "test fixture",
+            "captures": [{"name": val.name, "map": "Rustline", "split": "val",
+                          "catalogue_id": "rustline-01", "capture_sha256": capture_sha(val)}],
+        }),
+        encoding="utf-8",
+    )  # fmt: skip
+    over = {
+        "DRONE_FLY_DATA_ROOT": str(root),
+        "UC84_FROZEN_MANIFEST": str(manifest),
+        "STUB_REAL_INGEST": "1",
+    }
+    return root, manifest, over
+
+
+def test_real_ingest_frozen_val_plus_train_passes_gate(harness, real_root):
+    run, out, calls = harness
+    root, manifest, over = real_root
+    r = run(UC84_FORCE="1", **over)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (out / "00_ingest.txt").is_file()
+    assert "eyes dataset" in calls()  # delegated to the (stubbed) recipe
+    report = json.loads((out / "ingest" / "ingest.json").read_text())
+    assert report["frozen_eval"] == ["rustline-frozen-01"]
+    assert report["wrong_split"] == []
+    assert report["overall"]["captures_included"] == 1
+    assert report["frozen_manifest"] == str(manifest)
+    # the real CLI's human summary reached the driver log.
+    log = (out / "00_ingest.log").read_text(encoding="utf-8")
+    assert "overall in-view hit-ray fraction:" in log
+    assert "1 included, 1 frozen-eval (not counted), 0 excluded, 0 violations" in log
+    # provenance logs the manifest path, its sha256 and its entry count.
+    prov = (out / "00_provenance.txt").read_text(encoding="utf-8")
+    sha = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    assert f"frozen_manifest_sha256: {sha}" in prov
+    assert "frozen_manifest_entries: 1" in prov
+    assert f"frozen_manifest: {manifest}" in prov
+
+
+def test_real_ingest_unlisted_val_capture_aborts_with_exit_2(harness, real_root):
+    run, out, calls = harness
+    root, _manifest, over = real_root
+    write_capture(
+        root / "captures" / "rustline-new-01",
+        catalogue_id="rustline-01",
+        map_name="Rustline",
+        seed=3,
+    )
+    r = run(UC84_FORCE="1", **over)  # --force overrides below-target, never a violation
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "held-out-split invariant violated" in r.stderr
+    assert "rustline-new-01" in r.stderr
+    assert not (out / "00_ingest.txt").exists()
+    assert "eyes dataset" not in calls()
+    report = json.loads((out / "ingest" / "ingest.json").read_text())
+    assert report["wrong_split"] == ["rustline-new-01"]
+    # the summary was still printed before the abort.
+    assert "1 violations" in (out / "00_ingest.log").read_text(encoding="utf-8")
+
+
+def test_provenance_reports_missing_manifest(harness, tmp_path):
+    run, out, calls = harness
+    out.mkdir(parents=True)
+    (out / "STOP").touch()  # provenance is recorded before the STOP check; no ingest runs
+    r = run(UC84_FROZEN_MANIFEST=str(tmp_path / "nope.json"))
+    assert r.returncode == 0, r.stderr
+    prov = (out / "00_provenance.txt").read_text(encoding="utf-8")
+    assert "frozen_manifest_sha256: missing" in prov
+    assert "frozen_manifest_entries: 0" in prov
