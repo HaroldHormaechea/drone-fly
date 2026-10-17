@@ -49,6 +49,11 @@ SMOOTH_L1_BETA = 0.05
 GRAD_CLIP = 1.0
 LR_MIN = 1e-5
 MAX_PARAMS = 1_500_000
+#: UC-83 focal-loss defaults (α-balanced, γ=2.0) for the opt-in hit head.
+FOCAL_ALPHA = 0.25
+FOCAL_GAMMA = 2.0
+#: UC-83 hit-weighted sampler: default relative weight of a hit-bearing frame when enabled.
+HIT_SAMPLE_W = 8.0
 
 
 def runs_root() -> Path:
@@ -117,6 +122,28 @@ def _batch(data: EyesSamples, idx: np.ndarray, device: str) -> dict[str, torch.T
     }
 
 
+def focal_loss(
+    hit_logit: torch.Tensor,
+    hit: torch.Tensor,
+    *,
+    alpha: float = FOCAL_ALPHA,
+    gamma: float = FOCAL_GAMMA,
+) -> torch.Tensor:
+    """α-balanced focal loss (Lin et al.) on the per-ray hit logit vs the hit truth.
+
+    Computed in float32 so it is safe under fp16 AMP autocast. Down-weights easy "clear" rays by
+    ``(1 - p_t) ** gamma`` and class-balances with ``alpha`` (weight on the rare hit class), which
+    is why it does not collapse to "always clear" under the ~5 % hit-ray imbalance.
+    """
+    logit = hit_logit.float()
+    target = hit.float()
+    ce = F.binary_cross_entropy_with_logits(logit, target, reduction="none")
+    p = torch.sigmoid(logit)
+    p_t = p * target + (1.0 - p) * (1.0 - target)
+    alpha_t = alpha * target + (1.0 - alpha) * (1.0 - target)
+    return (alpha_t * (1.0 - p_t).pow(gamma) * ce).mean()
+
+
 def losses(
     free_pred: torch.Tensor,
     logit: torch.Tensor,
@@ -126,19 +153,41 @@ def losses(
     range_train: float,
     w_hit: float,
     tol_m: float,
+    hit_logit: torch.Tensor | None = None,
+    focal: bool = False,
+    focal_alpha: float = FOCAL_ALPHA,
+    focal_gamma: float = FOCAL_GAMMA,
+    w_focal: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """``(total, parts)``: weighted smooth-L1 on ``free`` + confidence BCE."""
+    """``(total, parts)``: weighted smooth-L1 on ``free`` + confidence BCE.
+
+    With the opt-in UC-83 lever (``focal=True`` and a ``hit_logit`` from the v2 hit head) an
+    α-balanced focal term ``w_focal * focal_loss(hit_logit, hit)`` is added. With the lever off
+    (``hit_logit is None`` or ``focal is False``) the returned total is byte-identical to v1.
+    """
     w = 1.0 + (w_hit - 1.0) * hit
     reg = (F.smooth_l1_loss(free_pred.float(), free, beta=SMOOTH_L1_BETA, reduction="none")
            * w).sum() / w.sum()  # fmt: skip
     err_m = (free_pred.detach().float() - free).abs() * range_train
     target = (err_m < tol_m).float()
     bce = F.binary_cross_entropy_with_logits(logit.float(), target)
-    return reg + bce, {
+    total = reg + bce
+    parts = {
         "reg": float(reg.detach()),
         "bce": float(bce.detach()),
         "mae_m": float(err_m.mean()),
     }
+    if focal and hit_logit is not None:
+        fl = focal_loss(hit_logit, hit, alpha=focal_alpha, gamma=focal_gamma)
+        total = total + w_focal * fl
+        parts["focal"] = float(fl.detach())
+    return total, parts
+
+
+def _net_forward(net: Any, b: dict[str, torch.Tensor]) -> tuple[Any, Any, Any]:
+    """Run the net and normalise its 2- (v1) or 3-tuple (v2 hit head) output to ``(fp, lg, hl)``."""
+    out = net(b["frames"], b["uv"], b["rays_cam"], b["in_view"], b["ego"], b["hist_dt"])
+    return (out[0], out[1], out[2] if len(out) > 2 else None)
 
 
 def _evaluate(net: Any, data: EyesSamples, device: str, batch: int, kw: dict[str, Any]):
@@ -148,8 +197,8 @@ def _evaluate(net: Any, data: EyesSamples, device: str, batch: int, kw: dict[str
         for a in range(0, len(data), batch):
             idx = np.arange(a, min(a + batch, len(data)))
             b = _batch(data, idx, device)
-            fp, lg = net(b["frames"], b["uv"], b["rays_cam"], b["in_view"], b["ego"], b["hist_dt"])
-            loss, parts = losses(fp, lg, b["free"], b["hit"], **kw)
+            fp, lg, hl = _net_forward(net, b)
+            loss, parts = losses(fp, lg, b["free"], b["hit"], hit_logit=hl, **kw)
             tot += float(loss) * len(idx)
             mae += parts["mae_m"] * len(idx)
             n += len(idx)
@@ -176,14 +225,32 @@ def train_eyes(
     max_samples: int | None = None,
     cache_root: str | Path | None = None,
     gpu_prototype_dir: str | Path | None = None,
+    hit_head: bool = False,
+    focal: bool = False,
+    focal_alpha: float = FOCAL_ALPHA,
+    focal_gamma: float = FOCAL_GAMMA,
+    w_focal: float = 1.0,
+    hit_sampler: bool = False,
+    hit_sample_w: float = HIT_SAMPLE_W,
 ) -> dict[str, Any]:
-    """Train (see the module docstring); returns the training log."""
+    """Train (see the module docstring); returns the training log.
+
+    UC-83 v2 levers (all default-off => a run with none of them set is byte-identical to v1):
+
+    * ``hit_head`` — build the opt-in hit/no-hit classification head (:class:`EyesNet`).
+    * ``focal`` / ``focal_alpha`` / ``focal_gamma`` / ``w_focal`` — add the α-balanced focal term on
+      the hit head (requires ``hit_head``).
+    * ``hit_sampler`` / ``hit_sample_w`` — oversample hit-bearing frames each epoch (train-time,
+      no disk cost); the epoch size is unchanged (sampled with replacement).
+    """
     from drone_fly.eyes.fov import array_sha, offline_contract
 
     if select not in ("best-val", "last"):
         raise HarnessConfigError(f"--select must be best-val or last, got {select!r}")
     if num_workers != 0:
         raise HarnessConfigError("--num-workers: only 0 is supported (in-process batches)")
+    if focal and not hit_head:
+        raise HarnessConfigError("--focal needs --hit-head (the focal term is on the hit head)")
     dataset = Path(dataset)
     man = load_manifest(dataset)
     ls = man.get("label_settings") or {}
@@ -214,6 +281,7 @@ def train_eyes(
         width=int(inp["width"]),
         height=int(inp["height"]),
         tol_m=float(tol_m),
+        hit_head=hit_head,
         label_settings_sha256=man["label_settings_sha256"],
         dataset_id=man["id"],
         dataset_sha256=man["dataset_sha256"],
@@ -238,7 +306,9 @@ def train_eyes(
     scaler = torch.amp.GradScaler("cuda", enabled=cuda)
     args = {"epochs": epochs, "batch": batch, "lr": lr, "weight_decay": weight_decay,
             "w_hit": w_hit, "tol_m": tol_m, "select": select, "patience": patience, "seed": seed,
-            "max_samples": max_samples, "device": dev}  # fmt: skip
+            "max_samples": max_samples, "device": dev, "hit_head": hit_head, "focal": focal,
+            "focal_alpha": focal_alpha, "focal_gamma": focal_gamma, "w_focal": w_focal,
+            "hit_sampler": hit_sampler, "hit_sample_w": hit_sample_w}  # fmt: skip
     hist: list[dict[str, Any]] = []
     start, best, best_epoch, best_state = 0, float("inf"), -1, None
     rp = out / RESUME_FILE
@@ -258,7 +328,17 @@ def train_eyes(
         start, best, best_epoch = int(ck["epoch"]) + 1, float(ck["best"]), int(ck["best_epoch"])
         best_state, hist = ck["best_state"], list(ck["log"])
         _set_rng_states(ck["rng"])
-    kw = {"range_train": range_train, "w_hit": w_hit, "tol_m": tol_m}
+    kw: dict[str, Any] = {"range_train": range_train, "w_hit": w_hit, "tol_m": tol_m}
+    if focal:
+        kw.update({"focal": True, "focal_alpha": focal_alpha, "focal_gamma": focal_gamma,
+                   "w_focal": w_focal})  # fmt: skip
+    sample_w: np.ndarray | None = None
+    if hit_sampler:
+        has_hit = np.asarray(train.data["hit"], bool).any(axis=1)
+        sample_w = np.where(has_hit, float(hit_sample_w), 1.0).astype(np.float64)
+        sample_w /= sample_w.sum()
+        log.info("hit-weighted sampler: %d/%d frames have a hit (weight %g)",
+                 int(has_hit.sum()), len(has_hit), hit_sample_w)  # fmt: skip
     k = int(inp["k_frames"])
     status = "completed"
     stop = out / STOP_FILE
@@ -268,7 +348,10 @@ def train_eyes(
             es = seed * 1000 + ep
             rng = np.random.default_rng(es)
             torch.manual_seed(es)
-            perm = rng.permutation(len(train))
+            if sample_w is not None:
+                perm = rng.choice(len(train), size=len(train), replace=True, p=sample_w)
+            else:
+                perm = rng.permutation(len(train))
             t0 = time.perf_counter()
             tl, tn = 0.0, 0
             for a in range(0, len(perm), batch):
@@ -278,8 +361,8 @@ def train_eyes(
                 b = _batch(train, idx, dev)
                 x = augment(b["frames"].float(), rng, k)
                 with torch.autocast("cuda", dtype=torch.float16, enabled=cuda):
-                    fp, lg = net(x, b["uv"], b["rays_cam"], b["in_view"], b["ego"], b["hist_dt"])
-                loss, _ = losses(fp, lg, b["free"], b["hit"], **kw)
+                    fp, lg, hl = _net_forward(net, {**b, "frames": x})
+                loss, _ = losses(fp, lg, b["free"], b["hit"], hit_logit=hl, **kw)
                 opt.zero_grad(set_to_none=True)
                 scaler.scale(loss).backward()
                 scaler.unscale_(opt)

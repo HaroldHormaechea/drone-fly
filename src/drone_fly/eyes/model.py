@@ -64,6 +64,7 @@ class EyesNet(nn.Module):
         channels: Sequence[int] = CHANNELS,
         hidden: Sequence[int] = HIDDEN,
         sample_stages: Sequence[int] = SAMPLE_STAGES,
+        hit_head: bool = False,
     ) -> None:
         super().__init__()
         self.k_frames, self.n_rays, self.ego_dim = int(k_frames), int(n_rays), int(ego_dim)
@@ -75,12 +76,27 @@ class EyesNet(nn.Module):
         self.stages = nn.ModuleList(stages)
         q = sum(channels[s] for s in self.sample_stages) + channels[-1] + 3 + 1 + self.ego_dim
         q += self.k_frames - 1
+        self.query_dim = int(q)
         layers: list[nn.Module] = []
         for h in hidden:
             layers += [nn.Linear(q, h), nn.ReLU(inplace=True)]
             q = h
         layers.append(nn.Linear(q, 2))
         self.head = nn.Sequential(*layers)
+        # AC1 (UC-83): opt-in hit/no-hit classification head. Constructed LAST and ONLY when
+        # enabled, so every base-parameter RNG draw above is identical to v1 -- a default-off
+        # EyesNet is therefore bitwise-equal to a v1 net (locked by test_eyes_model byte-identity).
+        self.has_hit_head = bool(hit_head)
+        if self.has_hit_head:
+            hlayers: list[nn.Module] = []
+            qh = self.query_dim
+            for h in hidden:
+                hlayers += [nn.Linear(qh, h), nn.ReLU(inplace=True)]
+                qh = h
+            hlayers.append(nn.Linear(qh, 1))
+            self.hit_head: nn.Module | None = nn.Sequential(*hlayers)
+        else:
+            self.hit_head = None
 
     def forward(
         self,
@@ -90,8 +106,12 @@ class EyesNet(nn.Module):
         in_view: torch.Tensor,
         ego: torch.Tensor,
         hist_dt: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """``(free (B, R) in [0, 1], confidence logit (B, R))``."""
+    ) -> tuple[torch.Tensor, ...]:
+        """``(free (B, R) in [0, 1], confidence logit (B, R))``.
+
+        With the opt-in hit head enabled, returns a third element, the per-ray hit logit
+        ``(B, R)`` (``sigmoid`` -> P(obstacle within range)); the first two outputs are unchanged.
+        """
         x = normalise_frames(frames)
         maps = []
         for st in self.stages:
@@ -110,7 +130,11 @@ class EyesNet(nn.Module):
         h = hist_dt.to(x.dtype).reshape(b, -1).unsqueeze(1).expand(b, r, -1)
         q = torch.cat([*feats, g, rays_cam.to(x.dtype), view, e, h], dim=-1)
         out = self.head(q)
-        return torch.sigmoid(out[..., 0]), out[..., 1]
+        free, conf = torch.sigmoid(out[..., 0]), out[..., 1]
+        if self.hit_head is None:
+            return free, conf
+        hit_logit = self.hit_head(q)[..., 0]
+        return free, conf, hit_logit
 
 
 def normalise_frames(frames: torch.Tensor) -> torch.Tensor:
@@ -173,9 +197,14 @@ def default_meta(
     hist_tol_s: float = HIST_TOL_S,
     width: int = INPUT_WIDTH,
     height: int = INPUT_HEIGHT,
+    hit_head: bool = False,
     **extra: Any,
 ) -> dict[str, Any]:
-    """The weights meta: everything inference needs, so it never reads labels or the contract."""
+    """The weights meta: everything inference needs, so it never reads labels or the contract.
+
+    ``hit_head`` records the opt-in UC-83 classification head (absent / false => a v1 net; v1
+    metas load unchanged). ``ARCH_VERSION`` stays 2: the base architecture is unchanged.
+    """
     c = np.asarray(cone, np.float32).reshape(-1, 3)
     return {
         "format": FORMAT,
@@ -184,6 +213,7 @@ def default_meta(
             "channels": list(CHANNELS),
             "hidden": list(HIDDEN),
             "sample_stages": list(SAMPLE_STAGES),
+            "hit_head": bool(hit_head),
         },  # fmt: skip
         "input": {
             "width": int(width),
@@ -218,4 +248,5 @@ def build_from_meta(meta: dict[str, Any]) -> EyesNet:
         channels=tuple(arch.get("channels", CHANNELS)),
         hidden=tuple(arch.get("hidden", HIDDEN)),
         sample_stages=tuple(arch.get("sample_stages", SAMPLE_STAGES)),
+        hit_head=bool(arch.get("hit_head", False)),
     )

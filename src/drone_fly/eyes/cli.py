@@ -83,10 +83,12 @@ def cmd_dataset(args: argparse.Namespace) -> int:
         stride_s=args.stride_s, hist_tol_s=args.history_tol_s, uptilt_tol_deg=args.uptilt_tol_deg,
         build_cache=args.build_cache, cache_root=args.cache_root,
         disk_margin_gb=args.disk_margin_gb, preset=args.preset, config=args.config,
-        harness=args.harness, label_kwargs=label_kw,
+        harness=args.harness, label_kwargs=label_kw, hit_frac=args.hit_frac,
+        mining_seed=args.mining_seed,
     )  # fmt: skip
     print(json.dumps({"id": m["id"], "split_maps": m["split_maps"],
                       "samples": {s: v["samples"] for s, v in m["splits"].items()},
+                      "mining": m.get("mining"),
                       "drop_reasons": m["drop_reasons"]}, indent=2))  # fmt: skip
     print(f"dataset: {m['out_dir']}")
     return 0
@@ -100,7 +102,9 @@ def cmd_train(args: argparse.Namespace) -> int:
         weight_decay=args.weight_decay, w_hit=args.w_hit, tol_m=args.tol_m, device=args.device,
         select=args.select, patience=args.patience, seed=args.seed, num_workers=args.num_workers,
         resume=args.resume, max_samples=args.max_samples, cache_root=args.cache_root,
-        gpu_prototype_dir=args.gpu_prototype_dir,
+        gpu_prototype_dir=args.gpu_prototype_dir, hit_head=args.hit_head, focal=args.focal,
+        focal_alpha=args.focal_alpha, focal_gamma=args.focal_gamma, w_focal=args.w_focal,
+        hit_sampler=args.hit_sampler, hit_sample_w=args.hit_sample_w,
     )  # fmt: skip
     last = r["log"][-1]
     print(f"{r['status']}: {len(r['log'])} epochs, best epoch {r['best_epoch']}, last train "
@@ -118,6 +122,21 @@ def cmd_eval(args: argparse.Namespace) -> int:
     )  # fmt: skip
     print(json.dumps(rep.get("aggregate", {"frames": 0}), indent=2))
     print(f"report: {rep['out_dir']}")
+    return 0
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    from drone_fly.eyes.evaluate import run_compare
+
+    cmp = run_compare(
+        args.v1, args.v2, min_rel_reduction=args.min_rel_reduction,
+        max_fa_clear=args.max_fa_clear, out=args.out,
+    )  # fmt: skip
+    print(json.dumps({k: cmp[k] for k in (
+        "v1_nearest_quarter_in_view_miss", "v2_nearest_quarter_in_view_miss", "relative_reduction",
+        "v2_false_alarm_rate_clear_all", "miss_passed", "fa_passed", "passed", "verdict",
+    )}, indent=2))  # fmt: skip
+    print(f"compare: {cmp['out_dir']}")
     return 0
 
 
@@ -205,6 +224,11 @@ def add_parser(sub: Any) -> None:
     p.add_argument("--build-cache", action="store_true", help="also build the frame cache now")
     p.add_argument("--cache-root", help="default <data root>/cache/eyes")
     p.add_argument("--disk-margin-gb", type=float, default=1.0)
+    # UC-83 AC2: opt-in hit-biased frame filter on the train split (default off => v1 dataset).
+    p.add_argument(
+        "--hit-frac", type=float, help="subsample clear train frames to ~this hit-bearing fraction"
+    )
+    p.add_argument("--mining-seed", type=int, default=0, help="seed for the hit-biased filter")
     p.set_defaults(func=cmd_dataset)
 
     p = es.add_parser("train", help="train the estimator (AC4)")
@@ -226,6 +250,25 @@ def add_parser(sub: Any) -> None:
     p.add_argument("--max-samples", type=int, help="cap samples per split (smoke runs)")
     p.add_argument("--cache-root")
     p.add_argument("--gpu-prototype-dir")
+    # UC-83 v2 levers (all default-off => byte-identical to v1).
+    p.add_argument("--hit-head", action="store_true",
+                   help="build the opt-in hit/no-hit classification head (eyes v2)")  # fmt: skip
+    p.add_argument("--focal", action="store_true",
+                   help="add the focal term on the hit head (needs --hit-head)")  # fmt: skip
+    p.add_argument("--focal-alpha", type=float, default=0.25, help="focal class weight on hits")
+    p.add_argument("--focal-gamma", type=float, default=2.0, help="focal easy-ray down-weighting")
+    p.add_argument("--w-focal", type=float, default=1.0, help="weight of the focal term")
+    p.add_argument(
+        "--hit-sampler",
+        action="store_true",
+        help="oversample hit-bearing frames each epoch (v2 primary lever)",
+    )
+    p.add_argument(
+        "--hit-sample-w",
+        type=float,
+        default=8.0,
+        help="sampling weight of a hit frame when --hit-sampler",
+    )
     p.set_defaults(func=cmd_train)
 
     p = es.add_parser("eval", help="accuracy report on held-out / val maps (AC6)")
@@ -240,6 +283,22 @@ def add_parser(sub: Any) -> None:
     p.add_argument("--out", help="default: the weights' folder")
     p.add_argument("--cache-root")
     p.set_defaults(func=cmd_eval)
+
+    p = es.add_parser("compare", help="v1-vs-v2 ray-accuracy verdict from two eval reports (AC4)")
+    _common(p)
+    p.add_argument("--v1", required=True, help="v1-baseline eval_<split>.json")
+    p.add_argument("--v2", required=True, help="v2 eval_<split>.json (same held-out split)")
+    p.add_argument(
+        "--min-rel-reduction",
+        type=float,
+        default=0.30,
+        help="min relative nearest-quarter in-view miss reduction to pass",
+    )
+    p.add_argument(
+        "--max-fa-clear", type=float, default=0.10, help="max v2 clear false-alarm rate to pass"
+    )
+    p.add_argument("--out", help="default: the v2 report's folder")
+    p.set_defaults(func=cmd_compare)
 
     p = es.add_parser("noise-model", help="build the obstacle-ray noise model (UC-82 AC1)")
     _common(p)

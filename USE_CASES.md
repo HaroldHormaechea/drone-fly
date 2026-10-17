@@ -92,3 +92,4 @@ Statuses:
 | 80 | [use-cases/80-fix-student-distillation-training.md](use-cases/80-fix-student-distillation-training.md) | Fix the student distillation training (on-policy relabelling / PPO fine-tune / β schedule) | done | 2026-10-16 |
 | 81 | [use-cases/81-combined-distillation-fix.md](use-cases/81-combined-distillation-fix.md) | Combined distillation fix — on-policy + β-floor + extended PPO with an altitude-hold reward | done | 2026-10-16 |
 | 82 | [use-cases/82-obstacle-detection-70-input-connectome.md](use-cases/82-obstacle-detection-70-input-connectome.md) | Obstacle detection for the 70-input connectome — ray noise model + obstacle-avoidance retrain (sim-only) | done | 2026-10-16 |
+| 83 | [use-cases/83-eyes-v2-estimator.md](use-cases/83-eyes-v2-estimator.md) | Eyes v2 — cut the obstacle-ray miss rate (classification head + focal loss + denser mining) | done | 2026-10-17 |
