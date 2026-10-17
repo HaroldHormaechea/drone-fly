@@ -16,6 +16,10 @@ but are required for normal implementation work:
   runtime application code and are not part of `paths.production`.
 - Root user-facing docs — `README.md` (and `CHANGELOG.md` if/when one exists) — for keeping
   user-visible behavior and docs in sync per the developer role's documentation rules.
+- `docs/**` — project documentation, including `docs/experiments/**` (per-use-case experiment
+  write-ups, e.g. `uc77-obstacle-free-student.md`, `uc78-vision-eyes.md`). Authored deliverables
+  that accompany an implementation (often mandated by a use case's acceptance criteria);
+  documentation, not `paths.production` runtime code.
 - `.env.example` — template for required environment variables.
 - `viz/**` — the static, dependency-free activation-playback viewer (HTML/JS/CSS). Not Python
   runtime code and not part of `paths.production`; it is a shipped web asset served/opened directly.

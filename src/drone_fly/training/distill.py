@@ -1308,8 +1308,13 @@ def _train_student(
                     buf.add(feats if feat_dim else None, obs_s, decoded_label(t_mean, spec, max_g))
                     use_t = torch.rand(n, device=dev) < beta
                     noise_ = d.explore_std * torch.randn_like(s_mean)
-                    act = torch.where(use_t.unsqueeze(-1), t_mean, s_mean + noise_)
-                    teacher_share += float(use_t.float().mean())
+                    if d.on_policy_relabel:
+                        # UC80: student-driven execution — the teacher (labelled above) relabels
+                        # the states the student actually visits, decoupled from beta.
+                        act = s_mean + noise_
+                    else:
+                        act = torch.where(use_t.unsqueeze(-1), t_mean, s_mean + noise_)
+                        teacher_share += float(use_t.float().mean())
                     senv.step(act.to(senv.dtype))
             actor.train()
             for _ in range(d.updates):

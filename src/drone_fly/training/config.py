@@ -556,10 +556,15 @@ class DistillSection:
     #: UC77: after an uninterrupted run, evaluate the val checkpoint on ``liftoff:held-out`` and
     #: every ``track_evals`` selector (the ``train eval`` reports).
     final_report: bool = False
+    #: UC80: on-policy DAgger relabelling. When true, rollouts execute the student action
+    #: unconditionally (student-driven), decoupling execution from ``beta`` so the frozen teacher
+    #: labels the states the *student* actually visits (attacks covariate shift). Default-off ⇒
+    #: the behaviour is byte-identical to UC77/79 (the β-mix selects execution as before).
+    on_policy_relabel: bool = False
 
 
-#: DistillSection fields left out of a run snapshot at their default (UC77 N6).
-_DISTILL_UC77_DEFAULTS = {"track_evals": [], "final_report": False}
+#: DistillSection fields left out of a run snapshot at their default (UC77 N6 + UC80).
+_DISTILL_UC77_DEFAULTS = {"track_evals": [], "final_report": False, "on_policy_relabel": False}
 
 
 @dataclass(frozen=True)
