@@ -168,6 +168,10 @@ def run_bench(
         "iters": int(iters),
         "warmup": int(warmup),
         "budget_ms": budget,
+        # UC-85: the frozen depth backbone (if any) is timed inside the eyes forward via
+        # EyesEstimator.update, so eyes_ms already includes it; recorded here for the AC5 doc.
+        "depth_backbone": (est.meta.get("arch") or {}).get("depth_backbone", False),
+        "backbone_id": (est.meta.get("arch") or {}).get("backbone_id"),
         "eyes_ms": eyes_ms,
         "eyes_p95_within_budget": None if p95 is None else bool(p95 <= budget),
         "detector": det_info,
@@ -197,6 +201,10 @@ def bench_markdown(rep: dict[str, Any]) -> str:
         f"Device `{rep['device']}` ({rep['gpu'] or 'CPU'}), frames {rep['frame'][0]}x"
         f"{rep['frame'][1]}, {rep['iters']} iterations after {rep['warmup']} warmup; budget "
         f"{rep['budget_ms']:.1f} ms.",
+        "",
+        f"Depth backbone (UC-85): `{rep.get('backbone_id') or rep.get('depth_backbone')}`."
+        if rep.get("depth_backbone")
+        else "Depth backbone (UC-85): none (eyes v1/v2 CNN trunk).",
         "",
         "| stage | p50 ms | p95 ms | p99 ms |",
         "|---|---:|---:|---:|",

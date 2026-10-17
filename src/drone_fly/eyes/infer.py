@@ -36,7 +36,7 @@ import torch
 from drone_fly.eyes.camera_rays import camera_from_meta, cone_namespace, ray_view
 from drone_fly.eyes.ego import ego_vector
 from drone_fly.eyes.history import default_tol, history_dt, select_history
-from drone_fly.eyes.model import EyesNet, build_from_meta, prepare_frame
+from drone_fly.eyes.model import EyesDepthNet, EyesNet, build_from_meta, prepare_frame
 from drone_fly.harness.types import FlightState, Frame
 
 
@@ -67,9 +67,13 @@ def load_eyes_weights(path: str | Path) -> tuple[dict[str, Any], dict[str, Any]]
 
 
 class EyesEstimator:
-    def __init__(self, net: EyesNet, meta: dict[str, Any], device: str = "cpu") -> None:
+    def __init__(
+        self, net: EyesNet | EyesDepthNet, meta: dict[str, Any], device: str = "cpu"
+    ) -> None:
         self.meta = meta
         self.device = resolve_device(device)
+        # A v3 (depth-backbone) net holds its frozen backbone internally and is dispatched by
+        # build_from_meta; the live/bench forward contract (6 args -> free, conf[, hit]) is kept.
         self.net = net.to(self.device).eval()
         inp = meta["input"]
         self.width, self.height = int(inp["width"]), int(inp["height"])

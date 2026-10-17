@@ -1,4 +1,4 @@
-"""``drone-fly eyes fov-report | label | dataset | train | eval | bench`` (UC-78).
+"""``drone-fly eyes fov-report | label | dataset | train | eval | bench | provision-backbone``.
 
 * ``fov-report [--capture DIR ...] [--pitch-min 0 --pitch-max 60 --pitch-step 5] [--band 10:40]
   [--fpa 15] [--out]``: AC1, which rays the camera sees.
@@ -10,11 +10,14 @@
   [--disk-margin-gb 1]``: AC3, the map-split dataset.
 * ``train --dataset D [--out] [--epochs 40] [--batch 64] [--lr 1e-3] [--weight-decay 1e-4]
   [--w-hit 4] [--tol-m 0.5] [--device] [--select best-val|last] [--patience 8] [--seed 78]
-  [--num-workers 0] [--resume] [--max-samples N]``: AC4.
+  [--num-workers 0] [--resume] [--max-samples N] [--depth-backbone] [--backbone-id ID]``: AC4
+  (``--depth-backbone`` builds the UC-85 eyes-v3 depth trunk; default-off => v1/v2).
 * ``eval --weights W --dataset D [--split held-out|val] [--tol-m] [--thin-m 0.2] [--large-m 1.0]
   [--device] [--out]``: AC6.
 * ``bench --weights W [--device] [--iters 500] [--warmup 20] [--with-gate-detector]
   [--gate-weights] [--budget-ms] [--out]``: AC7.
+* ``provision-backbone [--model-id ID]``: UC-85 AC2, fetch + cache the depth backbone once
+  (``tiny-depth`` = pure-torch stub, no download).
 
 Every subcommand takes ``--preset`` (default ``liftoff``), ``--config`` and ``--harness``. Light at
 import (argparse only); the work modules load inside the commands.
@@ -128,6 +131,7 @@ def cmd_train(args: argparse.Namespace) -> int:
         gpu_prototype_dir=args.gpu_prototype_dir, hit_head=args.hit_head, focal=args.focal,
         focal_alpha=args.focal_alpha, focal_gamma=args.focal_gamma, w_focal=args.w_focal,
         hit_sampler=args.hit_sampler, hit_sample_w=args.hit_sample_w,
+        depth_backbone=args.depth_backbone, backbone_id=args.backbone_id,
     )  # fmt: skip
     last = r["log"][-1]
     print(f"{r['status']}: {len(r['log'])} epochs, best epoch {r['best_epoch']}, last train "
@@ -189,6 +193,14 @@ def cmd_bench(args: argparse.Namespace) -> int:
     print(json.dumps({"eyes_ms": rep["eyes_ms"], "within_budget": rep["eyes_p95_within_budget"],
                       "detector": rep["detector"]}, indent=2))  # fmt: skip
     print(f"report: {rep['out_dir']}")
+    return 0
+
+
+def cmd_provision_backbone(args: argparse.Namespace) -> int:
+    from drone_fly.eyes.depth_backbone import DEFAULT_BACKBONE_ID, provision_backbone
+
+    info = provision_backbone(args.model_id or DEFAULT_BACKBONE_ID)
+    print(json.dumps(info, indent=2))
     return 0
 
 
@@ -255,7 +267,8 @@ def add_parser(sub: Any) -> None:
     p.set_defaults(func=cmd_dataset)
 
     p = es.add_parser(
-        "ingest", help="validate dropped-in captures + report the in-view hit-ray fraction (UC-84 AC3)"
+        "ingest",
+        help="validate dropped-in captures + report the in-view hit-ray fraction (UC-84 AC3)",
     )
     _common(p)
     p.add_argument("--captures-root", help="default <data root>/captures")
@@ -305,6 +318,17 @@ def add_parser(sub: Any) -> None:
         type=float,
         default=8.0,
         help="sampling weight of a hit frame when --hit-sampler",
+    )
+    # UC-85 eyes-v3 lever (default-off => v1/v2). The backbone is frozen + non-registered, so the
+    # optimizer / param budget are unchanged. --backbone-id tiny-depth uses the pure-torch stub.
+    p.add_argument(
+        "--depth-backbone",
+        action="store_true",
+        help="build EyesDepthNet with a frozen pretrained monocular-depth trunk (eyes v3)",
+    )
+    p.add_argument(
+        "--backbone-id",
+        help="depth backbone id (default Depth-Anything-V2-Small; 'tiny-depth' = pure-torch stub)",
     )
     p.set_defaults(func=cmd_train)
 
@@ -356,3 +380,14 @@ def add_parser(sub: Any) -> None:
     p.add_argument("--budget-ms", type=float, help="default: 1000 / runner.rate_hz")
     p.add_argument("--out", help="default: the weights' folder")
     p.set_defaults(func=cmd_bench)
+
+    p = es.add_parser(
+        "provision-backbone", help="fetch + cache the eyes-v3 depth backbone once (UC-85 AC2)"
+    )
+    _common(p)
+    p.add_argument(
+        "--model-id",
+        default=None,
+        help="backbone to provision (default Depth-Anything-V2-Small; 'tiny-depth' = no download)",
+    )
+    p.set_defaults(func=cmd_provision_backbone)
