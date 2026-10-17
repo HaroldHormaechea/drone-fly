@@ -1,0 +1,10 @@
+# UC-82 — the AC8 blanked-ray control: the SAME fine-tune as `uc82-obstacle-rays` (same recipe,
+# budget, seed, courses) but with the 40 obstacle rays replaced by constant clear (1.0) instead of
+# the noise-injected cast. This is the like-for-like baseline the collision-share comparison is made
+# against (AC4/AC5): if the ray-noise model avoids obstacles materially better than this control,
+# the connectome is using the rays.
+extends: uc82-obstacle-rays
+name: uc82-obstacle-blank
+course:
+  ray_noise: null       # no injection
+  ray_blank: true       # rays = constant clear (NOT zeroed)

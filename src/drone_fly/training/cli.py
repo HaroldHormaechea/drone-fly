@@ -33,6 +33,12 @@ HISTORICAL_07_COMPLETION = 185 / 192
 #: ``train eval`` defaults (the legacy episode count; the teacher reads 192 as "unset" -> 32).
 LEGACY_EPISODES = 192
 EVAL_SEED = 1234
+#: UC-82 ``proc-eval`` defaults (see drone_fly.training.proc_eval).
+PROC_EVAL_EPISODES = 256
+PROC_EVAL_SEED = 1234
+PROC_EVAL_POOL_BASE = 1_000_000
+PROC_EVAL_POOL_SIZE = 512
+PROC_EVAL_REL_THRESHOLD = 0.20
 #: Collective / rate scale of the random actions used by ``bench``.
 BENCH_ACTION_STD = 0.5
 #: ``bench`` drains the episode log every this many steps (one PPO rollout, ``ppo.roll``).
@@ -332,6 +338,52 @@ def cmd_eval(args: argparse.Namespace) -> int:
         )
     if args.json:
         print(json.dumps(res, indent=2))
+    return 0
+
+
+# ----------------------------------------------------------------------------- proc-eval (UC82)
+
+
+def cmd_proc_eval(args: argparse.Namespace) -> int:
+    """UC-82 AC5/AC7: proc-course obstacle-avoidance eval (collision share / outcome breakdown).
+
+    One arm per checkpoint+mode; with ``--blank-checkpoint`` also flies the blanked-ray control on
+    the SAME held-out courses and prints the ray-noise-vs-blank collision comparison + verdict.
+    """
+    import json as _json
+    from pathlib import Path
+
+    from drone_fly.training.proc_eval import compare_collision, evaluate_proc
+
+    common = dict(
+        episodes=args.episodes, seed=args.seed, device=args.device, k1_path=args.k1_path,
+        pool_base=args.pool_base, pool_size=args.pool_size,
+    )  # fmt: skip
+    rays = evaluate_proc(
+        args.checkpoint, args.config, ray_noise=args.ray_noise, ray_blank=args.ray_blank, **common
+    )
+    result: dict[str, Any] = {"rays": rays}
+    print(f"{rays['mode']}: collision {100 * rays['collision_share']:.1f}% "
+          f"completion {100 * rays['completion']:.1f}% "
+          f"({rays['episodes']} eps) outcomes {rays['outcome_shares']}")  # fmt: skip
+    if args.blank_checkpoint:
+        blank = evaluate_proc(
+            args.blank_checkpoint, args.blank_config or args.config, ray_blank=True, **common
+        )
+        cmp = compare_collision(blank=blank, rays=rays, rel_threshold=args.rel_threshold)
+        result.update({"blank": blank, "comparison": cmp})
+        print(f"blank: collision {100 * blank['collision_share']:.1f}% "
+              f"completion {100 * blank['completion']:.1f}%")  # fmt: skip
+        rr = cmp["relative_reduction"]
+        print(f"relative collision-share reduction: "
+              f"{'n/a' if rr is None else f'{100 * rr:.1f}%'} "
+              f"(threshold {100 * cmp['rel_threshold']:.0f}%) -> {cmp['verdict']}")  # fmt: skip
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(_json.dumps(result, indent=2), encoding="utf-8")
+        print(f"report: {args.out}")
+    if args.json:
+        print(_json.dumps(result, indent=2))
     return 0
 
 
@@ -881,3 +933,33 @@ def add_parser(sub: Any) -> None:
     bench.add_argument("--no-bench", action="store_false", dest="bench")
     p_x.add_argument("--k1-path", help="K1 connectome")
     p_x.set_defaults(func=cmd_export)
+
+    p_pe = tsub.add_parser(
+        "proc-eval",
+        help="UC-82: proc-course obstacle-avoidance eval (collision share / outcome breakdown)",
+    )
+    p_pe.add_argument("--checkpoint", required=True, help="the model_readout.pt to evaluate")
+    p_pe.add_argument("--config", required=True, help="training config of the eval env (name/path)")
+    p_pe.add_argument("--ray-noise", dest="ray_noise", help="ray-noise.yaml to inject (rays arm)")
+    p_pe.add_argument(
+        "--ray-blank", action="store_true", help="blank the rays (constant clear) instead"
+    )
+    p_pe.add_argument(
+        "--blank-checkpoint",
+        dest="blank_checkpoint",
+        help="also fly this control blanked on the SAME courses and print the comparison",
+    )
+    p_pe.add_argument("--blank-config", dest="blank_config", help="config for --blank-checkpoint")
+    p_pe.add_argument("--episodes", type=int, default=PROC_EVAL_EPISODES)
+    p_pe.add_argument("--seed", type=int, default=PROC_EVAL_SEED)
+    p_pe.add_argument("--pool-base", type=int, dest="pool_base", default=PROC_EVAL_POOL_BASE)
+    p_pe.add_argument("--pool-size", type=int, dest="pool_size", default=PROC_EVAL_POOL_SIZE)
+    p_pe.add_argument(
+        "--rel-threshold", type=float, dest="rel_threshold", default=PROC_EVAL_REL_THRESHOLD,
+        help="AC7 relative collision-share reduction bar (default 0.20)",
+    )  # fmt: skip
+    p_pe.add_argument("--k1-path", help="K1 connectome")
+    p_pe.add_argument("--device", help="auto | cpu | cuda")
+    p_pe.add_argument("--out", help="write the full result as JSON")
+    p_pe.add_argument("--json", action="store_true", help="also print the full result as JSON")
+    p_pe.set_defaults(func=cmd_proc_eval)
