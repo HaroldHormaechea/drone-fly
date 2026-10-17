@@ -103,48 +103,67 @@ drone-fly eyes bench --weights artifacts/uc85/v3/eyes.pt --with-gate-detector --
 
 ## Results
 
-> _Pending the heavy GPU/data run (orchestrator, post-merge). The code, driver, and this write-up are
-> the UC-85 deliverables; the run fills the two tables below from
-> `artifacts/uc85/compare/compare.json`, `eval_v{1,3}/eval_held-out.json`, and
-> `artifacts/uc85/bench/bench.json`._
+Run of 2026-10-17, in-sandbox on the NVIDIA RTX A3000 Laptop GPU (6 GB), reusing the UC-83 dense
+5-map dataset (`artifacts/uc83/dataset`); both nets trained 12 epochs, seed 78, tol 0.5 m, evaluated
+on the intact held-out split (HangarC03 / MinusTwo / ThePit). Backbone:
+`depth-anything/Depth-Anything-V2-Metric-Outdoor-Small-hf` (DINOv2 ViT-S, 24.78 M frozen params,
+~99 MB, Apache-2.0). Sources: `artifacts/uc85/compare/compare.json`, `eval_v{1,3}/eval_held-out.json`,
+`artifacts/uc85/bench/bench.json`.
 
 ### Ray accuracy: eyes v1-baseline vs eyes v3-depth (held-out, in-view, AC6)
 
 | metric (held-out, in-view) | v1-baseline | v3-depth | rel. change |
 |---|---:|---:|---:|
-| miss — nearest quarter (0–4 m) | _tbd_ | _tbd_ | _tbd_ |
-| miss — aggregate | _tbd_ | _tbd_ | _tbd_ |
-| false-alarm on clear rays | _tbd_ | _tbd_ | _tbd_ |
+| miss — nearest quarter (0–4 m) | 0.985 | 0.919 | −6.7 % |
+| miss — aggregate | 0.943 | 0.927 | −1.7 % |
+| false-alarm on clear rays (all) | 0.028 | 0.007 | −74 % |
 
-**Accuracy verdict (AC6):** _tbd_ — pass requires ≥ 30 % relative nearest-quarter in-view miss
-reduction **and** v3 clear false-alarm ≤ 0.10.
+**Accuracy verdict (AC6): NEGATIVE (miss gate FAIL, FA gate PASS).** The depth prior helps
+*directionally* — nearest-quarter in-view miss drops 0.985 → 0.919 and clear false-alarm drops ~4×
+(0.028 → 0.007, comfortably under the 0.10 bound) — but the 6.7 % relative nearest-quarter reduction
+is far short of the ≥ 30 % bar. On the thin 5-map data the prior is not enough; near-obstacle ranging
+is still essentially unsolved (miss ≈ 0.92).
 
 ### Latency: eyes v3-depth (AC5)
 
 | stage | p50 ms | p95 ms | p99 ms |
 |---|---:|---:|---:|
-| eyes total (incl. depth backbone) | _tbd_ | _tbd_ | _tbd_ |
-| + gate detector (tick) | _tbd_ | _tbd_ | _tbd_ |
+| eyes total (incl. depth backbone) | 10.41 | 13.15 | 14.80 |
+| + gate detector (tick) | 16.66 | 19.14 | 20.30 |
 
-Budget: ~25 ms (40 Hz). **Within budget:** _tbd_ (`bench.json → eyes_p95_within_budget` /
-`combined_p95_within_budget`).
+Budget: ~25 ms (40 Hz), measured on the A3000 GPU. **Within budget: YES** — `eyes_p95_within_budget`
+= true (13.15 ms) and `combined_p95_within_budget` = true (tick p95 19.14 ms, incl. the gate
+detector). Peak GPU memory: eyes 178 MB, eyes + detector 204 MB. **The expected main risk (a depth
+backbone blowing the live tick) did not materialize on GPU** — the frozen Depth-Anything-V2-Small
+trunk is comfortably deployable latency-wise; latency is *not* the blocker here.
 
 ## Recommendation (decision tree)
 
-Fill the branch the run lands in:
+**This run landed in the Negative branch → defer to the UC-84 richer-data re-run.** The depth prior
+is deployable (both latency bars pass) and directionally helpful (−6.7 % nearest-quarter miss, −74 %
+false-alarm), but it does **not** clear the ≥ 30 % accuracy bar on the thin 5-map data. Do **not**
+adopt it as the eyes default yet, and do **not** trigger the gated UC-82 re-run (it is gated on
+clearing both bars). Notably, latency is *not* the obstacle — the "accuracy-win, not deployable"
+branch and its mitigations are unused, because v3-depth already fits the 25 ms / 40 Hz tick on GPU.
+
+Branches considered:
 
 - **Adopt** — v3 clears **both** bars (≥ 30 % nearest-quarter miss reduction, FA ≤ 0.10, p95 within
   budget). Make it the eyes default for the obstacle path and gate the UC-82 obstacle-avoidance
-  re-run on it (below).
+  re-run on it (below). _Not taken: accuracy bar not cleared (6.7 % < 30 %)._
 - **Accuracy-win, not deployable** — v3 clears accuracy but **not** latency. Record it as a
   non-deployable accuracy result and apply a **named mitigation**, then re-bench:
   - a smaller / distilled depth backbone (e.g. `Intel/dpt-swinv2-tiny-256`);
   - lower input resolution to the backbone;
   - a **features-only** adapter (tap an intermediate backbone stage instead of the full decoded depth
     map), cutting the decode cost.
+
+  _Not taken: latency already passes (eyes p95 13.15 ms, tick p95 19.14 ms ≤ 25 ms); accuracy, not
+  latency, is the gap._
 - **Negative (depth prior insufficient on this data)** — v3 does **not** clear accuracy. This is an
   acceptable, informative outcome: the depth prior alone does not overcome the thin 5-map ceiling.
-  **Defer to the UC-84 richer-data re-run** (below) rather than treating it as a failure.
+  **Defer to the UC-84 richer-data re-run** (below) rather than treating it as a failure. _← **This
+  run.** The architecture lever is in place and cheap at inference; the binding constraint is data._
 
 ## Re-run hooks
 
