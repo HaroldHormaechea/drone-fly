@@ -1,0 +1,43 @@
+# UC-81 combined-distillation-fix ablation — variant `combined-ppo` (combined imitation + extended
+# PPO against the floor-clearance-shaped reward).
+#
+# `student-liftoff-open` + the MLP actor, running the `combined` imitation setup (on-policy
+# relabelling + β-floor, both levers active; see student-liftoff-open-uc81-combined.yaml) for the
+# full 1.8e7 DAgger budget, THEN an extended PPO fine-tune of `finetune.steps: 3.0e7` against the
+# env reward — now augmented with the opt-in UC-81 altitude-hold shaping term
+# (`env.rewards.floor_clearance: 0.03`). The PPO path optimises `senv.step()`'s reward directly,
+# so the shaping term auto-flows into the PPO objective; no PPO code change is involved.
+#
+# Why the shaping term: UC-80's residual failure was floor-sinking (held-out floor outcome
+# 18.5 %→48.8 % on the β-floor arm). The one-sided, bounded clearance penalty (weight 0.03, 0 at
+# or above the 0.5 m band, no positive bonus ⇒ not hover-hackable) pushes PPO away from descending
+# into the floor without rewarding idle hovering.
+#
+# BUDGET (AC4 — equal-budget deliberately RELAXED and stated explicitly): total ≈ 1.8e7 DAgger +
+# 3.0e7 PPO = ~4.8e7 env-steps, materially larger than baseline/combined (1.8e7) and ~5× UC-80's
+# 6e6 PPO. UC-80 proved the short equal-budget PPO arm undertrains (its reward was still climbing
+# at 6e6), so the budget is grown on purpose. CONFOUND: this variant bundles BOTH the extended PPO
+# budget AND the new reward term, so a ≥5 % result here cannot attribute cause to either lever
+# alone — the experiment doc records this and names the isolation follow-up. The doc also reports
+# the PPO reward curve as a hover-hack / undertraining sanity check.
+#
+# Budget-sizing / run instructions: see student-liftoff-open-uc81-baseline.yaml and
+# docs/experiments/uc81-combined-distillation-fix.md.
+extends: student-liftoff-open
+name: student-liftoff-open-uc81-combined-ppo
+n_envs: 2048
+budget: 1.8e7             # DAgger imitation phase (combined levers); PPO (finetune.steps) runs on top
+student:
+  actor: mlp-student
+distill:
+  on_policy_relabel: true
+  on_policy_beta_floor: true
+  beta_start: 0.15
+  beta_end: 0.15
+  beta_over: 1.0
+  final_report: true
+finetune:
+  steps: 3.0e+7          # UC-81: extended PPO fine-tune (~5× UC-80's 6e6), total ≈ 4.8e7
+env:
+  rewards:
+    floor_clearance: 0.03 # UC-81 AC1: opt-in altitude-hold shaping, included in the PPO objective
