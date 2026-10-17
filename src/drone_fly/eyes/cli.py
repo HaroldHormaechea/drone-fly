@@ -94,6 +94,29 @@ def cmd_dataset(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ingest(args: argparse.Namespace) -> int:
+    from drone_fly.eyes.ingest import run_ingest
+
+    label_kw = {"trackdata_root": args.trackdata_root, "scenes_root": args.scenes_root}
+    r = run_ingest(
+        args.captures_root, labels_root=args.labels_root, out=args.out,
+        label_missing=args.label_missing, baseline=args.baseline, target=args.target,
+        preset=args.preset, config=args.config, harness=args.harness, label_kwargs=label_kw,
+    )  # fmt: skip
+    ov = r["overall"]
+    print(json.dumps({
+        "overall_in_view_hit_ray_share": ov["in_view_hit_ray_share"],
+        "target": r["target_in_view_hit_ray_share"],
+        "baseline": r["baseline_in_view_hit_ray_share"],
+        "below_target": r["below_target"],
+        "captures_included": ov["captures_included"],
+        "captures_total": ov["captures_total"],
+        "per_map": {m: v["in_view_hit_ray_share"] for m, v in r["per_map"].items()},
+    }, indent=2))  # fmt: skip
+    print(f"ingest report: {r['out_dir']}")
+    return 0
+
+
 def cmd_train(args: argparse.Namespace) -> int:
     from drone_fly.eyes.train import train_eyes
 
@@ -230,6 +253,20 @@ def add_parser(sub: Any) -> None:
     )
     p.add_argument("--mining-seed", type=int, default=0, help="seed for the hit-biased filter")
     p.set_defaults(func=cmd_dataset)
+
+    p = es.add_parser(
+        "ingest", help="validate dropped-in captures + report the in-view hit-ray fraction (UC-84 AC3)"
+    )
+    _common(p)
+    p.add_argument("--captures-root", help="default <data root>/captures")
+    p.add_argument("--labels-root")
+    p.add_argument("--label-missing", action="store_true", help="label missing / stale captures")
+    p.add_argument("--trackdata-root", help="for --label-missing")
+    p.add_argument("--scenes-root", help="for --label-missing")
+    p.add_argument("--out", help="default <data root>/reports/eyes/ingest")
+    p.add_argument("--baseline", type=float, default=0.05, help="UC-83 in-view hit-ray baseline")
+    p.add_argument("--target", type=float, default=0.15, help="UC-84 in-view hit-ray target")
+    p.set_defaults(func=cmd_ingest)
 
     p = es.add_parser("train", help="train the estimator (AC4)")
     _common(p)
