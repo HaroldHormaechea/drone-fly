@@ -100,7 +100,9 @@ def cmd_train(args: argparse.Namespace) -> int:
         weight_decay=args.weight_decay, w_hit=args.w_hit, tol_m=args.tol_m, device=args.device,
         select=args.select, patience=args.patience, seed=args.seed, num_workers=args.num_workers,
         resume=args.resume, max_samples=args.max_samples, cache_root=args.cache_root,
-        gpu_prototype_dir=args.gpu_prototype_dir,
+        gpu_prototype_dir=args.gpu_prototype_dir, hit_head=args.hit_head, focal=args.focal,
+        focal_alpha=args.focal_alpha, focal_gamma=args.focal_gamma, w_focal=args.w_focal,
+        hit_sampler=args.hit_sampler, hit_sample_w=args.hit_sample_w,
     )  # fmt: skip
     last = r["log"][-1]
     print(f"{r['status']}: {len(r['log'])} epochs, best epoch {r['best_epoch']}, last train "
@@ -226,6 +228,18 @@ def add_parser(sub: Any) -> None:
     p.add_argument("--max-samples", type=int, help="cap samples per split (smoke runs)")
     p.add_argument("--cache-root")
     p.add_argument("--gpu-prototype-dir")
+    # UC-83 v2 levers (all default-off => byte-identical to v1).
+    p.add_argument("--hit-head", action="store_true",
+                   help="build the opt-in hit/no-hit classification head (eyes v2)")  # fmt: skip
+    p.add_argument("--focal", action="store_true",
+                   help="add the focal term on the hit head (needs --hit-head)")  # fmt: skip
+    p.add_argument("--focal-alpha", type=float, default=0.25, help="focal class weight on hits")
+    p.add_argument("--focal-gamma", type=float, default=2.0, help="focal easy-ray down-weighting")
+    p.add_argument("--w-focal", type=float, default=1.0, help="weight of the focal term in the loss")
+    p.add_argument("--hit-sampler", action="store_true",
+                   help="oversample hit-bearing frames each epoch (train-time; v2 primary lever)")  # fmt: skip
+    p.add_argument("--hit-sample-w", type=float, default=8.0,
+                   help="relative sampling weight of a hit-bearing frame when --hit-sampler")  # fmt: skip
     p.set_defaults(func=cmd_train)
 
     p = es.add_parser("eval", help="accuracy report on held-out / val maps (AC6)")
