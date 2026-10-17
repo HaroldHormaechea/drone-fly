@@ -102,43 +102,52 @@ drone-fly train proc-eval --checkpoint <rays-v2 ckpt> --config uc83-obstacle-ray
 
 ## Results
 
-> Filled by the orchestrator from the GPU run (`scripts/uc83_eyes_v2.sh`). The tables below are the
-> shape to fill from `compare.json` / `eval_held-out.json` (and, if AC5 ran, `08_ac5_eval.json`).
+Run 2026-10-17, RTX A3000. v1-baseline and eyes v2 trained on one shared dense dataset over the 5
+train maps on disk; both evaluated on the intact held-out split (HangarC03, MinusTwo, ThePit; tol
+0.5 training m). Numbers from `artifacts/uc83/compare/compare.json` + `eval_v{1,2}/eval_held-out.json`.
 
-### Ray accuracy: eyes v1-baseline vs eyes v2 (held-out, AC3/AC4)
+### Ray accuracy: eyes v1-baseline vs eyes v2 (held-out, in-view, AC3/AC4)
 
 | metric (held-out, in-view) | v1-baseline | eyes v2 | rel. change |
 |---|---:|---:|---:|
-| miss — nearest quarter (0–4 m) | _tbd_ | _tbd_ | _tbd_ |
-| miss — aggregate | _tbd_ | _tbd_ | _tbd_ |
-| false-alarm on clear rays | _tbd_ | _tbd_ | _tbd_ |
-| hit-head recall / F1 (diagnostic) | n/a | _tbd_ | — |
+| miss — nearest quarter (0–4 m) | 0.983 | 0.989 | **+0.6 %** (worse) |
+| miss — aggregate | 0.942 | 0.928 | −1.6 % |
+| false-alarm on clear rays | 0.019 | 0.055 | +0.036 abs |
+| hit-head recall / F1 (diagnostic, in-view) | n/a | **recall 0.027 / F1 0.050** | — |
 
-Train hit-ray fraction (manifest `mining`): v1 ~_tbd_ (vs UC-78's ~5 %).
+**AC4 verdict: NEGATIVE.** Nearest-quarter in-view miss did not fall ≥30 % (it rose 0.6 %); the
+false-alarm bound held (0.055 ≤ 0.10). The aggregate in-view miss improved only marginally
+(0.942 → 0.928, −1.6 %) at the cost of ~3× the false-alarm rate. AC5 was **not** run (gated on AC4).
 
-**AC4 verdict:** _PASS / NEGATIVE_ (≥30 % nearest-quarter in-view miss reduction and clear
-false-alarm ≤0.10). _tbd_
+## Result (the headline)
 
-### Collision share: rays-v2 vs blanked (AC5, only if AC4 passed)
-
-| arm | collision share | completion | vs blanked |
-|---|---:|---:|---:|
-| rays (eyes-v2 noise) | _tbd_ | _tbd_ | _tbd_ |
-| blanked (reused UC-82 control) | _tbd_ | _tbd_ | — |
+**The imbalance-correction levers are not the fix — the ceiling is data/sensing, not loss or
+sampling.** The classification head + focal loss + hit-weighted mining did essentially nothing for
+near-obstacle ranging (nearest-quarter miss stayed ~0.98–0.99, as in v1 and UC-78). Critically, the
+hit head itself **also collapsed** — in-view recall 0.027 (overall 0.014): it almost never fires even
+as a *detector*. So this is **not** the hoped-for detection-works / ranging-fails dissociation; **both
+detection and ranging fail** at this data scale. Focal loss + oversampling can rebalance a classifier
+only when the signal to separate the classes is present; here the model cannot tell hit from clear
+from these frames at all, so correcting the class balance moves nothing. This is a stronger,
+cleaner version of UC-78's "thin data" diagnosis: the bottleneck is the **information in the captures**
+(5 train maps, monocular, few close-obstacle frames), not the training objective.
 
 ## Recommendation
 
-> Filled after the run. Expected branches:
->
-> * **AC4 passes and AC5 shows rays-v2 < blanked:** better eyes help — adopt eyes v2 and the v2 noise
->   model for the obstacle-avoidance thread; UC-82's negative result is reversed.
-> * **AC4 passes but AC5 shows no collision gain:** the estimator improved but the connectome still
->   does not benefit — next lever is a richer ray encoding or the depth backbone.
-> * **AC4 fails:** the in-sandbox levers are not enough against the data ceiling — the named
->   follow-up is new close-to-obstacle capture flights (needs Liftoff) or a depth-model backbone
->   (UC-78 lever 3). Documented negative result; no AC5.
->   * **If the hit head reaches GOOD recall but the free-distance miss still does not clear the
->     bar, make that dissociation the headline:** it localizes the ceiling to monocular *ranging*
->     (distance) rather than *detection*. That sharpens the follow-up toward depth information
->     specifically — close-to-obstacle captures or a depth backbone — over just "collect more
->     data," since detection is already solved and more same-kind frames would not fix ranging.
+- **Stop iterating on the estimator's loss/architecture against the current captures.** v2's levers
+  (and, by extension, further loss/sampling tuning) are exhausted — they cannot manufacture a signal
+  the data does not contain. The hit head's ~0.03 recall shows the model can't even *detect*
+  obstacles here, let alone range them.
+- **The lever is data/sensing, specifically close-range obstacle information:**
+  1. **New capture flights close to obstacles** (UC-78 lever 1) — needs Liftoff, so it is the first
+     out-of-sandbox follow-up: fly the 70-input model (or manual) deliberately near obstacles across
+     more maps to get many near-hit frames, then rebuild the dense set and retrain v2's recipe (which
+     is already in place and tested).
+  2. **A depth-model backbone** (UC-78 lever 3) — pretrained monocular-depth features as the trunk,
+     which inject the ranging prior the raw frames lack; a larger lift but the only in-principle way
+     to range monocularly from limited data.
+- **Do not re-run the UC-82 obstacle-avoidance comparison** with v2 — at ~0.99 near-miss the v2 rays
+  are no better than v1's and would reproduce UC-82's negative (rays worse than blanked). Gate that
+  re-run on an estimator that actually clears the AC4 near-miss bar.
+- The UC-83 machinery (classification head, focal loss, hit-weighted sampler/mining, `eyes compare`,
+  the resumable driver) is kept and tested — ready to apply the moment better capture data exists.
