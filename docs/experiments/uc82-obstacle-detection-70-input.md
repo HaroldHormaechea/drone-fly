@@ -86,21 +86,43 @@ measured evidence either way.
 
 | model | collision share | completion | floor | out-of-bounds | ceiling | timeout |
 |---|---:|---:|---:|---:|---:|---:|
-| ray-noise (rays) | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
-| blanked control | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ |
+| ray-noise (rays) | 0.570 | 0.148 | 0.102 | 0.000 | 0.000 | 0.180 |
+| blanked control | 0.352 | 0.141 | 0.227 | 0.000 | 0.000 | 0.281 |
 | 11-count reference (exact rays, obstacles-on) | 0.33* | 0.67 | — | — | — | — |
 
 \* 11-count headline is 67 % honest completion @ seed 1024 with exact rays; its collision share on
 this held-out proc set is a reference point, not the control.
 
-Relative collision-share reduction: _tbd_ (bar 20 %). Verdict: _tbd_.
+Relative collision-share reduction: **−62.2 %** (bar 20 %). Verdict: **NEGATIVE** — the ray-noise
+model collides *more* than the blanked control (0.570 vs 0.352), not less.
 
-## Recommendation (fill after the run)
+## Result (run 2026-10-17, RTX A3000, 256 held-out proc courses, seed 1234)
 
-_If PASS:_ the connectome uses the vision rays even under eyes-v1-grade noise; next slice is live
-Liftoff validation (UC-73 AC9–10) and/or a better eyes estimator.
+**Negative, and informative: feeding eyes-v1-grade vision rays makes obstacle avoidance worse, not
+better.** Both arms fly about equally (completion 14.8 % rays vs 14.1 % blank — so the 70-input base
+model works and the comparison is meaningful), but the ray-noise model hits obstacles **57.0 %** of the
+time vs **35.2 %** for the blanked control. The outcome mix explains it: with noisy rays the model
+*reacts* — fewer floor/timeout endings (floor 10.2 %, timeout 18.0 %) but far more obstacle
+collisions, because at ~96 % miss and a 3.1 % false-alarm rate the rays mostly fail to warn of real
+obstacles while occasionally inventing phantom ones, steering the connectome *into* trouble. The
+blanked control, flying its learned path "blind but calm," hits fewer obstacles (35.2 %) and instead
+floors/times-out more (floor 22.7 %, timeout 28.1 %).
 
-_If NEGATIVE:_ record the likely cause — ray accuracy (eyes v1 misses ~96 % of near obstacles),
-warning time (~0.2–0.3 s at racing speed at 4 m range, UC-73 AC10), or the connectome lineage's own
-flying quality. The lever most likely to move it is a better eyes estimator (more capture data /
-temporal memory), not more avoidance training.
+So the connectome *does* respond to the ray inputs — but eyes-v1 rays carry more harm than signal. This
+is the expected consequence of UC-78's own finding that the eyes v1 (95.8 % miss) are not yet good
+enough to feed the connectome; UC-82 is the first *measured* confirmation of it at the connectome level.
+
+## Recommendation
+
+The lever is **ray accuracy, not avoidance training.** Do not iterate on the 70-input avoidance
+retrain against these rays — garbage-in dominates. The next step is a materially better eyes estimator
+before re-running this comparison:
+- **More signal in the eyes:** more capture data and/or temporal memory (frame stack / recurrence) and
+  the odometry-propagated obstacle map UC-73 lists as a stretch goal, to cut the ~96 % near-obstacle
+  miss rate that makes the rays net-negative here.
+- **Warning time:** at `RAY_RANGE` 4 m there is only ~0.2–0.3 s of warning at racing speed (UC-73
+  AC10); a longer range (with a 70-model retrain at that range) may be needed even once the estimator
+  improves.
+- Only once the eyes clear a usefulness threshold (e.g. miss rate well below the point where false
+  warnings dominate) should this rays-vs-blanked comparison be re-run; then live Liftoff validation
+  (UC-73 AC9–10) follows. Re-running the avoidance retrain at current eyes fidelity is not worthwhile.
