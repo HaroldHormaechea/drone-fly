@@ -127,6 +127,12 @@ _BUILTINS: list[tuple[str, str, str, dict]] = [
         },
     ),
     (
+        "free_space_estimator",
+        "composite",
+        f"{_PKG}.composite:CompositeFreeSpaceEstimator",
+        {"description": "free-space blocks from several providers (inputs.free_space mapping)"},
+    ),
+    (
         "depth_model",
         "depth-anything-v2",
         f"{_PKG}.liftoff.depth:DepthAnythingV2Model",

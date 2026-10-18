@@ -37,6 +37,14 @@ parts:
 # Options for programmatically registered parts, keyed by part kind (free-form).
 part_options: {}
 
+# Perception providers (UC-86, docs/harness/perception-providers.md).
+inputs:
+  # auto: screen on live Liftoff (refuses metadata / undeclared-provenance providers such as the
+  # oracle or course gates), any elsewhere | screen | any (offline / diagnostic opt-out)
+  require_provenance: auto
+  # parts.free_space_estimator: composite -> [{provider, blocks?, primary?, options?}, ...]
+  free_space: []
+
 scaling:
   world_scale: 1.0          # course geometry in yaml/inline is divided by this (training_m = m / s)
 

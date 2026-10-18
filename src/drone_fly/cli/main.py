@@ -886,6 +886,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_eyes_parser(sub)
 
+    from drone_fly.harness.perception_cli import add_parser as add_perception_parser  # argparse
+
+    add_perception_parser(sub)
+
     sim = sub.add_parser("sim", help="the batched simulator (drone_fly.sim)")
     simsub = sim.add_subparsers(dest="sim_command", required=True)
     p_rp = simsub.add_parser(

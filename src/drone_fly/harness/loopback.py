@@ -141,10 +141,16 @@ class CourseGateEstimator(GateEstimator):
     """Ground-truth gate senses from known course geometry (+ the env's pass rule)."""
 
     provides = frozenset({"target", "curr_gate", "next_lookahead"})
+    provenance = "metadata"
 
     def __init__(self, course: Course) -> None:
         self.course = course
         self.progress = GateProgress(course)
+
+    @classmethod
+    def from_config(cls, cfg: dict[str, Any], ctx: Any) -> CourseGateEstimator:
+        """Built by name outside the loopback factory (needs ``ctx.resources["course"]``)."""
+        return cls(ctx.resources["course"])
 
     def reset(self) -> None:
         self.progress.reset()
@@ -171,11 +177,17 @@ class RaycastFreeSpaceEstimator(FreeSpaceEstimator):
     """Ground-truth ``raycast`` via the contract's ``raycast()`` + the ``obstacle_vision`` block."""
 
     provides = frozenset({"obstacle_vision", "raycast"})
+    provenance = "metadata"
 
     def __init__(self, course: Course, contract: Any) -> None:
         self.course = course
         self.contract = contract
         self._obstacles = course.raycast_obstacles()
+
+    @classmethod
+    def from_config(cls, cfg: dict[str, Any], ctx: Any) -> RaycastFreeSpaceEstimator:
+        """Built by name (e.g. a composite child): ``ctx.resources["course"]`` + the contract."""
+        return cls(ctx.resources["course"], ctx.contract)
 
     def update(
         self, frame: Frame | None, state: FlightState, target: np.ndarray, now: float
