@@ -117,6 +117,16 @@ _BUILTINS: list[tuple[str, str, str, dict]] = [
         },
     ),
     (
+        "free_space_estimator",
+        "eyes",
+        f"{_PKG}.liftoff.eyes:EyesFreeSpaceEstimator",
+        {
+            "description": "vision eyes net (eyes.pt) -> 40-ray scan + obstacle_vision "
+            "(v3 weights also need transformers + pillow)",
+            "requires": ("torch",),
+        },
+    ),
+    (
         "depth_model",
         "depth-anything-v2",
         f"{_PKG}.liftoff.depth:DepthAnythingV2Model",

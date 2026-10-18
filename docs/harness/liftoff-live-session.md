@@ -31,17 +31,21 @@ tracks, drones or resolutions need their own calibration (ADR 0003).
      "StreamFormat": ["Timestamp","Position","Attitude","Velocity","Gyro","Input","Battery","MotorRPM"] }
    ```
    Restart Liftoff after changing it.
-3. Have the run inputs on disk (all gitignored, so a fresh clone or worktree does not have them):
-   - the K1 slice `artifacts/pruned/k1/`. Pass `--k1-path` if it lives elsewhere.
-   - the gate-detector weights. Use `artifacts/harness/liftoff/models/liftoff-gates-deploy.pt` (the
+3. Have the run inputs on disk (all gitignored, so a fresh clone or worktree does not have them).
+   They live under the **data root** `artifacts/harness/liftoff/training-data/` (or
+   `$DRONE_FLY_DATA_ROOT`; see `src/drone_fly/paths.py`):
+   - the K1 slice `<data root>/pruned/k1/`. The harness finds it there on its own; pass `--k1-path`
+     only if it lives elsewhere.
+   - the gate-detector weights. Use `<data root>/models/detector-v1/liftoff-gates-deploy.pt` (the
      deploy model, trained on every frame) for live runs. The preset defaults to the evaluation model
      `liftoff-gates.pt`.
-4. Create two small local config overlays (gitignored) so you don't retype overrides.
+   - for stage (c), the eyes weights `artifacts/uc84/v2/eyes.pt` (or `v1`).
+4. Create small local config overlays (gitignored) so you don't retype overrides.
    `artifacts/harness/live.yaml` (stage a):
    ```yaml
    gates:
      learned:
-       weights: artifacts/harness/liftoff/models/liftoff-gates-deploy.pt
+       weights: artifacts/harness/liftoff/training-data/models/detector-v1/liftoff-gates-deploy.pt
    free_space:
      assume_no_obstacles: true   # the 30-dim model also reads obstacle_vision; feed it zeros
    ```
@@ -50,6 +54,7 @@ tracks, drones or resolutions need their own calibration (ADR 0003).
    parts:
      free_space_estimator: depth
    ```
+   `artifacts/harness/live-eyes.yaml` (stage c) is shown in section 5c.
    Relative paths resolve against the repo root of the checkout you run from. In a git worktree,
    which has no `artifacts/`, use absolute paths into the main checkout.
 
@@ -110,7 +115,7 @@ decoded. See `docs/INFERENCE_CONTRACT.md` §0 and ADR 0006.
 
 Check in a terminal (PowerShell, not a sandboxed shell, because ViGEm needs a real session):
 ```
-.venv-cuda\Scripts\drone-fly.exe harness list            # liftoff, learned, depth, win32-foreground should show as available
+.venv-cuda\Scripts\drone-fly.exe harness list            # liftoff, learned, depth, eyes, win32-foreground should show as available
 ```
 
 ## 2. Controller direction check (pad-check)
@@ -168,7 +173,7 @@ PowerShell, from the repo root:
 .venv-cuda\Scripts\drone-fly.exe harness run --harness liftoff --preset liftoff `
     --config artifacts/harness/live.yaml --extra-dim 30 `
     --checkpoint training/07-proc-course-flight/model_readout.pt `
-    --k1-path artifacts/pruned/k1 --output-root artifacts/harness/liftoff/runs --overlay
+    --output-root artifacts/harness/liftoff/runs --overlay
 ```
 
 1. The command loads the model and arms the pad, then waits up to 15 s for focus: **click into
@@ -188,7 +193,7 @@ PowerShell, from the repo root:
 .venv-cuda\Scripts\drone-fly.exe harness run --harness liftoff --preset liftoff `
     --config artifacts/harness/live-depth.yaml --extra-dim 70 `
     --checkpoint training/11-count-curriculum/model_readout.pt `
-    --k1-path artifacts/pruned/k1 --output-root artifacts/harness/liftoff/runs --overlay
+    --output-root artifacts/harness/liftoff/runs --overlay
 ```
 `live-depth.yaml` sets `parts.free_space_estimator: depth`. Without it, the runner refuses a 70-dim
 model and names the missing `raycast` block.
@@ -200,6 +205,82 @@ false near obstacles.
 
 To check the overlay's overhead (UC-65 AC13(iv)), fly this stage once **with** `--overlay` and once
 **without**, using the same config.
+
+## 5c. Stage (c): 70-dim obstacle model with the vision eyes
+
+The same 70-dim model, with the 40 rays coming from the trained **vision eyes** net (UC-84/85)
+instead of Depth-Anything: `parts.free_space_estimator: eyes`. The eyes were trained on Liftoff
+frames against the exact training rays, so no depth calibration is involved.
+
+`artifacts/harness/live-eyes.yaml`:
+```yaml
+gates:
+  learned:
+    weights: artifacts/harness/liftoff/training-data/models/detector-v1/liftoff-gates-deploy.pt
+parts:
+  free_space_estimator: eyes
+eyes:
+  weights: artifacts/uc84/v2/eyes.pt
+  # obstacle_vision: zeros      # default; ray_clusters derives it from the rays (see below)
+```
+Relative paths resolve against the repo root of the checkout you run from; in a git worktree use
+absolute paths into the main checkout (e.g. `C:/dev/drone-fly/artifacts/uc84/v2/eyes.pt`).
+
+```powershell
+.venv-cuda\Scripts\drone-fly.exe harness run --harness liftoff --preset liftoff --config artifacts/harness/live-eyes.yaml --extra-dim 70 --checkpoint training/11-count-curriculum/model_readout.pt --output-root artifacts/harness/liftoff/runs --overlay
+```
+
+**Screen-only.** The eyes see only the screen frame, the telemetry and the target of an on-screen
+gate detector (`learned` or `opencv`). The run refuses to build with `parts.gate_estimator: course`
+or `oracle`, because those read track geometry.
+
+**How it runs.** The eyes net runs on its own worker thread and, on CUDA, its own CUDA stream, so it
+neither waits for nor stalls the gate detector and the policy. `eyes.max_rate_hz: auto` runs EyesNet
+v1/v2 at 30 Hz and the EyesDepthNet v3 at 10 Hz; a number below `1 / (2 * hist_tol_s)` (5 Hz for the
+UC-84 weights) is refused, since the 3-frame history (0.2 s stride) would never fill. Each run starts
+with 3 warm-up passes and logs `eyes: rate .. Hz, stream on|off, forward .. ms, duty ..%`. A duty
+(forward time x rate) above 50 % logs a warning. The first ~0.4 s of a segment has no history: the
+estimate is stamped `-inf` and the runner fails safe with `perception_stale` rather than flying
+blind. The same happens after a mid-run respawn.
+
+**Measured latency** (RTX 3050, 2560x1080, without Liftoff rendering):
+
+| Weights | Eyes p50 / p95 | With the gate detector p50 / p95 | Size | Expected estimate age |
+|---|---|---|---|---|
+| v1 | 9.5 / 12.9 ms | 23.8 / 28.2 ms | | ~50–100 ms |
+| v2 | 6.5 / 13.1 ms | 12.6 / 15.3 ms | ~110 MB | ~50–100 ms |
+| v3 (no trained checkpoint yet) | 34.4 / 36.1 ms | | 188 MB | ~100–150 ms |
+
+v2 at 30 Hz uses about 26 % GPU duty. `runner.max_estimate_age_s` is 0.25 s.
+
+**Acceptance: `latency_summary.json`** of the first eyes flight. Its `depth_worker` row is the eyes
+worker time per frame (the row is shared by every free-space estimator; it includes the stream
+sync) and `depth_update` is the per-tick read. Check the `free_space` age p95 (below 0.25 s), the
+policy step p95, the missed deadlines, and that no `perception_stale` stop happens after the first
+second.
+
+**The 165 ms policy step** seen in the stage (b) depth run was GPU contention: Depth-Anything took
+513–660 ms per frame and stretched the gate detector to 470 ms over the same ticks. It was not
+warm-up and not a policy defect. The eyes' small per-frame cost on a separate stream should remove
+it; the first eyes flight's `latency_summary.json` is the check.
+
+**`obstacle_vision` (8 values)** in training is the two nearest obstacles' exact offsets and sizes.
+Live, it can only be zeros or derived from the screen:
+- `eyes.obstacle_vision: zeros` (default): the model sees "no obstacle nearby" in that block and
+  avoids obstacles from the rays alone.
+- `eyes.obstacle_vision: ray_clusters` (opt-in): hit rays are grouped into up to two obstacles
+  (`cluster_link_m`, `min_obstacle_size_m`, training metres). **Eyes false alarms become phantom
+  obstacles** that the model steers around, and real obstacles are only as complete as the 40 rays
+  see them.
+
+Either way the inputs differ from training (noisy rays, an approximate or empty `obstacle_vision`).
+This stage makes the flight possible; it does not promise good avoidance.
+
+**Student checkpoints** (UC70 `student.pt`) force `parts.free_space_estimator: none`
+(`student.py`), so the eyes apply only to the 70-dim `model_readout.pt` checkpoints.
+
+**v3 weights** (EyesDepthNet) need `transformers` and `pillow` and the cached depth backbone: run
+`.venv-cuda\Scripts\drone-fly.exe eyes provision-backbone` once before the flight.
 
 ## 6. After each run
 
@@ -233,7 +314,11 @@ Record the results:
 | Liftoff ignores the pad | The physical controller has priority or isn't unbound; the ViGEm driver is missing; Liftoff wasn't restarted after the driver install |
 | Drone flips or yaws the wrong way | Stick signs. Run pad-check (step 2) and apply its suggestion |
 | `gate weights not found` | Relative weights path in a worktree; use an absolute path (step 0.4) |
-| 70-dim run refuses to start | `parts.free_space_estimator: depth` is missing |
+| 70-dim run refuses to start | `parts.free_space_estimator: depth` (or `eyes`) is missing |
+| `eyes estimator is screen-only` | `parts.gate_estimator` is `course` or `oracle`; use `learned` |
+| `config 'eyes.weights' is required` / `file not found` | Set `eyes.weights`; use an absolute path in a worktree |
+| `eyes weights ... does not match` | The weights were trained for another camera, `world_scale` or ray cone; use the `liftoff` preset or matching weights |
+| Stage (c) stops `perception_stale` at once | No eyes estimate yet (history ~0.4 s, or a respawn); check the `eyes:` start-up log line and the GPU duty warning |
 | Overlay not visible over the game | Liftoff is in exclusive fullscreen; switch to borderless |
 | Exit code 3 | A missing extra: install it into `.venv-cuda` with `uv pip` (step 0.1) |
 

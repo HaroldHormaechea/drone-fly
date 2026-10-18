@@ -10,7 +10,7 @@
 #     --checkpoint training/07-proc-course-flight/model_readout.pt --config my_liftoff.yaml
 # The 70-dim obstacle model (training/11-count-curriculum/model_readout.pt, or the older
 # training/10-proc-obstacle-avoid/model_readout.pt) needs a raycast-capable free-space
-# estimator (parts.free_space_estimator: depth).
+# estimator (parts.free_space_estimator: depth | eyes).
 harness: liftoff
 
 # The airframe flown (UC67): drones/<id>/drone.yaml. Its Betaflight rates and its inverse thrust
@@ -39,7 +39,7 @@ parts:
   state_source: liftoff-udp       # liftoff-udp | liftoff-csv (replay a recorded CSV)
   frame_source: screen
   gate_estimator: opencv
-  free_space_estimator: none      # none (obstacle-free, 12/30-dim only) | depth (70-dim)
+  free_space_estimator: none      # none (obstacle-free, 12/30-dim only) | depth | eyes (70-dim)
   action_sink: vgamepad
   abort_signal: hotkey
   focus_probe: win32-foreground   # fail safe when the Liftoff window loses focus (null = off)
@@ -215,6 +215,18 @@ depth:
     z_m: 0.0                # ground height (Liftoff metres); null disables the rejection
     height_m: 0.15
   warmup_timeout_s: 60.0    # wait for the first depth map (model load) before the loop starts
+
+# `eyes` free-space estimator (parts.free_space_estimator: eyes) -> raycast for 70-dim models: the
+# vision eyes net (`drone-fly eyes train`) on an async worker + its own CUDA stream. Screen-only:
+# refused with parts.gate_estimator course | oracle. See docs/harness/liftoff-live-session.md.
+eyes:
+  weights: null             # eyes.pt (required); relative = repo root (else the cwd)
+  device: auto              # auto | cpu | cuda
+  max_rate_hz: auto         # auto (EyesNet v1/v2: 30, EyesDepthNet v3: 10) | Hz >= 1/(2*hist_tol_s)
+  warmup_timeout_s: 30.0    # wait for the first valid estimate (history) before the loop starts
+  obstacle_vision: zeros    # zeros | ray_clusters (from the rays; eyes false alarms become obstacles)
+  cluster_link_m: 0.5       # ray_clusters: hit points this close (training m) join one obstacle
+  min_obstacle_size_m: 0.15 # ray_clusters: smallest obstacle half-size (training m)
 
 controls:
   # Only with `drone: null`: the Liftoff rate profile per axis (Betaflight rates; rc_rate 1.0 =
