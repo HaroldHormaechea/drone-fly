@@ -173,7 +173,7 @@ def test_builtins_registered_under_every_expected_name():
         "state_source": {"plant", "liftoff-udp", "liftoff-csv"},
         "frame_source": {"screen"},
         "gate_estimator": {"course", "opencv"},
-        "free_space_estimator": {"raycast", "none", "depth"},
+        "free_space_estimator": {"raycast", "none", "depth", "eyes"},
         "action_sink": {"plant", "vgamepad", "recording"},
         "abort_signal": {"hotkey"},
         "depth_model": {"depth-anything-v2"},

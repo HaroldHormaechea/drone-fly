@@ -20,7 +20,8 @@ Per call
        actual history offsets (:func:`~drone_fly.eyes.history.history_dt`);
     5. one forward pass.
 
-Wrapping this as a registered ``free_space_estimator`` part is a follow-up (UC-73).
+The live ``free_space_estimator`` part ``eyes`` wraps this class:
+:class:`drone_fly.harness.liftoff.eyes.EyesFreeSpaceEstimator` (async worker, CUDA stream).
 """
 
 from __future__ import annotations
@@ -48,6 +49,7 @@ class EyesOutput:
     history_ok: bool
     stamp: float  # capture time of the frame the estimate was computed from
     timings_s: dict[str, float] = field(default_factory=dict)
+    rays_world: np.ndarray | None = None  # (R, 3) unit world directions of the rays
 
 
 def resolve_device(device: str | None) -> str:
@@ -124,7 +126,9 @@ class EyesEstimator:
             self._frames.pop(0)
             self._quats.pop(0)
         if cuda:
-            torch.cuda.synchronize()
+            # Only the caller's stream: the live part runs this on its own CUDA stream, so a
+            # device-wide sync would also wait for the policy / gate detector's work.
+            torch.cuda.current_stream(self.device).synchronize()
         t1 = time.perf_counter()
         i = len(self._times) - 1
         hist = select_history(self._times, i, self.k_frames, self.dt_s, self.tol_s)
@@ -135,6 +139,7 @@ class EyesEstimator:
                 np.ones(self.n_rays, np.float32), np.zeros(self.n_rays, np.float32),
                 view.in_view, False, stamp,
                 {"preprocess_s": t1 - t0, "forward_s": 0.0, "total_s": time.perf_counter() - t0},
+                rays_world=view.rays_world,
             )  # fmt: skip
             self._last = out
             return out
@@ -164,6 +169,7 @@ class EyesEstimator:
         out = EyesOutput(
             free_np.astype(np.float32), conf_np.astype(np.float32), view.in_view, True, stamp,
             {"preprocess_s": t1 - t0, "forward_s": t2 - t1, "total_s": t2 - t0},
+            rays_world=view.rays_world,
         )  # fmt: skip
         self._last = out
         return out
