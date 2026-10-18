@@ -26,8 +26,9 @@ from drone_fly.harness.types import ContractCommand
 
 log = logging.getLogger(__name__)
 
-#: extra widths of the shipped augmented models (contract §4): 12, 30 (course), 70 (+raycast).
-SUPPORTED_EXTRA_DIMS = (12, 30, 70)
+#: extra widths of the shipped augmented models (contract §4): 12, 30 (course), 70 (+raycast),
+#: and 98 (UC-87: +raycast +memory prev_action(4)+obs_history(2*12), obs-contract v2).
+SUPPORTED_EXTRA_DIMS = (12, 30, 70, 98)
 
 
 def validate_extra_dim(extra_dim: Any) -> int:
