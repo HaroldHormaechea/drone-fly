@@ -112,6 +112,19 @@ def _ramp(frac_done: float, over: float | None) -> float | None:
     return None if over is None else min(1.0, frac_done / max(over, 1e-9))
 
 
+def _ramp_between(frac_done: float, pair: tuple[float, float] | None) -> float:
+    """UC-87 staged ramp: 0 before ``start``, linear 0->1 between ``[start, end]``, 1 after ``end``.
+
+    ``pair is None`` ⇒ 1.0 (the ramp is off, so the scale stays full — the pre-redesign behaviour).
+    """
+    if pair is None:
+        return 1.0
+    start, end = float(pair[0]), float(pair[1])
+    if end <= start:
+        return 1.0 if frac_done >= end else 0.0
+    return min(1.0, max(0.0, (frac_done - start) / (end - start)))
+
+
 def train(
     cfg: TrainConfig,
     profile: Any,
@@ -187,6 +200,11 @@ def _train(
             v = _ramp(frac, over)
             if v is not None:
                 setattr(env, attr, v)
+        # UC-87 redesign staged ramps (default 1.0 when the frac is None ⇒ old configs unchanged).
+        env.deploy_dr_scale = _ramp_between(frac, cur.timing_dr_frac)
+        env.input_dr_scale = _ramp_between(frac, cur.input_dr_frac)
+        pen = _ramp_between(frac, cur.penalty_frac)
+        env.penalty_scale = cur.penalty_init_scale + pen * (1.0 - cur.penalty_init_scale)
         tap_b = torch.zeros(roll, n, ac.feat_dim, device=dev)
         ext_b = torch.zeros(roll, n, e, device=dev)
         act_b = torch.zeros(roll, n, 4, device=dev)
@@ -264,6 +282,11 @@ def _train(
                 "completion_ema": float(env.comp_rate),
                 "difficulty": float(env.difficulty),
                 "log_std": float(ac.log_std.mean()),
+                # UC-87 redesign: the staged-ramp scales, so the schedule + λ/completion trade-off
+                # are visible in the training report (AC3/AC6).
+                "deploy_dr_scale": float(env.deploy_dr_scale),
+                "input_dr_scale": float(env.input_dr_scale),
+                "penalty_scale": float(env.penalty_scale),
                 "episodes": int(len(eps)),
                 "episode_completion": float(eps[:, col("completed")].mean()) if len(eps) else None,
                 "episode_return": float(eps[:, col("return")].mean()) if len(eps) else None,
