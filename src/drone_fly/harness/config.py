@@ -201,10 +201,18 @@ class RunnerConfig:
     wait_for_state_s: float
     max_duration_s: float | None
     max_ticks: int | None
+    #: Spawn-yaw frame alignment of gpu_prototype contract policies: "auto" (contract
+    #: checkpoints only), True or False. See :mod:`drone_fly.harness.yaw_align`.
+    align_spawn_yaw: str | bool = "auto"
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> RunnerConfig:
         max_ticks = d.get("max_ticks")
+        align = d.get("align_spawn_yaw", "auto")
+        if not (align == "auto" or isinstance(align, bool)):
+            raise HarnessConfigError(
+                f"config 'runner.align_spawn_yaw' must be auto, true or false, got {align!r}"
+            )
         return cls(
             rate_hz=float(
                 require_number(d["rate_hz"], "runner.rate_hz", min_value=1.0, max_value=1000.0)
@@ -236,6 +244,7 @@ class RunnerConfig:
             max_ticks=None
             if max_ticks is None
             else require_int(max_ticks, "runner.max_ticks", min_value=1),
+            align_spawn_yaw=align,
         )
 
 

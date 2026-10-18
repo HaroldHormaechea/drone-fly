@@ -187,6 +187,30 @@ PowerShell, from the repo root:
    `focus_lost` (you alt-tabbed), stale perception, any exception. Flight success is not required;
    UC-64 judges I/O and fail-safe behaviour.
 
+### Spawn yaw alignment
+
+The gpu_prototype contract checkpoints (`model_readout.pt`, 30- and 70-dim) are memoryless, were
+trained with the drone spawning at yaw 0, and mix world-frame inputs (`rel`, `vel`, the gate and
+obstacle directions) with body-frame ones (`g_body`, `omega`, the heading-relative rays). Liftoff
+spawns at yaw −90°, which rotated every world-frame input by 90° and made the drone flip on take-off.
+
+`runner.align_spawn_yaw` (`auto` | `true` | `false`, default `auto`) fixes this. The runner captures
+the spawn yaw `psi0` from the first telemetry state of each attempt, and again after a telemetry
+discontinuity (a respawn). It then rotates every world-frame (x, y) pair of `obs` / `extra` by
+`−psi0` before the policy sees them. It is one constant rotation per attempt, not a per-tick
+heading alignment.
+- `auto` aligns contract checkpoints only. Teacher (`--teacher`) and student checkpoints build their
+  own observations and are never aligned; `true` with either is refused.
+- Each capture adds a `spawn_yaw:<deg>` event to the tick record and an INFO log line.
+- The recorded `obs` / `extra` are what the policy saw (aligned); `state` stays raw telemetry. Runs
+  recorded before this change hold the unaligned frame.
+- A spawn at yaw 0 (the loopback plant) is a byte-identical no-op.
+
+**Live acceptance:** the first tracking tick of a stage (a) run at rest commands rates of about
+`[3.9, 3.9, −2.3]`, not the flip command `[4, −4, +3.4]`.
+
+Follow-up, not covered: the recurrent policy state is not reset on a respawn.
+
 ## 5. Stage (b): 70-dim obstacle model with live depth (acceptance target)
 
 ```powershell
@@ -276,6 +300,24 @@ Live, it can only be zeros or derived from the screen:
 Either way the inputs differ from training (noisy rays, an approximate or empty `obstacle_vision`).
 This stage makes the flight possible; it does not promise good avoidance.
 
+**World scale for 70-dim models.** The preset's `scaling.world_scale: 4.0` puts gate 0 of the
+Infinity Loop 9.4 training-m from the spawn, while the 70-dim models trained on 1.6–2.8 m: they
+fly at a target far outside their training range. Use `scaling.world_scale` 10–16 (12 is
+recommended). The eyes weights were trained at world_scale 4.0, though, and `check_meta` requires
+the two to match. Decouple them with `eyes.world_scale`:
+```yaml
+scaling:
+  world_scale: 12
+eyes:
+  world_scale: 4.0   # the weights' scale (null = must equal scaling.world_scale)
+```
+With it set, the eyes get `pos` / `vel` / the target multiplied by
+`k = scaling.world_scale / eyes.world_scale`, and their free space is converted back to the run's
+scale (a hit at `f` becomes `f / k`; a clear ray stays clear). The raycast, `ray_clusters` and the
+`eyes_scale_factor` info field use the converted values. This is approximate. With `k > 1` the eyes
+cannot see beyond `RAY_RANGE / k` run-metres, so the band `(RAY_RANGE / k, RAY_RANGE]` always reads
+clear (optimistic).
+
 **Student checkpoints** (UC70 `student.pt`) force `parts.free_space_estimator: none`
 (`student.py`), so the eyes apply only to the 70-dim `model_readout.pt` checkpoints.
 
@@ -317,7 +359,8 @@ Record the results:
 | 70-dim run refuses to start | `parts.free_space_estimator: depth` (or `eyes`) is missing |
 | `eyes estimator is screen-only` | `parts.gate_estimator` is `course` or `oracle`; use `learned` |
 | `config 'eyes.weights' is required` / `file not found` | Set `eyes.weights`; use an absolute path in a worktree |
-| `eyes weights ... does not match` | The weights were trained for another camera, `world_scale` or ray cone; use the `liftoff` preset or matching weights |
+| `eyes weights ... does not match` | The weights were trained for another camera, `world_scale` or ray cone; use the `liftoff` preset or matching weights. For a 70-dim run at `scaling.world_scale` 10–16 (4.0 puts gate 0 at 9.4 training-m vs 1.6–2.8 in training), set `eyes.world_scale: 4.0` (stage 5c) |
+| Drone flips on take-off with a `model_readout.pt` checkpoint | `runner.align_spawn_yaw` is `false`; keep it `auto` and check the `spawn_yaw:` event in the tick record |
 | Stage (c) stops `perception_stale` at once | No eyes estimate yet (history ~0.4 s, or a respawn); check the `eyes:` start-up log line and the GPU duty warning |
 | Overlay not visible over the game | Liftoff is in exclusive fullscreen; switch to borderless |
 | Exit code 3 | A missing extra: install it into `.venv-cuda` with `uv pip` (step 0.1) |

@@ -44,6 +44,7 @@ Fail-safe (latched)
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any, NoReturn
@@ -175,6 +176,8 @@ class RunnerSettings:
     #: After the fail-safe (arm button configured): retry Disarm until telemetry shows the motors
     #: stopped, for at most this long.
     disarm_confirm_s: float = 2.0
+    #: Spawn-yaw frame alignment switch ("auto" | True | False); session.py builds the aligner.
+    align_spawn_yaw: str | bool = "auto"
 
     @classmethod
     def from_config(cls, cfg: Any) -> RunnerSettings:
@@ -207,6 +210,7 @@ class RunnerSettings:
                     min_value=0.0,
                 )
             ),
+            align_spawn_yaw=getattr(r, "align_spawn_yaw", "auto"),
         )
 
 
@@ -266,8 +270,11 @@ class HarnessRunner:
         recorder: Any = None,
         clock: Any = None,
         publisher: Any = None,
+        yaw_aligner: Any = None,
     ) -> None:
         self.harness = harness
+        #: Optional :class:`~drone_fly.harness.yaw_align.SpawnYawAligner` (contract policies).
+        self.yaw_aligner = yaw_aligner
         self.policy = policy
         self.assembler = assembler
         self.contract = contract
@@ -483,6 +490,8 @@ class HarnessRunner:
     def _loop(self, result: RunResult) -> None:
         s = self.settings
         period = 1.0 / s.rate_hz
+        if self.yaw_aligner is not None:
+            self.yaw_aligner.reset()  # every run captures its own spawn yaw
         self._wait_for_state()
         self._wait_for_focus()
         start = self.clock.now()
@@ -544,6 +553,7 @@ class HarnessRunner:
         if state is None or age > s.stale_after_s:
             self._finish(record, STOP_STALE_TELEMETRY, f"telemetry age {age:.3f}s")
         record.state = state.as_state_dict()
+        aligner = self.yaw_aligner
         disc = getattr(h.state_source, "discontinuity_count", 0)
         if disc != self._last_disc:
             self._last_disc = disc
@@ -551,6 +561,14 @@ class HarnessRunner:
             if h.free_space_estimator is not None:
                 h.free_space_estimator.reset()
             record.events.append("discontinuity:estimators_reset")
+            if aligner is not None:
+                aligner.reset()  # a respawn: re-capture the spawn yaw from this tick
+        if aligner is not None:
+            psi0 = aligner.capture(state)
+            if psi0 is not None:
+                deg = math.degrees(psi0)
+                record.events.append(f"spawn_yaw:{deg:.1f}")
+                log.info("spawn yaw %.1f deg: policy inputs aligned to the training frame", deg)
         t1 = clock.now()
 
         # -- perception --
@@ -591,6 +609,8 @@ class HarnessRunner:
         brain: Any = None
         try:
             obs, extra = self.assembler.assemble(state, gate, fs, self.extra_dim)
+            if aligner is not None:
+                obs, extra = aligner.apply(obs, extra)  # recorded = what the policy sees
             record.obs, record.extra = obs, extra
             if pub is not None and pub.wants_brain(k):
                 raw, brain = self.policy.act_with_brain(obs, extra)

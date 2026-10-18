@@ -37,6 +37,7 @@ file additionally needs ``transformers`` / ``pillow`` for its frozen depth backb
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import logging
 import math
 import threading
@@ -119,6 +120,28 @@ def check_duty(duty: float | None, limit: float = MAX_GPU_DUTY) -> bool:
         100.0 * limit,
     )
     return False
+
+
+def scale_state(state: FlightState, k: float) -> FlightState:
+    """``state`` with ``pos`` / ``vel`` multiplied by ``k`` (quat, omega unchanged)."""
+    if k == 1.0:
+        return state
+    return dataclasses.replace(
+        state,
+        pos=(np.asarray(state.pos, np.float64) * k).astype(np.float32),
+        vel=(np.asarray(state.vel, np.float64) * k).astype(np.float32),
+    )
+
+
+def free_to_run_scale(free: np.ndarray, k: float) -> np.ndarray:
+    """Eyes free space (fraction of ``RAY_RANGE`` at the eyes' scale) -> the run's scale.
+
+    A clear ray stays clear (1); a hit at ``f * R`` eyes-metres lies at ``f * R / k`` run-metres.
+    """
+    f = np.asarray(free, np.float32)
+    if k == 1.0:
+        return f
+    return np.where(f >= 1.0 - HIT_EPS, 1.0, np.clip(f / k, 0.0, 1.0)).astype(np.float32)
 
 
 def obstacle_vision_from_rays(
@@ -248,9 +271,12 @@ class EyesFreeSpaceEstimator(FreeSpaceEstimator):
         weights: str | None = None,
         stream: Any = "auto",
         clock: Any = time.perf_counter,
+        scale_factor: float = 1.0,
     ) -> None:
         require_choice(obstacle_mode, "eyes.obstacle_vision", OBSTACLE_MODES)
         self.estimator = estimator
+        #: k = scaling.world_scale / eyes.world_scale (1 = the weights' scale is the run's).
+        self.scale_factor = float(scale_factor)
         self.meta = getattr(estimator, "meta", {}) or {}
         self.n_rays = int(getattr(estimator, "n_rays", 40))
         self.ray_range = float(self.meta.get("ray_range", 4.0))
@@ -271,7 +297,8 @@ class EyesFreeSpaceEstimator(FreeSpaceEstimator):
         self._thread: threading.Thread | None = None
         self._worker_error: BaseException | None = None
         self._target: np.ndarray | None = None
-        self._published: tuple[Any, np.ndarray, int, float] | None = None
+        # (estimator output, obstacle_vision, frame index, inference s, free at the run's scale)
+        self._published: tuple[Any, np.ndarray, int, float, np.ndarray] | None = None
         self._generation = 0
         self._reset_pending = False
         self._last_stamp: float | None = None
@@ -301,6 +328,12 @@ class EyesFreeSpaceEstimator(FreeSpaceEstimator):
         )
         link = num("cluster_link_m", 0.5, min_value=0.0, min_exclusive=True)
         min_size = num("min_obstacle_size_m", 0.15, min_value=0.0, min_exclusive=True)
+        eyes_ws_cfg = ecfg.get("world_scale")
+        if eyes_ws_cfg is None:
+            eyes_ws = float(conf.world_scale)
+        else:
+            eyes_ws = num("world_scale", 0.0, min_value=0.0, min_exclusive=True)
+        scale_factor = float(conf.world_scale) / eyes_ws
         path = resolve_weights_path(ecfg.get("weights"))
         try:
             lazy_import("torch", purpose="the eyes free-space estimator")
@@ -308,7 +341,7 @@ class EyesFreeSpaceEstimator(FreeSpaceEstimator):
             from drone_fly.eyes.model import build_from_meta
 
             meta, state = load_eyes_weights(path)
-            check_meta(meta, ctx.contract, conf.world_scale, cam)
+            check_meta(meta, ctx.contract, eyes_ws, cam)
             net = build_from_meta(meta)
             net.load_state_dict(state)
             estimator = EyesEstimator(net, meta, device)
@@ -330,6 +363,7 @@ class EyesFreeSpaceEstimator(FreeSpaceEstimator):
             cluster_link_m=link,
             min_obstacle_size_m=min_size,
             weights=str(path),
+            scale_factor=scale_factor,
         )
 
     # ------------------------------------------------------------------ lifecycle
@@ -450,17 +484,21 @@ class EyesFreeSpaceEstimator(FreeSpaceEstimator):
 
     def _process(self, frame: Frame, state: FlightState, target: Any, gen: int) -> None:
         """One estimator update; publishes the result when its history is complete."""
+        k = self.scale_factor
+        if k != 1.0 and target is not None:
+            target = (np.asarray(target, np.float64) * k).astype(np.float32)
         t0 = time.perf_counter()
-        out = self.estimator.update(frame, state, target)
+        out = self.estimator.update(frame, scale_state(state, k), target)
         self._sync_stream()
         inference_s = time.perf_counter() - t0
         if not out.history_ok:
             return  # never replaces the held estimate
+        free = free_to_run_scale(out.free, k)
         if self.obstacle_mode == "ray_clusters" and out.rays_world is not None:
             ov = obstacle_vision_from_rays(
                 state.pos,
                 out.rays_world,
-                out.free,
+                free,
                 self.ray_range,
                 self.cluster_link_m,
                 self.min_obstacle_size_m,
@@ -469,9 +507,9 @@ class EyesFreeSpaceEstimator(FreeSpaceEstimator):
             ov = np.zeros(8, np.float32)
         with self._lock:
             if gen == self._generation:  # a reset() during the update discards it
-                self._published = (out, ov, int(frame.index), inference_s)
+                self._published = (out, ov, int(frame.index), inference_s, free)
 
-    def _latest(self) -> tuple[Any, np.ndarray, int, float] | None:
+    def _latest(self) -> tuple[Any, np.ndarray, int, float, np.ndarray] | None:
         with self._lock:
             return self._published
 
@@ -500,13 +538,13 @@ class EyesFreeSpaceEstimator(FreeSpaceEstimator):
                 stamp=-np.inf,
                 info={"eyes": "none"},
             )
-        out, ov, frame_index, inference_s = latest
+        out, ov, frame_index, inference_s, free = latest
         conf = np.asarray(out.conf, np.float32)
         in_view = np.asarray(out.in_view, bool)
         fwd = out.timings_s.get("forward_s")
         return FreeSpaceEstimate(
             obstacle_vision=ov,
-            raycast=np.clip(np.asarray(out.free, np.float32), 0.0, 1.0).astype(np.float32),
+            raycast=np.clip(free, 0.0, 1.0).astype(np.float32),
             in_fov_mask=in_view,
             stamp=float(out.stamp),
             info={
@@ -521,6 +559,7 @@ class EyesFreeSpaceEstimator(FreeSpaceEstimator):
                 "coverage": float(in_view.mean()) if in_view.size else 0.0,
                 "weights": self.weights,
                 "rate_hz": self.rate_hz,
+                "eyes_scale_factor": self.scale_factor,
                 "stream": self._stream is not None,
                 "gpu_duty_est": gpu_duty(
                     self.forward_s if self.forward_s is not None else fwd, self.rate_hz

@@ -21,6 +21,7 @@ runner:
   wait_for_state_s: 1.0
   max_duration_s: 28.0      # 1400 ticks = the env's MAX_STEPS episode cap
   max_ticks: null
+  align_spawn_yaw: auto     # auto | true | false (the plant spawns at yaw 0: a no-op here)
 
 parts:
   state_source: plant

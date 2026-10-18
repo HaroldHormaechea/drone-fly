@@ -34,6 +34,10 @@ runner:
   wait_for_state_s: 10.0    # time allowed for the first telemetry datagram
   max_duration_s: null      # null = until abort / fail-safe
   max_ticks: null
+  # auto | true | false: rotate a gpu_prototype contract policy's world-frame inputs by -spawn
+  # yaw (captured per attempt) so it sees the yaw-0 frame it was trained in. auto = contract
+  # checkpoints only; true with --teacher / a student checkpoint is refused.
+  align_spawn_yaw: auto
 
 parts:
   state_source: liftoff-udp       # liftoff-udp | liftoff-csv (replay a recorded CSV)
@@ -227,6 +231,10 @@ eyes:
   obstacle_vision: zeros    # zeros | ray_clusters (from the rays; eyes false alarms become obstacles)
   cluster_link_m: 0.5       # ray_clusters: hit points this close (training m) join one obstacle
   min_obstacle_size_m: 0.15 # ray_clusters: smallest obstacle half-size (training m)
+  # null = the weights' world_scale must equal scaling.world_scale (today's rule). A number = the
+  # weights' world_scale: the eyes see pos/vel/target rescaled by scaling.world_scale / this, and
+  # their free space is converted back (approximate; with a ratio > 1 the far band reads clear).
+  world_scale: null
 
 controls:
   # Only with `drone: null`: the Liftoff rate profile per axis (Betaflight rates; rc_rate 1.0 =
