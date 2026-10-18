@@ -20,16 +20,19 @@ from drone_fly.harness.config import load_config
 from drone_fly.harness.errors import HarnessConfigError
 from drone_fly.harness.liftoff import recorder, ui_driver, ui_replay
 from drone_fly.harness.liftoff.recorder import (
-    MANUAL_FALLBACK,
-    REPLAY_STRATEGY,
     CaptureRecorder,
-    find_recording,
     pose_rows,
-    record_manual,
-    record_replay,
     write_pose_capture,
 )
+from drone_fly.harness.offline import capture_session
 from drone_fly.harness.offline.capture import load_capture
+from drone_fly.harness.offline.capture_session import (
+    MANUAL_FALLBACK,
+    REPLAY_STRATEGY,
+    find_recording,
+    record_manual,
+    record_replay,
+)
 from drone_fly.harness.offline.recordings import parse_recording
 from tests.liftoff_capture_support import (
     FMT,
@@ -605,7 +608,7 @@ def test_the_placeholder_api_is_gone():
 
 
 def test_replay_strategy_is_b():
-    assert REPLAY_STRATEGY == "B" and recorder.REPLAY_HUD_MASKS == []
+    assert REPLAY_STRATEGY == "B" and capture_session.REPLAY_HUD_MASKS == []
 
 
 def test_the_default_socket_binds_localhost(tmp_path, monkeypatch):
@@ -731,7 +734,7 @@ def fake_replay_steps(monkeypatch, steps, t0_ns, lost=()):
         def stop(self):
             return {"datagrams": 0, "frames": 30}
 
-    monkeypatch.setattr(recorder, "CaptureRecorder", FakeRecorder)
+    monkeypatch.setattr(capture_session, "CaptureRecorder", FakeRecorder)
 
     class Res:
         def alignment_block(self):
@@ -825,7 +828,7 @@ def test_record_manual_refuses_a_capture_without_telemetry(lib, tmp_path, monkey
         def run(self, max_s):
             return {"datagrams": 0, "frames": 12, "duration_s": 1.0}
 
-    monkeypatch.setattr(recorder, "CaptureRecorder", FakeRecorder)
+    monkeypatch.setattr(capture_session, "CaptureRecorder", FakeRecorder)
     with pytest.raises(HarnessConfigError, match="no telemetry arrived on UDP 9001"):
         record_manual("fake-arena-02", max_s=1.0, captures_root=tmp_path / "caps")
     ((out, kw),) = made
