@@ -8,7 +8,10 @@ the contract of :mod:`drone_fly.harness.perception`:
    and never newer than the newest input; a finite-stamp estimate appears within ``n_frames``,
    stamped with (sync) / no later than (async) the newest frame; every estimate passes
    :func:`~drone_fly.harness.perception.validate_estimate`; a gap (same frame, no frame) holds
-   the stamp; after ``reset()`` the stamp does not move forward until a new frame recovers it;
+   the stamp; after ``reset()`` the stamp does not move forward until a new frame recovers it.
+   A provider whose first ``update()`` after ``reset()`` raises
+   :class:`~drone_fly.harness.errors.EstimatorStop` (documented "reset ends the attempt", e.g. the
+   oracle's respawn rule) passes the reset check; the post-reset frames are skipped;
 3. gate role -- the stamp is finite and ``<= now``, and equals ``frame.stamp`` when a frame was
    given to a frame-stamped provider;
 4. async mode -- ``update()`` hammered with interleaved ``reset()`` while the worker runs;
@@ -37,7 +40,7 @@ from typing import Any
 
 import numpy as np
 
-from drone_fly.harness.errors import PerceptionContractError
+from drone_fly.harness.errors import EstimatorStop, PerceptionContractError
 from drone_fly.harness.perception import check_spec, validate_estimate
 from drone_fly.harness.types import FlightState, Frame
 
@@ -294,7 +297,12 @@ def _free_space(
         kit.ok("gap holds stamp")
     # -- reset --
     p.reset()
-    r = update(None, newest.stamp + 0.003)
+    try:
+        r = update(None, newest.stamp + 0.003)
+    except EstimatorStop as stop:  # a documented "reset ends the attempt" provider
+        kit.ok("reset")
+        kit.ok("estimate contract")
+        return {"constant": constant, "frames_used": nxt, "reset_ends_attempt": stop.reason}
     if not constant and float(r.stamp) > held + 1e-9:
         kit.fail("reset", f"stamp moved forward after reset() ({held} -> {r.stamp})")
     est, nxt = feed(nxt, n_frames, "recovery after reset")
@@ -342,9 +350,15 @@ def _gate(
     kit.ok("gate stamp")
     update(None, frames[n_frames - 1], frames[n_frames - 1].stamp + 0.002)
     p.reset()
-    for i in range(n_frames, n_frames + 3):
-        f = frames[i]
-        update(f, f, f.stamp + 0.001)
+    out: dict[str, Any] = {"frame_stamped": frame_stamped}
+    try:
+        for i in range(n_frames, n_frames + 3):
+            f = frames[i]
+            update(f, f, f.stamp + 0.001)
+    except EstimatorStop as stop:
+        if i != n_frames:
+            raise  # only the first update after reset() may end the attempt
+        out["reset_ends_attempt"] = stop.reason  # documented (e.g. the oracle's respawn rule)
     kit.ok("reset")
     kit.ok("estimate contract")
-    return {"frame_stamped": frame_stamped}
+    return out

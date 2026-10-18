@@ -187,6 +187,12 @@ async hammer (updates with interleaved resets while the worker runs) and that `s
 threads. A failure raises `PerceptionContractError` naming the provider and the check. It runs on
 CPU, without Liftoff or the network.
 
+Staleness exceptions the kit accepts: constant providers stamp `now` (no `-inf` phase, no held
+stamp), and a provider whose first `update()` after `reset()` raises `EstimatorStop` (a documented
+"reset ends the attempt", e.g. the `oracle`'s respawn rule) passes the reset check -- the report
+carries `reset_ends_attempt` and the post-reset frames are skipped. An `EstimatorStop` anywhere
+else still fails the kit.
+
 ## Offline evaluation
 
 ```
