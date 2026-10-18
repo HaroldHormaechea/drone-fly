@@ -8,10 +8,12 @@ live validation happens later on the Liftoff box.
 
 > **Status — GPU run executed in-sandbox 2026-10-18 (see [Empirical results](#empirical-results-gpu-run-2026-10-18) below).**
 > The dev-team landed the code + config + a CPU-runnable, unit-tested smooth-eval harness; the
-> fine-tune + smoothness eval were then run on the A3000 box. **Run 1 (`uc87-deploy-robust`, λ=0.08)
-> FAILS all five AC7 bars — course completion collapses to 0%** (penalty domination). Tuning
-> iterations are in progress; `λ=0.08` was always flagged as a starting point to tune (AC3 risk).
-> The numbers below are real measurements.
+> fine-tune + smoothness eval were then run on the A3000 box. **Both fine-tune runs FAIL all five
+> AC7 bars — course completion collapses (0.0% at λ=0.08, 0.8% at λ=0.02) vs model 11's 54.7%.**
+> Quartering the smoothness penalties barely helped, so the blocker is the unramped jump from
+> model 11 into full domain-randomisation (esp. spawn yaw 0–360°), not the penalties. The fix is a
+> **curriculum** (a small `CourseEnv` code addition) — a dev-team follow-up, not a config tweak.
+> See the Conclusion below. The numbers are real measurements.
 
 ## What changed vs. model 11
 
@@ -80,8 +82,10 @@ over 128 held-out courses per cell. Model 11 is evaluated with its own 70-dim co
 |---|---|---|---|---|---|
 | model 11 · `perfect` | 54.7 % | 0.185 | 6.5 % | 0.73 | 28.1 % |
 | model 11 · `live-like` | 27.3 % | 1.345 | 9.6 % | 7.11 | 60.9 % |
-| **run 1 fine-tuned · `perfect`** | **0.0 %** | 0.106 | 6.5 % | 0.26 | 38.3 % |
-| **run 1 fine-tuned · `live-like`** | **0.0 %** | 1.037 | 22.0 % | 4.06 | 8.6 % |
+| **run 1 fine-tuned · `perfect`** (λ=0.08) | **0.0 %** | 0.106 | 6.5 % | 0.26 | 38.3 % |
+| **run 1 fine-tuned · `live-like`** (λ=0.08) | **0.0 %** | 1.037 | 22.0 % | 4.06 | 8.6 % |
+| **run 2 fine-tuned · `perfect`** (λ=0.02) | **0.8 %** | 0.116 | 9.1 % | 0.76 | 28.9 % |
+| **run 2 fine-tuned · `live-like`** (λ=0.02) | **1.6 %** | 1.047 | 27.7 % | 5.14 | 7.0 % |
 
 **Diagnosis.** The smoothness objective partly worked (fine-tuned `perfect` mean|Δ| 0.106 < model
 11's 0.185; yaw flips 0.26 < 0.73), but **course completion collapsed to 0%**. The training log
@@ -92,11 +96,24 @@ state (it200 7.3% `perfect`, it400+ 0%). The jump from model 11 to full domain-r
 (unramped spawn yaw 0–360°, which model 11 never saw) + high penalties, with no curriculum, is too
 steep.
 
-**Tuning in progress.** Run 2 (`uc87-tune-lowpen`, λ 0.08→0.02, saturation 0.02→0.005) tests the
-penalty-domination hypothesis. If completion does not recover, the next step is a curriculum
-(difficulty/obstacle ramp and a spawn-yaw ramp — the latter needs a small code addition, since
-`spawn_yaw` is currently an on/off flag with no ramp) to let the policy retain completion while
-adapting to live-like conditions. This section is updated as runs complete.
+**Conclusion — penalty-tuning alone is insufficient.** Run 2 (`uc87-tune-lowpen`, λ 0.08→0.02,
+saturation 0.02→0.005) quartered the penalties and completion barely moved (0.0%→0.8% `perfect`),
+so the smoothness penalties are **not** the dominant cause. The real blocker is the training task
+itself: warm-starting model 11 straight into **full domain-randomisation** — in particular an
+**unramped spawn yaw 0–360°**, which model 11 was never trained for (it always spawned aligned to
+the first gate) — plus wide timing/delay/noise, all switched on from step 0 with no curriculum.
+Under that shock the policy never holds enough completion signal to learn, and converges to a
+smooth, shaping-reward-collecting, non-completing behaviour. Both runs show completion peaking in
+the single digits early (≤8% at ~2.6M steps) then decaying.
+
+**Recommended next step (needs code, not just config).** Add a **curriculum** that lets the policy
+keep completing while it adapts: ramp spawn yaw (0 → ±180°), obstacle count/difficulty, and the
+timing/delay/noise magnitudes from easy to full over training — and anneal the action-rate penalty
+in only after completion is established. `spawn_yaw` is currently an on/off flag, so a yaw **ramp**
+is a small `CourseEnv` addition (a `spawn_yaw_frac` curriculum knob), i.e. a dev-team follow-up, not
+a config tweak. This is tracked as the next iteration of UC-87; the AC8 robustness sweep is deferred
+until a fine-tune passes the AC7 completion bar (a sweep of a ~0%-completion policy carries no
+signal).
 
 ### AC8 robustness sweep
 
