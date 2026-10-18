@@ -150,8 +150,9 @@ class CourseConfig:
     saturation_weight: float = 0.0
     #: ``|tanh(a)|`` above this counts as saturated (AC6 uses 3.8/4.0 = 0.95 on the metric side).
     saturation_threshold: float = 0.9
-    #: Ceiling altitude (m) for the crash bound (AC5, configurable 4–6 m; was the fixed 3.5).
-    ceiling_z: float = 5.0
+    #: Ceiling altitude (m) for the crash bound (AC5, configurable 4–6 m). Default matches the
+    #: historical fixed ``CEIL`` (3.5) so existing configs are unchanged; UC-87 sets 5.0 in its cfg.
+    ceiling_z: float = 3.5
     #: Randomise the spawn attitude yaw uniformly over 0–360° (AC4; live spawns off-axis).
     spawn_yaw: bool = False
     #: Randomise the spawn's horizontal distance to the first gate, ``(lo, hi)`` m (AC4).
