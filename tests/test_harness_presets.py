@@ -18,6 +18,7 @@ from drone_fly.harness.config import list_presets, load_config, load_preset
 from drone_fly.harness.errors import HarnessConfigError
 from drone_fly.harness.gate_types import GateTypeTable
 from drone_fly.harness.liftoff.gate_cv import camera_from_config
+from drone_fly.harness.liftoff.gate_learned import configured_weights
 from drone_fly.harness.liftoff.masks import FrameMasks
 from drone_fly.harness.liftoff.pointer_cv import pointer_reader_from_config
 from drone_fly.harness.liftoff.telemetry import GyroMap
@@ -26,6 +27,22 @@ ARENA = "liftoff_arena"
 
 PRESET = "liftoff"
 REPO = Path(__file__).resolve().parent.parent
+
+
+#: One measured itemID per shipped gate class (UC71 P3, gate_types/liftoff.yaml comments).
+SHIPPED_ITEMS = {
+    "InflatableArchBrandless01": "inflatable_arch",
+    "AirgateBigLiftoffWhite01": "airgate_big",
+    "AirgateLiftoffDark01": "airgate_small",
+    "GenericGate200x250cm01": "generic_gate",
+    "GenericDoubleGate200x250cm01": "generic_double_gate",
+    "MultiGPStandard7x6Frame01": "multigp_frame_7x6",
+    "MultiGPChampTrack8x10Frame01": "multigp_frame_8x10",
+    "LightGate300x220cmVarBlue01": "light_gate_300x220",
+    "ASLLightHoopGate03": "light_hoop",
+    "InflatableGateLiftoff01": "inflatable_gate",
+    "TrussGateFinishGeneric01": "truss_gate_finish",
+}
 
 
 @pytest.fixture(scope="module")
@@ -37,6 +54,18 @@ def _preset_text() -> str:
     return (
         resources.files("drone_fly.harness")
         .joinpath("configs", f"{PRESET}.yaml")
+        .read_text("utf-8")
+    )
+
+
+#: UC71: the preset names its gate table by file reference; the table's provenance lives there.
+GATE_TYPES_FILE = "gate_types/liftoff.yaml"
+
+
+def _gate_types_text() -> str:
+    return (
+        resources.files("drone_fly.harness")
+        .joinpath("configs", *GATE_TYPES_FILE.split("/"))
         .read_text("utf-8")
     )
 
@@ -134,9 +163,11 @@ def test_preset_values(cfg):
     assert c.get("hover_stick") is None and c.get("rates") is None
     assert cfg.world_scale == 4.0
     assert cfg.parts.gate_estimator == "learned"
-    assert cfg.section("gates")["learned"]["weights"] == (
-        "artifacts/harness/liftoff/models/liftoff-gates.pt"
-    )
+    learned = cfg.section("gates")["learned"]
+    assert learned.get("weights") is None and learned["release"] == "v1"  # UC71: by release
+    from drone_fly import paths
+
+    assert configured_weights(learned) == str(paths.models_root("detector-v1") / "liftoff-gates.pt")
     d = cfg.section("depth")
     assert d["inverse"] is True
     assert d["calibration"]["scale"] == pytest.approx(-0.00535155)
@@ -157,7 +188,9 @@ def test_preset_masks_cover_the_arena_hud(cfg):
 
 def test_preset_gate_type_table(cfg):
     table = GateTypeTable.from_config(cfg.data["gate_types"])
-    assert table.classes == ["inflatable_arch"]
+    assert table.classes[0] == "inflatable_arch" and len(table) == len(SHIPPED_ITEMS)
+    for item_id, cls in SHIPPED_ITEMS.items():  # UC71 P3: the captured tracks' gate types
+        assert table.classify(item_id).cls == cls, item_id
     arch = table.classify("InflatableArchBrandless01")
     assert arch is not None and arch.cls == "inflatable_arch"
     assert arch.aperture == (6.18, 3.69) and arch.outer == (8.0, 4.46)
@@ -237,8 +270,9 @@ def _covered(lines: list[str], i: int) -> bool:
     return p is not None and _covered(lines, p)
 
 
-def test_every_preset_value_names_its_source():
-    lines = _preset_text().splitlines()
+@pytest.mark.parametrize("text", [_preset_text, _gate_types_text], ids=["preset", "gate-types"])
+def test_every_preset_value_names_its_source(text):
+    lines = text().splitlines()
     uncovered = [
         ln
         for i, ln in enumerate(lines)
@@ -260,13 +294,30 @@ def test_every_preset_value_names_its_source():
         r"resolution",
         r"hover_stick",
         r"world_scale",
-        r"aperture",
-        r"outer",
         r"scale: -0\.00535155",
     ],
 )
 def test_key_values_have_a_measurement_source_nearby(pattern):
-    lines = _preset_text().splitlines()
+    _assert_source_near(_preset_text(), pattern)
+
+
+def test_preset_references_the_gate_types_file(cfg):
+    assert re.search(rf"^gate_types: {re.escape(GATE_TYPES_FILE)}\s*(#.*)?$", _preset_text(), re.M)
+    assert cfg.gate_types_file == GATE_TYPES_FILE
+    assert [t["class"] for t in cfg.data["gate_types"]][0] == "inflatable_arch"
+
+
+@pytest.mark.parametrize(
+    "pattern", [r"aperture:", r"outer:", r"center_offset:", r"keypoints:", r"outline:"]
+)
+def test_gate_table_values_have_a_measurement_source_nearby(pattern):
+    """UC71: the gate-table keys moved (with their comments) into the gate-types file."""
+    assert not re.search(rf"^\s*-?\s*{pattern}", _preset_text(), re.M)  # not back in the preset
+    _assert_source_near(_gate_types_text(), pattern)
+
+
+def _assert_source_near(text: str, pattern: str) -> None:
+    lines = text.splitlines()
     i = next(k for k, ln in enumerate(lines) if re.search(pattern, ln))
     context = "\n".join(lines[max(0, i - 12) : i + 1])
     assert re.search(

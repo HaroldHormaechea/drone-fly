@@ -403,7 +403,7 @@ def add_parser(sub: Any) -> None:
     p.add_argument("--iters", type=int, default=500)
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--with-gate-detector", action="store_true")
-    p.add_argument("--gate-weights", help="default: the preset's gates.learned.weights")
+    p.add_argument("--gate-weights", help="default: the preset's gates.learned.weights / release")
     p.add_argument("--budget-ms", type=float, help="default: 1000 / runner.rate_hz")
     p.add_argument("--out", help="default: the weights' folder")
     p.set_defaults(func=cmd_bench)

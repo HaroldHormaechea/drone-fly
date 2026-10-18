@@ -49,3 +49,16 @@ The UC64 learned gate detector was trained only on Infinity Loop frames (one map
 ## Clarifications
 - Q: How should frames be collected on new maps (auto-labelling needs telemetry pose + frames)?
   A: Try replays first, and fall back to the user flying. "Remember we also have a bunch of replays already stored — use them if required, although many may reference incomplete races."
+
+## Delivery status (partial, 2026-10-18)
+
+Merged into `main` as a partial delivery. The acceptance criteria above are unchanged.
+
+- **Delivered:** AC1–AC6 and AC9.
+- **AC7 open:** the best held-out val_det so far is 0.503 (target ≥ 0.70).
+- **AC8 open:** there is no v2 release. The `liftoff` preset stays on `gates.learned.release: v1`
+  (`RELEASE_ALIASES` has only `v1`), and the `default` / `liftoff_arena` presets stay on opencv.
+- **Follow-ups:**
+  - Unify `eyes/capture_meta` with `harness/offline/capture_index`. This changes `capture_sha`,
+    so it invalidates the existing label caches.
+  - Resume detector training toward the AC7 target, then cut the v2 release (AC8).

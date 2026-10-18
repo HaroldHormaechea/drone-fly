@@ -19,7 +19,7 @@ from __future__ import annotations
 import copy
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -425,6 +425,10 @@ class HarnessConfig:
     recording: RecordingConfig
     parts: PartsConfig
     world_scale: float
+    #: UC71: the gate-types file's ``not_gates`` regexes (empty for an inline table)
+    not_gates: tuple[str, ...] = ()
+    #: UC71: the gate-types file reference ``gate_types`` was resolved from (None = inline)
+    gate_types_file: str | None = None
 
     def section(self, key: str) -> dict[str, Any]:
         return section(self.data, key)
@@ -540,7 +544,11 @@ def load_config(
     overrides: dict[str, Any] | None = None,
     preset: str | None = None,
 ) -> HarnessConfig:
-    """Packaged default <- packaged ``preset`` <- user YAML (path / mapping) <- overrides."""
+    """Packaged default <- packaged ``preset`` <- user YAML (path / mapping) <- overrides.
+
+    A ``gate_types`` string is a gate-types file reference, resolved last into its list
+    (:func:`~drone_fly.harness.gate_types.load_gate_types_file`).
+    """
     from drone_fly.harness import registry
 
     default_name = registry.entry("harness", harness).default_config
@@ -554,4 +562,13 @@ def load_config(
         data = overlay(data, user)
     for dotted, value in (overrides or {}).items():
         set_dotted(data, dotted, value)
+    ref = data.get("gate_types")
+    if isinstance(ref, str):  # UC71: a gate-types file reference -> its list
+        from drone_fly.harness.gate_types import load_gate_types_file
+
+        table = load_gate_types_file(ref)
+        data["gate_types"] = table["gate_types"]
+        return replace(
+            validate(harness, data), not_gates=tuple(table["not_gates"]), gate_types_file=ref
+        )
     return validate(harness, data)

@@ -33,6 +33,7 @@ from typing import Any
 
 import numpy as np
 
+from drone_fly import paths
 from drone_fly.harness.config import HarnessConfig, find_repo_root, load_config
 from drone_fly.harness.errors import HarnessConfigError
 from drone_fly.harness.gate_types import GateType, GateTypeTable
@@ -78,12 +79,12 @@ def place_gate(item: PlacedItem, gtype: GateType) -> PlacedGate:
         p = np.asarray(local, np.float64) * item.scale
         return (p @ item.rotation.T + item.position) @ _M.T
 
-    fwd = _M @ (item.rotation @ np.array([0.0, 0.0, 1.0]))
+    fwd = _M @ (item.rotation @ gtype.item_normal())
     return PlacedGate(
         item=item,
         gtype=gtype,
         keypoints_w=world(gtype.local_points()),
-        center_w=world(np.asarray([gtype.center_offset], np.float64))[0],
+        center_w=world(gtype.item_center()[None])[0],
         forward_w=fwd / (np.linalg.norm(fwd) + 1e-12),
     )
 
@@ -230,7 +231,8 @@ def check_gate_types_against_props(
         b = collider_bounds(entry["colliders"])
         if b["solid"] is not None:
             lo, hi = np.asarray(b["solid"]["min"]), np.asarray(b["solid"]["max"])
-            width, height = hi[0] - lo[0], hi[1] - max(lo[1], 0.0)
+            ax = 2 if gtype.normal == "x" else 0  # the in-plane horizontal item axis
+            width, height = hi[ax] - lo[ax], hi[1] - max(lo[1], 0.0)
             for name, got, want in (
                 ("outer width", width, gtype.outer[0]),
                 ("outer height", height, gtype.outer[1]),
@@ -244,7 +246,7 @@ def check_gate_types_against_props(
         if trig is not None:
             half, center = np.asarray(trig["half"]), np.asarray(trig["center"])
             for name, got, want in (
-                ("aperture width", 2 * half[0], gtype.aperture[0]),
+                ("aperture width", 2 * half[2 if gtype.normal == "x" else 0], gtype.aperture[0]),
                 ("aperture height", 2 * half[1], gtype.aperture[1]),
                 ("aperture centre y", center[1], gtype.center_offset[1]),
             ):
@@ -254,6 +256,79 @@ def check_gate_types_against_props(
                         f"{got:.3f} m from the trigger box"
                     )
     return warnings
+
+
+#: aperture bottom this far above the prop base -> a closed frame (a bottom bar), else an open arch
+CLOSED_BOTTOM_M = 0.3
+
+
+def _class_name(item_id: str) -> str:
+    import re
+
+    base = re.sub(r"\d+$", "", item_id)
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", "_", base).lower()
+
+
+def draft_gate_types(props: dict[str, Any], item_ids: list[str]) -> list[dict[str, Any]]:
+    """Candidate ``gate_types`` entries from props.json colliders (UC71 ``gates draft-types``).
+
+    Outer size = the solid colliders' bounds; aperture + centre = the trigger box; ``bottom`` =
+    ``closed`` when the aperture starts more than :data:`CLOSED_BOTTOM_M` above the prop base.
+    Default keypoints: closed frames 4 outer + 4 aperture corners; open arches feet, mid-legs, top
+    corners and top centre; left/right flip pairs always. Candidates only: every class is checked
+    with label previews before it is trained on.
+    """
+    out = []
+    for item_id in item_ids:
+        entry = props.get(item_id)
+        draft: dict[str, Any] = {"class": _class_name(item_id), "match": f"^{item_id}"}
+        if not entry or not entry.get("colliders"):
+            draft["error"] = "no collider shapes in props.json"
+            out.append(draft)
+            continue
+        b = collider_bounds(entry["colliders"])
+        if b["solid"] is None:
+            draft["error"] = "no solid collider"
+            out.append(draft)
+            continue
+        lo, hi = np.asarray(b["solid"]["min"]), np.asarray(b["solid"]["max"])
+        cx = float((lo[0] + hi[0]) / 2.0)
+        base = float(max(lo[1], 0.0))
+        w, h = float(hi[0] - lo[0]), float(hi[1] - base)
+        trig = b["trigger"]
+        if trig is not None:
+            half, centre = np.asarray(trig["half"]), np.asarray(trig["center"])
+            ap = [round(2 * float(half[0]), 3), round(2 * float(half[1]), 3)]
+            centre_xyz = [round(float(v), 3) for v in centre]
+            ap_bottom = float(centre[1] - half[1])
+        else:
+            draft["warning"] = "no trigger: aperture guessed as 80 % of the outer frame"
+            ap = [round(0.8 * w, 3), round(0.8 * h, 3)]
+            centre_xyz = [round(cx, 3), round(base + h / 2.0, 3), 0.0]
+            ap_bottom = base + 0.1 * h
+        closed = ap_bottom - base > CLOSED_BOTTOM_M
+        x0, x1, y1 = cx - w / 2.0, cx + w / 2.0, base + h
+        if closed:
+            ax0 = centre_xyz[0] - ap[0] / 2.0
+            ax1 = centre_xyz[0] + ap[0] / 2.0
+            ay0, ay1 = centre_xyz[1] - ap[1] / 2.0, centre_xyz[1] + ap[1] / 2.0
+            kps = [[x0, y1], [x1, y1], [x0, base], [x1, base],
+                   [ax0, ay1], [ax1, ay1], [ax0, ay0], [ax1, ay0]]  # fmt: skip
+            pairs = [[0, 1], [2, 3], [4, 5], [6, 7]]
+        else:
+            kps = [[x0, base], [x1, base], [x0, base + h / 2.0], [x1, base + h / 2.0],
+                   [x0, y1], [x1, y1], [cx, y1]]  # fmt: skip
+            pairs = [[0, 1], [2, 3], [4, 5]]
+        draft.update(
+            aperture=ap,
+            outer=[round(w, 3), round(h, 3)],
+            center_offset=centre_xyz,
+            bottom="closed" if closed else "open",
+            keypoints=[[round(float(x), 3), round(float(y), 3)] for x, y in kps],
+            flip_pairs=pairs,
+        )
+        out.append(draft)
+    return out
 
 
 def check_item_table_against_props(
@@ -357,6 +432,24 @@ def draw_preview(image: np.ndarray, row: dict[str, Any], masks: FrameMasks) -> n
     return cv2.resize(img, (w // 2, h // 2))
 
 
+def refuse_unknown_items(
+    items: list[PlacedItem], table: GateTypeTable, not_gates: Any, route: Any, track: Any
+) -> None:
+    """UC71 AC5: refuse a track with itemIDs the gate-type table does not cover (never guessed)."""
+    from drone_fly.tracks.gate_coverage import unknown_items
+
+    by_instance = {it.instance_id: it.item_id for it in items if it.instance_id}
+    checkpoints = route.checkpoint_ids if route else ()
+    route_ids = [by_instance[c] for c in checkpoints if c in by_instance]
+    unknown = unknown_items(items, table, not_gates, route_ids)
+    if unknown:
+        raise HarnessConfigError(
+            f"{track} has itemIDs that are not a gate_types class, a checkpoint volume or a "
+            f"not_gates entry: {unknown}; add them to the gate-types file (see "
+            "`drone-fly tracks check --gate-coverage`)"
+        )
+
+
 def run_autolabel(
     capture: str | Path,
     track: str | Path,
@@ -384,6 +477,7 @@ def run_autolabel(
     cap = load_capture(capture, cfg.section("telemetry"), 1.0, lag_ms)
     items = parse_track_items(track)
     route = parse_race_route(race) if race is not None else None
+    refuse_unknown_items(items, table, cfg.not_gates, route, track)
     gates = placed_gates(items, table)
     if not gates:
         raise HarnessConfigError(
@@ -396,7 +490,7 @@ def run_autolabel(
         props_warnings = check_gate_types_against_props(table, ids, prop_items)
     rows, counts = label_capture(cap, gates, camera, masks)
 
-    out_dir = Path(out) if out is not None else artifacts_root() / "labels" / cap.name
+    out_dir = Path(out) if out is not None else paths.labels_root() / cap.name
     out_dir.mkdir(parents=True, exist_ok=True)
     with (out_dir / "labels.jsonl").open("w", encoding="utf-8") as fh:
         for r in rows:

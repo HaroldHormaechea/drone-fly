@@ -151,6 +151,7 @@ def test_gpu_prototype_dir_resolution_and_errors(tmp_path, monkeypatch):
 
 def test_k1_path_resolution_and_errors(tmp_path, monkeypatch):
     monkeypatch.delenv(K1_PATH_ENV, raising=False)
+    monkeypatch.setenv("DRONE_FLY_DATA_ROOT", str(tmp_path / "no-data-root"))  # no pruned/k1
     with pytest.raises(HarnessConfigError, match="--k1-path"):
         resolve_k1_path(tmp_path / "missing")
     assert resolve_k1_path(tmp_path) == tmp_path.resolve()

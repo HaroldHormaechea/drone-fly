@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -367,7 +368,9 @@ def score_capture_frame(
         in_range = EVAL_RANGE_M[0] <= g["range_m"] <= EVAL_RANGE_M[1]
         if not (in_range and g["center_in_image"] and not g.get("center_masked")):
             continue
-        entry: dict[str, Any] = {"cls": g["cls"], "range_m": float(g["range_m"]), "detected": False}
+        entry: dict[str, Any] = {
+            "gate_index": gi, "cls": g["cls"], "range_m": float(g["range_m"]), "detected": False
+        }  # fmt: skip
         if gi in used_g:
             d = detections[used_g[gi]]
             err = float(np.linalg.norm(det_world[used_g[gi]] - np.asarray(g["center_world"])))
@@ -539,4 +542,265 @@ def capture_eval_summary(report: dict[str, Any]) -> str:
     lines.append(report["caveat"])
     lines.append(report["threshold_note"])
     lines.append(f"report: {report.get('report_path')}")
+    return "\n".join(lines)
+
+
+# ----------------------------------------------------------------------------- UC71: held-out maps
+
+#: AC7 targets on held-out maps (the single-capture UC64 eval keeps 80 % / 15 %).
+HELDOUT_TARGET_DETECTION = 0.70
+HELDOUT_TARGET_REL_ERROR = 0.20
+JUDGE_MIN_N = 30
+COMPARE_MAX_DROP = 0.05
+D_U1_RULE = (
+    "D-U1 (accepted by the user 2026-10-13): judged per gate type pooled over held-out "
+    "maps at 4-25 m; a type is judged only if it was seen in training and has n >= 30; types only "
+    "on held-out maps are reported as 'unseen type', types with n < 30 as 'insufficient n'."
+)
+
+
+def trained_capture_names(meta: dict[str, Any]) -> set[str]:
+    """Captures the weights trained OR selected on (``captures`` + ``selection_captures``)."""
+    names = {str(c.get("name")) for c in meta.get("captures") or []}
+    names |= {str(c.get("name")) for c in meta.get("selection_captures") or []}
+    return names
+
+
+def seen_types(meta: dict[str, Any]) -> set[str]:
+    """Gate types present in the training data (``trained_types``; v1: its classes)."""
+    if meta.get("trained_types") is not None:
+        return {k for k, n in meta["trained_types"].items() if n}
+    return set(meta.get("classes") or [])
+
+
+def _latency(lat_s: list[float], device: str) -> dict[str, Any]:
+    lat = np.asarray(lat_s, np.float64) * 1000.0
+    cuda = str(device).startswith("cuda")
+    return {
+        "device": str(device),
+        "cuda_synchronised": cuda,
+        "flag": None if cuda else "measured on the CPU: not representative of the live budget",
+        "p50": float(np.percentile(lat, 50)) if lat.size else None,
+        "p95": float(np.percentile(lat, 95)) if lat.size else None,
+        "n": int(lat.size),
+    }
+
+
+def run_heldout_eval(
+    detector: str | Path,
+    *,
+    captures: list[str | Path] | None = None,
+    split: str = "held-out",
+    compare: str | Path | None = None,
+    protected_capture: str | Path | None = None,
+    config: str | Path | dict[str, Any] | None = None,
+    preset: str | None = "liftoff",
+    device: str | None = None,
+    split_source: str | Path | None = None,
+    report_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """``harness eval --detector <weights|dir> --split held-out [--captures] [--compare <v1>]``.
+
+    Scores every frame of the ``split``-map captures (from the catalogue; default every
+    discovered capture on such a map) and refuses any capture the weights list as trained or
+    selected on. Per map x type and per type pooled over maps, with range bins and the ADR 0003
+    metrics; types are judged under :data:`D_U1_RULE`. ``compare`` scores both detectors on the
+    protected Infinity Loop window (``protected_capture``, default the v1 reference capture) and
+    passes when the new arch detection at 4-25 m is >= the other's - 5 pp.
+    """
+    from drone_fly.harness.config import find_repo_root
+    from drone_fly.harness.offline import gate_diagnose as gdg
+    from drone_fly.harness.offline.capture_index import (
+        iter_capture_dirs,
+        link_entry,
+        read_meta,
+        resolve_captures,
+    )
+    from drone_fly.tracks import catalogue as cat
+
+    if split not in ("held-out", "val"):
+        raise HarnessConfigError(f"--split must be held-out or val, got {split!r}")
+    catalogue = cat.load_catalogue(split_source) if split_source else cat.load_named("liftoff")
+    wpath = gdg.resolve_detector(detector)
+    est, cfg = gdg.build_estimator(wpath, config=config, preset=preset, device=device)
+    meta = est.meta or {}
+    trained = trained_capture_names(meta)
+    from drone_fly.harness.offline.gate_dataset import same_camera
+
+    preset_uptilt = float(cfg.section("camera")["uptilt_deg"])
+    dirs = resolve_captures([str(c) for c in captures]) if captures else iter_capture_dirs()
+    chosen = []
+    for d in dirs:
+        m = read_meta(d)
+        if link_entry(m, catalogue)["split"] != split:
+            if captures:
+                raise HarnessConfigError(f"capture {d.name} is not on a {split} map ({m['map']})")
+            continue
+        if d.name in trained:
+            raise HarnessConfigError(
+                f"the weights trained or selected on capture {d.name}: it cannot be scored"
+            )
+        if not same_camera(m, preset_uptilt):
+            msg = (
+                f"capture {d.name} uses camera uptilt {m['camera']['uptilt_deg']:g}, not the "
+                f"preset's {preset_uptilt:g}: evaluation stays on the deployed camera"
+            )
+            if captures:
+                raise HarnessConfigError(msg)
+            logging.getLogger(__name__).warning("%s; skipped", msg)
+            continue
+        chosen.append((d, m))
+    if not chosen:
+        raise HarnessConfigError(f"no labelled capture on a {split} map to score")
+    by_map: dict[str, list] = {}
+    false, lat, frames, per_capture = [], [], 0, {}
+    for d, m in chosen:
+        cam_cfg, pairs, _ = gdg.capture_frames(d, cfg)
+        res = gdg.score_capture(est, cam_cfg, pairs)
+        by_map.setdefault(m["map"], []).extend(res["records"])
+        false += res["false"]
+        lat += res["latency_s"]
+        frames += res["frames"]
+        per_capture[d.name] = {"map": m["map"], "frames": res["frames"]}
+    pooled = [r for rs in by_map.values() for r in rs]
+    per_type = gdg.by_class(pooled)
+    seen = seen_types(meta)
+    judged = {}
+    for cls, bins in per_type.items():
+        s = bins[gdg.POOLED]
+        if cls not in seen:
+            judged[cls] = {"stratum": "unseen type", "judged": False}
+        elif s["n"] < JUDGE_MIN_N:
+            judged[cls] = {"stratum": "insufficient n", "judged": False}
+        else:
+            ok_det = s["detection_rate"] >= HELDOUT_TARGET_DETECTION
+            rel = s["position_error_rel_median"]
+            ok_err = rel is not None and rel <= HELDOUT_TARGET_REL_ERROR
+            judged[cls] = {
+                "stratum": "judged",
+                "judged": True,
+                "meets_detection_target": ok_det,
+                "meets_error_target": ok_err,
+                "pass": ok_det and ok_err,
+            }
+    report: dict[str, Any] = {
+        "weights": str(wpath),
+        "split": split,
+        "captures": per_capture,
+        "frames_scored": frames,
+        "range_bins_m": [list(b) for b in gdg.RANGE_BINS],
+        "targets": {
+            "detection_rate": HELDOUT_TARGET_DETECTION,
+            "position_error_rel": HELDOUT_TARGET_REL_ERROR,
+            "judge_min_n": JUDGE_MIN_N,
+        },
+        "rule": D_U1_RULE,
+        "per_map_type": {mp: gdg.by_class(rs) for mp, rs in sorted(by_map.items())},
+        "per_type": per_type,
+        "judgement": judged,
+        "pass": bool(judged)
+        and all(j["pass"] for j in judged.values() if j["judged"])
+        and any(j["judged"] for j in judged.values()),
+        "false_detections_per_frame": float(np.mean(false)) if false else 0.0,
+        "inference_ms": _latency(lat, getattr(est, "device", "cpu")),
+    }
+    if compare is not None:
+        report["compare"] = compare_protected(
+            wpath, compare, protected_capture, config=config, preset=preset, device=device
+        )
+    if report_path is None:
+        root = find_repo_root()
+        report_path = (
+            (root if root is not None else Path.cwd())
+            / "artifacts"
+            / "harness"
+            / "liftoff"
+            / "reports"
+            / "gate-eval"
+            / f"heldout_{wpath.stem}.json"
+        )
+    out = Path(report_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    report["report_path"] = str(out)
+    return report
+
+
+def compare_protected(
+    new: str | Path,
+    old: str | Path,
+    protected_capture: str | Path | None = None,
+    *,
+    config: Any = None,
+    preset: str | None = "liftoff",
+    device: str | None = None,
+    cls: str = "inflatable_arch",
+) -> dict[str, Any]:
+    """Both detectors on ``old``'s protected window of the Infinity Loop reference capture."""
+    from drone_fly.harness.offline import gate_diagnose as gdg
+    from drone_fly.harness.offline.capture_index import CaptureMetaError, resolve_captures
+    from drone_fly.harness.offline.detector_noise import heldout_window
+
+    if protected_capture:
+        cap = Path(protected_capture)
+    else:
+        try:  # by name anywhere under the captures root (captures/<Map>/<session>/)
+            cap = resolve_captures(["2026-10-11-infinity-manual"])[0]
+        except CaptureMetaError as exc:
+            raise HarnessConfigError(
+                "the Infinity Loop reference capture 2026-10-11-infinity-manual is not under the "
+                "captures root; pass it explicitly"
+            ) from exc
+    old_w = gdg.resolve_detector(old)
+    out: dict[str, Any] = {"capture": cap.name, "class": cls}
+    window = None
+    for name, path in (("old", old_w), ("new", gdg.resolve_detector(new))):
+        est, cfg = gdg.build_estimator(path, config=config, preset=preset, device=device)
+        if name == "old":
+            window = heldout_window(est.meta, cap.name)
+            if window is None:
+                raise HarnessConfigError(f"{old_w} records no held-out window for {cap.name}")
+        else:
+            w_new = heldout_window(est.meta, cap.name)  # raises if the new weights trained on it
+            if w_new is not None and w_new != window:
+                raise HarnessConfigError("the new weights hold out a different window")
+        cam_cfg, pairs, _ = gdg.capture_frames(cap, cfg, window)
+        res = gdg.score_capture(est, cam_cfg, pairs)
+        out[name] = {
+            "weights": str(path),
+            "frames": res["frames"],
+            "bins": gdg.binned([r for r in res["records"] if r["cls"] == cls]),
+        }
+    out["window"] = window
+    a = out["new"]["bins"][gdg.POOLED]["detection_rate"] or 0.0
+    b = out["old"]["bins"][gdg.POOLED]["detection_rate"] or 0.0
+    out["delta_pp"] = 100.0 * (a - b)
+    out["pass"] = a >= b - COMPARE_MAX_DROP
+    out["near_bin_tracked"] = {
+        "new": out["new"]["bins"]["4-8"]["detection_rate"],
+        "old": out["old"]["bins"]["4-8"]["detection_rate"],
+    }
+    return out
+
+
+def heldout_eval_summary(rep: dict[str, Any]) -> str:
+    lines = [f"{rep['split']} eval of {rep['weights']}: {rep['frames_scored']} frames"]
+    for cls, bins in rep["per_type"].items():
+        s = bins["4-25"]
+        j = rep["judgement"][cls]
+        rate = "-" if s["detection_rate"] is None else f"{100 * s['detection_rate']:.1f} %"
+        rel = s["position_error_rel_median"]
+        lines.append(
+            f"  {cls:28s} n {s['n']:5d}  det {rate:>7s}  rel err "
+            f"{'-' if rel is None else f'{100 * rel:.1f} %'}  [{j['stratum']}]"
+            + (f" {'PASS' if j['pass'] else 'FAIL'}" if j["judged"] else "")
+        )
+    lines.append(f"  false detections / frame {rep['false_detections_per_frame']:.2f}")
+    if "compare" in rep:
+        c = rep["compare"]
+        lines.append(
+            f"  Infinity Loop window: new vs old {c['delta_pp']:+.1f} pp -> "
+            f"{'PASS' if c['pass'] else 'FAIL'} (4-8 m: {c['near_bin_tracked']})"
+        )
+    lines.append("overall: " + ("PASS" if rep["pass"] else "FAIL / not judged"))
     return "\n".join(lines)

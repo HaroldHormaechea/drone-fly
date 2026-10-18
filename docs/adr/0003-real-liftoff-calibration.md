@@ -245,6 +245,13 @@ heatmap focal term dominates it. On the reference capture it bottoms out at epoc
 keypoint offsets are still under-trained. The predicted keypoint spread on held-out arches is about
 0.72x the true spread, so PnP places gates about 1.4x too far.
 
+> **UC71 follow-up ([ADR 0010](0010-multi-map-gate-detector.md) §6).** `harness gates diagnose`
+> measures these root causes per range bin on the same held-out window: spread ratio 0.40 / 0.72 /
+> 0.80 and median signed range error +148 / +38 / +26 % at 4-8 / 8-15 / 15-25 m; 55 of the 119
+> misses are PnP range errors and 64 have no centre peak. Model selection now uses the val-map
+> detection rate instead of the validation loss, and the gate table moved to
+> `configs/gate_types/liftoff.yaml`.
+
 Detection on the held-out laps (faster, banked, motion-blurred) was 19.6 %:
 
 - the network peaked on only about half of the in-range arches;

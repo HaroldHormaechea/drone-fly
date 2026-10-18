@@ -14,8 +14,27 @@
     drone-fly harness eval --session <run dir> --track <xml> --race <xml> --config <yaml>
                           [--report <json>]
     drone-fly harness eval --capture <dir> --labels <dir> [--preset] [--gate-weights] [--device]
+    drone-fly harness eval --detector <weights|dir> --split held-out [--captures ...]
+                          [--compare <weights>] [--protected-capture <dir>] [--device]
     drone-fly harness label --capture <dir> --track <xml> [--race] [--props] [--preset] [--out]
                           [--preview N] [--lag-ms]
+    drone-fly harness captures register <dir> --track <catalogue-id> [--trackdata-root] [--force]
+    drone-fly harness captures record --track <catalogue-id> [--max-s N] [--fps 10] [--port]
+    drone-fly harness captures replay --recording <name> [--max-s N] [--fps 10]
+                          [--strategy auto|A|B|C] [--allow-pending-camera]
+                          --browser-pos ENV,RACE,ROW
+    drone-fly harness captures inventory [--dir <Recordings>] [--json out] [--trackdata-root]
+                          [--no-pose]
+    drone-fly harness captures verify <dir> [--search-lag] [--search-uptilt] [--trackdata-root]
+                          [--no-write] [--calibrate]
+    drone-fly harness gates train (--captures <dir|glob|name>... | --all-captures) [--split-source]
+                          [--detector-id] [--epochs] [--backbone] [--input-width] [--frame-stride]
+                          [--max-frames-per-capture] [--select val-detection|val-loss|last]
+                          [--val-every 2] [--protect-holdout-of <weights>] [--deploy]
+    drone-fly harness gates dataset-report (--captures ... | --all-captures) [--json out]
+    drone-fly harness gates draft-types --props <props.json> --items <itemID>...
+    drone-fly harness gates diagnose --weights <weights|dir> --captures <dir>... [--all-frames]
+                          [--json out] [--device]
     drone-fly harness train-gates --labels <dir>... [--out] [--preset] [--epochs] [--backbone]
                           [--holdout-frac 0.2 | --holdout t0:t1]
     drone-fly harness depth-fit --capture <dir> --track <xml> [--race] [--props] [--preset]
@@ -234,6 +253,24 @@ def _hold_until_ctrl_c(overlay_process: object = None) -> None:
 
 
 def _cmd_eval(args: argparse.Namespace) -> int:
+    if args.detector is not None:
+        from drone_fly.harness.offline.evaluate import heldout_eval_summary, run_heldout_eval
+
+        rep = run_heldout_eval(
+            args.detector,
+            captures=args.captures,
+            split=args.split,
+            compare=args.compare,
+            protected_capture=args.protected_capture,
+            config=args.config,
+            preset=args.preset or "liftoff",
+            device=None if args.device in (None, "auto") else args.device,
+            split_source=args.split_source,
+            report_path=args.report,
+        )
+        print(heldout_eval_summary(rep))
+        print(f"report: {rep['report_path']}")
+        return EXIT_OK
     if args.capture is not None:
         from drone_fly.harness.offline.evaluate import capture_eval_summary, run_capture_eval
 
@@ -294,6 +331,331 @@ def _cmd_label(args: argparse.Namespace) -> int:
     print(f"labels: {meta['out_dir']}")
     if meta["previews"]:
         print(f"previews: {Path(meta['previews'][0]).parent}")
+    return EXIT_OK
+
+
+def _cmd_captures_register(args: argparse.Namespace) -> int:
+    from drone_fly.harness.offline.capture_index import capture_sha256, register
+
+    meta = register(
+        args.dir,
+        args.track,
+        config=args.config,
+        preset=args.preset or "liftoff",
+        trackdata_root=args.trackdata_root,
+        source=args.source,
+        force=args.force,
+    )
+    c = meta["completeness"]
+    print(f"registered {meta['name']}: {meta['catalogue_id']} ({meta['map']}, {meta['split']})")
+    print(f"completeness: {c['status']} ({c['source']}: {c.get('passed')}/{c.get('required')})")
+    print(f"capture sha256: {capture_sha256(args.dir)}")
+    print("alignment: unverified (run `drone-fly harness captures verify`)")
+    return EXIT_OK
+
+
+def _cmd_captures_record(args: argparse.Namespace) -> int:
+    from drone_fly.harness.offline.capture_session import record_manual
+
+    out, res = record_manual(
+        args.track,
+        max_s=args.max_s,
+        fps=args.fps,
+        port=args.port,
+        trackdata_root=args.trackdata_root,
+        preset=args.preset or "liftoff",
+    )
+    print(json.dumps(res["stats"], indent=2))
+    print(f"capture: {out}")
+    print(f"next: drone-fly harness captures verify {out} --search-lag")
+    return EXIT_OK
+
+
+def _browser_pos(
+    text: str | None,
+) -> tuple[tuple[int | None, int | None, int], tuple[int | None, int | None]] | None:
+    """``ENV[/N],RACE[/N],ROW`` (0-based; ``-`` keeps that filter; ``/N`` = the dropdown's entry
+    count) -> ``((env, race, row), (env count, race count))``."""
+    if not text:
+        return None
+    parts = text.split(",")
+    if len(parts) != 3:
+        raise HarnessConfigError(f"--browser-pos must be ENV,RACE,ROW, got {text!r}")
+    try:
+        idx, counts = [], []
+        for v in parts[:2]:
+            i, _, n = v.strip().partition("/")
+            idx.append(None if i == "-" else int(i))
+            counts.append(int(n) if n else None)
+        return (idx[0], idx[1], int(parts[2])), (counts[0], counts[1])
+    except ValueError as exc:
+        raise HarnessConfigError(f"--browser-pos must be integers or '-', got {text!r}") from exc
+
+
+def _browser_kwargs(text: str | None) -> dict[str, object]:
+    parsed = _browser_pos(text)
+    return {} if parsed is None else {"browser_pos": parsed[0], "dropdown_counts": parsed[1]}
+
+
+def _cmd_captures_replay(args: argparse.Namespace) -> int:
+    from drone_fly.harness.offline.capture_session import record_replay
+
+    out, res = record_replay(
+        args.recording,
+        max_s=args.max_s,
+        fps=args.fps,
+        port=args.port,
+        strategy=args.strategy,
+        recordings_dir=args.dir,
+        trackdata_root=args.trackdata_root,
+        preset=args.preset or "liftoff",
+        allow_pending_camera=args.allow_pending_camera,
+        **_browser_kwargs(args.browser_pos),
+    )
+    print(json.dumps(res, indent=2))
+    print(f"capture: {out}")
+    return EXIT_OK if res["alignment"]["verified"] else EXIT_CONFIG
+
+
+def _cmd_captures_inventory(args: argparse.Namespace) -> int:
+    from drone_fly.harness.offline.recordings import inventory, inventory_table
+
+    rows = inventory(
+        args.dir,
+        trackdata_root=args.trackdata_root,
+        pose_completeness=not args.no_pose,
+    )
+    print(inventory_table(rows))
+    if args.json:
+        Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.json).write_text(json.dumps([r.as_dict() for r in rows], indent=2),
+                                   encoding="utf-8")  # fmt: skip
+        print(f"inventory: {args.json}")
+    return EXIT_OK
+
+
+def _cmd_captures_verify(args: argparse.Namespace) -> int:
+    from drone_fly.harness.offline import align
+
+    kw = {"config": args.config, "preset": args.preset or "liftoff",
+          "trackdata_root": args.trackdata_root, "max_frames": args.max_frames}  # fmt: skip
+    if args.calibrate:
+        rep = align.calibration_report(args.dir, **kw)
+        print(json.dumps(rep, indent=2))
+        return EXIT_OK
+    res = align.verify_capture(
+        args.dir,
+        write=not args.no_write,
+        search_lag=args.search_lag,
+        search_uptilt=args.search_uptilt,
+        **kw,
+    )
+    print(json.dumps(res.alignment_block(), indent=2))
+    print("verified" if res.verified else "NOT verified: " + "; ".join(res.reasons))
+    return EXIT_OK if res.verified else EXIT_CONFIG
+
+
+def _gate_captures(args: argparse.Namespace) -> list[Path]:
+    from drone_fly.harness.offline.capture_index import iter_capture_dirs, resolve_captures
+
+    if args.all_captures:
+        return iter_capture_dirs(args.captures_root)
+    if not args.captures:
+        raise HarnessConfigError("pass --captures <dir|glob|name>... or --all-captures")
+    return resolve_captures(args.captures, args.captures_root)
+
+
+def _trainable_captures(args: argparse.Namespace) -> list[Path]:
+    """``--all-captures`` leaves out held-out-map captures (by name they still raise)."""
+    caps = _gate_captures(args)
+    if not args.all_captures:
+        return caps
+    from drone_fly.harness.offline.capture_index import CaptureMetaError, link_entry, read_meta
+    from drone_fly.tracks import catalogue as cat
+
+    catalogue = cat.load_catalogue(args.split_source) if args.split_source else cat.load_named(
+        "liftoff")  # fmt: skip
+    out = []
+    for d in caps:
+        try:
+            if link_entry(read_meta(d), catalogue)["split"] == "held-out":
+                logging.getLogger(__name__).info("held-out map: %s left out", d.name)
+                continue
+        except CaptureMetaError:
+            pass  # assemble records the refusal
+        out.append(d)
+    return out
+
+
+def _floats(text: str, flag: str) -> tuple[float, ...]:
+    try:
+        return tuple(float(v) for v in text.split(","))
+    except ValueError as exc:
+        raise HarnessConfigError(f"{flag} must be comma-separated numbers, got {text!r}") from exc
+
+
+def _cmd_gates_train(args: argparse.Namespace) -> int:
+    from drone_fly.harness.offline.gate_train import RollAug, train_multi
+
+    meta = train_multi(
+        _trainable_captures(args),
+        trackdata_root=args.trackdata_root,
+        split_source=args.split_source,
+        detector_id=args.detector_id,
+        config=args.config,
+        preset=args.preset or "liftoff",
+        epochs=args.epochs,
+        backbone=args.backbone,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        input_width=args.input_width,
+        frame_stride=args.frame_stride,
+        max_frames_per_capture=args.max_frames_per_capture,
+        select=args.select,
+        val_every=args.val_every,
+        patience=args.patience,
+        protect_holdout_of=None if args.protect_holdout_of == "none" else args.protect_holdout_of,
+        deploy=args.deploy,
+        device=args.device,
+        roll=RollAug(
+            p=args.aug_roll_p,
+            edges=_floats(args.aug_roll_edges, "--aug-roll-edges"),
+            weights=_floats(args.aug_roll_weights, "--aug-roll-weights"),
+            fallback_weights=_floats(args.aug_roll_fallback_weights, "--aug-roll-fallback-weights"),
+            shift=args.aug_shift,
+            fill=args.aug_roll_fill,
+            keep_sign_p=args.aug_roll_keep_sign_p,
+        ).validate(),
+        rotated_val=_floats(args.rotated_val, "--rotated-val") if args.rotated_val else (),
+        live_roll_val=args.live_roll_val,
+        resume=args.resume,
+    )
+    print(f"weights: {meta['weights']} ({meta['purpose']}, epoch {meta['chosen_epoch']})")
+    if meta.get("chosen_val_detection"):
+        print(f"val detection: {meta['chosen_val_detection']}")
+    print(f"data manifest: {meta['data_manifest']}")
+    return EXIT_OK
+
+
+def _peak_rss_mb() -> float | None:
+    """This process's peak resident memory (MB), or None when the platform can't say."""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class _Counters(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [
+                (n, ctypes.c_size_t)
+                for n in ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                          "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                          "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage")
+            ]  # fmt: skip
+
+        c = _Counters()
+        c.cb = ctypes.sizeof(c)
+        k32 = ctypes.WinDLL("kernel32")
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        psapi = ctypes.WinDLL("psapi")
+        psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
+        if not psapi.GetProcessMemoryInfo(k32.GetCurrentProcess(), ctypes.byref(c), c.cb):
+            return None
+        return c.PeakWorkingSetSize / 2**20
+    try:
+        import resource
+    except ImportError:
+        return None
+    kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return kb / 2**20 if sys.platform == "darwin" else kb / 1024
+
+
+def _cmd_gates_dataset_report(args: argparse.Namespace) -> int:
+    from drone_fly.harness.config import load_config
+    from drone_fly.harness.gate_types import GateTypeTable
+    from drone_fly.harness.offline import gate_dataset as gd
+    from drone_fly.harness.offline.capture_index import CaptureMetaError, link_entry, read_meta
+    from drone_fly.harness.offline.gate_train import load_labels
+    from drone_fly.tracks import catalogue as cat
+
+    cfg = load_config("liftoff", args.config, preset=args.preset or "liftoff")
+    catalogue = cat.load_catalogue(args.split_source) if args.split_source else cat.load_named(
+        "liftoff")  # fmt: skip
+    usable, heldout_rows = [], {}
+    for d in _gate_captures(args):
+        try:
+            meta = read_meta(d)
+            split = link_entry(meta, catalogue)["split"]
+        except CaptureMetaError:
+            usable.append(d)  # assemble records the refusal
+            continue
+        if split == "held-out":
+            lab = gd.labels_dir_for(d, meta)
+            ok_cam = gd.same_camera(meta, float(cfg.section("camera")["uptilt_deg"]))
+            if lab is not None and meta["alignment"].get("verified") and ok_cam:
+                heldout_rows.setdefault(meta["map"], []).extend(load_labels(lab).rows)
+            continue
+        usable.append(d)
+    protect = None if args.protect_holdout_of == "none" else args.protect_holdout_of
+    if protect == "release:v1":
+        from drone_fly.harness.liftoff.gate_learned import configured_weights
+
+        protect = configured_weights({"release": "v1"})
+    ds = gd.assemble(
+        usable,
+        catalogue=catalogue,
+        table=GateTypeTable.from_config(cfg.get("gate_types")),
+        not_gates=cfg.not_gates,
+        trackdata_root=args.trackdata_root,
+        protect=gd.read_weights_meta(protect),
+        frame_stride=args.frame_stride,
+        max_frames_per_capture=args.max_frames_per_capture,
+        telemetry_cfg=cfg.section("telemetry"),
+        preset_uptilt_deg=float(cfg.section("camera")["uptilt_deg"]),
+    )
+    rep = gd.dataset_report(ds, heldout_rows)
+    print(gd.report_summary(rep))
+    if args.build_cache:
+        lw = args.input_width or int(
+            (cfg.section("gates").get("learned") or {}).get("input_width", 768)
+        )
+        _, idx = gd.build_frame_cache(ds, lw, cfg.section("camera"))
+        print(f"frame cache: {gd.cache_dir(ds, lw)} ({idx['shape'][0]} frames)")
+        peak = _peak_rss_mb()
+        if peak is not None:
+            print(f"peak RAM: {peak:.0f} MB")
+    if args.json:
+        Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.json).write_text(json.dumps(rep, indent=2), encoding="utf-8")
+        print(f"report: {args.json}")
+    return EXIT_OK if rep["g1"]["go"] else EXIT_COVERAGE
+
+
+def _cmd_gates_diagnose(args: argparse.Namespace) -> int:
+    from drone_fly.harness.offline.gate_diagnose import diagnose, diagnose_table
+
+    rep = diagnose(
+        args.weights,
+        args.captures,
+        config=args.config,
+        preset=args.preset or "liftoff",
+        device=None if args.device in (None, "auto") else args.device,
+        all_frames=args.all_frames,
+    )
+    print(diagnose_table(rep))
+    if args.json:
+        Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.json).write_text(json.dumps(rep, indent=2), encoding="utf-8")
+        print(f"report: {args.json}")
+    return EXIT_OK
+
+
+def _cmd_gates_draft_types(args: argparse.Namespace) -> int:
+    import yaml
+
+    from drone_fly.harness.offline.autolabel import draft_gate_types, load_props
+
+    drafts = draft_gate_types(load_props(args.props), args.items)
+    print("# CANDIDATES ONLY: check every class with label previews before training on it.")
+    print(yaml.safe_dump({"gate_types": drafts}, sort_keys=False, default_flow_style=None))
     return EXIT_OK
 
 
@@ -675,11 +1037,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--race", help="Liftoff race XML (gate order)")
     p_eval.add_argument("--capture", help="capture folder to score the learned gate detector on")
     p_eval.add_argument("--labels", help="label folder of --capture (from `harness label`)")
-    p_eval.add_argument("--gate-weights", help="gate-net weights (default: gates.learned.weights)")
+    p_eval.add_argument(
+        "--gate-weights", help="gate-net weights (default: gates.learned.weights / release)"
+    )
     p_eval.add_argument("--device", choices=("auto", "cpu", "cuda"), help="gate-net device")
     p_eval.add_argument(
         "--all-frames", action="store_true", help="score every frame, not only the held-out split"
     )
+    p_eval.add_argument("--detector", help="UC71: weights file or models/<detector-id>/ folder")
+    p_eval.add_argument("--split", choices=("held-out", "val"), default="held-out",
+                        help="maps to score (catalogue split) with --detector")  # fmt: skip
+    p_eval.add_argument("--captures", nargs="+", help="with --detector: these captures only")
+    p_eval.add_argument("--compare", help="with --detector: the weights to compare against (v1)")
+    p_eval.add_argument("--protected-capture", help="the Infinity Loop reference capture folder")
+    p_eval.add_argument("--split-source", help="track catalogue (default tracks/liftoff.yaml)")
     _common(p_eval)
     p_eval.add_argument(
         "--report", help="eval_report.json path (default: <session>/ or artifacts/...)"
@@ -693,13 +1064,144 @@ def build_parser() -> argparse.ArgumentParser:
     p_label.add_argument("--race", help="Liftoff race XML (recorded in the metadata)")
     p_label.add_argument("--props", help="props.json: cross-check gate_types against colliders")
     _common(p_label)
-    p_label.add_argument("--out", help="label folder (default artifacts/harness/liftoff/labels/)")
+    p_label.add_argument("--out", help="label folder (default <data root>/labels/<capture>/)")
     p_label.add_argument("--preview", type=int, default=0, help="write N overlay previews")
     p_label.add_argument("--preview-dir", help="preview root (default .../reports/label-preview)")
     p_label.add_argument("--lag-ms", type=float, default=0.0, help="frame -> telemetry lag")
     p_label.set_defaults(func=_cmd_label)
 
-    p_train = hsub.add_parser("train-gates", help="train the learned gate detector on labels")
+    p_caps = hsub.add_parser("captures", help="multi-map gate captures (UC71)")
+    csub = p_caps.add_subparsers(dest="captures_command", required=True)
+    p_reg = csub.add_parser("register", help="write meta.json for an existing capture folder")
+    p_reg.add_argument("dir", help="capture folder (frames.csv + telemetry)")
+    p_reg.add_argument("--track", required=True, help="tracks/liftoff.yaml catalogue id")
+    p_reg.add_argument("--trackdata-root", help="trackdata root (completeness from telemetry)")
+    p_reg.add_argument("--source", choices=("manual",), default="manual")
+    p_reg.add_argument("--force", action="store_true", help="rewrite an existing meta.json")
+    _common(p_reg)
+    p_reg.set_defaults(func=_cmd_captures_register)
+    p_rec = csub.add_parser("record", help="record a hand-flown capture of a catalogue track")
+    p_rec.add_argument("--track", required=True, help="tracks/liftoff.yaml catalogue id")
+    p_rec.add_argument("--max-s", type=float, help="stop after N seconds (default: Ctrl+C)")
+    p_rec.add_argument("--fps", type=float, default=10.0)
+    p_rec.add_argument("--port", type=int, default=9001, help="Liftoff telemetry UDP port")
+    p_rec.add_argument("--trackdata-root", help="trackdata root (completeness)")
+    _common(p_rec)
+    p_rec.set_defaults(func=_cmd_captures_record)
+    p_rep = csub.add_parser("replay", help="play a stored recording in Liftoff and capture it")
+    p_rep.add_argument("--recording", required=True, help="recording name (file stem) or path")
+    p_rep.add_argument("--max-s", type=float, help="cap the capture length")
+    p_rep.add_argument("--fps", type=float, default=10.0)
+    p_rep.add_argument("--port", type=int, default=9001)
+    p_rep.add_argument("--strategy", choices=("auto", "A", "B", "C"), default="auto")
+    p_rep.add_argument("--browser-pos", help="ENV[/N],RACE[/N],ROW: replay-browser dropdown / "
+                       "list indices, 0-based ('-' keeps a filter; /N = entries in that "
+                       "dropdown, needed for its last 5)")  # fmt: skip
+    p_rep.add_argument("--dir", help="Recordings folder (default %%USERPROFILE%%\\AppData\\...)")
+    p_rep.add_argument("--trackdata-root", help="trackdata root (verify)")
+    p_rep.add_argument("--allow-pending-camera", action="store_true",
+                       help="try a recording made with another drone/camera")  # fmt: skip
+    _common(p_rep)
+    p_rep.set_defaults(func=_cmd_captures_replay)
+    p_inv = csub.add_parser("inventory", help="list Liftoff's stored recordings (read-only)")
+    p_inv.add_argument("--dir", help="Recordings folder (default %%USERPROFILE%%\\AppData\\...)")
+    p_inv.add_argument("--json", help="write the rows as JSON here")
+    p_inv.add_argument("--trackdata-root", help="trackdata root (pose completeness)")
+    p_inv.add_argument("--no-pose", action="store_true", help="skip pose-based completeness")
+    p_inv.set_defaults(func=_cmd_captures_inventory)
+    p_ver = csub.add_parser("verify", help="projection alignment: lag, camera, verified flag")
+    p_ver.add_argument("dir", help="capture folder with meta.json")
+    p_ver.add_argument("--search-lag", action="store_true", help="search the time offset +-1.5 s")
+    p_ver.add_argument("--search-uptilt", action="store_true", help="search uptilt +-5 deg")
+    p_ver.add_argument("--trackdata-root", help="trackdata root (the capture's track XML)")
+    p_ver.add_argument("--max-frames", type=int, default=120, help="frames sampled")
+    p_ver.add_argument("--no-write", action="store_true", help="do not update meta.json")
+    p_ver.add_argument("--calibrate", action="store_true",
+                       help="print margins of the best vs deliberately wrong poses")  # fmt: skip
+    _common(p_ver)
+    p_ver.set_defaults(func=_cmd_captures_verify)
+
+    p_gates = hsub.add_parser("gates", help="multi-map gate detector: train, report, types")
+    gsub = p_gates.add_subparsers(dest="gates_command", required=True)
+
+    def _gate_inputs(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--captures", nargs="+", help="capture folders, globs or names")
+        p.add_argument("--all-captures", action="store_true", help="every capture found")
+        p.add_argument("--captures-root", help="default <data root>/captures")
+        p.add_argument("--split-source", help="track catalogue (default tracks/liftoff.yaml)")
+        p.add_argument("--trackdata-root", help="trackdata root (track XMLs)")
+        p.add_argument("--frame-stride", type=int, default=1)
+        p.add_argument("--max-frames-per-capture", type=int)
+        p.add_argument("--protect-holdout-of", default="release:v1",
+                       help="weights whose held-out windows stay out (default: v1 under "
+                            "<data root>/models/detector-v1; kept by sha256; 'none' = off)",
+                       )  # fmt: skip
+        _common(p)
+
+    p_gt = gsub.add_parser("train", help="train on train-map captures, select on val maps")
+    _gate_inputs(p_gt)
+    p_gt.add_argument("--detector-id", help="default liftoff-gates-v2-<YYYYMMDD-HHMM>")
+    p_gt.add_argument("--epochs", type=int, default=40)
+    p_gt.add_argument("--backbone", choices=("resnet18-hf", "tiny-cnn"), default="resnet18-hf")
+    p_gt.add_argument("--batch-size", type=int, default=8)
+    p_gt.add_argument("--lr", type=float, default=1e-3)
+    p_gt.add_argument("--input-width", type=int)
+    p_gt.add_argument("--select", choices=("val-detection", "val-loss", "last"),
+                      default="val-detection")  # fmt: skip
+    p_gt.add_argument("--val-every", type=int, default=2, help="val decode every N epochs")
+    p_gt.add_argument("--patience", type=int, help="early stop after N epochs without gain")
+    p_gt.add_argument("--deploy", action="store_true",
+                      help="retrain on train + val maps (select last) -> *-deploy.pt")  # fmt: skip
+    p_gt.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    p_gt.add_argument("--resume", action="store_true",
+                      help="continue <detector-id>/resume.pt after the last finished epoch "
+                           "(same captures and flags)")  # fmt: skip
+    p_gt.add_argument("--aug-roll-p", type=float, default=0.0,
+                      help="share of images rolled (0 = off, as R1)")  # fmt: skip
+    p_gt.add_argument("--aug-roll-edges", default="0,15,35,60,90,135",
+                      help="target |roll| buckets, deg, max 135 (live mix)")  # fmt: skip
+    p_gt.add_argument("--aug-roll-weights", default="0.15,0.35,0.40,0.07,0.03",
+                      help="target weight per bucket (live flight, ADR 0010)")  # fmt: skip
+    p_gt.add_argument("--aug-roll-fallback-weights", default="0.10,0.25,0.35,0.25,0.05",
+                      help="raw-angle weights for frames with no known roll")  # fmt: skip
+    p_gt.add_argument("--aug-roll-keep-sign-p", type=float, default=0.8,
+                      help="chance a target keeps the frame's own roll sign")  # fmt: skip
+    p_gt.add_argument("--live-roll-val", action="store_true",
+                      help="also report val re-rolled to the live mix")  # fmt: skip
+    p_gt.add_argument("--aug-roll-fill", choices=("mean", "reflect"), default="mean",
+                      help="uncovered corners: ImageNet mean colour or reflection")  # fmt: skip
+    p_gt.add_argument("--rotated-val", help="report val detection on frames rolled by these "
+                      "angles, e.g. 0,30,60,90,135 (not used for selection)")  # fmt: skip
+    p_gt.add_argument("--aug-shift", type=float, default=0.0,
+                      help="random translation, fraction of the width (<= 0.05)")  # fmt: skip
+    p_gt.set_defaults(func=_cmd_gates_train)
+    p_gr = gsub.add_parser("dataset-report", help="in-range gate-frame counts and the G1 gate")
+    _gate_inputs(p_gr)
+    p_gr.add_argument("--json", help="write the report JSON here")
+    p_gr.add_argument(
+        "--build-cache",
+        action="store_true",
+        help="also build the training frame cache (CPU) for `gates train`",
+    )
+    p_gr.add_argument("--input-width", type=int, help="network input width of the cache")
+    p_gr.set_defaults(func=_cmd_gates_dataset_report)
+    p_gd = gsub.add_parser("draft-types", help="candidate gate_types entries from props.json")
+    p_gd.add_argument("--props", required=True, help="props.json (liftoff-flight-analyzer)")
+    p_gd.add_argument("--items", nargs="+", required=True, help="itemIDs")
+    p_gd.set_defaults(func=_cmd_gates_draft_types)
+    p_gx = gsub.add_parser("diagnose", help="attribute detector misses per range bin")
+    p_gx.add_argument("--weights", required=True, help="weights file or models/<detector-id>/")
+    p_gx.add_argument("--captures", nargs="+", required=True, help="labelled capture folders")
+    p_gx.add_argument("--all-frames", action="store_true",
+                      help="also score frames the weights trained on")  # fmt: skip
+    p_gx.add_argument("--json", help="write the full report JSON here")
+    p_gx.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    _common(p_gx)
+    p_gx.set_defaults(func=_cmd_gates_diagnose)
+
+    p_train = hsub.add_parser(
+        "train-gates", help="train the learned gate detector on labels (alias, single-map UC64)"
+    )
     p_train.add_argument("--labels", nargs="+", required=True, help="label folder(s)")
     p_train.add_argument("--out", help="weights path (default .../models/liftoff-gates.pt)")
     _common(p_train)

@@ -4,10 +4,15 @@ Writes the manual-capture layout the owner's ``capture.py`` produces — ``telem
 (``t_wall_ns,len,hex``: raw datagrams packed with the configured :class:`TelemetryFormat`),
 ``frames.csv`` (``t_wall_ns,file``) and ``frames/`` — with small ``.npy`` frames so nothing needs
 OpenCV. Poses are given in Unity (x right, y up, z forward; quaternion ``x, y, z, w``).
+
+UC71: :func:`write_recording` writes a synthetic Liftoff recording XML
+(``LocalGhostStatesRecording``, schema in ``docs/harness/liftoff-captures.md`` AC1a), invented
+values only.
 """
 
 from __future__ import annotations
 
+import base64
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -150,3 +155,117 @@ def labelled_capture(tmp: Path, duration_s: float = 12.0, fps: float = 10.0) -> 
     labels = tmp / "labels"
     run_autolabel(cap, track, preset="liftoff", config=SMALL_CAMERA, out=labels)
     return cap, labels
+
+
+# ----------------------------------------------------------------------------- UC71 recordings
+
+#: The two drone setups seen in real recordings (``droneConfiguration``): name, camera id, uptilt.
+RECORDING_DRONES = {
+    "small": ("Test small drone", "CameraFX805MicroCam01", 20.0315),
+    "borrum": ("Borrum 180 X (Tutorial)", "CameraVortex01", 30.0),
+}
+RECORDING_TRACK_UUID = "0f6c1d2e-1111-4a5b-9c0d-a1b2c3d4e5f6"
+RECORDING_RACE_UUID = "7a8b9c0d-2222-4e5f-8a9b-f6e5d4c3b2a1"
+RECORDING_RATE_HZ = 10.0
+RECORDING_STATE_BYTES = 48  # 12 little-endian float32
+
+
+def recording_states(poses: Sequence[Pose], t0: float = 1234.5) -> np.ndarray:
+    """``(N, 12)`` float32 POSITION_STICKS records: position, quat xyzw, sticks, game time."""
+    out = np.zeros((len(poses), 12), np.float32)
+    for i, p in enumerate(poses):
+        out[i, 0:3] = p.position
+        out[i, 3:7] = p.quat_xyzw
+        # sticks: throttle 0..1, then yaw, pitch, roll in -1..1 (invented, smooth)
+        out[i, 7:11] = (0.55, 0.1 * math.sin(p.t_sim), -0.2, 0.05 * math.cos(p.t_sim))
+        out[i, 11] = t0 + p.t_sim
+    return out
+
+
+def _race_time(total: float) -> str:
+    mm, ss = divmod(total, 60.0)
+    return f"{int(mm):02d}_{int(ss):02d}_{int(round((ss % 1) * 1000)):03d}"
+
+
+def write_recording(
+    path: Path,
+    poses: Sequence[Pose] | None = None,
+    *,
+    completed: bool = True,
+    drone: str = "small",
+    duplicate_stamp: int | None = None,
+    laps: int = 2,
+    lap_time_s: float = 48.021,
+    environment: str = "FakeArena",
+    gamemode: str = "Race",
+    track_uuid: str = RECORDING_TRACK_UUID,
+    race_uuid: str | None = RECORDING_RACE_UUID,
+    name: str | None = None,
+    t0: float = 1234.5,
+    game_version: str = "1.7.6",
+) -> Path:
+    """Write a synthetic ``LocalGhostStatesRecording`` (see ``docs/harness/liftoff-captures.md``).
+
+    ``poses`` default to a 12 s straight flight at 10 Hz (:data:`RECORDING_RATE_HZ`).
+    ``completed=False`` gives an unfinished race: ``totalTime`` 0, ``00_00_000`` in the name and one
+    lap fewer in ``lapTimes`` than laps started. ``drone`` is a :data:`RECORDING_DRONES` key
+    (``small`` at uptilt 20.0315, ``borrum`` at 30). ``duplicate_stamp=k`` gives state ``k + 1`` the
+    game time of state ``k`` (a time stall: step 0, under 0.2 m of motion, as in 5 real files).
+    ``race_uuid=None`` omits ``raceID`` (FreeFlight / StuntMode).
+    """
+    if poses is None:
+        poses = straight_flight(duration_s=12.0, rate_hz=RECORDING_RATE_HZ, velocity=(0, 0, 1.0))
+    states = recording_states(poses, t0)
+    if duplicate_stamp is not None:
+        k = int(duplicate_stamp)
+        if not 0 <= k < len(states) - 1:
+            raise ValueError(f"duplicate_stamp {k} out of range for {len(states)} states")
+        states[k + 1, 11] = states[k, 11]
+    dname, cam_id, angle = RECORDING_DRONES[drone]
+    n = len(states)
+    starts = [round(i * n / (laps + 1)) for i in range(laps)]
+    done = laps if completed else laps - 1
+    lap_times = [round(lap_time_s + 0.137 * i, 3) for i in range(done)]
+    total = round(sum(lap_times), 3) if completed else 0.0
+    race_time = _race_time(total) if completed else "00_00_000"
+    name = name or f"01 - {environment} - {race_time} - 2026-10-13"
+    payload = base64.b64encode(states.astype("<f4").tobytes()).decode("ascii")
+    lines = [
+        '<?xml version="1.0" encoding="utf-8"?>',
+        "<!-- Synthetic UC71 Liftoff recording (liftoff_capture_support.py); invented values. -->",
+        '<LocalGhostStatesRecording xmlns:xsd="http://www.w3.org/2001/XMLSchema" '
+        'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">',
+        f"  <gameVersion>{game_version}</gameVersion>",
+        f"  <name>{name}</name>",
+        f"  <environment>{environment}</environment>",
+        f"  <gamemode>{gamemode}</gamemode>",
+        "  <gameModifiers>DisableGodMode EnableCameraNoise EnableBattery</gameModifiers>",
+        "  <isCrashed>false</isCrashed>",
+        f"  <trackID><str>{track_uuid}</str></trackID>",
+        *([f"  <raceID><str>{race_uuid}</str></raceID>"] if race_uuid else []),
+        "  <creationTime>20261013.101500</creationTime>",
+        f"  <totalTime>{total}</totalTime>",
+        "  <lapStartIndices>" + "".join(f"<int>{i}</int>" for i in starts) + "</lapStartIndices>",
+        "  <lapTimes>" + "".join(f"<float>{t}</float>" for t in lap_times) + "</lapTimes>",
+        "  <droneConfiguration>",
+        f"    <name>{dname}</name>",
+        "    <FlightController><rates><roll>0.7</roll></rates></FlightController>",
+        f"    <Blueprint><camera><id>{cam_id}</id><angle>{angle}</angle></camera></Blueprint>",
+        "  </droneConfiguration>",
+        "  <stunts />",
+        "  <events />",
+        "  <stateLayout>POSITION_STICKS</stateLayout>",
+        f"  <statesByte>{payload}</statesByte>",
+        "</LocalGhostStatesRecording>",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def read_recording_states(path: Path) -> np.ndarray:
+    """Decode a recording's ``statesByte`` back to ``(N, 12)`` float32 (test-side helper)."""
+    import xml.etree.ElementTree as ET
+
+    raw = base64.b64decode(ET.parse(path).getroot().findtext("statesByte") or "")
+    return np.frombuffer(raw, "<f4").reshape(-1, 12)

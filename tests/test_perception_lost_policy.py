@@ -423,6 +423,8 @@ def test_the_learned_estimator_reads_the_policy(monkeypatch):
     L = gate_learned.LearnedGateEstimator  # noqa: N806
     monkeypatch.setattr(gate_learned, "resolve_weights_path", lambda w: "weights.pt")
     monkeypatch.setattr(gate_learned, "load_weights", lambda *a, **k: (None, {}))
+    # UC71: from_config checks the weights' gate-type table; the stub weights have none
+    monkeypatch.setattr(gate_learned, "weights_table", lambda meta, table, path: table)
     monkeypatch.setattr(L, "__init__", fake_init)
     monkeypatch.setattr(L, "warmup", lambda self: None)
     hc = load_config("liftoff", overrides={"gates.lost_policy": "reacquire",

@@ -13,6 +13,11 @@ The telemetry stream is cut into **segments** at wall-clock gaps > ``gap_s`` (1 
 resets and per-sample position jumps (``telemetry.max_position_jump_m``, i.e. respawns). Each frame
 (shifted by ``lag_ms``) is paired with the nearest datagram within ``pair_tol_s`` (30 ms); frames
 outside a segment or within ``cut_margin_s`` (0.5 s) of a cut are dropped, with the reason counted.
+
+**Static trim (UC71, off by default).** With ``static_trim=True`` a run of paired frames that stays
+within ``STATIC_MOVE_M`` (5 cm) and ``STATIC_TURN_DEG`` (1 deg) of its first frame for longer than
+``STATIC_MIN_S`` (1 s) keeps only that first frame; the rest count as drop reason ``static``
+(a parked drone would otherwise flood a dataset with near-identical frames).
 """
 
 from __future__ import annotations
@@ -33,6 +38,10 @@ from drone_fly.harness.liftoff.telemetry import (
     read_telemetry_csv,
 )
 from drone_fly.harness.types import FlightState, TelemetrySample
+
+STATIC_MOVE_M = 0.05
+STATIC_TURN_DEG = 1.0
+STATIC_MIN_S = 1.0
 
 
 @dataclass(frozen=True)
@@ -139,6 +148,7 @@ def load_capture(
     pair_tol_s: float = 0.03,
     cut_margin_s: float = 0.5,
     gap_s: float = 1.0,
+    static_trim: bool = False,
 ) -> Capture:
     """Read a capture / run folder and pair its frames with telemetry (see the module docstring)."""
     root = Path(root)
@@ -191,8 +201,45 @@ def load_capture(
             dropped["missing_image"] += 1
             continue
         cap.frames.append(CaptureFrame(idx, stamp, path, i, samples[i], states[i], k))
+    if static_trim:
+        cap.frames, n_static = trim_static(cap.frames)
+        if n_static:
+            dropped["static"] += n_static
     cap.dropped = dict(dropped)
     return cap
+
+
+def _turn_deg(q0: np.ndarray, q1: np.ndarray) -> float:
+    d = abs(float(np.dot(q0, q1))) / max(float(np.linalg.norm(q0) * np.linalg.norm(q1)), 1e-12)
+    return float(np.degrees(2.0 * np.arccos(min(d, 1.0))))
+
+
+def trim_static(frames: list[CaptureFrame]) -> tuple[list[CaptureFrame], int]:
+    """Keep one frame per static run (see the module docstring); ``(kept, n_dropped)``."""
+    kept: list[CaptureFrame] = []
+    n_drop = 0
+    i = 0
+    while i < len(frames):
+        a = frames[i]
+        j = i + 1
+        while j < len(frames):
+            b = frames[j]
+            if (
+                b.segment != a.segment
+                or float(np.linalg.norm(np.asarray(b.sample.position) - a.sample.position))
+                >= STATIC_MOVE_M
+                or _turn_deg(np.asarray(a.sample.quat_xyzw), np.asarray(b.sample.quat_xyzw))
+                >= STATIC_TURN_DEG
+            ):
+                break
+            j += 1
+        if frames[j - 1].stamp - a.stamp > STATIC_MIN_S:
+            kept.append(a)
+            n_drop += j - i - 1
+        else:
+            kept.extend(frames[i:j])
+        i = j
+    return kept, n_drop
 
 
 def load_frame_image(path: Path) -> np.ndarray:

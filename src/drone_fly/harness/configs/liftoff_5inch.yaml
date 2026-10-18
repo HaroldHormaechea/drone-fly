@@ -165,6 +165,7 @@ gates:
   # `learned` gate estimator (parts.gate_estimator: learned): keypoint net + PnP per gate type.
   learned:
     weights: null           # trained by `drone-fly harness train-gates`; relative = repo root
+    release: null           # v1 ...: a published release's weights when `weights` is unset (UC71)
     device: auto            # auto | cpu | cuda
     fp16: true              # half precision on CUDA
     input_width: 768        # network input width (frames are resized, aspect kept)

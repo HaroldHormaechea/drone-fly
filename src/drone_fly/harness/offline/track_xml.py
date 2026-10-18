@@ -318,7 +318,7 @@ def _gate_geometry(
     gtype = table.classify(it.item_id) if table is not None else None
     if gtype is not None:
         w, h = gtype.aperture[0] * s[0], gtype.aperture[1] * s[1]
-        return gtype.cls, min(w, h), np.asarray(gtype.center_offset, np.float64) * s
+        return gtype.cls, min(w, h), gtype.item_center() * s
     entry = _classify(it.item_id, item_table)
     if entry is None or entry.get("kind") != "gate":
         return None

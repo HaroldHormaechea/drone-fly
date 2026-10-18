@@ -80,7 +80,7 @@ Statuses:
 | 68 | [use-cases/68-track-library-multi-track-teacher.md](use-cases/68-track-library-multi-track-teacher.md) | Track library + multi-track privileged teacher | done | 2026-10-13 |
 | 69 | [use-cases/69-teacher-in-liftoff-with-oracle-gates.md](use-cases/69-teacher-in-liftoff-with-oracle-gates.md) | Fly the teacher in Liftoff with exact gate poses (oracle perception) | done | 2026-10-13 |
 | 70 | [use-cases/70-student-distillation-detector-noise.md](use-cases/70-student-distillation-detector-noise.md) | Deployable student distilled under a measured detector-noise model | in-progress | 2026-10-13 |
-| 71 | [use-cases/71-multi-map-gate-detector.md](use-cases/71-multi-map-gate-detector.md) | Gate detector generalization across Liftoff maps and gate types | pending | 2026-10-12 |
+| 71 | [use-cases/71-multi-map-gate-detector.md](use-cases/71-multi-map-gate-detector.md) | Gate detector generalization across Liftoff maps and gate types | in-progress | 2026-10-18 |
 | 72 | [use-cases/72-liftoff-eval-and-fine-tuning.md](use-cases/72-liftoff-eval-and-fine-tuning.md) | Liftoff evaluation on held-out tracks + fine-tuning from Liftoff episodes | pending | 2026-10-12 |
 | 73 | [use-cases/73-camera-obstacle-eyes-for-70-input-connectome.md](use-cases/73-camera-obstacle-eyes-for-70-input-connectome.md) | Camera-based obstacle "eyes" for the 70-input connectome (draft, needs refinement) | pending | 2026-10-14 |
 | 74 | [use-cases/74-hud-next-gate-pointer-reader.md](use-cases/74-hud-next-gate-pointer-reader.md) | Live HUD next-gate pointer reader (classic OpenCV, no ML) | done | 2026-10-15 |

@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 
 import numpy as np
@@ -43,11 +44,13 @@ from drone_fly.sim.pool import (
     surface_distance_matrix,
 )
 from drone_fly.tracks.liftoff import (
+    CONVERSION_VERSION,
     ConversionConfig,
     PropsTable,
     UnconvertibleError,
     _frame_ring,
     convert_liftoff,
+    harness_tables,
     is_nonsolid_item,
     item_primitives,
     passage_bottom_z,
@@ -590,3 +593,68 @@ def test_every_route_passage_lies_above_the_floor_kill_plane(tmp_path, props):
         top = p.center[2] + float(np.abs(p.vol_rot[2]) @ p.vol_half)  # the volume's highest z
         assert top == pytest.approx(0.5 - 1.0)
         assert top > c.floor_z + FLOOR_KILL_M, (p.center, c.floor_z)
+
+
+# ----------------------------------------------------------------------------- UC71 H1 pin
+
+#: Measured on the pre-UC71 code (c7bd457). Growing the gate-types table or adding keys to an
+#: entry must not change the sim conversion; a deliberate change is a CONVERSION_VERSION bump.
+DEFAULT_FINGERPRINT = "639beb3ef1bd8bec"
+FIELD_PASSAGES_SHA256 = "45e8b9f83ae82649aaa0fc6343541bd143b49e31b184deae238fe30967b525cd"
+ARCH_KEYS = {"aperture", "center_offset", "class", "flip_pairs", "keypoints", "match", "outer",
+             "outline", "tube_radius"}  # fmt: skip
+
+
+def _passages_sha256(course) -> str:
+    h = hashlib.sha256()
+    for p in course.passages:
+        h.update(p.kind.encode())
+        for a in (p.center, p.normal, p.outline):
+            h.update((np.round(np.asarray(a, np.float64), 6) + 0.0).tobytes())  # +0.0: no -0.0
+    return h.hexdigest()
+
+
+def test_default_conversion_fingerprint_is_pinned():
+    assert CONVERSION_VERSION == 4
+    assert ConversionConfig.from_dict(None).fingerprint() == DEFAULT_FINGERPRINT
+    assert ConversionConfig.from_dict({}).fingerprint() == DEFAULT_FINGERPRINT
+
+
+def test_default_gate_table_is_only_the_inflatable_arch_with_todays_keys():
+    gt, it = harness_tables()
+    assert len(gt) == 1
+    assert gt[0]["class"] == "inflatable_arch"
+    assert set(gt[0]) == ARCH_KEYS  # a leaked bottom / family key changes the sim conversion
+    assert len(it) == 3
+    assert ConversionConfig.from_dict(None).gate_types == gt
+
+
+def test_gate_types_course_is_byte_identical(field):
+    assert [q.cls for q in field.passages][4] == "inflatable_arch"  # converted via gate_types
+    assert _passages_sha256(field) == FIELD_PASSAGES_SHA256
+
+
+def test_a_grown_gate_table_leaves_the_conversion_unchanged(monkeypatch):
+    """UC71 H1: new classes and the new bottom / family keys never reach the conversion."""
+    from drone_fly.harness import gate_types as gt_mod
+
+    base_gt, base_it = harness_tables()
+    real, calls = gt_mod.resolve_gate_types, []
+
+    def grown(value):
+        calls.append(value)
+        table = [dict(e) for e in real(value)]
+        table[0].update(bottom="open", family="inflatable")
+        return [
+            {"class": "square_gate", "match": "^Square", "aperture": [1.5, 1.5], "outer": [2, 2],
+             "bottom": "closed", "family": "truss"},
+            *table,
+            {"class": "truss_arch", "match": "^Truss", "aperture": [4, 3], "outer": [5, 4],
+             "bottom": "open"},
+        ]  # fmt: skip
+
+    monkeypatch.setattr(gt_mod, "resolve_gate_types", grown)
+    gt, it = harness_tables()
+    assert calls and gt == base_gt and it == base_it  # the grown table was read
+    assert set(gt[0]) == ARCH_KEYS
+    assert ConversionConfig.from_dict(None).fingerprint() == DEFAULT_FINGERPRINT
