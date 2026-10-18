@@ -476,10 +476,7 @@ class CourseEnv:
         self.ep_arate = zf.clone()
         self.ep_sat = zf.clone()
         # UC-87 AC4 input-domain-randomisation state (all default-off ⇒ no RNG, byte-identical).
-        self._gyro_on = (
-            config.gyro_noise_sigma > 0
-            or config.gyro_vibration_sigma > 0
-        )
+        self._gyro_on = config.gyro_noise_sigma > 0 or config.gyro_vibration_sigma > 0
         self._gate_on = (
             config.gate_pos_noise_m > 0
             or config.gate_outlier_p > 0
@@ -691,7 +688,9 @@ class CourseEnv:
         zcol = torch.zeros_like(self.prev_action)
         self.prev_action = torch.where(m1, zcol, self.prev_action)
         if self.obs_hist is not None:
-            self.obs_hist = torch.where(mask[:, None, None], torch.zeros_like(self.obs_hist), self.obs_hist)  # noqa: E501
+            self.obs_hist = torch.where(
+                mask[:, None, None], torch.zeros_like(self.obs_hist), self.obs_hist
+            )  # noqa: E501
         self.ep_arate = torch.where(mask, torch.zeros_like(self.ep_arate), self.ep_arate)
         self.ep_sat = torch.where(mask, torch.zeros_like(self.ep_sat), self.ep_sat)
         if self._gyro_on:
@@ -1004,9 +1003,9 @@ class CourseEnv:
             ta_prev = torch.tanh(self.prev_action)
             arate = ((ta - ta_prev) ** 2).sum(-1)
             sat = torch.relu(ta[:, 1:4].abs() - cfg.saturation_threshold).sum(-1)
-            reward = reward - (
-                cfg.action_rate_lambda * arate + cfg.saturation_weight * sat
-            ) * rscale
+            reward = (
+                reward - (cfg.action_rate_lambda * arate + cfg.saturation_weight * sat) * rscale
+            )
             self.ep_arate = self.ep_arate + arate
             self.ep_sat = self.ep_sat + sat
 
@@ -1115,4 +1114,6 @@ class CourseEnv:
             new_rel = true_rel + noise
             r1 = refresh[:, None]
             self._gate_rel = torch.where(surv[:, None] & r1, new_rel, self._gate_rel)
-            self._gate_age = torch.where(surv & refresh, torch.zeros_like(age), torch.where(surv, age, self._gate_age))  # noqa: E501
+            self._gate_age = torch.where(
+                surv & refresh, torch.zeros_like(age), torch.where(surv, age, self._gate_age)
+            )  # noqa: E501

@@ -79,3 +79,7 @@ events.out.tfevents.*
 # First tunnel-navigating model -- thread a fly-through doorway, 28% honest (4x the base)
 !training/12-tunnels/
 !training/12-tunnels/**
+# UC-87 deploy-robust deliverable (README + live-harness yaml committed now; the trained .pt is
+# added post-merge from the GPU run)
+!training/13-deploy-robust/
+!training/13-deploy-robust/**

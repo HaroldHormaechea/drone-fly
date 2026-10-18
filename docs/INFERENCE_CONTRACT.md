@@ -126,6 +126,7 @@ Two actor families (both freeze the ~3.86M real MaleCNS edges; only the readout 
   | pad-lap / obstacle-lap | 12 (+ task senses, see that scenario) | |
   | proc-course-flight | **30** | full course senses (below) |
   | proc + raycast (experimental) | **70** | course senses + 40 rays |
+  | **deploy-robust (UC-87)** | **98** | 70 course senses + 40 rays **+ memory block** (below) |
 
   The full course-sense **extra** vector (proc) is:
 
@@ -137,6 +138,35 @@ Two actor families (both freeze the ~3.86M real MaleCNS edges; only the readout 
   - `next_lookahead(7)` = `bearing(3)` + `orient(2 = cos,sin of next gate yaw)` + `dist(1)` + `vis(1 = 1−occluded)`.
   - `obstacle_vision(8)` = for the nearest `NVIS=2` obstacles: `rel(3) + size(1)`, zeroed if none.
   - `raycast(40)` = forward 90° cone, 40 free-space distances (normalized), only if the model was trained with it.
+
+### 4a. Policy memory — the UC-87 deploy-robust block (observation contract v2)
+
+The UC-87 deploy-robust model (`training/13-deploy-robust`) adds a **policy-memory block** so the
+readout can filter noise and adapt to control delay. It is appended **strictly AFTER** the raycast
+block (the **end-append invariant**), so columns `[0:70)` are byte-identical in meaning and order to
+model 11 — which is exactly why a 70→98 warm-start (zero-initialising the new columns) reproduces
+model 11 (old 70-dim checkpoints keep working unchanged on the old layout):
+
+```
+extra = [ obs(12) ‖ curr_gate(3) ‖ next_lookahead(7) ‖ obstacle_vision(8) ‖ raycast(40)
+          ‖ prev_action(4) ‖ obs_history(H·12) ]
+        EXTRA_DIM = 70 + 4 + H·12        (= 98 at the shipped H = 2)
+```
+- `prev_action(4)` = the **raw** 4-dim action (3 body rates + collective) the policy OUTPUT on the
+  previous policy-step — pre-decode / pre-ZOH / pre-delay.
+- `obs_history(H·12)` = the last **H** policy-step 12-dim core-obs vectors (`obs(12)` above),
+  raw-stacked **newest-first** (index 0 = most recent), sampled at the **policy-step** rate (not the
+  physics substep). The gate/next/obstacle_vision/raycast blocks are **not** included in history.
+- **Seeding / reset:** `prev_action` and `obs_history` are **zeros** at episode (sim) / run (harness)
+  start and are ring-reset on every episode / run boundary (and on a live discontinuity / respawn).
+- **Harness assembly:** the live harness builds this block from state it already has — the raw action
+  it sent and its own observation history — in `ContractObservationAssembler` + the stateful runner,
+  **bit-identical** to the sim's `CourseEnv.extra()` by construction (`prev_action`/history tracked
+  the same way as the student path). A sim↔harness parity test pins it.
+- **Sidecar:** the memory model records `"obs_contract_version": 2` alongside `extra_dim: 98`; a
+  checkpoint without that key is observation-contract v1 (the 12/30/70 prefix layout).
+- Training-only input DR (gyro/omega observation noise) is injected into the **observed** `omega`
+  slice in the sim and is **NOT** mirrored by the harness — it is domain randomisation, not contract.
 - **Brain-integrated (experimental)** — `reservoir_brain.K1ReservoirBrainRay`: rays injected *into* the
   connectome. `act(obs12, rays40, extra)`. This is the open-problem obstacle line, not a shipped model.
 
