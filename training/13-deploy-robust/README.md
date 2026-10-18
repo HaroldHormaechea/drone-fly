@@ -6,12 +6,12 @@ conditions it actually meets live in Liftoff** — control timing, actuation del
 rather than only with perfect sim inputs. Sim-only (UC-87 runs on the second machine, no Liftoff);
 live validation happens later on the Liftoff box.
 
-> **Status — empirical numbers deferred to the GPU run (D6).** This folder is the committed
-> *deliverable scaffold*: the training config, the live-harness preset, the verification recipe and
-> the metrics-table shape. The trained `model_readout.pt` and the **AC7/AC8 numbers below are
-> produced post-merge on the GPU box** and are marked `TBD (GPU)` until then. The dev-team landed
-> the code + config + a CPU-runnable, unit-tested smooth-eval harness; it did **not** run a full
-> training job or produce empirical smoothness numbers.
+> **Status — GPU run executed in-sandbox 2026-10-18 (see [Empirical results](#empirical-results-gpu-run-2026-10-18) below).**
+> The dev-team landed the code + config + a CPU-runnable, unit-tested smooth-eval harness; the
+> fine-tune + smoothness eval were then run on the A3000 box. **Run 1 (`uc87-deploy-robust`, λ=0.08)
+> FAILS all five AC7 bars — course completion collapses to 0%** (penalty domination). Tuning
+> iterations are in progress; `λ=0.08` was always flagged as a starting point to tune (AC3 risk).
+> The numbers below are real measurements.
 
 ## What changed vs. model 11
 
@@ -29,8 +29,8 @@ Training config: [`src/drone_fly/training/configs/uc87-deploy-robust.yaml`](../.
 ## How to produce the trained model (GPU box, post-merge)
 
 ```
-drone-fly train --config uc87-deploy-robust
-#   -> artifacts/training/meteor75/<run-id>/checkpoints/model_readout.pt (+ .contract.json)
+drone-fly train run uc87-deploy-robust --device cuda --k1-path <path/to/pruned/k1>
+#   -> <output-root>/meteor75/<run-id>/checkpoints/model_readout.pt (+ .contract.json)
 # then bundle it into this deliverable:
 python - <<'PY'
 from drone_fly.training.export import export_deploy_robust
@@ -46,32 +46,66 @@ contract (v2), `extra_dim`, and the observation-contract version.
 
 ```
 python - <<'PY'
-from drone_fly.training.smooth_eval import compare_models
-r = compare_models(
-    "training/11-count-curriculum/model_readout.pt",   # model 11 (70-dim)
-    "training/13-deploy-robust/model_readout.pt",        # fine-tuned (98-dim)
-    "uc87-deploy-robust", episodes=256)
-print(r["ac7"])   # the five PASS/FAIL bars
+from drone_fly.training.smooth_eval import evaluate_one, evaluate_bars
+K1 = "<path/to/pruned/k1>"
+# NB: model 11 has no contract sidecar and predates the 98-dim memory layout, so evaluate it with
+# its own 70-dim config — do NOT pass it to compare_models with the uc87 config (which would default
+# it to extra_dim=98 and mis-load it). Evaluate each model with the config that matches its contract.
+m11_perfect = evaluate_one("training/11-count-curriculum/model_readout.pt",
+                           "uc83-obstacle-rays-v2", "perfect", episodes=128, device="cuda", k1_path=K1)
+ft = {p: evaluate_one("training/13-deploy-robust/model_readout.pt",
+                      "uc87-deploy-robust", p, episodes=128, device="cuda", k1_path=K1)
+      for p in ("perfect", "live-like")}
+print(evaluate_bars(ft["live-like"], ft["perfect"], m11_perfect))   # the five PASS/FAIL bars
 PY
 ```
 
-### AC7 acceptance bars (sim, `live-like`, fine-tuned policy)
+### AC7 acceptance bars (sim, `live-like`, fine-tuned policy) — run 1 (λ=0.08)
 
-| Bar | Target | Result |
-|---|---|---|
-| mean \|Δaction\| per tick | ≤ 0.6 rad/s | `TBD (GPU)` |
-| saturation share | ≤ 10 % | `TBD (GPU)` |
-| yaw sign-flips | ≤ 3 /s | `TBD (GPU)` |
-| completion vs model-11 `perfect` | within 10 pp | `TBD (GPU)` |
-| `perfect` completion vs model 11 | not worse by > 5 pp | `TBD (GPU)` |
+| Bar | Target | Run 1 result | Verdict |
+|---|---|---|---|
+| mean \|Δaction\| per tick | ≤ 0.6 rad/s | 1.037 | ❌ FAIL |
+| saturation share | ≤ 10 % | 22.0 % | ❌ FAIL |
+| yaw sign-flips | ≤ 3 /s | 4.06 | ❌ FAIL |
+| completion vs model-11 `perfect` | within 10 pp | 0.0 % (ref 54.7 %) | ❌ FAIL |
+| `perfect` completion vs model 11 | not worse by > 5 pp | 0.0 % (ref 54.7 %) | ❌ FAIL |
+
+## Empirical results (GPU run, 2026-10-18)
+
+Run on the A3000 box: 8.0M-step warm-started fine-tune (~37 min), evaluated with `smooth_eval`
+over 128 held-out courses per cell. Model 11 is evaluated with its own 70-dim config
+(`uc83-obstacle-rays-v2`) since it predates the 98-dim memory contract.
+
+| Model / preset | completion | mean \|Δ\| | saturation | yaw flips/s | collision |
+|---|---|---|---|---|---|
+| model 11 · `perfect` | 54.7 % | 0.185 | 6.5 % | 0.73 | 28.1 % |
+| model 11 · `live-like` | 27.3 % | 1.345 | 9.6 % | 7.11 | 60.9 % |
+| **run 1 fine-tuned · `perfect`** | **0.0 %** | 0.106 | 6.5 % | 0.26 | 38.3 % |
+| **run 1 fine-tuned · `live-like`** | **0.0 %** | 1.037 | 22.0 % | 4.06 | 8.6 % |
+
+**Diagnosis.** The smoothness objective partly worked (fine-tuned `perfect` mean|Δ| 0.106 < model
+11's 0.185; yaw flips 0.26 < 0.73), but **course completion collapsed to 0%**. The training log
+shows completion peaking at ~8% (2.6M steps) then decaying to 0 while the shaping reward stayed
+flat (~0.73) — the policy optimized the action-rate + saturation penalties into a smooth,
+reward-collecting, non-completing behavior. Intermediate checkpoints confirm no usable earlier
+state (it200 7.3% `perfect`, it400+ 0%). The jump from model 11 to full domain-randomisation
+(unramped spawn yaw 0–360°, which model 11 never saw) + high penalties, with no curriculum, is too
+steep.
+
+**Tuning in progress.** Run 2 (`uc87-tune-lowpen`, λ 0.08→0.02, saturation 0.02→0.005) tests the
+penalty-domination hypothesis. If completion does not recover, the next step is a curriculum
+(difficulty/obstacle ramp and a spawn-yaw ramp — the latter needs a small code addition, since
+`spawn_yaw` is currently an on/off flag with no ramp) to let the policy retain completion while
+adapting to live-like conditions. This section is updated as runs complete.
 
 ### AC8 robustness sweep
 
 A grid over control period × delay × τ-bandwidth × spawn yaw (`smooth_eval.sweep_grid`), fine-tuned
-vs model 11 — shows where the new policy stays stable. `TBD (GPU)`.
+vs model 11. Deferred until a fine-tune passes the AC7 completion bar — a sweep of a 0%-completion
+policy carries no signal.
 
-The AC3 λ trade-off curve (penalty weight vs completion) is produced by sweeping `course.action_rate_lambda`
-across a few fine-tune runs on the GPU box; `λ=0.08` in the config is a starting point to tune.
+The AC3 λ trade-off curve (penalty weight vs completion) is being produced by the tuning runs above;
+`λ=0.08` (run 1) collapsed completion, so the curve starts from the lower-λ run 2.
 
 ## Live flight on the Liftoff machine
 
