@@ -8,9 +8,12 @@
 #     --extra-dim 98 \
 #     --preset liftoff_arena --config training/13-deploy-robust/harness-liftoff.yaml
 #
-# The two alignment hacks that model 11 needed are OFF here, because UC-87 trained them away:
-#   * runner.align_spawn_yaw: false — the policy saw a uniform 0..360 deg spawn yaw in training, so
-#     the live frame no longer has to be rotated onto a fixed training heading.
+# Alignment:
+#   * runner.align_spawn_yaw: true — the UC-87 REDESIGN trains the policy from an ALIGNED spawn (no
+#     spawn-yaw randomisation; the SpawnYawAligner is the spawn-yaw solution, kept ON). The live frame
+#     therefore MUST be rotated onto the fixed training heading, exactly as model 11 required. (The
+#     earlier run-1/run-2 attempt flipped this to false on the assumption that uniform 0..360 deg
+#     spawn-yaw DR would teach yaw-invariance — that attempt collapsed completion; see README.)
 #   * runner.latency_compensation: off — UC-87 trained WITH the live control timing + ~75 ms
 #     actuation delay and a previous-action/history memory input, so the Smith predictor is
 #     redundant (and the v2 action contract is not eligible for it anyway).
@@ -21,5 +24,5 @@
 harness: liftoff
 
 runner:
-  align_spawn_yaw: false
+  align_spawn_yaw: true
   latency_compensation: off

@@ -15,7 +15,8 @@ end of ``plant.range_overrides``.
 
 :func:`evaluate_bars` turns the four runs (model-11 / fine-tuned × perfect / live-like) into the 5
 AC7 PASS/FAIL bars; it is pure arithmetic, so it is unit-testable without a GPU. :func:`sweep_grid`
-enumerates the AC8 robustness grid (control period × delay × τ-bandwidth × spawn yaw). The empirical
+enumerates the AC8 robustness grid (control period × delay × τ-bandwidth). Spawn is aligned by the
+``SpawnYawAligner`` (AC4/AC10), so spawn yaw is no longer a sweep axis. The empirical
 numbers are produced post-merge on the GPU box (D6); this module is the runnable, CPU-testable
 harness that makes those numbers trustworthy.
 """
@@ -43,7 +44,9 @@ AC7_MEAN_ABS_DELTA = 0.6  # rad/s per tick
 AC7_SATURATION = 0.10
 AC7_YAW_FLIPS = 3.0  # per second
 AC7_COMPLETION_GAP_PP = 0.10  # within 10 pp of model-11 perfect
-AC7_PERFECT_REGRESS_PP = 0.05  # fine-tuned perfect ≥ model-11 perfect − 5 pp
+# UC-87 redesign (AC9): the fresh run trains on the SAME task, so its `perfect` completion must
+# MATCH OR BEAT model-11 perfect — not merely "not regress by >5 pp". Tightened to 0 pp.
+AC7_PERFECT_REGRESS_PP = 0.0  # trained perfect >= model-11 perfect
 
 
 def _profile(drone: str) -> Any:
@@ -253,7 +256,8 @@ def evaluate_bars(
             # within 10 pp of model-11 perfect (not worse by more than 10 pp)
             "pass": float(ll["completion"]) >= m11p - AC7_COMPLETION_GAP_PP,
         },
-        "perfect_no_regress": {
+        # AC9 (redesign): trained `perfect` completion must be AT LEAST model-11 perfect (PP = 0).
+        "perfect_at_least_model11": {
             "value": float(finetuned_perfect["completion"]),
             "reference": m11p,
             "bar_pp": AC7_PERFECT_REGRESS_PP,
@@ -288,30 +292,29 @@ def sweep_grid(
     control_periods_s: tuple[float, ...] = (0.020, 0.035, 0.050, 0.060),
     delays_s: tuple[float, ...] = (0.0, 0.050, 0.075, 0.100),
     tau_s: tuple[float, ...] = (0.005, 0.030, 0.055, 0.083),
-    spawn_yaws_deg: tuple[float, ...] = (0.0, 90.0, 180.0, 270.0),
 ) -> list[dict[str, Any]]:
-    """The AC8 robustness grid: control period × delay × τ-bandwidth × spawn yaw.
+    """The AC10 robustness grid: control period × delay × τ-bandwidth.
 
-    Pure enumeration (no rollout), so callers (and tests) can see / trim the grid before flying it.
+    No spawn-yaw axis — spawn is aligned (the live SpawnYawAligner handles live yaw), so a yaw sweep
+    carries no signal (AC10 redesign). Pure enumeration (no rollout), so callers (and tests) can see
+    / trim the grid before flying it.
     """
     grid = []
     for cp in control_periods_s:
         for d in delays_s:
             for tau in tau_s:
-                for yaw in spawn_yaws_deg:
-                    grid.append(
-                        {
-                            "control_period_s": float(cp),
-                            "delay_s": float(d),
-                            "tau_s": float(tau),
-                            "spawn_yaw_deg": float(yaw),
-                        }
-                    )
+                grid.append(
+                    {
+                        "control_period_s": float(cp),
+                        "delay_s": float(d),
+                        "tau_s": float(tau),
+                    }
+                )
     return grid
 
 
 def sweep_cell_config(cfg: Any, cell: dict[str, Any], *, extra_dim: int) -> Any:
-    """Build an eval :class:`TrainConfig` for one AC8 sweep cell (fixed timing/τ/spawn yaw)."""
+    """Build an eval :class:`TrainConfig` for one AC10 sweep cell (fixed timing/τ, aligned)."""
     from drone_fly.sim.timing import TimingConfig
 
     hz = 1.0 / float(cell["control_period_s"])
@@ -328,8 +331,7 @@ def sweep_cell_config(cfg: Any, cell: dict[str, Any], *, extra_dim: int) -> Any:
         f"rates.{a}.tau_s": (tau, tau) for a in ("roll", "pitch", "yaw")
     }
     plant = replace(cfg.plant, range_overrides=ov)
-    yaw_on = float(cell["spawn_yaw_deg"]) != 0.0
-    course = replace(cfg.course, memory=extra_dim > 70, spawn_yaw=yaw_on)
+    course = replace(cfg.course, memory=extra_dim > 70, spawn_yaw=False)
     actor = replace(cfg.actor, extra_dim=int(extra_dim))
     return replace(
         cfg, timing=timing, plant=plant, course=course, actor=actor, randomization_scale=1.0
