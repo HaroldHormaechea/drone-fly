@@ -96,4 +96,4 @@ Statuses:
 | 84 | [use-cases/84-liftoff-obstacle-capture-protocol.md](use-cases/84-liftoff-obstacle-capture-protocol.md) | Liftoff obstacle-capture protocol — richer hit-ray data for the vision eyes | done | 2026-10-17 |
 | 85 | [use-cases/85-eyes-v3-depth-backbone.md](use-cases/85-eyes-v3-depth-backbone.md) | Eyes v3 — pretrained monocular-depth backbone for the obstacle-ray estimator | done | 2026-10-17 |
 | 86 | [use-cases/86-pluggable-perception-inputs.md](use-cases/86-pluggable-perception-inputs.md) | Pluggable perception inputs — a contract between "eyes" and the brain | done | 2026-10-18 |
-| 87 | [use-cases/87-deploy-robust-retrain.md](use-cases/87-deploy-robust-retrain.md) | Deploy-robust retraining of the 70-dim connectome policy (sim only) | pending | 2026-10-18 |
+| 87 | [use-cases/87-deploy-robust-retrain.md](use-cases/87-deploy-robust-retrain.md) | Deploy-robust retraining of the 70-dim connectome policy (sim only) | in-progress | 2026-10-18 |

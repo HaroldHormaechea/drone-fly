@@ -137,6 +137,41 @@ class CourseConfig:
     floor_grace_s: float = 0.4  # the prototype's 20 steps of 20 ms
     start: StartConfig = field(default_factory=StartConfig)
 
+    # ---- UC-87 deploy-robust fields (all default-OFF ⇒ byte-identical to the model-11 env) ----
+    #: Append the policy-memory block to ``extra()`` (D1): ``prev_action(4) || obs_history(H*12)``,
+    #: strictly AFTER the raycast block (the D2 end-append invariant). Columns 0..(pre-memory) stay
+    #: byte-identical to model 11, so ``warm_start``'s zero-init reproduces it.
+    memory: bool = False
+    #: H — the number of past policy-step 12-dim core-obs vectors stacked in the memory block.
+    history_len: int = 2
+    #: λ for the action-rate penalty ``λ·‖tanh(a_t)−tanh(a_{t-1})‖²`` (rate-scaled; AC3).
+    action_rate_lambda: float = 0.0
+    #: Weight for the body-rate saturation penalty ``Σ relu(|tanh(a_i)|−thr)`` over the rate dims.
+    saturation_weight: float = 0.0
+    #: ``|tanh(a)|`` above this counts as saturated (AC6 uses 3.8/4.0 = 0.95 on the metric side).
+    saturation_threshold: float = 0.9
+    #: Ceiling altitude (m) for the crash bound (AC5, configurable 4–6 m; was the fixed 3.5).
+    ceiling_z: float = 5.0
+    #: Randomise the spawn attitude yaw uniformly over 0–360° (AC4; live spawns off-axis).
+    spawn_yaw: bool = False
+    #: Randomise the spawn's horizontal distance to the first gate, ``(lo, hi)`` m (AC4).
+    spawn_distance_m: tuple[float, float] | None = None
+    #: White gyro/omega observation noise σ (rad/s), injected into the OBSERVED omega only (AC4).
+    gyro_noise_sigma: float = 0.0
+    #: Coloured (AR(1)) vibration component: stationary σ (rad/s) and the AR coefficient.
+    gyro_vibration_sigma: float = 0.0
+    gyro_vibration_rho: float = 0.0
+    #: Make the floor plane (z = ground_z) visible to the forward raycast (AC4).
+    raycast_floor: bool = False
+    #: Zero the ``obstacle_vision`` block in ``extra()`` (live sees zeros; AC4).
+    obstacle_vision_zero: bool = False
+    #: Gate-estimate perception noise on the tracked (current-target) gate (AC4). All 0 ⇒ off.
+    gate_pos_noise_m: float = 0.0
+    gate_outlier_p: float = 0.0
+    gate_outlier_m: float = 0.4
+    gate_staleness_s: float = 0.0
+    gate_dropout_p: float = 0.0
+
     def __post_init__(self) -> None:
         if not self.reward_reference_dt_s or self.reward_reference_dt_s <= 0:
             raise ValueError("course.reward_reference_dt_s must be positive")
@@ -146,6 +181,20 @@ class CourseConfig:
             raise ValueError("course.ray_noise / ray_blank require course.raycast")
         if self.ray_noise and self.ray_blank:
             raise ValueError("course.ray_noise and course.ray_blank are mutually exclusive")
+        if self.history_len < 0:
+            raise ValueError("course.history_len must be >= 0")
+        if self.memory and self.history_len < 1:
+            raise ValueError("course.memory needs history_len >= 1")
+        if not 0.0 <= self.ceiling_z:
+            raise ValueError("course.ceiling_z must be >= 0")
+        if self.spawn_distance_m is not None:
+            lo, hi = self.spawn_distance_m
+            if not 0 < lo <= hi:
+                raise ValueError("course.spawn_distance_m needs 0 < lo <= hi")
+        if not 0.0 <= self.gate_outlier_p <= 1.0 or not 0.0 <= self.gate_dropout_p <= 1.0:
+            raise ValueError("course.gate_outlier_p / gate_dropout_p must be in [0, 1]")
+        if not -1.0 < self.gyro_vibration_rho < 1.0:
+            raise ValueError("course.gyro_vibration_rho must be in (-1, 1)")
 
     @property
     def pool_kwargs(self) -> dict[str, Any]:
@@ -159,13 +208,20 @@ class CourseConfig:
         return kw
 
     @property
+    def memory_dim(self) -> int:
+        """Width of the appended memory block (0 when ``memory`` is off)."""
+        return (4 + self.history_len * 12) if self.memory else 0
+
+    @property
     def extra_dim(self) -> int:
-        return BASE_EXTRA_DIM + (N_RAYS if self.raycast else 0)
+        return BASE_EXTRA_DIM + (N_RAYS if self.raycast else 0) + self.memory_dim
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> CourseConfig:
         d = dict(d)
         start = StartConfig.from_dict(d.pop("start", None))
+        if d.get("spawn_distance_m") is not None:
+            d["spawn_distance_m"] = tuple(float(x) for x in d["spawn_distance_m"])
         unknown = set(d) - set(cls.__dataclass_fields__)
         if unknown:
             raise ValueError(f"unknown course keys {sorted(unknown)}")
@@ -291,7 +347,17 @@ EPISODE_HEADER = (
     *LOG_COLUMNS,
     *TIMING_LOG_COLUMNS,
 )
-EPISODE_TAIL = ("return", "length_s", "steps", "completed", "outcome")
+EPISODE_TAIL = (
+    "return",
+    "length_s",
+    "steps",
+    "completed",
+    "outcome",
+    # UC-87 AC3: per-episode SUM of the (unweighted) smoothness terms; divide by ``steps`` for the
+    # per-tick mean. Always present (0 when the penalties are off) so the schema is stable.
+    "action_rate",
+    "saturation",
+)
 EPISODE_COLUMNS = EPISODE_HEADER + EPISODE_TAIL
 
 
@@ -395,6 +461,42 @@ class CourseEnv:
         self.prev_clear = torch.full_like(zf, CLEAR_CAP)
         self.prev_floor = torch.full_like(zf, FLOOR_CAP)
         self.ep_return = zf.clone()
+        # UC-87 ceiling (configurable; was the fixed CEIL constant)
+        self.ceil_z = float(config.ceiling_z)
+        # UC-87 policy-memory state (D1/D3): the previous raw action and the recent core-obs ring.
+        # ``prev_action`` is always maintained (cheap, internal) so the action-rate penalty works
+        # independently of the memory toggle; ``obs_hist`` is only allocated when memory is on.
+        self.prev_action = torch.zeros(n, 4, dtype=self.dtype, device=dev)
+        self.obs_hist = (
+            torch.zeros(n, config.history_len, 12, dtype=self.dtype, device=dev)
+            if config.memory
+            else None
+        )
+        # UC-87 AC3 per-episode smoothness accumulators (logged in EPISODE_TAIL).
+        self.ep_arate = zf.clone()
+        self.ep_sat = zf.clone()
+        # UC-87 AC4 input-domain-randomisation state (all default-off ⇒ no RNG, byte-identical).
+        self._gyro_on = (
+            config.gyro_noise_sigma > 0
+            or config.gyro_vibration_sigma > 0
+        )
+        self._gate_on = (
+            config.gate_pos_noise_m > 0
+            or config.gate_outlier_p > 0
+            or config.gate_dropout_p > 0
+            or config.gate_staleness_s > 0
+        )
+        self._gyro_ar = torch.zeros(n, 3, dtype=self.dtype, device=dev)
+        self._gyro_obs = torch.zeros(n, 3, dtype=self.dtype, device=dev)
+        self._gate_rel = torch.zeros(n, 3, dtype=self.dtype, device=dev)
+        self._gate_age = torch.zeros(n, dtype=torch.long, device=dev)
+        self._gate_hold = torch.zeros(n, dtype=torch.long, device=dev)
+        #: A dedicated generator for the UC-87 input DR so it never perturbs the plant/timing RNG
+        #: stream (the default-off path stays byte-identical).
+        self._perc_gen: Any = None
+        if self._gyro_on or self._gate_on:
+            self._perc_gen = torch.Generator(device=dev)
+            self._perc_gen.manual_seed(int(seed) ^ 0x44524E4F)  # "DRNO"
         self.comp_rate = torch.zeros((), dtype=self.dtype, device=dev)
         self.last_completed = torch.zeros(n, dtype=torch.bool, device=dev)
         self.last_crashed = torch.zeros_like(self.last_completed)
@@ -514,6 +616,14 @@ class CourseEnv:
     def _rand(self, *shape: int) -> torch.Tensor:
         return torch.rand(*shape, generator=self.gen, device=self.device, dtype=self.dtype)
 
+    def _perc_randn(self, *shape: int) -> torch.Tensor:
+        """Standard-normal draw from the dedicated UC-87 input-DR generator."""
+        return torch.randn(*shape, generator=self._perc_gen, device=self.device, dtype=self.dtype)
+
+    def _perc_rand(self, *shape: int) -> torch.Tensor:
+        """Uniform [0, 1) draw from the dedicated UC-87 input-DR generator."""
+        return torch.rand(*shape, generator=self._perc_gen, device=self.device, dtype=self.dtype)
+
     def _spawn(self, mask: torch.Tensor, course_ids: torch.Tensor | None = None) -> None:
         """Respawn the envs in ``mask`` on fresh courses (masked, no host sync)."""
         n, dev = self.n, self.device
@@ -542,7 +652,30 @@ class CourseEnv:
         motor = torch.where(ground, 0.0, 1.0).to(self.dtype)
         command = torch.zeros(n, 4, dtype=self.dtype, device=dev)
         command[:, 0] = motor
-        self.plant.reset(mask, pos=pos, motor_g=motor, grounded=ground, command=command)
+        # UC-87 AC4: randomise the horizontal spawn distance to the first gate. Place the drone
+        # ``dist`` metres back along the (horizontal) start->gate-0 direction; the z handling above
+        # is kept. Ground starts stay grounded regardless (xy only).
+        if self.cfg.spawn_distance_m is not None:
+            lo, hi = self.cfg.spawn_distance_m
+            gate0 = self.P["cen"][self.cid, 0]
+            dxy = (gate0 - start)[:, :2]
+            dn = dxy.norm(dim=-1, keepdim=True).clamp(min=1e-3)
+            u = dxy / dn
+            dist = (lo + (hi - lo) * self._rand(n)).unsqueeze(-1)
+            new_xy = gate0[:, :2] - u * dist
+            pos = pos.clone()
+            pos[:, :2] = new_xy
+        # UC-87 AC4: randomise the spawn yaw uniformly over 0..2π (rotation about world z).
+        quat_arg = None
+        if self.cfg.spawn_yaw:
+            yaw = 2.0 * math.pi * self._rand(n)
+            half = 0.5 * yaw
+            quat_arg = torch.zeros(n, 4, dtype=self.dtype, device=dev)
+            quat_arg[:, 0] = torch.cos(half)
+            quat_arg[:, 3] = torch.sin(half)
+        self.plant.reset(
+            mask, pos=pos, quat=quat_arg, motor_g=motor, grounded=ground, command=command
+        )
         self.timing.resample(mask)
         self.start_mode = torch.where(mask, mode, self.start_mode)
         arm = torch.where(ground, sc.arm_delay_s, 0.0).to(torch.float64)
@@ -553,6 +686,29 @@ class CourseEnv:
             fl = (self.pos[:, 2] - FLOOR_KILL_Z).clamp(0.0, FLOOR_CAP)
             self.prev_floor = torch.where(mask, fl, self.prev_floor)
         self.ep_return = torch.where(mask, torch.zeros_like(self.ep_return), self.ep_return)
+        # UC-87: zero the policy-memory, penalty accumulators and input-DR state on (re)spawn (D3:
+        # zero-seed + per-episode reset). The step-time memory update then skips these done envs.
+        zcol = torch.zeros_like(self.prev_action)
+        self.prev_action = torch.where(m1, zcol, self.prev_action)
+        if self.obs_hist is not None:
+            self.obs_hist = torch.where(mask[:, None, None], torch.zeros_like(self.obs_hist), self.obs_hist)  # noqa: E501
+        self.ep_arate = torch.where(mask, torch.zeros_like(self.ep_arate), self.ep_arate)
+        self.ep_sat = torch.where(mask, torch.zeros_like(self.ep_sat), self.ep_sat)
+        if self._gyro_on:
+            z3 = torch.zeros_like(self._gyro_ar)
+            self._gyro_ar = torch.where(mask[:, None], z3, self._gyro_ar)
+            self._gyro_obs = torch.where(mask[:, None], z3, self._gyro_obs)
+        if self._gate_on:
+            true_rel = self._target_pos() - self.pos
+            self._gate_rel = torch.where(mask[:, None], true_rel, self._gate_rel)
+            self._gate_age = torch.where(mask, torch.zeros_like(self._gate_age), self._gate_age)
+            # per-episode staleness hold (number of steps an estimate is held), 0..stale/ref_dt
+            if self.cfg.gate_staleness_s > 0:
+                hi = self.cfg.gate_staleness_s / self.cfg.reward_reference_dt_s
+                hold = (self._perc_rand(n) * hi).round().long()
+            else:
+                hold = torch.zeros(n, dtype=torch.long, device=dev)
+            self._gate_hold = torch.where(mask, hold, self._gate_hold)
         ids = self._episode_counter * n + self._ar_n
         self._episode_counter += 1
         self.episode = torch.where(mask, ids, self.episode)
@@ -586,11 +742,17 @@ class CourseEnv:
 
     # ---- observations ----
     def obs(self) -> torch.Tensor:
-        rel = self._target_pos() - self.pos
-        return torch.cat([rel, gravity_body(self.quat), self.vel, self.omega], dim=-1)
+        # UC-87 AC4: the perceived (noisy / held) gate-relative vector when gate noise is on, else
+        # the true rel; the OBSERVED omega carries the gyro noise (training-only, NOT the plant's
+        # true omega). Both default-off ⇒ byte-identical to the model-11 obs.
+        rel = self._gate_rel if self._gate_on else (self._target_pos() - self.pos)
+        omega = self.omega + self._gyro_obs if self._gyro_on else self.omega
+        return torch.cat([rel, gravity_body(self.quat), self.vel, omega], dim=-1)
 
     def _obstacle_vision(self) -> torch.Tensor:
         """Nearest-NVIS obstacles: rel (dx, dy, dz) + size proxy, masked to real obstacles."""
+        if self.cfg.obstacle_vision_zero:  # AC4: live sees a zeroed obstacle_vision block
+            return torch.zeros(self.n, NVIS * 4, dtype=self.dtype, device=self.device)
         oc, od, om = self._ocen(), self._odim(), self._omask()
         rel = oc - self.pos.unsqueeze(1)
         dist = torch.where(om, rel.norm(dim=-1), torch.full_like(rel[..., 0], 1e4))
@@ -687,7 +849,14 @@ class CourseEnv:
         tbox = torch.where(bok, bhit, INF)
         t = torch.where(ot_e == 0, tcyl, tbox)
         t = torch.where(om_e & (t > 0) & (t < RAY_RANGE), t, INF)
-        return t.min(dim=2).values.clamp(max=RAY_RANGE) / RAY_RANGE
+        t_hit = t.min(dim=2).values  # (n, R) nearest obstacle hit
+        if self.cfg.raycast_floor:  # AC4: the floor plane (z = ground_z) is visible to the rays
+            rz = rays[..., 2]
+            ground = float(self.plant.config.ground_z)
+            tf = (ground - self.pos[:, 2:3]) / rz
+            tf = torch.where((rz < -1e-6) & (tf > 1e-3), tf, torch.full_like(tf, 1e4))
+            t_hit = torch.minimum(t_hit, tf)
+        return t_hit.clamp(max=RAY_RANGE) / RAY_RANGE
 
     def _raycast(self) -> torch.Tensor:
         return self._cast(self._ray_basis())
@@ -722,12 +891,20 @@ class CourseEnv:
             return self._ray_noise.apply(free, in_view, self._ray_gen)
         return self._raycast()
 
+    def _memory_block(self) -> torch.Tensor:
+        """The D1 memory block: ``prev_action(4) || obs_history(H*12)`` (newest-first history)."""
+        return torch.cat([self.prev_action, self.obs_hist.reshape(self.n, -1)], dim=-1)
+
     def extra(self) -> torch.Tensor:
         _, cy, cap = self._gate(self.tgt)
         curr = torch.stack([torch.cos(cy), torch.sin(cy), cap], -1)
         feats = [self.obs(), curr, self._next_lookahead(), self._obstacle_vision()]
         if self.cfg.raycast:
             feats.append(self._ray_obs())
+        # UC-87 D2: the memory block is appended STRICTLY AFTER raycast, so columns 0..(pre-memory)
+        # are byte-identical to model 11.
+        if self.cfg.memory:
+            feats.append(self._memory_block())
         return torch.cat(feats, dim=-1)
 
     def metric(self) -> str:
@@ -736,14 +913,27 @@ class CourseEnv:
     # ---- step ----
     def step(self, action: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Raw policy action ``(n, 4)`` -> ``(obs, reward, done, tilt)`` (auto-respawn)."""
-        cg, rates = decode_torch(action.to(self.dtype), self.action_spec, max_g=self.plant.max_g)
-        return self.step_command(cg, rates)
+        action = action.to(self.dtype)
+        cg, rates = decode_torch(action, self.action_spec, max_g=self.plant.max_g)
+        return self.step_command(cg, rates, raw_action=action)
 
     def step_command(
-        self, collective_g: torch.Tensor, rates: torch.Tensor
+        self,
+        collective_g: torch.Tensor,
+        rates: torch.Tensor,
+        *,
+        raw_action: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...]:
-        """Like :meth:`step`, from a decoded ``collective_g`` (n,) + body ``rates`` (n, 3)."""
+        """Like :meth:`step`, from a decoded ``collective_g`` (n,) + body ``rates`` (n, 3).
+
+        ``raw_action`` (the policy's pre-decode output, (n, 4)) drives the UC-87 action-rate /
+        saturation penalties and the policy-memory update; it is ``None`` for non-policy callers
+        (replay), which leaves both off.
+        """
         cfg = self.cfg
+        # UC-87 (D1/D3): the core obs the policy observed THIS step (pre-plant-step), pushed into
+        # the history ring after the transition so the next step's memory block holds it.
+        obs_now = self.obs() if (cfg.memory and raw_action is not None) else None
         arming = self.plant.t < self.arm_until  # ground start: motors idle until armed
         cg = torch.where(arming, torch.zeros_like(collective_g), collective_g)
         rates = torch.where(arming[:, None], torch.zeros_like(rates), rates)
@@ -806,13 +996,27 @@ class CourseEnv:
             reward = reward + FLOOR_BETA * (floor_now - self.prev_floor)
             self.prev_floor = floor_now
 
+        # UC-87 AC3: action-rate + saturation penalties (rate-scaled, like the dense terms). The
+        # previous raw action is ``self.prev_action`` (zero at episode start); it is updated to
+        # ``raw_action`` by the memory step after the transition.
+        if raw_action is not None and (cfg.action_rate_lambda > 0 or cfg.saturation_weight > 0):
+            ta = torch.tanh(raw_action)
+            ta_prev = torch.tanh(self.prev_action)
+            arate = ((ta - ta_prev) ** 2).sum(-1)
+            sat = torch.relu(ta[:, 1:4].abs() - cfg.saturation_threshold).sum(-1)
+            reward = reward - (
+                cfg.action_rate_lambda * arate + cfg.saturation_weight * sat
+            ) * rscale
+            self.ep_arate = self.ep_arate + arate
+            self.ep_sat = self.ep_sat + sat
+
         t = self.plant.t
         xy_off = self.pos[:, :2].norm(dim=-1)
         grace = t > cfg.floor_grace_s + 1e-6
         ground_start = self.start_mode == START_GROUND
         floor_live = torch.where(ground_start, self.plant.lifted, grace)
         hit_floor = (self.pos[:, 2] < FLOOR_KILL_Z) & floor_live
-        hit_ceil = (self.pos[:, 2] > CEIL) & grace
+        hit_ceil = (self.pos[:, 2] > self.ceil_z) & grace
         hit_arena = (xy_off > ARENA) & grace
         crashed = hit_floor | hit_ceil | hit_arena
         if cfg.obs_terminal:
@@ -852,10 +1056,63 @@ class CourseEnv:
                     self.steps.float(),
                     completed.float(),
                     outcome.float(),
+                    self.ep_arate.float(),
+                    self.ep_sat.float(),
                 ],
                 1,
             )
             self.log.add(done, torch.cat([self.header, tail], 1))
 
         self._spawn(done)
+        # UC-87: after the respawn (which zeroes memory/DR for done envs), advance the memory ring
+        # and the input-DR for the SURVIVORS, so the next obs()/extra() reflect this transition.
+        if raw_action is not None:
+            self._update_memory(obs_now, raw_action, done)
+        self._update_input_dr(done)
         return self.obs(), reward, done, tilt
+
+    # ---- UC-87 per-step state updates (memory + input domain randomisation) ----
+    def _update_memory(
+        self, obs_now: torch.Tensor | None, raw_action: torch.Tensor, done: torch.Tensor
+    ) -> None:
+        """Survivors record this step's raw action as ``prev_action`` and push ``obs_now`` into the
+        history ring (newest-first); done envs were already zeroed by :meth:`_spawn`."""
+        surv = (~done)[:, None]
+        self.prev_action = torch.where(surv, raw_action, self.prev_action)
+        if self.obs_hist is not None and obs_now is not None:
+            rolled = self.obs_hist.roll(1, dims=1)
+            rolled[:, 0] = obs_now
+            self.obs_hist = torch.where((~done)[:, None, None], rolled, self.obs_hist)
+
+    def _update_input_dr(self, done: torch.Tensor) -> None:
+        """Advance the gyro-noise and gate-perception state for the SURVIVORS (AC4). Done envs keep
+        the fresh state :meth:`_spawn` set. No-op (and no RNG drawn) when both are off."""
+        surv = ~done
+        if self._gyro_on:
+            rho = float(self.cfg.gyro_vibration_rho)
+            vib = float(self.cfg.gyro_vibration_sigma)
+            white = float(self.cfg.gyro_noise_sigma)
+            eps = self._perc_randn(self.n, 3)
+            ar = rho * self._gyro_ar + ((1.0 - rho * rho) ** 0.5) * vib * eps
+            noise = ar + white * self._perc_randn(self.n, 3)
+            self._gyro_ar = torch.where(surv[:, None], ar, self._gyro_ar)
+            self._gyro_obs = torch.where(surv[:, None], noise, self._gyro_obs)
+        if self._gate_on:
+            cfg = self.cfg
+            true_rel = self._target_pos() - self.pos
+            # staleness: hold the estimate while age < per-episode hold; Markov dropout also holds.
+            age = self._gate_age + 1
+            fresh_due = age > self._gate_hold
+            dropped = self._perc_rand(self.n) < cfg.gate_dropout_p
+            refresh = fresh_due & (~dropped)
+            # a freshly sampled estimate: true rel + gaussian noise, or an outlier offset
+            noise = cfg.gate_pos_noise_m * self._perc_randn(self.n, 3)
+            if cfg.gate_outlier_p > 0:
+                outl = self._perc_rand(self.n) < cfg.gate_outlier_p
+                d = self._perc_randn(self.n, 3)
+                d = d / d.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+                noise = torch.where(outl[:, None], d * cfg.gate_outlier_m, noise)
+            new_rel = true_rel + noise
+            r1 = refresh[:, None]
+            self._gate_rel = torch.where(surv[:, None] & r1, new_rel, self._gate_rel)
+            self._gate_age = torch.where(surv & refresh, torch.zeros_like(age), torch.where(surv, age, self._gate_age))  # noqa: E501

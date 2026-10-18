@@ -38,6 +38,11 @@ but are required for normal implementation work:
   the dev-time generator under `scripts/`. These are regenerated *data*, not hand-authored test
   *code*; the developer may (re)generate them by running the build script. Hand-written test code
   (`tests/**/*.py`) remains QA's exclusive scope.
+- `training/13-deploy-robust/**` — the UC-87 curated model deliverable (export README with the
+  contract version / extra_dim / metrics table, and the live-flight harness yaml), following the
+  committed-deliverable convention of `training/11-count-curriculum/`. This is a hand-authored,
+  committed deliverable that accompanies the implementation (mandated by UC-87 AC9), not generated
+  per-run output; the trained `.pt` checkpoint itself is produced post-merge on the GPU box.
 
 The **QA** agent's write scope remains `paths.test` (`tests/**`, i.e. the `tests/**/*.py` test code
 and any test-only helpers it authors) as declared in the brief, plus `.claude/allowed-commands.yaml`
