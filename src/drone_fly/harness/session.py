@@ -47,6 +47,7 @@ from drone_fly.harness.runner import (
     SimClock,
     WallClock,
 )
+from drone_fly.harness.yaw_align import SpawnYawAligner
 
 log = logging.getLogger(__name__)
 
@@ -394,6 +395,10 @@ def run_harness(
         raise HarnessConfigError("--overlay-launch needs the overlay enabled")
     if plan is not None and overlay_cfg.enabled:
         raise HarnessConfigError("--overlay is not supported with --teacher (no K1 brain)")
+    if (plan is not None or student_plan is not None) and cfg.runner.align_spawn_yaw is True:
+        raise HarnessConfigError(
+            "align_spawn_yaw applies only to gpu_prototype contract checkpoints"
+        )
 
     contract = load_contract(
         cfg.contract.gpu_prototype_dir, cfg.contract.k1_path, cfg.contract.device
@@ -457,13 +462,19 @@ def run_harness(
     else:
         assembler = ContractObservationAssembler(contract)
         policy = ContractPolicyRunner(contract, checkpoint, extra_dim)  # type: ignore[arg-type]
+    settings = RunnerSettings.from_config(cfg)
+    # Spawn-yaw frame alignment: contract checkpoints only (teacher / student: their own frames).
+    yaw_aligner: SpawnYawAligner | None = None
+    if plan is None and student_plan is None:
+        yaw_aligner = SpawnYawAligner(enabled=settings.align_spawn_yaw in ("auto", True))
     runner = HarnessRunner(
         h,
         policy,
         assembler,
         contract,
-        RunnerSettings.from_config(cfg),
+        settings,
         clock=h.clock,
+        yaw_aligner=yaw_aligner,
     )
     recorder = None
     observer: _TickObserver | None = None
