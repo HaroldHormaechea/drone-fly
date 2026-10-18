@@ -1,4 +1,4 @@
-"""UC-87 AC6 / AC10: the pure-CPU smoothness metrics (``drone_fly.sim.smooth_metrics``).
+"""UC-87 AC6 / AC10: the pure-CPU smoothness metrics (``drone_fly.training.smooth_metrics``).
 
 Exercised on SYNTHETIC raw-action command traces (no env, no torch, no RNG), so the numbers are
 checked against closed-form expectations. These metric functions are the single source of truth
@@ -10,8 +10,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from drone_fly.sim import smooth_metrics as sm
-from drone_fly.sim.smooth_metrics import (
+from drone_fly.training import smooth_metrics as sm
+from drone_fly.training.smooth_metrics import (
     FLIP_RATE,
     MAX_BODY_RATE,
     SAT_RATE,

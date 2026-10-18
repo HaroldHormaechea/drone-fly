@@ -2,8 +2,8 @@
 
 Builds on :mod:`drone_fly.training.proc_eval` (the same deterministic mean-action rollout on the
 procedural :class:`~drone_fly.sim.course.CourseEnv`), but captures the **action trace** and scores
-it with :mod:`drone_fly.sim.smooth_metrics`, for BOTH the old model 11 and the fine-tuned policy,
-under the named D5 presets:
+it with :mod:`drone_fly.training.smooth_metrics`, for BOTH the old model 11 and the fine-tuned
+policy, under the named D5 presets:
 
 * ``perfect``   — training defaults: fixed 50 Hz, zero delay, nominal τ, no input noise.
 * ``live-like`` — deploy conditions: a 50 ms control period, the config's ~75 ms actuation delay,
@@ -28,7 +28,7 @@ from typing import Any
 
 import numpy as np
 
-from drone_fly.sim.smooth_metrics import MAX_BODY_RATE, aggregate_metrics
+from drone_fly.training.smooth_metrics import MAX_BODY_RATE, aggregate_metrics
 
 #: The ``perfect`` preset control rate (Hz) — the training default fixed rate.
 PERFECT_HZ = 50.0
@@ -105,7 +105,9 @@ def preset_config(cfg: Any, preset: str, *, extra_dim: int) -> Any:
     raise ValueError(f"unknown preset {preset!r} (one of {PRESETS})")
 
 
-def _rollout(env: Any, actor: Any, max_steps: int, dt: float) -> dict[str, Any]:
+def _rollout(
+    env: Any, actor: Any, max_steps: int, dt: float, *, max_body_rate: float = MAX_BODY_RATE
+) -> dict[str, Any]:
     """One deterministic mean-action episode per env; capture the action trace + outcome tally."""
     import torch
 
@@ -148,7 +150,7 @@ def _rollout(env: Any, actor: Any, max_steps: int, dt: float) -> dict[str, Any]:
     R = np.stack(raws, axis=0) if raws else np.zeros((0, n, 4), np.float32)  # (T, n, 4)
     A = np.stack(alives, axis=0) if alives else np.zeros((0, n), bool)  # (T, n)
     traces = [R[: int(A[:, i].sum()), i] for i in range(n)]
-    agg = aggregate_metrics(traces, dt, max_body_rate=MAX_BODY_RATE)
+    agg = aggregate_metrics(traces, dt, max_body_rate=max_body_rate)
     return {
         "episodes": n,
         "outcome_counts": counts,
@@ -205,7 +207,9 @@ def evaluate_one(
     env.reset_all(cids)
     dt = 1.0 / PERFECT_HZ if preset == "perfect" else LIVE_PERIOD_S
     max_steps = int(math.ceil(pcfg.course.episode_s / dt)) + 5
-    out = _rollout(env, actor, max_steps, dt)
+    # the body-rate scale is the checkpoint's contract (single source of truth), not a sim constant
+    max_body_rate = float(spec.max_rate_rad_s) if spec.max_rate_rad_s else MAX_BODY_RATE
+    out = _rollout(env, actor, max_steps, dt, max_body_rate=max_body_rate)
     out.update(
         checkpoint=str(ckpt),
         config=cfg.name,

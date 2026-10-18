@@ -6,6 +6,12 @@ on the **raw policy action** trace and decode it with the one true convention �
 ``rates = tanh(a[1:4]) * MAX_BODY_RATE`` (:mod:`drone_fly.sim.action` v2, ``max_rate_rad_s`` =
 ``MAX_BODY_RATE`` on meteor75) — so the offline numbers match what the sink actually commands.
 
+This module lives under ``training/`` (NOT ``sim/``) on purpose: it is a function OF the airframe /
+action-contract max-body-rate, so under the UC67 [C4] convention it cannot hard-code that scale in a
+``sim/*`` module. The real eval (:mod:`drone_fly.training.smooth_eval`) sources ``max_body_rate``
+from the checkpoint's :class:`~drone_fly.sim.action.ActionSpec`; ``MAX_BODY_RATE`` here is only the
+meteor75 contract default these pure helpers fall back to for standalone / test use.
+
 Everything here is stateless NumPy: no torch, no env, no RNG. The metrics are:
 
 * ``mean_abs_delta`` — mean |Δ body-rate| per policy tick (rad/s), over axes and ticks (AC7 ≤ 0.6).
@@ -25,7 +31,8 @@ from typing import Any
 import numpy as np
 
 #: The v2 action-contract rate scale on meteor75 (``max_rate_rad_s``); the decode is
-#: ``rates = tanh(a[1:4]) * MAX_BODY_RATE``.
+#: ``rates = tanh(a[1:4]) * MAX_BODY_RATE``. The real eval sources this from the checkpoint's
+#: ActionSpec — this is only the meteor75 fallback default for the pure helpers / tests.
 MAX_BODY_RATE = 4.0
 #: |rate| at or above this (rad/s) counts as saturated (AC6: 3.8 of the 4.0 rad/s envelope).
 SAT_RATE = 3.8
