@@ -449,6 +449,15 @@ class CourseEnv:
         self.difficulty = 1.0  # curriculum: fraction of the sorted pool that can be drawn
         self.obs_pos_curr = 1.0  # 0 = obstacles parked PARK m off-path, 1 = on-path
         self.obs_count_curr = 1.0  # 0 = at most 1 obstacle active, 1 = all active
+        # UC-87 redesign: three runtime ramp scales (default 1.0 = full ⇒ byte-identical off).
+        # The train loop sets them per iteration from the CurriculumConfig schedule; they have NO
+        # effect on existing configs/eval (which leave them at 1.0).
+        self.deploy_dr_scale = 1.0  # control timing/delay/skip + plant dynamics-randomisation scale
+        self.input_dr_scale = 1.0  # gyro/gate/ray input-noise magnitude (0 ⇒ zero noise effect)
+        self.penalty_scale = 1.0  # multiplies cfg.action_rate_lambda ONLY (λ mild→target anneal)
+        #: Base (config) plant DR scale; effective = ``_base_dr_scale * deploy_dr_scale``.
+        self._base_dr_scale = float(randomization_scale)
+        self._applied_dr_scale = float(randomization_scale)  # last scale pushed to the plant
         self._ar_n = torch.arange(n, device=dev)
         z = torch.zeros(n, device=dev, dtype=torch.long)
         self.tgt = z.clone()
@@ -622,6 +631,15 @@ class CourseEnv:
         """Uniform [0, 1) draw from the dedicated UC-87 input-DR generator."""
         return torch.rand(*shape, generator=self._perc_gen, device=self.device, dtype=self.dtype)
 
+    def _apply_dr_scale(self) -> None:
+        """Push the current effective plant DR scale (``_base_dr_scale * deploy_dr_scale``) to the
+        plant when it changes (UC-87 deployment ramp). Recomputing is cheap but guarded so the
+        default (deploy_dr_scale == 1.0) is a no-op after construction."""
+        eff = self._base_dr_scale * float(self.deploy_dr_scale)
+        if eff != self._applied_dr_scale:
+            self.plant.set_dr_scale(eff)
+            self._applied_dr_scale = eff
+
     def _spawn(self, mask: torch.Tensor, course_ids: torch.Tensor | None = None) -> None:
         """Respawn the envs in ``mask`` on fresh courses (masked, no host sync)."""
         n, dev = self.n, self.device
@@ -671,6 +689,12 @@ class CourseEnv:
             quat_arg = torch.zeros(n, 4, dtype=self.dtype, device=dev)
             quat_arg[:, 0] = torch.cos(half)
             quat_arg[:, 3] = torch.sin(half)
+        # UC-87 redesign: apply the deployment-DR ramp. The plant's dynamics-randomisation scale
+        # (carrying the tau-override span) and the control-timing scale both ride deploy_dr_scale —
+        # a newly-reset env draws its dynamics/timing at the current ramp level. Scale 0 ⇒ nominal
+        # plant + clean fixed-rate timing; 1 ⇒ the full configured ranges.
+        self._apply_dr_scale()
+        self.timing.scale = float(self.deploy_dr_scale)
         self.plant.reset(
             mask, pos=pos, quat=quat_arg, motor_g=motor, grounded=ground, command=command
         )
@@ -702,9 +726,11 @@ class CourseEnv:
             true_rel = self._target_pos() - self.pos
             self._gate_rel = torch.where(mask[:, None], true_rel, self._gate_rel)
             self._gate_age = torch.where(mask, torch.zeros_like(self._gate_age), self._gate_age)
-            # per-episode staleness hold (number of steps an estimate is held), 0..stale/ref_dt
-            if self.cfg.gate_staleness_s > 0:
-                hi = self.cfg.gate_staleness_s / self.cfg.reward_reference_dt_s
+            # per-episode staleness hold (steps an estimate is held), 0..stale/ref_dt, ramped by the
+            # input-DR scale (scale 0 ⇒ hold 0 ⇒ always refresh ⇒ zero staleness effect).
+            stale_s = self.cfg.gate_staleness_s * float(self.input_dr_scale)
+            if stale_s > 0:
+                hi = stale_s / self.cfg.reward_reference_dt_s
                 hold = (self._perc_rand(n) * hi).round().long()
             else:
                 hold = torch.zeros(n, dtype=torch.long, device=dev)
@@ -884,11 +910,16 @@ class CourseEnv:
         """
         if self.cfg.ray_blank:  # AC8 control: constant clear (NOT zeroed)
             return torch.ones(self.n, N_RAYS, dtype=self.dtype, device=self.device)
-        if self._ray_noise is not None:  # AC2: inject the measured ray error
+        if self._ray_noise is not None:  # AC2/AC5: inject the measured ray error
             basis = self._ray_basis()
             free = self._cast(basis)
             in_view = self._ray_camera.in_view(basis, self.quat)
-            return self._ray_noise.apply(free, in_view, self._ray_gen)
+            noisy = self._ray_noise.apply(free, in_view, self._ray_gen)
+            # UC-87 redesign: ramp the ray-noise magnitude with input_dr_scale (0 ⇒ exact rays).
+            s = float(self.input_dr_scale)
+            if s >= 1.0:
+                return noisy
+            return free + s * (noisy - free)
         return self._raycast()
 
     def _memory_block(self) -> torch.Tensor:
@@ -1004,9 +1035,11 @@ class CourseEnv:
             ta_prev = torch.tanh(self.prev_action)
             arate = ((ta - ta_prev) ** 2).sum(-1)
             sat = torch.relu(ta[:, 1:4].abs() - cfg.saturation_threshold).sum(-1)
-            reward = (
-                reward - (cfg.action_rate_lambda * arate + cfg.saturation_weight * sat) * rscale
-            )
+            # UC-87 redesign: penalty_scale anneals ONLY the action-rate weight (λ mild→target) so
+            # completion can establish first; the saturation guard-rail is intentionally un-annealed
+            # (small/constant — annealing it adds no AC value).
+            eff_lambda = cfg.action_rate_lambda * float(self.penalty_scale)
+            reward = reward - (eff_lambda * arate + cfg.saturation_weight * sat) * rscale
             self.ep_arate = self.ep_arate + arate
             self.ep_sat = self.ep_sat + sat
 
@@ -1088,27 +1121,36 @@ class CourseEnv:
         """Advance the gyro-noise and gate-perception state for the SURVIVORS (AC4). Done envs keep
         the fresh state :meth:`_spawn` set. No-op (and no RNG drawn) when both are off."""
         surv = ~done
+        # UC-87 redesign: the input-DR magnitudes ride ``input_dr_scale``. At scale 0 every noise
+        # term is 0 and every hold/dropout probability is 0, so the observed omega equals the true
+        # omega and the gate estimate equals the true rel — ZERO EFFECT (not RNG-identity). The ramp
+        # opens them linearly to the full cfg magnitudes at scale 1.
+        s = float(self.input_dr_scale)
         if self._gyro_on:
             rho = float(self.cfg.gyro_vibration_rho)
-            vib = float(self.cfg.gyro_vibration_sigma)
-            white = float(self.cfg.gyro_noise_sigma)
+            vib = float(self.cfg.gyro_vibration_sigma) * s
+            white = float(self.cfg.gyro_noise_sigma) * s
             eps = self._perc_randn(self.n, 3)
             ar = rho * self._gyro_ar + ((1.0 - rho * rho) ** 0.5) * vib * eps
             noise = ar + white * self._perc_randn(self.n, 3)
+            if s <= 0.0:  # scale 0 ⇒ no coloured-noise memory can accumulate
+                ar = torch.zeros_like(ar)
+                noise = torch.zeros_like(noise)
             self._gyro_ar = torch.where(surv[:, None], ar, self._gyro_ar)
             self._gyro_obs = torch.where(surv[:, None], noise, self._gyro_obs)
         if self._gate_on:
             cfg = self.cfg
             true_rel = self._target_pos() - self.pos
             # staleness: hold the estimate while age < per-episode hold; Markov dropout also holds.
+            # Both the dropout probability and the noise magnitude scale with input_dr_scale.
             age = self._gate_age + 1
             fresh_due = age > self._gate_hold
-            dropped = self._perc_rand(self.n) < cfg.gate_dropout_p
+            dropped = self._perc_rand(self.n) < (cfg.gate_dropout_p * s)
             refresh = fresh_due & (~dropped)
             # a freshly sampled estimate: true rel + gaussian noise, or an outlier offset
-            noise = cfg.gate_pos_noise_m * self._perc_randn(self.n, 3)
+            noise = (cfg.gate_pos_noise_m * s) * self._perc_randn(self.n, 3)
             if cfg.gate_outlier_p > 0:
-                outl = self._perc_rand(self.n) < cfg.gate_outlier_p
+                outl = self._perc_rand(self.n) < (cfg.gate_outlier_p * s)
                 d = self._perc_randn(self.n, 3)
                 d = d / d.norm(dim=-1, keepdim=True).clamp(min=1e-6)
                 noise = torch.where(outl[:, None], d * cfg.gate_outlier_m, noise)

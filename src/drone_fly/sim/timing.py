@@ -140,6 +140,10 @@ class ControlTiming:
     device: torch.device
     generator: torch.Generator | None = None
     dtype: torch.dtype = torch.float64
+    #: UC-87 deployment ramp (0..1). 1.0 ⇒ the full configured ranges (byte-identical default);
+    #: 0.0 ⇒ the clean baseline (fixed ``config.fixed_hz`` period, zero delay, zero skip). The env
+    #: sets this to ``deploy_dr_scale`` before each resample.
+    scale: float = 1.0
     period_s: torch.Tensor = field(init=False)
     delay_s: torch.Tensor = field(init=False)
     skip_prob: torch.Tensor = field(init=False)
@@ -188,6 +192,16 @@ class ControlTiming:
             else:
                 delay = dlo + (dhi - dlo) * self._u()
             skip = c.skip_prob[0] + (c.skip_prob[1] - c.skip_prob[0]) * self._u()
+            # UC-87 deployment ramp: interpolate from the clean baseline toward the sampled values.
+            # The clean period anchor is ``config.fixed_hz`` — the SAME rate the `perfect` preset
+            # uses (``TimingConfig.fixed(PERFECT_HZ)`` in smooth_eval); keep fixed_hz and PERFECT_HZ
+            # consistent if either changes. Delay/skip ramp from 0.
+            s = float(self.scale)
+            if s < 1.0:
+                clean_period = torch.full_like(period, 1.0 / c.fixed_hz)
+                period = clean_period + s * (period - clean_period)
+                delay = s * delay
+                skip = s * skip
         self.period_s = torch.where(mask, period, self.period_s)
         self.delay_s = torch.where(mask, delay, self.delay_s)
         self.skip_prob = torch.where(mask, skip, self.skip_prob)

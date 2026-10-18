@@ -244,6 +244,12 @@ class Plant:
 
     # ------------------------------------------------------------------ parameters
 
+    def set_dr_scale(self, scale: float) -> None:
+        """Change the dynamics-randomisation scale at runtime (UC-87 deployment ramp). Delegates to
+        the randomizer; newly-reset envs then draw their dynamics at the new scale. In-flight params
+        are unchanged until their env next resets (``reset`` resamples them)."""
+        self.randomizer.set_scale(scale)
+
     def _update_channel_delay(self) -> None:
         p = self.params
         d = torch.cat(
