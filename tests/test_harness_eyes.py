@@ -254,6 +254,7 @@ def test_packaged_config_eyes_section_defaults():
         "obstacle_vision": "zeros",  # challenger condition 3: zeros until the audit says otherwise
         "cluster_link_m": 0.5,
         "min_obstacle_size_m": 0.15,
+        "world_scale": None,  # null = the weights' world_scale must equal scaling.world_scale
     }
     with pytest.raises(HarnessConfigError, match="eyes.bogus"):
         load_config("liftoff", {"eyes": {"bogus": 1}})
