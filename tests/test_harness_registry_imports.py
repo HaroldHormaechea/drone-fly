@@ -173,7 +173,7 @@ def test_builtins_registered_under_every_expected_name():
         "state_source": {"plant", "liftoff-udp", "liftoff-csv"},
         "frame_source": {"screen"},
         "gate_estimator": {"course", "opencv"},
-        "free_space_estimator": {"raycast", "none", "depth", "eyes"},
+        "free_space_estimator": {"raycast", "none", "depth", "eyes", "composite"},
         "action_sink": {"plant", "vgamepad", "recording"},
         "abort_signal": {"hotkey"},
         "depth_model": {"depth-anything-v2"},
@@ -331,6 +331,8 @@ def test_hermetic_import_and_list_without_heavy_backends():
             "drone_fly.harness.liftoff.gate_cv", "drone_fly.harness.liftoff.gamepad",
             "drone_fly.harness.liftoff.abort", "drone_fly.harness.liftoff.depth",
             "drone_fly.harness.estimators", "drone_fly.cli.main",
+            "drone_fly.harness.perception", "drone_fly.harness.composite",
+            "drone_fly.harness.perception_kit", "drone_fly.harness.examples.brightness",
         ]
         for m in mods:
             importlib.import_module(m)
@@ -361,6 +363,30 @@ def test_hermetic_import_and_list_without_heavy_backends():
     )
     assert re.search(r"action_sink\s+vgamepad\s+missing", out)
     assert re.search(r"harness\s+sim-loopback\s+available", out)
+
+
+def test_hermetic_uc86_perception_modules_import_without_heavy_backends():
+    """UC-86 AC3: the perception contract, composite, kit, eval, CLI and example plugin import
+    (and an import-reference plugin builds) with every heavy backend blocked."""
+    proc = _run_hermetic(
+        """
+        import importlib, json
+        for m in ("drone_fly.harness.perception", "drone_fly.harness.composite",
+                  "drone_fly.harness.perception_kit", "drone_fly.harness.offline.perception_cli",
+                  "drone_fly.harness.examples.brightness",
+                  "drone_fly.harness.offline.perception_eval"):
+            importlib.import_module(m)
+        from types import SimpleNamespace
+        from drone_fly.harness.registry import build_part
+        part = build_part("free_space_estimator", "drone_fly.harness.estimators:"
+                          "NoObstacleFreeSpaceEstimator", {}, SimpleNamespace(config=None))
+        print(json.dumps({"heavy": loaded_heavy(), "name": part.provider_name}))
+        """
+    )
+    assert proc.returncode == 0, proc.stderr
+    res = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert res["heavy"] == []
+    assert res["name"] == "drone_fly.harness.estimators:NoObstacleFreeSpaceEstimator"
 
 
 def test_hermetic_heavy_use_raises_actionable_dependency_errors():
