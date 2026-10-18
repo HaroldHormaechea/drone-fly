@@ -46,6 +46,11 @@ app = [
 # Live-harness backends (drone_fly.harness): screen capture, OpenCV gate detection, the
 # monocular depth model and the ViGEm virtual gamepad. All lazily imported; the core package
 # and CI do not need them. Install with `uv sync --extra harness`.
+#
+# UC-85: the eyes-v3 depth backbone (drone_fly.eyes.depth_backbone / EyesDepthNet) reuses THIS
+# extra's `transformers` + `pillow` for the real Depth-Anything-V2 trunk — deliberately NOT added to
+# the default/dev deps, so CI stays network-free. The pure-torch `tiny-depth` stub (the offline
+# fallback and the hermetic test backbone) needs neither, so all eyes-v3 tests run on `--extra dev`.
 harness = [
     "opencv-python",
     "mss",

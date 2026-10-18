@@ -17,8 +17,13 @@ import pytest
 from drone_fly.harness.config import list_presets, load_config, load_preset
 from drone_fly.harness.errors import HarnessConfigError
 from drone_fly.harness.gate_types import GateTypeTable
+from drone_fly.harness.liftoff.gate_cv import camera_from_config
 from drone_fly.harness.liftoff.gate_learned import configured_weights
+from drone_fly.harness.liftoff.masks import FrameMasks
+from drone_fly.harness.liftoff.pointer_cv import pointer_reader_from_config
 from drone_fly.harness.liftoff.telemetry import GyroMap
+
+ARENA = "liftoff_arena"
 
 PRESET = "liftoff"
 REPO = Path(__file__).resolve().parent.parent
@@ -69,8 +74,10 @@ def _gate_types_text() -> str:
 
 
 def test_preset_is_listed_for_liftoff_only():
-    assert list_presets("liftoff") == {PRESET: "liftoff"}
-    assert PRESET in list_presets()
+    # two packaged liftoff presets: the general Arena `liftoff` and the UC74 pointer-enabled
+    # `liftoff_arena` launch preset (both target the liftoff harness).
+    assert list_presets("liftoff") == {PRESET: "liftoff", "liftoff_arena": "liftoff"}
+    assert PRESET in list_presets() and "liftoff_arena" in list_presets()
     assert list_presets("sim-loopback") == {}
     # harness defaults are not presets
     assert "liftoff_5inch" not in list_presets() and "loopback" not in list_presets()
@@ -321,6 +328,87 @@ def _assert_source_near(text: str, pattern: str) -> None:
 
 
 # ----------------------------------------------------------------------------- real outputs
+
+
+# ------------------------------------------------- UC74 liftoff_arena preset + pointer surface
+
+
+def _arena_text() -> str:
+    return (
+        resources.files("drone_fly.harness").joinpath("configs", f"{ARENA}.yaml").read_text("utf-8")
+    )
+
+
+def test_liftoff_arena_preset_only_uses_keys_of_the_default():
+    """The new preset overlays the 5-inch default with no unknown keys (strict overlay)."""
+    raw = load_preset("liftoff", ARENA)
+    default = load_config("liftoff").data
+    assert set(raw) <= set(default)
+
+
+def test_liftoff_arena_preset_loads_and_enables_the_pointer():
+    """`--preset liftoff_arena` yields the Arena camera + an ENABLED, buildable pointer reader."""
+    cfg = load_config("liftoff", preset=ARENA)
+    cam = cfg.section("camera")
+    assert cam["resolution"] == [2560, 1080]
+    assert cam["hfov_deg"] == 122.0 and cam["uptilt_deg"] == 27.5
+    assert cam["pointer"]["enabled"] is True
+    assert cam["pointer_roi"] == [700, 130, 1200, 760]
+
+    reader = pointer_reader_from_config(camera_from_config(cam), cam, FrameMasks.from_config(cam))
+    assert reader is not None
+    assert reader.roi is not None and reader.roi.rect == (700, 130, 1200, 760)
+    assert reader.roi.resolution == (2560, 1080)
+    assert len(reader.hsv_ranges) == 1
+    assert reader.center_exclude_radius_frac == pytest.approx(0.0324)
+    assert reader.camera.width == 2560 and reader.camera.height == 1080
+    assert reader.max_bearing_az_deg == 30.0  # UC75 off-axis trust guard opts in
+
+
+def test_uc75_default_liftoff_off_axis_guard_is_present_but_off():
+    """UC75 AC3: the 5-inch default carries ``max_bearing_az_deg`` (so the Arena overlay stays
+    strict) but as null = guard off; a pointer-enabled default-style reader has no guard."""
+    cam = load_config("liftoff").section("camera")
+    assert "max_bearing_az_deg" in cam["pointer"]
+    assert cam["pointer"]["max_bearing_az_deg"] is None
+    enabled = {**cam, "pointer": {**cam["pointer"], "enabled": True}}
+    reader = pointer_reader_from_config(camera_from_config(enabled), enabled)
+    assert reader is not None and reader.max_bearing_az_deg is None
+
+
+def test_liftoff_arena_pointer_roi_is_in_frame_and_clears_the_hud_masks():
+    """AC7: the explicit pointer ROI sits inside the frame, below the top HUD and clear of the
+    right-side ghost list, so it does not re-capture masked HUD glyphs."""
+    cfg = load_config("liftoff", preset=ARENA)
+    cam = cfg.section("camera")
+    x, y, w, h = cam["pointer_roi"]
+    assert x >= 0 and y >= 0 and x + w <= 2560 and y + h <= 1080
+    masks = {m["name"]: m["rect"] for m in cam["masks"]}
+    top = masks["top_hud"]
+    assert y >= top[1] + top[3]  # ROI starts below the top HUD strip
+    ghost = masks["ghost_list"]
+    assert x + w <= ghost[0]  # ROI ends left of the right-side ghost list
+
+
+def test_default_liftoff_pointer_surface_is_present_but_off():
+    """The 5-inch default ships the pointer config surface disabled → no reader is built."""
+    cfg = load_config("liftoff")
+    cam = cfg.section("camera")
+    assert cam["pointer"]["enabled"] is False
+    assert "pointer_roi" in cam and "pointer_roi_mask" in cam
+    assert cam["pointer_roi"] is None and cam["pointer_roi_mask"] is None
+    assert pointer_reader_from_config(camera_from_config(cam), cam) is None
+
+
+@pytest.mark.parametrize(
+    "pattern", [r"hfov_deg", r"uptilt_deg", r"center_exclude_radius_frac", r"max_bearing_az_deg"]
+)
+def test_arena_calibrated_values_name_their_source(pattern):
+    """The calibrated Arena values cite a real-frame fit / CALIBRATE provenance nearby."""
+    lines = _arena_text().splitlines()
+    i = next(k for k, ln in enumerate(lines) if re.search(pattern, ln))
+    context = "\n".join(lines[max(0, i - 6) : i + 1])
+    assert re.search(r"fit|FIT|CALIBRATE|captures?|real frames", context), context
 
 
 def test_preset_depth_calibration_equals_the_depth_fit_report(cfg):

@@ -1,0 +1,45 @@
+# Liftoff Arena "04 - Infinity Loop" @ 2560x1080 — camera + HUD next-gate pointer calibration (UC74).
+#
+# A PRESET overlaid on the packaged default (liftoff_5inch.yaml):
+#   drone-fly harness run --checkpoint <student-run2.pt> --preset liftoff_arena [...]
+#
+# Calibrated from real captures in uc74-captures/uc74-liftoff-arena-04 (755 HUD-visible frames):
+#   * camera hfov/uptilt FIT against telemetry+track ground truth (next-gate bearing): 122 deg /
+#     27.5 deg (the generic 120 / 25 defaults were already within noise).
+#   * the white HUD pointer ring is detected over `pointer_roi`; the fixed ACRO aiming reticle (an
+#     identical white ring at the image centre) is removed by `center_exclude_radius_frac`.
+#   * measured bearing error on this capture: inlier combined median ~4.2 deg, p95 ~16 deg; bias
+#     ~0.5 deg; per-frame jitter std ~6 deg (~0.10 rad) — see docs/harness/uc74-arena-pointer.md.
+# Masks/ROI are layout-specific to a 2560x1080 Arena HUD; re-tune for other resolutions/tracks.
+harness: liftoff
+
+camera:
+  resolution: [2560, 1080]
+  hfov_deg: 122.0             # fit from real frames (UC74); CALIBRATE if your FOV differs
+  uptilt_deg: 27.5            # fit from real frames (UC74); CALIBRATE if your camera angle differs
+  # HUD regions excluded from gate detection / auto-label / depth (approximate; CALIBRATE).
+  masks:
+    - {name: top_hud,     rect: [0, 0, 2560, 120]}      # timer / lap / ALT / SPD / ACRO / battery
+    - {name: ghost_list,  rect: [1950, 180, 610, 270]}  # right-side racer / lap list
+    - {name: sticks,      rect: [1070, 925, 430, 155]}  # bottom-centre stick widgets
+    - {name: rec,         rect: [0, 1025, 130, 55]}      # bottom-left REC indicator
+  pointer:
+    enabled: true
+    # The pointer ring and the ACRO reticle are both near-white (low S, high V); key on white and
+    # separate the reticle by position (center_exclude). CALIBRATE the band to your HUD theme.
+    hsv_ranges:
+      - [[0, 0, 185], [179, 70, 255]]
+    min_area_frac: 0.00015     # of ROI area (~135 px in this ROI); the ring is ~300-500 px
+    max_area_frac: 0.0015      # of ROI area (~1370 px)
+    min_circularity: 0.72
+    min_solidity: 0.86
+    morph_kernel: 3
+    ambiguity_ratio: 0.8
+    center_exclude_radius_frac: 0.0324   # ~35 px at 1080 h — drops the centred ACRO reticle
+    # Off-axis trust guard (UC75): UC74 real-frame captures show the pointer is faithful within
+    # |az| ~20-25 deg (median error ~4 deg) and clamps toward the screen edge beyond ~30-40 deg
+    # (error 15-75 deg), so |az| > 30 deg reads unavailable. This ROI reaches ~44 deg at 122 hfov.
+    max_bearing_az_deg: 30.0
+  # The pointer roams the central play area following the next gate; this rect excludes the top
+  # HUD, the right ghost list and the bottom widgets. [x, y, w, h] at `resolution`.
+  pointer_roi: [700, 130, 1200, 760]

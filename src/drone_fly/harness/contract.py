@@ -128,8 +128,8 @@ def resolve_gpu_prototype_dir(explicit: str | os.PathLike[str] | None = None) ->
 
 
 def resolve_k1_path(explicit: str | os.PathLike[str] | None = None) -> Path | None:
-    """CLI/config value -> ``$DRONE_FLY_K1_PATH`` -> the data root's ``pruned/k1`` ->
-    ``<repo-root>/artifacts/pruned/k1`` (legacy).
+    """CLI/config value -> ``$DRONE_FLY_K1_PATH`` -> ``<data root>/pruned/k1``
+    (:mod:`drone_fly.paths`) -> the legacy ``<repo-root>/artifacts/pruned/k1``.
 
     An explicit (CLI/config/env) path must exist. The repo default may be absent (the K1
     connectome is not committed to every checkout): then ``None`` is returned and loading a

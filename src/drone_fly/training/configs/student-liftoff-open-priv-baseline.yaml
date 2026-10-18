@@ -1,0 +1,28 @@
+# UC-79 student information-gap ablation — BASELINE (no privileged blocks).
+#
+# The like-for-like control for the 6 privileged variants (AC7): student-liftoff-open with the MLP
+# actor and the SHORTENED ablation budget, but an empty `distill.student_privileged`, so the obs is
+# the deployable student-obs v3 (DIM 65) unchanged. Every variant is compared against this row.
+#
+# Equalizer (AC6): the step `budget` below is IDENTICAL across the baseline and all 6 variants and
+# is the ONLY wall-clock knob — `max_hours` is removed (null) because it resets per process on a
+# --resume and would break the equal-budget guarantee under the AC9 reboot/resume scenario; the step
+# budget is cumulative across resumes and so is resume-safe.
+#
+# Budget sizing (documented assumption — re-measure on your card and adjust if it is off):
+#   target ≈ 45 min on an RTX 3050 at n_envs 2048. The K1 csr32 closed-loop bench is 7,403
+#   env-steps/s at 4096 envs; the MLP student's forward is far cheaper than the K1 connectome
+#   propagation, which roughly offsets halving the env count, so we assume ≈ 6,700 env-steps/s at
+#   2048 envs. 45 min × 6,700 ≈ 1.8e7 steps. If your measured rate differs, change `budget` in ALL
+#   seven files together (keep them equal).
+#
+# Run it via scripts/uc79_ablation.sh (resumable driver) — see docs/experiments/uc79-student-information-gap.md.
+extends: student-liftoff-open
+name: student-liftoff-open-priv-baseline
+n_envs: 2048
+budget: 1.8e7              # UC-79 shortened ablation budget (≈ 45 min @ RTX 3050, 2048 envs); EQUAL across all 7
+student:
+  actor: mlp-student      # UC-79 is the MLP-only diagnostic ablation (K1 stays byte-identical)
+distill:
+  max_hours: null         # remove the inherited 3.5 h wall-clock cap — equal STEP budget is the authoritative equalizer (AC6)
+  student_privileged: []  # baseline: no privileged blocks

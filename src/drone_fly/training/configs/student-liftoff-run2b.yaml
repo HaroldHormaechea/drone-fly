@@ -1,0 +1,28 @@
+# UC75 run-2b deployable student: run-2 with the pointer-noise model re-tuned to the REAL HUD
+# reader measured in UC74 (docs/harness/uc74-arena-pointer-calibration.json, Liftoff Arena
+# "04 - Infinity Loop", 755 HUD-visible frames). Only the perception.pointer block differs from
+# student-liftoff-run2, which stays unchanged as the A/B baseline. No obs-schema change (v3 / DIM 65).
+#
+# Dropout (dropout_p is drawn per EPISODE; live the pointer is detected on 52.3 % of FRAMES):
+#   * the student policy is feedforward per tick and the pointer is not in the obs-history EMA, so
+#     what it learns about pointer absence is governed by the marginal share of bit-0 ticks, which
+#     is dropout_p. Live that share is 1 - 0.523 = 0.477 (calibration detection_rate), and the
+#     reader's off-axis |az| guard (liftoff_arena: 30 deg) only raises it -> 0.5;
+#   * 0.5 still keeps half the episodes pointer-on, so the student keeps learning to use it;
+#   * a per-tick / state-conditioned availability model would need a new TICK_DRAWS slot and
+#     sim + reference-perception changes (out of UC75 scope) — a follow-up if the re-eval shows
+#     pointer over-reliance.
+#
+# Retrain / export / fly (the CUDA retrain and the re-eval vs run-2 are user-side GPU follow-ups):
+#   drone-fly train student --config student-liftoff-run2b --teacher <run> --noise <noise_model.yaml> \
+#       --device cuda [--resume <run folder>]
+#   drone-fly train export <run> --out <student-run2b.pt>
+#   drone-fly harness run --harness liftoff --checkpoint <student-run2b.pt> --preset liftoff_arena
+extends: student-liftoff-run2
+name: student-liftoff-run2b
+perception:
+  pointer:
+    bias_sigma_rad: 0.0073    # UC74 measured: calibration.json suggested_bias_sigma_rad (0.00734)
+    jitter_sigma_rad: 0.085   # UC74 measured: calibration.json suggested_jitter_sigma_rad (0.08503)
+    dropout_p: 0.5            # UC74 measured: 1 - calibration.json detection_rate (0.523); see above
+    bearing_tol_deg: 16.4     # UC74 measured: calibration.json suggested_pointer_bearing_tol_deg (16.38)

@@ -21,6 +21,10 @@ runner:
   wait_for_state_s: 1.0
   max_duration_s: 28.0      # 1400 ticks = the env's MAX_STEPS episode cap
   max_ticks: null
+  align_spawn_yaw: auto     # auto | true | false (the plant spawns at yaw 0: a no-op here)
+  latency_compensation: auto  # off | auto | on (auto: off on the sim clock; loopback unchanged)
+  latency_delay_s: 0.04
+  latency_predict: rotation   # rotation (attitude + rates only) | full
 
 parts:
   state_source: plant
@@ -32,6 +36,14 @@ parts:
 
 # Options for programmatically registered parts, keyed by part kind (free-form).
 part_options: {}
+
+# Perception providers (UC-86, docs/harness/perception-providers.md).
+inputs:
+  # auto: screen on live Liftoff (refuses metadata / undeclared-provenance providers such as the
+  # oracle or course gates), any elsewhere | screen | any (offline / diagnostic opt-out)
+  require_provenance: auto
+  # parts.free_space_estimator: composite -> [{provider, blocks?, primary?, options?}, ...]
+  free_space: []
 
 scaling:
   world_scale: 1.0          # course geometry in yaml/inline is divided by this (training_m = m / s)

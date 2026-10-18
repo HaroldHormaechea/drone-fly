@@ -240,8 +240,11 @@ class TickRecord:
     ages_s: dict[str, float] = field(default_factory=dict)
     missed_deadline: bool = False
     events: list[str] = field(default_factory=list)
+    #: The latency-compensated state the assembler saw (``None`` when compensation is off).
+    predicted_state: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
+        extra = {} if self.predicted_state is None else {"predicted_state": self.predicted_state}
         return _jsonable(
             {
                 "tick": self.tick,
@@ -259,5 +262,6 @@ class TickRecord:
                 "ages_s": self.ages_s,
                 "missed_deadline": self.missed_deadline,
                 "events": self.events,
+                **extra,
             }
         )

@@ -298,6 +298,18 @@ class TracksConfig:
     conversion: dict[str, Any] = field(default_factory=dict)
     #: Training-only course augmentation (``tracks.augment``): ``{mirror: bool, scales: [..]}``.
     augment: dict[str, Any] = field(default_factory=dict)
+    #: UC77 course obstacles: ``all`` (default) or ``none`` (obstacle-free: no non-gate items in
+    #: contact or the teacher's privileged obstacle blocks; gates, floor and bounds stay). Applies
+    #: to every course this config builds (train, val, feasibility, eval). Not a conversion
+    #: parameter, so the conversion fingerprint is unchanged.
+    obstacles: str = "all"
+
+    def __post_init__(self) -> None:
+        from drone_fly.tracks.liftoff import OBSTACLE_MODES
+
+        if self.obstacles not in OBSTACLE_MODES:
+            raise ValueError(f"tracks.obstacles must be one of {OBSTACLE_MODES}, got "
+                             f"{self.obstacles!r}")  # fmt: skip
 
     def conversion_dict(self) -> dict[str, Any]:
         return {
@@ -356,6 +368,10 @@ class TeacherConfig:
         out["action"] = self.action.as_dict()
         out["contract_version"] = self.action.version
         out["kind"] = "teacher"
+        if self.tracks.obstacles == "all":  # UC77 N4: default snapshots stay byte-identical
+            out["tracks"].pop("obstacles", None)
+        if self.env.rewards.floor_clearance == 0.0:  # UC81 AC1: default-off ⇒ byte-identical
+            out["env"]["rewards"].pop("floor_clearance", None)
         return _plain(out)
 
 
@@ -455,6 +471,40 @@ class StudentSection:
     residual: bool = False  # L2
     logstd_init: float = -1.5
     warm_start: str = "training/07-proc-course-flight/model_readout.pt"
+    #: The frozen K1 body's propagation kernel (``controller.student.BODY_KERNELS``).
+    body_kernel: str = "csr16"
+
+
+@dataclass(frozen=True)
+class PointerSection:
+    """``perception.pointer:`` — the next-gate HUD pointer obs (UC70 run-2). Defaults ⇒ the exact
+    truth bearing, always available (parity-strict)."""
+
+    bias_sigma_rad: float = 0.0
+    jitter_sigma_rad: float = 0.0
+    dropout_p: float = 0.0
+    bearing_tol_deg: float = 20.0
+
+
+@dataclass(frozen=True)
+class GateMemorySection:
+    """``perception.gate_memory:`` — world-frame gate memory (UC70 run-2). ``enabled=false`` ⇒
+    run-1 perception."""
+
+    enabled: bool = False
+    fresh_s: float = 1.5
+
+
+@dataclass(frozen=True)
+class FpSuppressionSection:
+    """``perception.fp_suppression:`` — the three toggleable false-positive sub-gates (UC70
+    run-2). All off ⇒ run-1 acquisition."""
+
+    pointer: bool = False
+    memory: bool = False
+    temporal: bool = False
+    memory_tol: float = 2.0
+    temporal_frames: int = 2
 
 
 @dataclass(frozen=True)
@@ -467,6 +517,15 @@ class PerceptionSection:
     lost_timeout_s: float | None = None  # None: the noise model's recommendation
     acquire_timeout_s: float | None = None
     timing_from_noise_model: bool = True
+    #: The tracker's lost policy (sim.perception; ADR 0009 amendment). The student flies
+    #: ``reacquire``; the harness's legacy default is ``terminate``.
+    lost_policy: str = "reacquire"
+    lost_hard_stop_s: float = 6.0
+    drop_after_s: float = 0.5
+    #: UC70 run-2 features (all default-OFF ⇒ run-1 perception, bar the appended pointer block).
+    pointer: PointerSection = field(default_factory=PointerSection)
+    gate_memory: GateMemorySection = field(default_factory=GateMemorySection)
+    fp_suppression: FpSuppressionSection = field(default_factory=FpSuppressionSection)
 
 
 @dataclass(frozen=True)
@@ -479,7 +538,11 @@ class DistillSection:
     beta_schedule: str = "linear"  # linear | exp
     beta_over: float = 0.5  # fraction of the budget
     explore_std: float = 0.05
-    buffer: int = 2_000_000
+    #: FIFO samples (K1: 1024 fp16 taps + obs + label each, ~2.3 KB): 1e6 ~ 2.3 GB (ADR 0009).
+    buffer: int = 1_000_000
+    #: Pin the buffer in host memory (faster host -> GPU copies; pinned pages cannot be paged
+    #: out). None = auto: pin only when the buffer is smaller than 1 GiB.
+    pin_memory: bool | None = None
     updates: int = 8
     minibatch: int = 8192
     lr: float = 3.0e-4
@@ -487,6 +550,40 @@ class DistillSection:
     val_every_iters: int = 200
     val_episodes: int = 8
     val_seed: int = 4321
+    #: Wall-clock cap of the DAgger phase (hours; None = budget only). D9: 2.5 h per run.
+    max_hours: float | None = None
+    #: UC77: extra selectors (e.g. ``liftoff:liftoff-arena-04``) scored at every validation and
+    #: logged in ``val_history.jsonl`` under ``tracks``; checkpoint selection stays on val.
+    track_evals: tuple[str, ...] = ()
+    #: UC77: after an uninterrupted run, evaluate the val checkpoint on ``liftoff:held-out`` and
+    #: every ``track_evals`` selector (the ``train eval`` reports).
+    final_report: bool = False
+    #: UC79: opt-in, sim-only, DIAGNOSTIC privileged teacher blocks appended to the student obs
+    #: (``drone_fly.sim.teacher_obs.PRIVILEGED_BLOCKS``), one ablation at a time. Default empty ⇒
+    #: everything is byte-identical to before (schema / sidecar / snapshot). MLP-student only (a
+    #: student with any privileged block is never deployable: ``train export`` / ``harness run``
+    #: refuse it). Canonicalised (fixed declaration order) and de-duplicated at parse time.
+    student_privileged: tuple[str, ...] = ()
+    #: UC80: on-policy DAgger relabelling. When true, rollouts execute the student action
+    #: unconditionally (student-driven), decoupling execution from ``beta`` so the frozen teacher
+    #: labels the states the *student* actually visits (attacks covariate shift). Default-off ⇒
+    #: the behaviour is byte-identical to UC77/79 (the β-mix selects execution as before).
+    on_policy_relabel: bool = False
+    #: UC81 (AC2): combine on-policy relabelling with the β-floor. Only meaningful when
+    #: ``on_policy_relabel`` is true: when this is also true, the student drives execution but the
+    #: β-mix still blends in teacher correction on student-visited states (both levers active).
+    #: Default-off ⇒ ``on_policy_relabel`` alone stays pure-student (byte-identical to UC80).
+    on_policy_beta_floor: bool = False
+
+
+#: DistillSection fields left out of a run snapshot at their default (UC77 N6 + UC79 + UC80 + UC81).
+_DISTILL_UC77_DEFAULTS = {
+    "track_evals": [],
+    "final_report": False,
+    "student_privileged": [],
+    "on_policy_relabel": False,
+    "on_policy_beta_floor": False,
+}
 
 
 @dataclass(frozen=True)
@@ -507,6 +604,8 @@ class FinetuneSection:
     bc_lambda: float = 0.1
     bc_decay_frac: float = 0.5
     logstd: float = -1.5
+    #: Wall-clock cap of the PPO phase (hours; None = steps only). D9: 3 h.
+    max_hours: float | None = None
 
 
 @dataclass(frozen=True)
@@ -531,14 +630,41 @@ class StudentConfig:
     def __post_init__(self) -> None:
         if self.student.actor not in STUDENT_ACTORS:
             raise TrainConfigError(f"student.actor must be one of {STUDENT_ACTORS}")
+        from drone_fly.controller.student import BODY_KERNELS
+
+        if self.student.body_kernel not in BODY_KERNELS:
+            raise TrainConfigError(
+                f"student.body_kernel must be one of {BODY_KERNELS}, got "
+                f"{self.student.body_kernel!r}"
+            )
         if self.perception.mode not in ("noise", "exact"):
             raise TrainConfigError("perception.mode must be noise or exact")
+        if self.perception.lost_policy not in ("terminate", "reacquire"):
+            raise TrainConfigError("perception.lost_policy must be terminate or reacquire")
         if self.perception.uncovered not in ("proxy", "exclude"):
             raise TrainConfigError("perception.uncovered must be proxy or exclude")
         if self.distill.beta_schedule not in ("linear", "exp"):
             raise TrainConfigError("distill.beta_schedule must be linear or exp")
         if self.student.world_scale is not None and self.student.world_scale <= 0:
             raise TrainConfigError("student.world_scale must be > 0")
+        priv = self.distill.student_privileged
+        if priv:
+            from drone_fly.sim.teacher_obs import PRIVILEGED_BLOCKS
+
+            unknown = [b for b in priv if b not in PRIVILEGED_BLOCKS]
+            if unknown:
+                raise TrainConfigError(
+                    f"distill.student_privileged has unknown block(s) {unknown}; choose from "
+                    f"{list(PRIVILEGED_BLOCKS)}"
+                )
+            if len(set(priv)) != len(priv):
+                raise TrainConfigError(f"distill.student_privileged has duplicates: {list(priv)}")
+            if self.student.actor != "mlp-student":
+                raise TrainConfigError(
+                    "distill.student_privileged is the UC79 MLP-only diagnostic ablation; it "
+                    f"needs student.actor 'mlp-student', not {self.student.actor!r} (the K1 "
+                    "deployable student stays byte-identical)"
+                )
 
     @property
     def name(self) -> str:
@@ -557,7 +683,32 @@ class StudentConfig:
         out["kind"] = "student"
         for k in ("student", "perception", "distill", "finetune", "feasibility"):
             out[k] = _plain(asdict(getattr(self, k)))
+        for k, v in _DISTILL_UC77_DEFAULTS.items():  # UC77 N6: defaults stay byte-identical
+            if out["distill"].get(k) == v:
+                out["distill"].pop(k)
         return out
+
+
+def _perception_section(d: Any) -> PerceptionSection:
+    """Parse ``perception:`` with its UC70 run-2 nested sub-sections (pointer / gate_memory /
+    fp_suppression) built via :func:`_section` so unknown keys are still rejected."""
+    d = dict(d or {})
+    sub = {
+        "pointer": (PointerSection, d.pop("pointer", None)),
+        "gate_memory": (GateMemorySection, d.pop("gate_memory", None)),
+        "fp_suppression": (FpSuppressionSection, d.pop("fp_suppression", None)),
+    }
+    kw = {name: _section(cls, raw, f"perception.{name}") for name, (cls, raw) in sub.items()}
+    return _section_with(PerceptionSection, d, "perception", kw)
+
+
+def _section_with(cls: type, d: Any, key: str, extra: dict[str, Any]) -> Any:
+    """``_section`` but with already-built sub-objects merged in (nested sections)."""
+    d = dict(d or {})
+    unknown = set(d) - set(cls.__dataclass_fields__)
+    if unknown:
+        raise TrainConfigError(f"unknown {key} keys {sorted(unknown)}")
+    return cls(**d, **extra)
 
 
 def student_from_mapping(data: dict[str, Any], *, validate_tracks: bool = True) -> StudentConfig:
@@ -566,11 +717,21 @@ def student_from_mapping(data: dict[str, Any], *, validate_tracks: bool = True) 
     feas = dict(data.get("feasibility") or {})
     if "selectors" in feas:
         feas["selectors"] = tuple(feas["selectors"])
+    distill = dict(data.get("distill") or {})
+    if "track_evals" in distill:
+        distill["track_evals"] = tuple(str(x) for x in distill["track_evals"] or ())
+    if "student_privileged" in distill:
+        from drone_fly.sim.teacher_obs import PRIVILEGED_BLOCKS
+
+        names = tuple(str(x) for x in distill["student_privileged"] or ())
+        order = {b: i for i, b in enumerate(PRIVILEGED_BLOCKS)}
+        # canonical (declaration) order; unknown blocks sort last and are rejected in __post_init__
+        distill["student_privileged"] = tuple(sorted(names, key=lambda b: order.get(b, len(order))))
     return StudentConfig(
         base=base,
         student=_section(StudentSection, data.get("student"), "student"),
-        perception=_section(PerceptionSection, data.get("perception"), "perception"),
-        distill=_section(DistillSection, data.get("distill"), "distill"),
+        perception=_perception_section(data.get("perception")),
+        distill=_section(DistillSection, distill, "distill"),
         finetune=_section(FinetuneSection, data.get("finetune"), "finetune"),
         feasibility=_section(FeasibilitySection, feas, "feasibility"),
     )

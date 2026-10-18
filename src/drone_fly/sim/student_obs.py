@@ -46,7 +46,7 @@ from drone_fly.sim.perception import NEXT_VISIBLE
 from drone_fly.sim.quat import gravity_body
 
 NAME = "student-obs"
-VERSION = 2
+VERSION = 3
 BLOCKS: tuple[tuple[str, int], ...] = (
     ("harness30", 30),
     ("attitude6", 6),
@@ -56,6 +56,11 @@ BLOCKS: tuple[tuple[str, int], ...] = (
     ("perception", 3),
     ("history", 12),
     ("battery", 2),
+    # v3 (UC70 run-2): the next-gate pointer — a body-frame unit bearing to the current target
+    # gate (3; Liftoff's on-screen next-gate HUD arrow) and an availability bit (1). A noisy HUD
+    # proxy; appended at the tail so the legacy [0:61] columns and offsets are unchanged and the
+    # warm start zeros these new columns.
+    ("pointer", 4),
 )
 DIM = sum(w for _, w in BLOCKS)
 HARNESS_LAYOUT: tuple[tuple[str, int], ...] = (
@@ -96,6 +101,7 @@ def input_scale() -> list[float]:
     out += [1.0] * 3  # perception
     out += [1 / 20.0] * 3 + [1.0] * 4 + [1.0] * 3 + [1.0, 1.0]  # history
     out += list(teacher_scale(2)[-2:])  # battery: as teacher-obs v2 (charge, volts / 4.2)
+    out += [1.0] * 4  # pointer: a unit bearing (3, already O(1)) + the availability bit (1)
     assert len(out) == DIM
     return out
 
@@ -108,18 +114,43 @@ def schema(
     camera: dict[str, Any],
     assoc_radius: float = 1.0,
     battery_cells: int = 3,
+    lost_policy: str = "terminate",
+    lost_hard_stop_s: float = 6.0,
+    drop_after_s: float = 0.5,
+    pointer_bias_sigma_rad: float = 0.0,
+    pointer_jitter_sigma_rad: float = 0.0,
+    pointer_dropout_p: float = 0.0,
+    pointer_bearing_tol_deg: float = 20.0,
+    privileged: tuple[str, ...] = (),
+    privileged_version: int | None = None,
 ) -> dict[str, Any]:
     """The JSON-able ``obs_schema`` written into the student checkpoint (pins ``k``, the tracker
-    timeouts and the camera the noise model and perception assumed)."""
+    timeouts and the camera the noise model and perception assumed).
+
+    UC79: ``privileged`` (default empty) is the opt-in list of diagnostic teacher blocks appended
+    to the obs. When empty the schema is **byte-identical** to before (nothing added; AC3). When
+    set, ``dim`` grows by the privileged widths, the privileged block layout is appended to
+    ``blocks`` and a top-level ``privileged`` key records the names/widths (always exact).
+    ``privileged_version`` is the teacher-obs version whose encoding the blocks mirror (only
+    ``teacher_full``'s width depends on it); defaults to the current teacher-obs version."""
+    from drone_fly.sim import teacher_obs as _t
+
+    priv = _t._privileged_canonical(privileged)
+    pv = int(privileged_version) if privileged_version is not None else _t.VERSION
     start = 0
     blocks = []
     for n, w in BLOCKS:
         blocks.append({"name": n, "start": start, "width": w})
         start += w
-    return {
+    dim = DIM
+    if priv:
+        for entry in _t.privileged_layout(priv, pv):
+            blocks.append({**entry, "start": entry["start"] + DIM})
+        dim = DIM + _t.privileged_total_width(priv, pv)
+    out = {
         "name": NAME,
         "version": VERSION,
-        "dim": DIM,
+        "dim": dim,
         "dtype": "float32",
         "units": "student units = Liftoff metres / world_scale (harness WorldScale); rates, "
         "quaternions, times unscaled; body FLU",
@@ -138,6 +169,9 @@ def schema(
             "lost_timeout_s": float(lost_timeout_s),
             "acquire_timeout_s": float(acquire_timeout_s),
             "assoc_radius": float(assoc_radius),
+            "lost_policy": str(lost_policy),
+            "lost_hard_stop_s": float(lost_hard_stop_s),
+            "drop_after_s": float(drop_after_s),
         },
         "camera": {
             "resolution": [int(v) for v in camera["resolution"]],
@@ -145,6 +179,16 @@ def schema(
             "uptilt_deg": float(camera.get("uptilt_deg", 0.0)),
         },
         "history": {"ema_tau_s": EMA_TAU_S, "ticks_norm": TICKS_NORM},
+        "pointer": {
+            "dim": 4,
+            "layout": "body-frame unit bearing (3) + availability bit (1)",
+            "bias_sigma_rad": float(pointer_bias_sigma_rad),
+            "jitter_sigma_rad": float(pointer_jitter_sigma_rad),
+            "dropout_p": float(pointer_dropout_p),
+            "bearing_tol_deg": float(pointer_bearing_tol_deg),
+            "source": "sim: noisy truth bearing; live: UC74 classic-OpenCV HUD reader when a "
+            "camera.pointer reader is configured, else unavailable (bit = 0)",
+        },
         "input_scale": input_scale(),
         "battery": {**teacher_battery_schema(), "cells": int(battery_cells)},
         "requires": {
@@ -155,6 +199,18 @@ def schema(
         },  # fmt: skip
         "prev_action": "raw policy output of the previous tick, before decoding / clipping",
     }
+    if priv:
+        out["input_scale"] = input_scale() + _t.privileged_input_scale(priv, pv)
+        out["privileged"] = {
+            "blocks": list(priv),
+            "widths": {b: _t.privileged_width(b, pv) for b in priv},
+            "teacher_obs_version": pv,
+            "exactness": "always exact (computed by the teacher's own code path on env truth, "
+            "regardless of the student's perception mode)",
+            "role": "diagnostic; a student with any privileged block is NOT deployable "
+            "(train export / harness run refuse it)",
+        }
+    return out
 
 
 def teacher_battery_schema() -> dict[str, Any]:
@@ -301,8 +357,9 @@ def build_student_obs(
         from drone_fly.sim.teacher_obs import FULL_CELL_V
 
         battery = pos.new_tensor([1.0, FULL_CELL_V]).expand(pos.shape[0], 2)
+    pointer = perc["pointer"].to(dt_)  # body bearing (3) + availability bit (1), already unitless
     parts = [h30, R[:, :, 0], R[:, :, 1], vb, prev_action.to(dt_),
-             arm_remaining_s.to(dt_).unsqueeze(-1), perc3, hist, battery.to(dt_)]  # fmt: skip
+             arm_remaining_s.to(dt_).unsqueeze(-1), perc3, hist, battery.to(dt_), pointer]  # fmt: skip
     return torch.cat(parts, -1)
 
 

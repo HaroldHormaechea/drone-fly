@@ -79,7 +79,20 @@ Statuses:
 | 67 | [use-cases/67-profile-driven-batched-sim.md](use-cases/67-profile-driven-batched-sim.md) | Profile-driven batched sim with dynamics/latency randomization, hover-relative throttle, ground starts | done | 2026-10-12 |
 | 68 | [use-cases/68-track-library-multi-track-teacher.md](use-cases/68-track-library-multi-track-teacher.md) | Track library + multi-track privileged teacher | done | 2026-10-13 |
 | 69 | [use-cases/69-teacher-in-liftoff-with-oracle-gates.md](use-cases/69-teacher-in-liftoff-with-oracle-gates.md) | Fly the teacher in Liftoff with exact gate poses (oracle perception) | done | 2026-10-13 |
-| 70 | [use-cases/70-student-distillation-detector-noise.md](use-cases/70-student-distillation-detector-noise.md) | Deployable student distilled under a measured detector-noise model | in-progress | 2026-10-14 |
-| 71 | [use-cases/71-multi-map-gate-detector.md](use-cases/71-multi-map-gate-detector.md) | Gate detector generalization across Liftoff maps and gate types | in-progress | 2026-10-14 |
+| 70 | [use-cases/70-student-distillation-detector-noise.md](use-cases/70-student-distillation-detector-noise.md) | Deployable student distilled under a measured detector-noise model | in-progress | 2026-10-13 |
+| 71 | [use-cases/71-multi-map-gate-detector.md](use-cases/71-multi-map-gate-detector.md) | Gate detector generalization across Liftoff maps and gate types | in-progress | 2026-10-18 |
 | 72 | [use-cases/72-liftoff-eval-and-fine-tuning.md](use-cases/72-liftoff-eval-and-fine-tuning.md) | Liftoff evaluation on held-out tracks + fine-tuning from Liftoff episodes | pending | 2026-10-12 |
 | 73 | [use-cases/73-camera-obstacle-eyes-for-70-input-connectome.md](use-cases/73-camera-obstacle-eyes-for-70-input-connectome.md) | Camera-based obstacle "eyes" for the 70-input connectome (draft, needs refinement) | pending | 2026-10-14 |
+| 74 | [use-cases/74-hud-next-gate-pointer-reader.md](use-cases/74-hud-next-gate-pointer-reader.md) | Live HUD next-gate pointer reader (classic OpenCV, no ML) | done | 2026-10-15 |
+| 75 | [use-cases/75-retune-run2-pointer-noise.md](use-cases/75-retune-run2-pointer-noise.md) | Re-tune run-2 pointer-noise from UC-74 measurements (run2b) + off-axis trust guard | done | 2026-10-15 |
+| 76 | [use-cases/76-release-for-liftoff-run-bundle.md](use-cases/76-release-for-liftoff-run-bundle.md) | Turnkey release-for-liftoff run bundle (download, run one script, fly) | pending | 2026-10-15 |
+| 77 | [use-cases/77-obstacle-free-student-training.md](use-cases/77-obstacle-free-student-training.md) | Obstacle-free student training for open race tracks (Infinity Loop class) | done | 2026-10-15 |
+| 78 | [use-cases/78-vision-eyes-ray-estimator-v1.md](use-cases/78-vision-eyes-ray-estimator-v1.md) | Vision "eyes" v1: camera ray estimator for the 70-input connectome (dataset, labels, model, accuracy) | done | 2026-10-16 |
+| 79 | [use-cases/79-student-information-gap-ablation.md](use-cases/79-student-information-gap-ablation.md) | Student information-gap ablation (which privileged inputs the student needs) | done | 2026-10-16 |
+| 80 | [use-cases/80-fix-student-distillation-training.md](use-cases/80-fix-student-distillation-training.md) | Fix the student distillation training (on-policy relabelling / PPO fine-tune / β schedule) | done | 2026-10-16 |
+| 81 | [use-cases/81-combined-distillation-fix.md](use-cases/81-combined-distillation-fix.md) | Combined distillation fix — on-policy + β-floor + extended PPO with an altitude-hold reward | done | 2026-10-16 |
+| 82 | [use-cases/82-obstacle-detection-70-input-connectome.md](use-cases/82-obstacle-detection-70-input-connectome.md) | Obstacle detection for the 70-input connectome — ray noise model + obstacle-avoidance retrain (sim-only) | done | 2026-10-16 |
+| 83 | [use-cases/83-eyes-v2-estimator.md](use-cases/83-eyes-v2-estimator.md) | Eyes v2 — cut the obstacle-ray miss rate (classification head + focal loss + denser mining) | done | 2026-10-17 |
+| 84 | [use-cases/84-liftoff-obstacle-capture-protocol.md](use-cases/84-liftoff-obstacle-capture-protocol.md) | Liftoff obstacle-capture protocol — richer hit-ray data for the vision eyes | done | 2026-10-17 |
+| 85 | [use-cases/85-eyes-v3-depth-backbone.md](use-cases/85-eyes-v3-depth-backbone.md) | Eyes v3 — pretrained monocular-depth backbone for the obstacle-ray estimator | done | 2026-10-17 |
+| 86 | [use-cases/86-pluggable-perception-inputs.md](use-cases/86-pluggable-perception-inputs.md) | Pluggable perception inputs — a contract between "eyes" and the brain | done | 2026-10-18 |

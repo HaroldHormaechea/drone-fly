@@ -33,6 +33,12 @@ HISTORICAL_07_COMPLETION = 185 / 192
 #: ``train eval`` defaults (the legacy episode count; the teacher reads 192 as "unset" -> 32).
 LEGACY_EPISODES = 192
 EVAL_SEED = 1234
+#: UC-82 ``proc-eval`` defaults (see drone_fly.training.proc_eval).
+PROC_EVAL_EPISODES = 256
+PROC_EVAL_SEED = 1234
+PROC_EVAL_POOL_BASE = 1_000_000
+PROC_EVAL_POOL_SIZE = 512
+PROC_EVAL_REL_THRESHOLD = 0.20
 #: Collective / rate scale of the random actions used by ``bench``.
 BENCH_ACTION_STD = 0.5
 #: ``bench`` drains the episode log every this many steps (one PPO rollout, ``ppo.roll``).
@@ -335,6 +341,52 @@ def cmd_eval(args: argparse.Namespace) -> int:
     return 0
 
 
+# ----------------------------------------------------------------------------- proc-eval (UC82)
+
+
+def cmd_proc_eval(args: argparse.Namespace) -> int:
+    """UC-82 AC5/AC7: proc-course obstacle-avoidance eval (collision share / outcome breakdown).
+
+    One arm per checkpoint+mode; with ``--blank-checkpoint`` also flies the blanked-ray control on
+    the SAME held-out courses and prints the ray-noise-vs-blank collision comparison + verdict.
+    """
+    import json as _json
+    from pathlib import Path
+
+    from drone_fly.training.proc_eval import compare_collision, evaluate_proc
+
+    common = dict(
+        episodes=args.episodes, seed=args.seed, device=args.device, k1_path=args.k1_path,
+        pool_base=args.pool_base, pool_size=args.pool_size,
+    )  # fmt: skip
+    rays = evaluate_proc(
+        args.checkpoint, args.config, ray_noise=args.ray_noise, ray_blank=args.ray_blank, **common
+    )
+    result: dict[str, Any] = {"rays": rays}
+    print(f"{rays['mode']}: collision {100 * rays['collision_share']:.1f}% "
+          f"completion {100 * rays['completion']:.1f}% "
+          f"({rays['episodes']} eps) outcomes {rays['outcome_shares']}")  # fmt: skip
+    if args.blank_checkpoint:
+        blank = evaluate_proc(
+            args.blank_checkpoint, args.blank_config or args.config, ray_blank=True, **common
+        )
+        cmp = compare_collision(blank=blank, rays=rays, rel_threshold=args.rel_threshold)
+        result.update({"blank": blank, "comparison": cmp})
+        print(f"blank: collision {100 * blank['collision_share']:.1f}% "
+              f"completion {100 * blank['completion']:.1f}%")  # fmt: skip
+        rr = cmp["relative_reduction"]
+        print(f"relative collision-share reduction: "
+              f"{'n/a' if rr is None else f'{100 * rr:.1f}%'} "
+              f"(threshold {100 * cmp['rel_threshold']:.0f}%) -> {cmp['verdict']}")  # fmt: skip
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(_json.dumps(result, indent=2), encoding="utf-8")
+        print(f"report: {args.out}")
+    if args.json:
+        print(_json.dumps(result, indent=2))
+    return 0
+
+
 # ----------------------------------------------------------------------------- bench
 
 
@@ -601,7 +653,19 @@ def cmd_student(args: argparse.Namespace) -> int:
     if args.scale_report:
         out = args.out or str(Path("artifacts") / "training" / (args.drone or "student")
                               / "student-scale-report.json")  # fmt: skip
-        rep = scale_report(trackdata_root=args.trackdata_root, out=out)
+        speeds = rng07 = sources = None
+        if args.teacher:  # CPU: the teacher's val speed vs. 07's own flight speed
+            from drone_fly.training.distill import speed_stats_07, teacher_speed_stats
+
+            t = teacher_speed_stats(args.teacher, device="cpu")
+            s07 = speed_stats_07(k1_path=args.k1_path, device="cpu")
+            speeds = t["speed_mps"]
+            rng07 = (s07["speed_mps"]["p10"], s07["speed_mps"]["p90"])
+            sources = {"teacher": t, "07": s07}
+            print(f"teacher val speed p50 {speeds['p50']:.2f} / p90 {speeds['p90']:.2f} m/s; "
+                  f"07 speed p10-p90 {rng07[0]:.2f}-{rng07[1]:.2f} m/s")  # fmt: skip
+        rep = scale_report(trackdata_root=args.trackdata_root, teacher_speeds=speeds,
+                           speed_range_07=rng07, speed_sources=sources, out=out)  # fmt: skip
         for r in rep["candidates"]:
             vals = ", ".join(f"{k} p50 {v['p50']:.2f} ({'in' if v['inside'] else 'OUT'})"
                              for k, v in r["values"].items())  # fmt: skip
@@ -610,8 +674,12 @@ def cmd_student(args: argparse.Namespace) -> int:
             print(rep["speed_note"])
         print(f"chosen k = {rep['chosen_k']:g}; report: {rep.get('written')}")
         return 0
+    from drone_fly.training.distill import TEACHER_ENV, default_teacher
+
+    args.teacher = default_teacher(args.teacher)
     if not args.teacher:
-        print("train student: --teacher is required (or --scale-report)")
+        print(f"train student: --teacher is required (or ${TEACHER_ENV}, or the data root's "
+              "models/teacher run; or --scale-report)")  # fmt: skip
         return 2
     overrides: dict[str, Any] = {}
     for key in ("n_envs", "seed", "device"):
@@ -632,6 +700,9 @@ def cmd_student(args: argparse.Namespace) -> int:
         overrides["student"] = student
     if args.ppo_steps is not None:
         overrides["finetune"] = {"steps": float(args.ppo_steps)}
+    if args.max_hours is not None:
+        overrides.setdefault("distill", {})["max_hours"] = float(args.max_hours)
+        overrides.setdefault("finetune", {})["max_hours"] = float(args.max_hours)
     from drone_fly.training.config import load_raw, student_from_mapping
 
     if args.resume:
@@ -642,12 +713,29 @@ def cmd_student(args: argparse.Namespace) -> int:
         for k in ("n_envs", "device"):
             if k in overrides:
                 raw[k] = overrides[k]
+        # this invocation's phase knobs (--ppo-steps, --max-hours) apply to the resumed run
+        for section in ("distill", "finetune"):
+            if section in overrides:
+                raw[section] = {**(raw.get(section) or {}), **overrides[section]}
         cfg = student_from_mapping(raw)
     else:
         data = load_raw(args.config, overrides)
         if args.tracks or args.procedural is not None:
             data = teacher_mix(data, args.tracks, args.procedural)
         cfg = student_from_mapping(data)
+    if args.bench:
+        from drone_fly.training.distill import bench_student
+
+        res = bench_student(cfg, _profile(cfg.drone), teacher=args.teacher, noise=args.noise,
+                            n_envs=int(args.n_envs or cfg.base.n_envs), steps=args.bench_steps,
+                            device=args.device, k1_path=args.k1_path)  # fmt: skip
+        print(f"{res['actor']} @ {res['n_envs']} envs on {res['gpu'] or res['device']}: "
+              f"{res['env_steps_per_s']:,.0f} env-steps/s ({res['steps_per_hour']:.3g}/h); per "
+              f"step: full {1e3 * res['full_step_s']:.1f} ms, env {1e3 * res['env_step_s']:.1f} "
+              f"ms, student {1e3 * res['student_s']:.1f} ms, teacher "
+              f"{1e3 * res['teacher_s']:.1f} ms; peak GPU {res['peak_gpu_mb']} MB")  # fmt: skip
+        print(json.dumps(res, indent=2))
+        return 0
     try:
         res = train_student(
             cfg,
@@ -660,6 +748,7 @@ def cmd_student(args: argparse.Namespace) -> int:
             max_iterations=args.max_iterations,
             k1_path=args.k1_path,
             feasibility_only=args.feasibility_only,
+            skip_feasibility=args.skip_feasibility,
             allow_gpu_contention=args.allow_gpu_contention,
         )
     except ContentionError as exc:
@@ -751,6 +840,11 @@ def add_parser(sub: Any) -> None:
     p_ev.add_argument("--tracks", action="append", help="teacher: e.g. liftoff:held-out")
     p_ev.add_argument("--mode", choices=("nominal", "randomized", "both"), default="both")
     p_ev.add_argument(
+        "--obstacles",
+        choices=("all", "none"),
+        help="teacher / student: course obstacles (UC77; default: the run config's)",
+    )
+    p_ev.add_argument(
         "--select-val",
         action="store_true",
         help="teacher: pick the checkpoint with the best val macro completion (randomized)",
@@ -791,8 +885,12 @@ def add_parser(sub: Any) -> None:
     )
     p_dn.set_defaults(func=cmd_detector_noise)
     p_s = tsub.add_parser("student", help="distil the deployable student from a teacher (UC70)")
-    p_s.add_argument("--teacher", help="teacher run folder or teacher .pt")
-    p_s.add_argument("--noise", help="noise_model.yaml of the detector the student will fly with")
+    p_s.add_argument("--teacher", help="teacher run folder, run id under <data root>/models/"
+                     "teacher, or teacher .pt (default $DRONE_FLY_TEACHER, then the data root's "
+                     "UC68 teacher)")  # fmt: skip
+    p_s.add_argument("--noise", help="noise_model.yaml of the detector the student will fly with "
+                     "(default perception.noise_model, $DRONE_FLY_NOISE_MODEL, then the data "
+                     "root's detector-v1 noise model)")  # fmt: skip
     p_s.add_argument("--drone", help="drone profile id (default: the config's)")
     p_s.add_argument("--tracks", help="train selector, e.g. liftoff:train")
     p_s.add_argument("--procedural", type=float, help="procedural share of the mix, e.g. 0.4")
@@ -805,11 +903,20 @@ def add_parser(sub: Any) -> None:
     p_s.add_argument("--resume", help="run folder to resume")
     p_s.add_argument("--ppo-steps", type=float, dest="ppo_steps", help="L4 PPO fine-tune steps")
     p_s.add_argument("--feasibility-only", action="store_true", dest="feasibility_only")
+    p_s.add_argument(
+        "--skip-feasibility",
+        action="store_true",
+        dest="skip_feasibility",
+        help="don't re-run the stage (the same teacher's feasibility.json already exists)",
+    )
     p_s.add_argument("--scale-report", action="store_true", dest="scale_report",
                      help="CPU only: pick k from the train-split geometry")  # fmt: skip
     p_s.add_argument("--trackdata-root", dest="trackdata_root")
     p_s.add_argument("--out", help="--scale-report output (.json)")
     p_s.add_argument("--allow-gpu-contention", action="store_true", dest="allow_gpu_contention")
+    p_s.add_argument("--max-hours", type=float, dest="max_hours", help="wall-clock cap per phase")
+    p_s.add_argument("--bench", action="store_true", help="env-steps/s of the DAgger rollout")
+    p_s.add_argument("--bench-steps", type=int, default=50, dest="bench_steps")
     p_s.add_argument("--k1-path", help="K1 connectome")
     p_s.add_argument("--device", help="auto | cpu | cuda")
     p_s.add_argument("--seed", type=int)
@@ -826,3 +933,33 @@ def add_parser(sub: Any) -> None:
     bench.add_argument("--no-bench", action="store_false", dest="bench")
     p_x.add_argument("--k1-path", help="K1 connectome")
     p_x.set_defaults(func=cmd_export)
+
+    p_pe = tsub.add_parser(
+        "proc-eval",
+        help="UC-82: proc-course obstacle-avoidance eval (collision share / outcome breakdown)",
+    )
+    p_pe.add_argument("--checkpoint", required=True, help="the model_readout.pt to evaluate")
+    p_pe.add_argument("--config", required=True, help="training config of the eval env (name/path)")
+    p_pe.add_argument("--ray-noise", dest="ray_noise", help="ray-noise.yaml to inject (rays arm)")
+    p_pe.add_argument(
+        "--ray-blank", action="store_true", help="blank the rays (constant clear) instead"
+    )
+    p_pe.add_argument(
+        "--blank-checkpoint",
+        dest="blank_checkpoint",
+        help="also fly this control blanked on the SAME courses and print the comparison",
+    )
+    p_pe.add_argument("--blank-config", dest="blank_config", help="config for --blank-checkpoint")
+    p_pe.add_argument("--episodes", type=int, default=PROC_EVAL_EPISODES)
+    p_pe.add_argument("--seed", type=int, default=PROC_EVAL_SEED)
+    p_pe.add_argument("--pool-base", type=int, dest="pool_base", default=PROC_EVAL_POOL_BASE)
+    p_pe.add_argument("--pool-size", type=int, dest="pool_size", default=PROC_EVAL_POOL_SIZE)
+    p_pe.add_argument(
+        "--rel-threshold", type=float, dest="rel_threshold", default=PROC_EVAL_REL_THRESHOLD,
+        help="AC7 relative collision-share reduction bar (default 0.20)",
+    )  # fmt: skip
+    p_pe.add_argument("--k1-path", help="K1 connectome")
+    p_pe.add_argument("--device", help="auto | cpu | cuda")
+    p_pe.add_argument("--out", help="write the full result as JSON")
+    p_pe.add_argument("--json", action="store_true", help="also print the full result as JSON")
+    p_pe.set_defaults(func=cmd_proc_eval)

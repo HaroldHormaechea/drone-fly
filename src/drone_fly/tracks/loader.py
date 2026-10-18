@@ -9,6 +9,10 @@
   :func:`drone_fly.tracks.catalogue.select` with a ``purpose`` -- ``train`` refuses val /
   held-out entries (AC9) -- and returns the courses, their groups and a record of every file it
   read (for the run snapshot).
+
+Both take ``obstacles`` (``all`` / ``none``, UC77 obstacle-free; see
+:func:`~drone_fly.tracks.liftoff.convert_liftoff`): a non-default mode adds an ``obstacles``
+part to the cache key and the ``obstacle-free`` course flag.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from drone_fly.tracks import catalogue as cat
 from drone_fly.tracks.catalogue import Catalogue, TrackDataError, sha256_file
 from drone_fly.tracks.liftoff import (
     CONVERSION_VERSION,
+    OBSTACLE_MODES,
     ConversionConfig,
     PropsTable,
     convert_liftoff,
@@ -117,13 +122,21 @@ def load_course(
     record: LoadRecord | None = None,
     cache_dir: Path | None = None,
     use_cache: bool = True,
+    obstacles: str = "all",
 ) -> list[SimCourse]:
     """Courses of one entry (see the module docstring)."""
+    if obstacles not in OBSTACLE_MODES:
+        raise TrackDataError(f"unknown obstacles mode {obstacles!r} (one of {OBSTACLE_MODES})")
     conv = conversion or ConversionConfig.from_dict(None)
     record = record if record is not None else LoadRecord()
     cdir = (cache_dir or cache_root()) if use_cache else None
     base_meta = {"id": entry["id"], "source": entry["source"], "split": entry["split"],
                  "map": entry["map"], "flags": list(entry.get("flags") or [])}  # fmt: skip
+    # the loader's meta overwrites the convert step's flags (see the liftoff branch below)
+    obstacle_key: dict[str, Any] = {}
+    if obstacles != "all":
+        base_meta["flags"] = sorted(set(base_meta["flags"]) | {"obstacle-free"})
+        obstacle_key = {"obstacles": obstacles}
     cap = (catalogue.header.get("harness_cap") or {}).get("value")
     if conv.harness_cap is None and cap is not None:
         conv = replace(conv, harness_cap=int(cap))
@@ -133,12 +146,14 @@ def load_course(
         from drone_fly.tracks.procedural import convert_procedural, validate_spec
 
         spec = validate_spec(entry["spec"])
-        key = _cache_key({"spec": repr(spec), "conv": conv.fingerprint(), "v": CONVERSION_VERSION})
+        key = _cache_key({"spec": repr(spec), "conv": conv.fingerprint(), "v": CONVERSION_VERSION,
+                          **obstacle_key})  # fmt: skip
 
         def build_proc() -> list[SimCourse]:
             return [
                 convert_procedural(spec, i, conv, {**base_meta, "id": f"{entry['id']}/{i}",
-                                                   "entry": entry["id"], "scene": "procedural"})
+                                                   "entry": entry["id"], "scene": "procedural"},
+                                   obstacles=obstacles)
                 for i in range(spec["pool_size"])
             ]  # fmt: skip
 
@@ -195,7 +210,7 @@ def load_course(
     meta = {**base_meta, "scene": status, "flags": sorted(set(flags))}
     key = _cache_key({"track": sha["track"], "race": sha["race"], "props": props.sha256,
                       "scene": scene.sha256 if scene else None, "conv": conv.fingerprint(),
-                      "v": CONVERSION_VERSION})  # fmt: skip
+                      "v": CONVERSION_VERSION, **obstacle_key})  # fmt: skip
 
     def build_liftoff() -> list[SimCourse]:
         geom = load_track_geometry(track, race)
@@ -203,7 +218,7 @@ def load_course(
             geom, props, conv,
             scene_colliders=scene.colliders if scene else None,
             scene_heightfields=scene.heightfields if scene else None,
-            meta=meta,
+            meta=meta, obstacles=obstacles,
         )  # fmt: skip
         return [course]
 
@@ -222,6 +237,7 @@ def build_pool(
     scenes_root: str | Path | None = None,
     catalogues: dict[str, Catalogue] | None = None,
     use_cache: bool = True,
+    obstacles: str = "all",
 ) -> Pool:
     """Resolve a mix into a :class:`Pool` (``purpose`` ``train`` = leakage guarded)."""
     conv = conversion or ConversionConfig.from_dict(None)
@@ -246,7 +262,8 @@ def build_pool(
                     props_cache[r] = PropsTable.load(r / "props.json")
                 props = props_cache[r]
             for course in load_course(e, catalogue=c, root=r, scenes_root=sr, conversion=conv,
-                                      props=props, record=record, use_cache=use_cache):  # fmt: skip
+                                      props=props, record=record, use_cache=use_cache,
+                                      obstacles=obstacles):  # fmt: skip
                 course.meta["group"] = str(g["select"])
                 idx.append(len(courses))
                 courses.append(course)

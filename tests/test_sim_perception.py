@@ -333,6 +333,96 @@ def test_reset_clears_only_the_masked_envs(tmp_path):
     assert p.status[0].item() == HOLDING
 
 
+# ----------------------------------------------------------------------------- UC70 run-2 features
+
+
+def test_pointer_block_is_the_truth_bearing_and_drops_out(tmp_path):
+    """The appended pointer block is the EXACT body-frame unit bearing to the truth target centre
+    (+ an availability bit) when the pointer noise is off; per-episode dropout forces the whole
+    episode to bit 0 / zeros (the pre-UC74 degraded state the student trains for)."""
+    model = load_model(tmp_path, a=12.0, timing=FAST)
+    # a forward gate -> body +x, available
+    p, d, _ = run(model, 1, 0, 0.02)
+    out = d.tick(gate_batch(1, (10.0, 0.0, 0.0)))
+    torch.testing.assert_close(out["pointer"][0], torch.tensor([1.0, 0.0, 0.0, 1.0]), atol=1e-5,
+                               rtol=0)  # fmt: skip
+    # a gate 90 deg to the left -> body +y (truth-driven, independent of acquisition)
+    d2 = StaticDrone(perception(model, 1, seed=1), 1, 0.02)
+    out = d2.tick(gate_batch(1, (0.0, 10.0, 0.0)))
+    torch.testing.assert_close(out["pointer"][0], torch.tensor([0.0, 1.0, 0.0, 1.0]), atol=1e-5,
+                               rtol=0)  # fmt: skip
+    # dropout 1.0: the whole episode flies with the pointer unavailable -> four zeros
+    d3 = StaticDrone(perception(model, 1, seed=2, pointer_dropout_p=1.0), 1, 0.02)
+    out = d3.tick(gate_batch(1, (10.0, 0.0, 0.0)))
+    assert torch.all(out["pointer"][0] == 0.0)
+
+
+def test_a_false_positive_off_the_pointer_is_suppressed_only_with_the_sub_gate(tmp_path):
+    """UC70 run-2 (behavioural): an FP sampled near the optical axis (body +x) while the noisy
+    next-gate pointer points to a gate 90 deg to the side is REJECTED by the pointer-consistency
+    sub-gate (the target stays unacquired); with the sub-gate OFF the SAME FP hijacks the target."""
+    acq = {"p_wrong_present": 1.0, "p_pick_wrong": 1.0}
+    model = load_model(tmp_path, a=10.0, fp_rate=5.0, acquisition=acq, timing=FAST)
+    side = gate_batch(1, (0.0, 10.0, 0.0))  # the true target is 90 deg left, out of the frustum
+    force_fp = dict(fp_any=0.0, fp_pick=0.0)  # a forced false positive this frame
+    off = StaticDrone(perception(model, 1, seed=0, fp_suppress_pointer=False,
+                                 pointer_bearing_tol_deg=20.0), 1, 0.02)  # fmt: skip
+    out = off.tick(side, draws=draws(1, **force_fp))
+    assert bool(out["fp_target"][0]) and bool(out["acquired"][0])  # hijacked by the FP
+    assert float(out["pointer"][0][3]) == 1.0  # the pointer is available, pointing to the side gate
+    on = StaticDrone(perception(model, 1, seed=0, fp_suppress_pointer=True,
+                                pointer_bearing_tol_deg=20.0), 1, 0.02)  # fmt: skip
+    out = on.tick(side, draws=draws(1, **force_fp))
+    assert not bool(out["fp_target"][0]) and not bool(out["acquired"][0])  # off the pointer: gated
+
+
+def test_the_pointer_sub_gate_never_suppresses_a_true_detection(tmp_path):
+    """UC70 run-2 (behavioural): the FP pointer-consistency sub-gate screens only FALSE-positive
+    candidates. A TRUE detection near the (noisy) pointer is acquired normally even with the
+    sub-gate on and a tight tolerance — ``bearing_tol_deg`` never gates a real gate."""
+    model = load_model(tmp_path, a=12.0, timing=FAST,
+                       acquisition={"p_wrong_present": 0.0, "p_pick_wrong": 0.0})  # fmt: skip
+    fwd = gate_batch(1, (10.0, 0.0, 0.0))  # the true gate is forward, right where the pointer looks
+    p = perception(model, 1, seed=0, fp_suppress_pointer=True, pointer_bearing_tol_deg=5.0,
+                   pointer_jitter_sigma_rad=0.05, pointer_bias_sigma_rad=0.05)  # fmt: skip
+    out = StaticDrone(p, 1, 0.02).tick(fwd, draws=draws(1, mk_t=1.0))
+    assert bool(out["matched"][0]) and bool(out["acquired"][0]) and not bool(out["fp_target"][0])
+
+
+def test_run2_features_off_leave_run1_outputs_byte_identical_except_pointer(tmp_path):
+    """The critical run-1 comparability invariant (UC70 run-2): with gate_memory and the FP sub-
+    gates OFF, enabling / noising the pointer OBS cannot perturb ANY run-1 output field — only the
+    appended pointer block changes. Two perceptions share the RNG seed (identical injected draws),
+    differing only in pointer-noise config; every non-pointer output is bit-identical tick by tick,
+    while the pointer block does move. Guards future changes from silently breaking run-1."""
+    model = load_model(tmp_path, a=1.0, sigma_per_m=(0.03, 0.03, 0.03), yaw_sigma_deg=5.0,
+                       ar1_tau_s=0.05, fp_rate=0.5, next_misassoc_rate=0.3,
+                       acquisition={"p_wrong_present": 0.4, "p_pick_wrong": 0.3},
+                       timing={**FAST, "frame_skip_p": 0.1},
+                       tracker={"lost_timeout_s": 0.15, "acquire_timeout_s": 0.4})  # fmt: skip
+    n = 32
+    run1 = perception(model, n, seed=7)  # run-1: pointer sigma 0, memory / FP sub-gates off
+    noisy = perception(model, n, seed=7, pointer_bias_sigma_rad=0.05,
+                       pointer_jitter_sigma_rad=0.03, pointer_dropout_p=0.2)  # only the pointer obs
+    d1, d2 = StaticDrone(run1, n, 0.02), StaticDrone(noisy, n, 0.02)
+    g1 = gate_batch(n, (8.0, 0.0, 0.0))
+    g2 = gate_batch(n, (14.0, 1.5, 0.0))
+    nonptr = ("status", "target", "target_yaw", "acquired", "next_mode", "next_center", "next_yaw",
+              "target_age_s", "next_age_s", "target_valid", "hand_over", "passed", "matched",
+              "ticks_since_detection", "fp_target")  # fmt: skip
+    ptr_moved = False
+    for i in range(60):  # weave + cross gate 1 midway: hand-over, holding, lost and FP all run
+        pos = (0.3 * i, 0.4 * math.sin(0.3 * i), 0.0)
+        q = yaw_quat(0.2 * math.sin(0.5 * i))
+        crossed = torch.tensor([i == 30] * n)
+        o1 = d1.tick(g1, g2, crossed=crossed, pos=pos, quat=q)
+        o2 = d2.tick(g1, g2, crossed=crossed, pos=pos, quat=q)
+        for key in nonptr:
+            assert torch.equal(o1[key], o2[key]), (i, key)  # byte-identical run-1 field
+        ptr_moved = ptr_moved or not torch.equal(o1["pointer"], o2["pointer"])
+    assert ptr_moved  # the pointer noise actually changed the appended block
+
+
 # ----------------------------------------------------------------------------- exact mode
 
 

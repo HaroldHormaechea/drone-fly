@@ -71,11 +71,11 @@ def test_warm_start_equals_07_on_the_legacy_columns(student, source_07):
 
 
 def test_warm_start_from_07_ignores_the_v2_battery_block(student, source_07):
-    """student-obs v2 (61 values): the battery columns start inert, so a v2 student still equals
+    """student-obs v3 (65 values): the battery columns start inert, so the student still equals
     07 at init whatever the pack reads."""
     from drone_fly.sim.student_obs import block_slice
 
-    assert DIM == 61 and block_slice("battery") == slice(59, 61)
+    assert DIM == 65 and block_slice("battery") == slice(59, 61)
     r = student.feat_dim
     assert torch.all(student.k1.pi[0].weight[:, r + 59 : r + 61] == 0)
     src, _ = source_07
@@ -86,6 +86,26 @@ def test_warm_start_from_07_ignores_the_v2_battery_block(student, source_07):
         mx, my = student.mean_action(x), student.mean_action(y)
         ref, _ = src.act(src.features(x[:, :12]), x[:, :LEGACY])
     torch.testing.assert_close(mx, my)
+    torch.testing.assert_close(mx[:, 1:], ref[:, 1:], atol=1e-5, rtol=1e-5)
+
+
+def test_warm_start_zeros_the_v3_pointer_columns(student, source_07):
+    """student-obs v3 (UC70 run-2) appends a 4-wide pointer block at the tail [61:65). Its readout
+    columns start zero, so a warm-started student still equals 07 at init whatever the HUD pointer
+    reads (the pointer gain is learned, never inherited from the legacy 30)."""
+    from drone_fly.sim.student_obs import block_slice
+
+    assert block_slice("pointer") == slice(61, 65)
+    r = student.feat_dim
+    assert torch.all(student.k1.pi[0].weight[:, r + 61 : r + 65] == 0)
+    src, _ = source_07
+    x = obs(seed=5)
+    y = x.clone()
+    y[:, 61:65] = torch.tensor([0.3, -0.6, 0.74, 1.0])  # an available, off-axis pointer
+    with torch.no_grad():
+        mx, my = student.mean_action(x), student.mean_action(y)
+        ref, _ = src.act(src.features(x[:, :12]), x[:, :LEGACY])
+    torch.testing.assert_close(mx, my)  # the pointer columns are inert at init
     torch.testing.assert_close(mx[:, 1:], ref[:, 1:], atol=1e-5, rtol=1e-5)
 
 
@@ -116,10 +136,13 @@ def test_trainable_and_frozen_parameters(student):
 
 
 def test_residual_and_encoder_flags(harness_k1_dir):
+    from drone_fly.training.config import StudentSection
+
     s = K1Student(harness_k1_dir, encoder=False, residual=False)
     tr = s.trainable_names()
     assert not any(n.startswith(("residual", "encoder")) for n in tr)
     assert s.arch() == {"kind": "k1-student", "encoder": False, "residual": False,
+                        "body_kernel": StudentSection().body_kernel,  # the config's default
                         "feat_dim": s.feat_dim, "enc": [SENSES, 64, ENC_OUT],
                         "residual_hidden": [256, 128]}  # fmt: skip
 

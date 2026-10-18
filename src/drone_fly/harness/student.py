@@ -41,14 +41,14 @@ from drone_fly.harness.errors import (
     StudentSchemaError,
 )
 from drone_fly.harness.interfaces import ObservationAssembler, PolicyRunner
-from drone_fly.harness.teacher import TeacherStepState
+from drone_fly.harness.teacher import CELL_VOLTS_BAND, TeacherStepState
 from drone_fly.harness.types import FlightState, FreeSpaceEstimate, GateEstimate
 
 log = logging.getLogger(__name__)
 
-#: Plausible live pack voltage per cell (V), as the UC69 teacher path: outside it the cell count
-#: (or the telemetry's battery block) is wrong.
-CELL_V_BAND = (2.5, 4.45)
+#: Plausible live pack voltage per cell (V): UC69's single source. Outside it the cell count (or
+#: the telemetry's battery block) is wrong.
+CELL_V_BAND = CELL_VOLTS_BAND
 
 
 @dataclass
@@ -124,6 +124,11 @@ class StudentObservationAssembler(ObservationAssembler):
             history=self.step.history,
             dt=dt,
             battery=bat,
+            # UC70 run-2: the next-gate pointer (student-obs v3). Live, the UC74 HUD reader
+            # populates info["pointer"] when a camera.pointer reader is configured; otherwise (or
+            # pre-UC74) this is None -> zeros / bit = 0 (degraded, as trained for with per-episode
+            # pointer dropout).
+            pointer=(gate.info or {}).get("pointer"),
         )
         self.step.timings["assemble"].append(time.perf_counter() - t0)
         if extra.shape[0] != extra_dim:
@@ -172,6 +177,14 @@ def plan_student(checkpoint: str | Path, *, allow_baseline: bool = False) -> Stu
     if not is_student_checkpoint(p):
         return None
     state, meta = load_export(p)
+    # UC79: a diagnostic privileged student is never deployable — refuse unconditionally (even
+    # with --allow-baseline), before validate_meta's generic dim-mismatch error (AC4).
+    privileged = meta.get("privileged") or (meta.get("obs_schema") or {}).get("privileged")
+    if privileged:
+        blocks = privileged.get("blocks") if isinstance(privileged, dict) else list(privileged)
+        raise StudentSchemaError(
+            f"{p}: diagnostic privileged student, not deployable (privileged blocks {blocks})"
+        )
     validate_meta(meta, p)
     if not meta.get("deployable", False) and not allow_baseline:
         raise StudentSchemaError(
@@ -185,6 +198,9 @@ def plan_student(checkpoint: str | Path, *, allow_baseline: bool = False) -> Stu
         "gates.lost_timeout_s": float(tr["lost_timeout_s"]),
         "gates.acquire_timeout_s": float(tr["acquire_timeout_s"]),
         "gates.assoc_radius": float(tr.get("assoc_radius", 1.0)),
+        "gates.lost_policy": str(tr.get("lost_policy", "terminate")),
+        "gates.lost_hard_stop_s": float(tr.get("lost_hard_stop_s", 6.0)),
+        "gates.drop_after_s": float(tr.get("drop_after_s", 0.5)),
         "parts.free_space_estimator": "none",
         "free_space.assume_no_obstacles": True,
     }
@@ -372,7 +388,7 @@ class StudentPolicyRunner(PolicyRunner):
         with torch.no_grad():
             x = torch.as_tensor(np.asarray(extra, np.float32), device=self._device).reshape(1, -1)
             if brain and hasattr(a, "k1"):
-                full = a.k1.propagated_full(x[:, :12])
+                full = a.propagate(x[:, :12])  # the trained kernel (actor_arch.body_kernel)
                 feats = a.k1.tap(full)
             else:
                 feats = a.features(x)

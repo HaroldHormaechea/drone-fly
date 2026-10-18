@@ -77,6 +77,9 @@
                           [--require-scenes] | scan --source liftoff [--root] [--scenes-root]
                           [--seed] | stats --split S | extract-scenes [--map M] [--bundle M=B]
                           [--witness M=F] [--force] | extract-props [--force]
+    drone-fly eyes fov-report | label --capture <dir> | dataset | train --dataset <dir> |
+                          eval --weights <eyes.pt> --dataset <dir> | bench --weights <eyes.pt>
+                          (UC-78 vision eyes; see drone_fly.eyes.cli)
     drone-fly sim replay-sysid <session dir> --drone <id> [--write-report] [--gate|--no-gate]
 
 Exit codes: 0 ok, 2 config/usage error (also: anti-cheat software running), 3 missing optional
@@ -686,6 +689,12 @@ def _cmd_train_gates(args: argparse.Namespace) -> int:
         + ("-" if val is None else f"{val:.4f}")
     )
     return EXIT_OK
+
+
+def _cmd_perception_eval(args: argparse.Namespace) -> int:
+    from drone_fly.harness.offline.perception_cli import cmd_eval  # UC-86
+
+    return cmd_eval(args)
 
 
 def _cmd_depth_fit(args: argparse.Namespace) -> int:
@@ -1378,6 +1387,32 @@ def build_parser() -> argparse.ArgumentParser:
     from drone_fly.tracks.cli import add_parser as add_tracks_parser  # light: argparse only
 
     add_tracks_parser(sub)
+
+    from drone_fly.eyes.cli import add_parser as add_eyes_parser  # light: argparse only
+
+    add_eyes_parser(sub)
+
+    perc = sub.add_parser("perception", help="pluggable perception providers (UC-86)")
+    ps = perc.add_subparsers(dest="perception_command", required=True)
+    p = ps.add_parser(
+        "eval", help="score an obstacle-vision provider on an eyes dataset (UC-78 metrics)"
+    )
+    p.add_argument(
+        "--provider", required=True, help="registered name, module.path:Class or entry point"
+    )
+    p.add_argument("--dataset", required=True, help="eyes dataset folder (drone-fly eyes dataset)")
+    p.add_argument("--config", help="YAML overlaid on the preset (e.g. eyes.weights)")
+    p.add_argument("--preset", default="liftoff", help="harness preset (camera, telemetry)")
+    p.add_argument("--harness", default="liftoff", help="harness whose config to use")
+    p.add_argument("--split", default="held-out", choices=("held-out", "val"))
+    p.add_argument("--device", help="eyes/depth device override (auto | cpu | cuda)")
+    p.add_argument("--max-frames", type=int, help="score at most N rows, evenly spread")
+    p.add_argument("--tol-m", type=float, help="ray tolerance in training metres (default 0.5)")
+    p.add_argument("--out", help="default <data root>/perception-eval/<provider>-<UTC stamp>")
+    p.add_argument("--trackdata-root", help="Liftoff track XMLs (the label route targets)")
+    p.add_argument("--scenes-root")
+    p.add_argument("--gpu-prototype-dir")
+    p.set_defaults(func=_cmd_perception_eval)
 
     sim = sub.add_parser("sim", help="the batched simulator (drone_fly.sim)")
     simsub = sim.add_subparsers(dest="sim_command", required=True)

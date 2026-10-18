@@ -48,12 +48,14 @@ from drone_fly.harness.config import (
 from drone_fly.harness.errors import HarnessConfigError, lazy_import
 from drone_fly.harness.gate_types import GateTypeTable
 from drone_fly.harness.liftoff.gate_cv import (
+    DEFAULT_POSE_OFFSET_S,
     GateDetection,
     TrackingGateEstimator,
     camera_from_config,
     solve_planar_pnp,
 )
 from drone_fly.harness.liftoff.masks import FrameMasks
+from drone_fly.harness.liftoff.pointer_cv import pointer_reader_from_config
 from drone_fly.harness.scale import WorldScale
 from drone_fly.harness.types import FlightState, Frame
 
@@ -272,6 +274,7 @@ class LearnedGateEstimator(TrackingGateEstimator):
         min_keypoints: int = 4,
         max_detections: int = 8,
         masks: FrameMasks | None = None,
+        pointer_reader: Any = None,
         async_inference: bool = False,
         **tracker: Any,
     ) -> None:
@@ -281,6 +284,7 @@ class LearnedGateEstimator(TrackingGateEstimator):
             scale,
             default_aperture=scale.length(table.types[0].min_aperture),
             masks=masks,
+            pointer_reader=pointer_reader,
             **tracker,
         )
         self.torch = lazy_import("torch", purpose="the learned gate estimator")
@@ -326,13 +330,15 @@ class LearnedGateEstimator(TrackingGateEstimator):
         net, meta = load_weights(weights_path, table, dev)
         table = weights_table(meta, table, weights_path)
         cam = conf.section("camera")
+        camera = camera_from_config(cam)
+        masks = FrameMasks.from_config(cam)
         gpl = cfg.get("gates_per_lap")
         num = lambda k, d, **kw: float(require_number(cfg.get(k, d), f"gates.{k}", **kw))  # noqa: E731
         est = cls(
             net,
             meta,
             table,
-            camera_from_config(cam),
+            camera,
             WorldScale(conf.world_scale),
             device=dev,
             fp16=require_bool(lc.get("fp16", True), "gates.learned.fp16"),
@@ -355,7 +361,8 @@ class LearnedGateEstimator(TrackingGateEstimator):
             max_detections=require_int(
                 lc.get("max_detections", 8), "gates.learned.max_detections", min_value=1
             ),
-            masks=FrameMasks.from_config(cam),
+            masks=masks,
+            pointer_reader=pointer_reader_from_config(camera, cam, masks),
             async_inference=require_bool(
                 lc.get("async_inference", False), "gates.learned.async_inference"
             ),
@@ -364,6 +371,12 @@ class LearnedGateEstimator(TrackingGateEstimator):
             acquire_timeout_s=num("acquire_timeout_s", 3.0, min_value=0.0),
             pass_area_frac=num("pass_area_frac", 0.2, min_value=0.0, max_value=1.0),
             gates_per_lap=None if gpl is None else int(gpl),
+            lost_policy=str(cfg.get("lost_policy", "terminate")),
+            lost_hard_stop_s=num("lost_hard_stop_s", 6.0, min_value=0.0, min_exclusive=True),
+            drop_after_s=num("drop_after_s", 0.5, min_value=0.0),
+            pose_offset_s=num(
+                "pose_offset_s", DEFAULT_POSE_OFFSET_S, min_value=-0.2, max_value=0.2
+            ),
         )
         est.weights_path = weights_path
         est.warmup()

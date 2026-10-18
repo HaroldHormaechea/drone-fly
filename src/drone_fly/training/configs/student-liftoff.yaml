@@ -9,16 +9,16 @@
 #  - pass slack 0 throughout
 #  - student: the K1 reservoir actor warm-started from 07 (v1 -> v2), L1 sense encoder on;
 #    world_scale k is set from `train student --scale-report` before run 1 (ADR parameter table)
-extends: teacher-liftoff
+extends: teacher-liftoff-aug   # power model, battery obs, training-course augmentation (UC68 run 2)
 name: student-liftoff
 n_envs: 4096
-budget: 2.0e8
+budget: 8.0e7               # compute-driven (ADR 0009): csr32 bench 7,403 env-steps/s x 3.5 h x 0.9 = 8.4e7
 randomization_scale: 1.0
 plant:
   power: true                # UC68 battery + thrust-at-speed model, as the teacher (student-obs v2
                              # observes the battery; power_loss is an episode outcome)
 tracks:
-  mix:
+  mix:                       # the plan's 60 / 40 (the teacher ran 50 / 50); augmentation inherited
     - {select: "liftoff:train", weight: 0.6, scene_weight: 2.0}
     - {select: "procedural:proc-liftoff", weight: 0.4}
 env:
@@ -29,11 +29,13 @@ slack:
   frac: 0.5
 student:
   actor: k1-student
-  world_scale: 6.0           # k: scale report 2026-10-13 near-tie 6 vs 10, overridden to 6 (ADR 0009)
+  world_scale: 10.0          # k: scale report with it1374 + 07 speeds picks 10 (ADR 0009 parameter row)
   encoder: true
   residual: false
   logstd_init: -1.5
   warm_start: training/07-proc-course-flight/model_readout.pt
+  body_kernel: csr32         # exact CSR (2.8x the COO path). csr16 failed the closed-loop drift check:
+                             # 0.073 action divergence vs csr32's 6.9e-5 self-divergence (ADR 0009)
 perception:
   mode: noise
   noise_model: null          # --noise
@@ -48,7 +50,8 @@ distill:
   beta_schedule: linear
   beta_over: 0.5
   explore_std: 0.05
-  buffer: 2000000
+  buffer: 1000000            # ~2.3 GB host RAM (run 1: 2e6 = 4.6 GB pinned paged a 15.8 GB machine)
+  pin_memory: null           # auto: pin only below 1 GiB
   updates: 8
   minibatch: 8192
   lr: 3.0e-4
@@ -56,6 +59,7 @@ distill:
   val_every_iters: 200
   val_episodes: 8
   val_seed: 4321
+  max_hours: 3.5            # wall-clock cap (the budget fits inside it at the bench rate)
 finetune:
   steps: 0                   # --ppo-steps (L4)
   lr: 1.0e-4

@@ -25,12 +25,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from drone_fly.harness import perception as perception_contract
 from drone_fly.harness import registry
 from drone_fly.harness.assembler import ContractObservationAssembler
 from drone_fly.harness.config import HarnessConfig, OverlayConfig, find_repo_root, load_config
 from drone_fly.harness.contract import load_contract
 from drone_fly.harness.errors import HarnessConfigError
 from drone_fly.harness.interfaces import BuildContext, Harness
+from drone_fly.harness.latency_comp import LatencyCompensator
 from drone_fly.harness.overlay import (
     OverlayPublisher,
     build_meta,
@@ -47,6 +49,7 @@ from drone_fly.harness.runner import (
     SimClock,
     WallClock,
 )
+from drone_fly.harness.yaw_align import SpawnYawAligner
 
 log = logging.getLogger(__name__)
 
@@ -239,6 +242,19 @@ class _TeacherPlan:
     preset_world_scale: float | None = None
 
 
+def _stamp_provider_names(h: Harness, cfg: HarnessConfig) -> None:
+    """Name each perception provider after its ``parts.*`` entry when the factory did not."""
+    for part, name in (
+        (h.gate_estimator, cfg.parts.gate_estimator),
+        (h.free_space_estimator, cfg.parts.free_space_estimator),
+    ):
+        if part is not None and name and not getattr(part, "provider_name", None):
+            try:
+                part.provider_name = name
+            except AttributeError:
+                pass
+
+
 def run_harness(
     harness: str,
     checkpoint: str | os.PathLike[str] | None = None,
@@ -374,6 +390,8 @@ def run_harness(
                     "free_space.assume_no_obstacles": False,
                     "parts.gate_estimator": "oracle",
                     "scaling.world_scale": 1.0,
+                    # the oracle is metadata by design (UC69 diagnostic): opt out of the guard
+                    "inputs.require_provenance": "any",
                 }
             )
             log.info(
@@ -381,6 +399,7 @@ def run_harness(
                 "capture, contract on the CPU",
                 plan.preset_world_scale,
             )
+            log.info("oracle perception: inputs.require_provenance any (diagnostic teacher run)")
 
     cfg = load_config(harness, config, overrides, preset=preset)
     overlay_cfg = OverlayConfig.from_config(cfg)
@@ -394,6 +413,14 @@ def run_harness(
         raise HarnessConfigError("--overlay-launch needs the overlay enabled")
     if plan is not None and overlay_cfg.enabled:
         raise HarnessConfigError("--overlay is not supported with --teacher (no K1 brain)")
+    if (plan is not None or student_plan is not None) and cfg.runner.align_spawn_yaw is True:
+        raise HarnessConfigError(
+            "align_spawn_yaw applies only to gpu_prototype contract checkpoints"
+        )
+    if (plan is not None or student_plan is not None) and cfg.runner.latency_compensation == "on":
+        raise HarnessConfigError(
+            "latency_compensation applies only to gpu_prototype contract checkpoints"
+        )
 
     contract = load_contract(
         cfg.contract.gpu_prototype_dir, cfg.contract.k1_path, cfg.contract.device
@@ -457,13 +484,40 @@ def run_harness(
     else:
         assembler = ContractObservationAssembler(contract)
         policy = ContractPolicyRunner(contract, checkpoint, extra_dim)  # type: ignore[arg-type]
+    settings = RunnerSettings.from_config(cfg)
+    # Spawn-yaw frame alignment: contract checkpoints only (teacher / student: their own frames).
+    yaw_aligner: SpawnYawAligner | None = None
+    if plan is None and student_plan is None:
+        yaw_aligner = SpawnYawAligner(enabled=settings.align_spawn_yaw in ("auto", True))
+    # Smith-predictor latency compensation: contract checkpoints only; auto also needs the wall
+    # clock (the loopback's sim clock has no latency) and is resolved again after the model load.
+    latency_comp: LatencyCompensator | None = None
+    if plan is None and student_plan is None:
+        latency_comp = LatencyCompensator(
+            cfg.runner.latency_compensation,
+            cfg.runner.latency_delay_s,
+            plant_step=getattr(contract, "plant_step", None),
+            dt=float(getattr(contract, "DT", 0.02)),
+            eligible=cfg.runner.clock == "wall",
+            predict=cfg.runner.latency_predict,
+        )
+        log.info(
+            "latency compensation %s (runner.latency_compensation: %s, delay %.0f ms)",
+            "on" if latency_comp.enabled else "off",
+            cfg.runner.latency_compensation,
+            cfg.runner.latency_delay_s * 1000.0,
+        )
+    _stamp_provider_names(h, cfg)
     runner = HarnessRunner(
         h,
         policy,
         assembler,
         contract,
-        RunnerSettings.from_config(cfg),
+        settings,
         clock=h.clock,
+        yaw_aligner=yaw_aligner,
+        latency_comp=latency_comp,
+        perception=perception_contract.PerceptionRuntime(h),
     )
     recorder = None
     observer: _TickObserver | None = None
@@ -473,6 +527,10 @@ def run_harness(
         # load, the anti-cheat check and the recording root / run folder. Any failure up to and
         # including arming shuts the harness down (sink closed), so a refused run never leaves
         # the device armed.
+        # Coverage first (a missing block is a PerceptionCoverageError), then the perception
+        # contract (UC-86: declarations, unused providers, the live screen-only guard).
+        assembler.check_coverage(runner.extra_dim, h.provided_blocks())
+        perception_meta = perception_contract.check_session(h, assembler, runner.extra_dim, cfg)
         runner.prepare(arm=False)
         policy.warm_up()  # first forward pass off the live loop (CUDA init)
         if (
@@ -523,6 +581,7 @@ def run_harness(
                     "k1_path": None if contract.k1_path is None else str(contract.k1_path),
                     "dry_run": dry_run,
                     "provided_blocks": sorted(h.provided_blocks()),
+                    "perception": perception_meta,
                     "harness_info": h.info,
                     **({} if plan is None else _teacher_meta(plan, policy, cfg)),
                     **({} if student_plan is None else _student_meta(student_plan)),

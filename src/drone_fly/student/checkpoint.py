@@ -87,6 +87,7 @@ def expected_schema(meta: dict[str, Any]) -> dict[str, Any]:
 
     sch = meta.get("obs_schema") or {}
     tr = sch.get("tracker") or {}
+    ptr = sch.get("pointer") or {}
     return schema(
         world_scale=float(meta.get("world_scale", sch.get("world_scale", 0.0))),
         lost_timeout_s=float(tr.get("lost_timeout_s", 0.0)),
@@ -94,6 +95,13 @@ def expected_schema(meta: dict[str, Any]) -> dict[str, Any]:
         camera=meta.get("camera") or sch.get("camera") or {"resolution": [0, 0], "hfov_deg": 0},
         assoc_radius=float(tr.get("assoc_radius", 1.0)),
         battery_cells=int((sch.get("battery") or {}).get("cells", 3)),
+        lost_policy=str(tr.get("lost_policy", "terminate")),
+        lost_hard_stop_s=float(tr.get("lost_hard_stop_s", 6.0)),
+        drop_after_s=float(tr.get("drop_after_s", 0.5)),
+        pointer_bias_sigma_rad=float(ptr.get("bias_sigma_rad", 0.0)),
+        pointer_jitter_sigma_rad=float(ptr.get("jitter_sigma_rad", 0.0)),
+        pointer_dropout_p=float(ptr.get("dropout_p", 0.0)),
+        pointer_bearing_tol_deg=float(ptr.get("bearing_tol_deg", 20.0)),
     )
 
 
@@ -122,6 +130,23 @@ def validate_meta(meta: dict[str, Any], ckpt: str | Path = "checkpoint") -> None
         diff = sorted(k for k in set(sch) | set(exp) if sch.get(k) != exp.get(k))
         raise StudentSchemaError(
             f"{ckpt}: obs_schema differs from this build's {NAME} v{VERSION} in {diff}"
+        )
+    # the deep-equal above rebuilds from the export's own tracker values: check them too
+    from drone_fly.sim.perception import LOST_POLICIES
+
+    tr = sch.get("tracker") or {}
+    bad = []
+    if tr.get("lost_policy") not in LOST_POLICIES:
+        bad.append(f"lost_policy {tr.get('lost_policy')!r} not in {LOST_POLICIES}")
+    if not float(tr.get("lost_hard_stop_s", 0.0)) > 0.0:
+        bad.append(f"lost_hard_stop_s {tr.get('lost_hard_stop_s')!r} must be > 0")
+    if not float(tr.get("drop_after_s", -1.0)) >= 0.0:
+        bad.append(f"drop_after_s {tr.get('drop_after_s')!r} must be >= 0")
+    if bad:
+        raise StudentSchemaError(
+            f"{ckpt}: obs_schema differs from what this build deploys in tracker: "
+            + "; ".join(bad)
+            + " (an export made before the lost policy existed must be re-exported)"
         )
     version = meta.get("contract_version", (meta.get("action") or {}).get("version"))
     if version != 2:

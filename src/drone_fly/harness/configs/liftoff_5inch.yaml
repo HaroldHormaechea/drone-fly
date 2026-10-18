@@ -10,7 +10,7 @@
 #     --checkpoint training/07-proc-course-flight/model_readout.pt --config my_liftoff.yaml
 # The 70-dim obstacle model (training/11-count-curriculum/model_readout.pt, or the older
 # training/10-proc-obstacle-avoid/model_readout.pt) needs a raycast-capable free-space
-# estimator (parts.free_space_estimator: depth).
+# estimator (parts.free_space_estimator: depth | eyes).
 harness: liftoff
 
 # The airframe flown (UC67): drones/<id>/drone.yaml. Its Betaflight rates and its inverse thrust
@@ -34,12 +34,26 @@ runner:
   wait_for_state_s: 10.0    # time allowed for the first telemetry datagram
   max_duration_s: null      # null = until abort / fail-safe
   max_ticks: null
+  # auto | true | false: rotate a gpu_prototype contract policy's world-frame inputs by -spawn
+  # yaw (captured per attempt) so it sees the yaw-0 frame it was trained in. auto = contract
+  # checkpoints only; true with --teacher / a student checkpoint is refused.
+  align_spawn_yaw: auto
+  # Smith-predictor latency compensation (gpu_prototype v1 contract checkpoints): the policy sees
+  # the state forecast latency_delay_s past now through the commands still in flight (contract
+  # plant_step). off | auto | on. auto is OFF: the real-data replay (2026-10-18) found the whoop
+  # plant mispredicts a scaled Liftoff quad (velocity ~10x worse than the stale state); on forces
+  # it. Refused with --teacher / a student checkpoint and for action-spec v2 checkpoints.
+  latency_compensation: auto
+  latency_delay_s: 0.04     # command sent -> measured response (s, 0..0.3)
+  # rotation: roll only attitude + body rates (scale-invariant); velocity stays measured and the
+  # position is extrapolated pos + vel*h. full: the whole plant_step state (whoop translation).
+  latency_predict: rotation
 
 parts:
   state_source: liftoff-udp       # liftoff-udp | liftoff-csv (replay a recorded CSV)
   frame_source: screen
   gate_estimator: opencv
-  free_space_estimator: none      # none (obstacle-free, 12/30-dim only) | depth (70-dim)
+  free_space_estimator: none      # none (obstacle-free, 12/30-dim only) | depth | eyes (70-dim)
   action_sink: vgamepad
   abort_signal: hotkey
   focus_probe: win32-foreground   # fail safe when the Liftoff window loses focus (null = off)
@@ -92,6 +106,34 @@ camera:
   # Screen regions ignored by gate detection, auto-labelling and depth sampling (HUD, ghost list).
   # Each {name, rect: [x, y, w, h]} in pixels at `resolution` (required when masks are set).
   masks: []
+  # UC74 live next-gate HUD pointer reader (classic OpenCV, no ML). OFF by default; enable + tune
+  # per track/resolution (see the `liftoff_arena` preset, calibrated for Arena @2560x1080). When
+  # enabled it fills est.info["pointer"] so the run-2 student consumes the live pointer (AC6; no
+  # retrain). The reader reads the RAW frame over `pointer_roi`; gate detection still masks its own
+  # copy, so the two never collide.
+  pointer:
+    enabled: false
+    # White HUD-icon HSV range(s) [[h,s,v],[h,s,v]] (OpenCV H 0-179). CALIBRATE from real frames.
+    hsv_ranges: []
+    min_area_frac: 0.00005      # icon area / ROI area, lower bound. CALIBRATE
+    max_area_frac: 0.0006       # icon area / ROI area, upper bound. CALIBRATE
+    min_circularity: 0.72       # 4*pi*area/perimeter^2; a clean ring is high
+    min_solidity: 0.86          # area / convex-hull area
+    morph_kernel: 3
+    ambiguity_ratio: 0.8        # reject if the 2nd-best blob's score is >= this * the best (unsure)
+    # Drop detections within this fraction of min(frame_w, frame_h) of the image centre — suppresses
+    # the fixed ACRO aiming reticle (an identical-looking white ring). 0 disables it. CALIBRATE
+    center_exclude_radius_frac: 0.0
+    template: null              # optional greyscale template image path (multi-scale fallback)
+    template_threshold: 0.7
+    template_scales: [0.8, 1.0, 1.25]
+    # Off-axis trust guard (UC75): a detection with body-frame |az| > this (deg) reads unavailable
+    # (bit 0), since the HUD pointer clamps toward the screen edge off-axis. null = off (default).
+    max_bearing_az_deg: null
+  # Pointer ROI override [x, y, w, h] at `resolution` (wins over mask-derived ROI); null = derive
+  # from `masks` (or `pointer_roi_mask` to pick one). The pointer roams here following the gate.
+  pointer_roi: null
+  pointer_roi_mask: null        # name of a camera.masks region to derive the ROI from (optional)
 
 gates:
   nominal_width_m: 1.5      # OUTER gate frame size in Liftoff metres. CALIBRATE per track
@@ -106,6 +148,18 @@ gates:
   assoc_radius: 1.0         # x aperture: association gate for re-detecting the tracked gate
   lost_timeout_s: 1.0       # hold the last estimate this long, then fail-safe
   acquire_timeout_s: 3.0    # hover in place this long waiting for the first gate
+  # UC70 lost policy: terminate (legacy: fail-safe once lost) | reacquire (release a target
+  # unmatched for lost_timeout_s and acquire again; re-acquire a held gate unmatched for more than
+  # drop_after_s when detections exist; fail-safe only after lost_hard_stop_s without a match,
+  # an acquisition or a pass). A student checkpoint pins its own value.
+  lost_policy: terminate
+  lost_hard_stop_s: 6.0
+  drop_after_s: 0.5
+  # Detections are placed in the world with the drone pose AT THEIR CAPTURE STAMP (interpolated
+  # from the telemetry history), shifted by this offset (s, -0.2..0.2) for a render-to-capture
+  # bias. Fit from the 2026-10-18 recordings (-25..-50 ms in all three runs; p90 gate error
+  # 0.50 -> 0.23 training-m vs 0); refit per setup (docs/harness/liftoff-live-session.md).
+  pose_offset_s: -0.025
   pass_area_frac: 0.2       # gate area fraction that, once vanished nearby, counts as a pass
   gates_per_lap: null       # set to count laps
   # `learned` gate estimator (parts.gate_estimator: learned): keypoint net + PnP per gate type.
@@ -154,6 +208,14 @@ oracle:
     yaw_deg: 20.0
     speed_mps: 0.3
 
+# Perception providers (UC-86, docs/harness/perception-providers.md).
+inputs:
+  # auto: screen on live Liftoff (refuses metadata / undeclared-provenance providers such as the
+  # oracle or course gates), any elsewhere | screen | any (offline / diagnostic opt-out)
+  require_provenance: auto
+  # parts.free_space_estimator: composite -> [{provider, blocks?, primary?, options?}, ...]
+  free_space: []
+
 free_space:
   assume_no_obstacles: false  # `none` estimator: set true to fly 12/30-dim models obstacle-free
 
@@ -181,6 +243,22 @@ depth:
     z_m: 0.0                # ground height (Liftoff metres); null disables the rejection
     height_m: 0.15
   warmup_timeout_s: 60.0    # wait for the first depth map (model load) before the loop starts
+
+# `eyes` free-space estimator (parts.free_space_estimator: eyes) -> raycast for 70-dim models: the
+# vision eyes net (`drone-fly eyes train`) on an async worker + its own CUDA stream. Screen-only:
+# refused with parts.gate_estimator course | oracle. See docs/harness/liftoff-live-session.md.
+eyes:
+  weights: null             # eyes.pt (required); relative = repo root (else the cwd)
+  device: auto              # auto | cpu | cuda
+  max_rate_hz: auto         # auto (EyesNet v1/v2: 30, EyesDepthNet v3: 10) | Hz >= 1/(2*hist_tol_s)
+  warmup_timeout_s: 30.0    # wait for the first valid estimate (history) before the loop starts
+  obstacle_vision: zeros    # zeros | ray_clusters (from the rays; eyes false alarms become obstacles)
+  cluster_link_m: 0.5       # ray_clusters: hit points this close (training m) join one obstacle
+  min_obstacle_size_m: 0.15 # ray_clusters: smallest obstacle half-size (training m)
+  # null = the weights' world_scale must equal scaling.world_scale (today's rule). A number = the
+  # weights' world_scale: the eyes see pos/vel/target rescaled by scaling.world_scale / this, and
+  # their free space is converted back (approximate; with a ratio > 1 the far band reads clear).
+  world_scale: null
 
 controls:
   # Only with `drone: null`: the Liftoff rate profile per axis (Betaflight rates; rc_rate 1.0 =

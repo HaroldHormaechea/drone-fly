@@ -20,6 +20,11 @@ from drone_fly.harness.types import FlightState, Frame, FreeSpaceEstimate
 
 
 class NoObstacleFreeSpaceEstimator(FreeSpaceEstimator):
+    # A constant assertion that reads no environment data (UC-86 provenance "telemetry"); it
+    # provides obstacle_vision a 12-dim / student model may ignore, so it is never "unused".
+    provenance = "telemetry"
+    optional = True
+
     def __init__(self, assume_no_obstacles: bool = False) -> None:
         self.assume_no_obstacles = assume_no_obstacles
         self.provides = frozenset({"obstacle_vision"}) if assume_no_obstacles else frozenset()

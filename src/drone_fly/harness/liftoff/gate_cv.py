@@ -36,12 +36,28 @@ Shared by every subclass (the tracker):
    ``info`` carries ``target_age_s`` / ``next_age_s`` (now - that stamp; ``lost_timeout_s`` when
    nothing is held), ``target_valid`` (a current gate is held) and ``hand_over`` (passed this
    tick). No behaviour changes.
+9. UC70 lost policy (``gates.lost_policy``; the simulator's ``sim.perception`` mirrors it):
+   ``terminate`` (default, steps 6 as above) or ``reacquire``: (a) a held gate unmatched for more
+   than ``drop_after_s`` is replaced by the acquisition rule whenever detections exist; (b) after
+   ``lost_timeout_s`` unmatched it is RELEASED (its last estimate stays the target, ``target_valid``
+   false) and the tracker acquires again; the status is ``lost`` (the runner's fail-safe) only when
+   nothing good — a match, an acquisition or a pass — happened for ``lost_hard_stop_s``.
+10. Pose at capture: ``update`` keeps a short history of ``(received_at, pos, quat)`` and step 3
+    uses the drone pose **at the detections' capture stamp** (plus ``gates.pose_offset_s``),
+    interpolated (linear position, slerp attitude), instead of the current tick's pose — the async
+    learned detector's results are several frames old, and pairing them with the current attitude
+    swings the world estimate while the drone rotates. With fewer than two history stamps, no
+    stamp, or a stamp more than ``POSE_STAMP_TOL_S`` outside the history (clock mismatch; warned
+    once, counted in ``pose_fallbacks``) the current pose is used. Tracking and the pass rule stay
+    on the current pose.
 
 OpenCV is imported lazily (on the first frame / detection call).
 """
 
 from __future__ import annotations
 
+import collections
+import logging
 from abc import abstractmethod
 from dataclasses import dataclass, replace
 from typing import Any
@@ -61,7 +77,14 @@ from drone_fly.harness.interfaces import GateEstimator
 from drone_fly.harness.scale import WorldScale
 from drone_fly.harness.types import FlightState, Frame, GateEstimate
 
+log = logging.getLogger(__name__)
+
 _F = np.float32
+#: Default ``gates.pose_offset_s``: the V2 fit on the 2026-10-18 runs (-25..-50 ms in all three).
+DEFAULT_POSE_OFFSET_S = -0.025
+#: A capture stamp farther than this outside the pose history is a clock mismatch: current pose.
+POSE_STAMP_TOL_S = 0.25
+POSE_HISTORY = 64
 
 
 def _cv2() -> Any:
@@ -163,6 +186,7 @@ class TrackingGateEstimator(GateEstimator):
     """Detections -> current / next gate tracking (see the module docstring, steps 3-7)."""
 
     provides = frozenset({"target", "curr_gate", "next_lookahead"})
+    provenance = "screen"
 
     def __init__(
         self,
@@ -171,16 +195,37 @@ class TrackingGateEstimator(GateEstimator):
         *,
         default_aperture: float,
         masks: Any = None,
+        pointer_reader: Any = None,
         assoc_radius: float = 1.0,
         lost_timeout_s: float = 1.0,
         acquire_timeout_s: float = 3.0,
         pass_area_frac: float = 0.2,
         gates_per_lap: int | None = None,
+        lost_policy: str = "terminate",
+        lost_hard_stop_s: float = 6.0,
+        drop_after_s: float = 0.5,
+        pose_offset_s: float = 0.0,
     ) -> None:
+        if lost_policy not in ("terminate", "reacquire"):
+            raise HarnessConfigError(
+                f"gates.lost_policy must be terminate or reacquire, got {lost_policy!r}"
+            )
+        self.lost_policy = lost_policy
+        self.lost_hard_stop_s = float(lost_hard_stop_s)
+        self.drop_after_s = float(drop_after_s)
+        self.pose_offset_s = float(require_number(
+            pose_offset_s, "gates.pose_offset_s", min_value=-0.2, max_value=0.2
+        ))  # fmt: skip
+        self.pose_fallbacks = 0  # capture stamps outside the pose history (clock mismatch)
+        self._pose_warned = False
         self.camera = camera
         self.scale = scale or WorldScale(1.0)
         self.default_aperture = float(default_aperture)  # training scale; acquire fallback
         self.masks = masks
+        #: Optional UC74 HUD pointer reader (live only). When set, ``update`` populates
+        #: ``info["pointer"]`` from the RAW frame over its own ROI; the gate detector masks its own
+        #: copy, so the two never collide. ``None`` leaves ``info["pointer"]`` unset (sim / legacy).
+        self.pointer_reader = pointer_reader
         self.assoc_radius = assoc_radius
         self.lost_timeout_s = lost_timeout_s
         self.acquire_timeout_s = acquire_timeout_s
@@ -233,8 +278,8 @@ class TrackingGateEstimator(GateEstimator):
         """Camera-frame gate pose -> world :class:`GateDetection` (``None`` behind the camera)."""
         if t_cam[2] <= 0:
             return None
-        r_wc = quat_to_matrix(state.quat) @ camera.body_to_camera().T  # camera -> world
-        pos = np.asarray(state.pos, np.float64)
+        pos, quat = self._pose_at(self._det_stamp, state)  # the pose the frame was captured at
+        r_wc = quat_to_matrix(quat) @ camera.body_to_camera().T  # camera -> world
         center = pos + r_wc @ (np.asarray(t_cam, np.float64) / self.scale.factor)
         d = center - pos
         nh = (r_wc @ np.asarray(n_cam, np.float64))[:2]
@@ -256,15 +301,55 @@ class TrackingGateEstimator(GateEstimator):
             pixel_center=None if pixel_center is None else np.asarray(pixel_center, np.float64),
         )
 
+    # ------------------------------------------------------------------ pose history
+
+    def _record_pose(self, state: FlightState) -> None:
+        stamp = float(state.received_at)
+        if self._poses and self._poses[-1][0] == stamp:
+            return
+        self._poses.append(
+            (stamp, np.asarray(state.pos, np.float64), np.asarray(state.quat, np.float64))
+        )
+
+    def _pose_at(self, stamp: float | None, state: FlightState) -> tuple[np.ndarray, np.ndarray]:
+        """``(pos, quat)`` at ``stamp + pose_offset_s`` from the history (else the current pose)."""
+        current = (np.asarray(state.pos, np.float64), np.asarray(state.quat, np.float64))
+        hist = self._poses
+        if stamp is None or len(hist) < 2:
+            return current
+        t = float(stamp) + self.pose_offset_s
+        oldest, newest = hist[0][0], hist[-1][0]
+        if t < oldest - POSE_STAMP_TOL_S or t > newest + POSE_STAMP_TOL_S:
+            self.pose_fallbacks += 1
+            if not self._pose_warned:
+                self._pose_warned = True
+                log.warning(
+                    "gate capture stamp %.3f is outside the pose history [%.3f, %.3f]: frame and "
+                    "telemetry clocks disagree; using the current pose", t, oldest, newest,
+                )  # fmt: skip
+            return current
+        t = min(max(t, oldest), newest)
+        i = 1
+        while i < len(hist) - 1 and hist[i][0] < t:
+            i += 1
+        (t0, p0, q0), (t1, p1, q1) = hist[i - 1], hist[i]
+        w = 0.0 if t1 <= t0 else (t - t0) / (t1 - t0)
+        return p0 + w * (p1 - p0), _slerp(q0, q1, w)
+
     # ------------------------------------------------------------------ state
 
     def reset(self) -> None:
+        self._poses: collections.deque[tuple[float, np.ndarray, np.ndarray]] = collections.deque(
+            maxlen=POSE_HISTORY
+        )
         self.current: _Tracked | None = None
         self.next_known: _Tracked | None = None
         self.gate_index = 0
         self._t0: float | None = None
         self._last_event: float | None = None  # last sighting or pass
         self._det_stamp: float | None = None  # capture stamp behind the latest detections
+        self._released: _Tracked | None = None  # reacquire: the last released target
+        self._good: float | None = None  # reacquire: the last match / acquisition / pass
 
     @property
     def lap(self) -> int:
@@ -303,21 +388,36 @@ class TrackingGateEstimator(GateEstimator):
         if self._t0 is None:
             self._t0 = now
         pos = np.asarray(state.pos, np.float64)
+        self._record_pose(state)
         self._det_stamp = None
         dets = [] if frame is None else self.detect_frame(frame, state)
         src = self._det_stamp
 
+        reacq = self.lost_policy == "reacquire"
+        if self._good is None:
+            self._good = now
         match: GateDetection | None = None
+        acquired = False
         if self.current is not None and dets:
             match = self._associate(dets)
+            if (match is None and reacq
+                    and now - self.current.last_seen > self.drop_after_s):  # fmt: skip
+                # (a) a stale held gate is replaced by the acquisition rule
+                match = min(dets, key=lambda d: d.distance * (1.0 + d.off_axis))
+                self.current = _Tracked.of(match, now, src)
+                acquired = True
         elif self.current is None and dets:
             match = min(dets, key=lambda d: d.distance * (1.0 + d.off_axis))
             self.current = _Tracked.of(match, now, src)
+            acquired = True
         if match is not None and self.current is not None:
-            prev = self.current.prev_signed
+            prev = None if acquired and reacq else self.current.prev_signed
             self.current = _Tracked.of(match, now, src)
             self.current.prev_signed = prev
             self._last_event = now
+            if reacq:
+                self._good = now
+                self._released = None
 
         next_det: GateDetection | None = None
         if self.current is not None:
@@ -338,9 +438,26 @@ class TrackingGateEstimator(GateEstimator):
             self.next_known = None
             next_det = None
             self._last_event = now
+            if reacq:
+                self._good = now
+                self._released = None
 
         status: str
-        if self.current is not None:
+        if reacq:
+            if self.current is not None and now - self.current.last_seen > self.lost_timeout_s:
+                self._released = self.current  # (b) release; keep its estimate as the target
+                self.current = None
+            status = "tracking" if match is not None and not passed else "holding"
+            if now - self._good > self.lost_hard_stop_s:
+                status = "lost"
+            held = self.current if self.current is not None else self._released
+            if held is not None:
+                target = held.center.astype(_F)
+                curr = curr_gate_block(held.gate)
+            else:
+                target = pos.astype(_F)
+                curr = np.array([1.0, 0.0, self.default_aperture], _F)
+        elif self.current is not None:
             age = now - self.current.last_seen
             status = "tracking" if match is not None and not passed else "holding"
             if age > self.lost_timeout_s:
@@ -360,6 +477,8 @@ class TrackingGateEstimator(GateEstimator):
             nxt = lookahead_unseen(pos, self.next_known.center)
         elif self.current is not None:
             nxt = lookahead_unseen(pos, self.current.center)
+        elif reacq and self._released is not None:
+            nxt = lookahead_unseen(pos, self._released.center)
         else:
             nxt = lookahead_unseen(pos, pos + np.array([1.0, 0.0, 0.0]))
 
@@ -371,6 +490,7 @@ class TrackingGateEstimator(GateEstimator):
         )
         info["target_valid"] = self.current is not None
         info["hand_over"] = passed
+        info["pose_fallbacks"] = self.pose_fallbacks
         if self.current is not None and self.current.cls is not None:
             info["gate_class"] = self.current.cls
         if frame is not None:
@@ -388,6 +508,10 @@ class TrackingGateEstimator(GateEstimator):
             info["frame_size"] = [int(w), int(h)]
             info["frame_index"] = int(frame.index)
         info.update(self.extra_info())
+        if frame is not None and self.pointer_reader is not None:
+            # UC74: the live HUD next-gate pointer (body unit bearing 3 + availability bit 1),
+            # read from the RAW frame. zeros + bit 0 when absent/ambiguous (the degraded block).
+            info["pointer"] = self.pointer_reader.read(frame.image)
         return GateEstimate(
             target=target,
             curr_gate=curr,
@@ -399,6 +523,21 @@ class TrackingGateEstimator(GateEstimator):
             passed=passed,
             info=info,
         )
+
+
+def _slerp(q0: np.ndarray, q1: np.ndarray, w: float) -> np.ndarray:
+    """Normalized shortest-arc slerp between unit quaternions ``[w, x, y, z]``."""
+    q0 = q0 / np.linalg.norm(q0)
+    q1 = q1 / np.linalg.norm(q1)
+    dot = float(np.dot(q0, q1))
+    if dot < 0.0:
+        q1, dot = -q1, -dot
+    if dot > 0.9995:
+        q = q0 + w * (q1 - q0)
+    else:
+        theta = np.arccos(dot)
+        q = (np.sin((1.0 - w) * theta) * q0 + np.sin(w * theta) * q1) / np.sin(theta)
+    return q / np.linalg.norm(q)
 
 
 class OpenCvGateEstimator(TrackingGateEstimator):
@@ -421,6 +560,11 @@ class OpenCvGateEstimator(TrackingGateEstimator):
         pass_area_frac: float = 0.2,
         gates_per_lap: int | None = None,
         masks: Any = None,
+        pointer_reader: Any = None,
+        lost_policy: str = "terminate",
+        lost_hard_stop_s: float = 6.0,
+        drop_after_s: float = 0.5,
+        pose_offset_s: float = 0.0,
     ) -> None:
         if nominal_width_m <= 0 or nominal_height_m <= 0:
             raise HarnessConfigError("gates.nominal_width_m / nominal_height_m must be > 0")
@@ -440,18 +584,26 @@ class OpenCvGateEstimator(TrackingGateEstimator):
             scale,
             default_aperture=scale.length(min(self.w, self.h)),
             masks=masks,
+            pointer_reader=pointer_reader,
             assoc_radius=assoc_radius,
             lost_timeout_s=lost_timeout_s,
             acquire_timeout_s=acquire_timeout_s,
             pass_area_frac=pass_area_frac,
             gates_per_lap=gates_per_lap,
+            lost_policy=lost_policy,
+            lost_hard_stop_s=lost_hard_stop_s,
+            drop_after_s=drop_after_s,
+            pose_offset_s=pose_offset_s,
         )
 
     @classmethod
     def from_config(cls, cfg: dict[str, Any], ctx: Any) -> OpenCvGateEstimator:
         from drone_fly.harness.liftoff.masks import FrameMasks
+        from drone_fly.harness.liftoff.pointer_cv import pointer_reader_from_config
 
         cam = ctx.config.section("camera")
+        camera = camera_from_config(cam)
+        masks = FrameMasks.from_config(cam)
         ranges = []
         for i, pair in enumerate(cfg.get("hsv_ranges") or []):
             if not isinstance(pair, (list, tuple)) or len(pair) != 2:
@@ -465,7 +617,7 @@ class OpenCvGateEstimator(TrackingGateEstimator):
         gpl = cfg.get("gates_per_lap")
         num = lambda k, d, **kw: float(require_number(cfg.get(k, d), f"gates.{k}", **kw))  # noqa: E731
         return cls(
-            camera_from_config(cam),
+            camera,
             num("nominal_width_m", 1.5, min_value=0.0, min_exclusive=True),
             num("nominal_height_m", 1.5, min_value=0.0, min_exclusive=True),
             ranges,
@@ -478,7 +630,14 @@ class OpenCvGateEstimator(TrackingGateEstimator):
             acquire_timeout_s=num("acquire_timeout_s", 3.0, min_value=0.0),
             pass_area_frac=num("pass_area_frac", 0.2, min_value=0.0, max_value=1.0),
             gates_per_lap=None if gpl is None else int(gpl),
-            masks=FrameMasks.from_config(cam),
+            lost_policy=str(cfg.get("lost_policy", "terminate")),
+            lost_hard_stop_s=num("lost_hard_stop_s", 6.0, min_value=0.0, min_exclusive=True),
+            drop_after_s=num("drop_after_s", 0.5, min_value=0.0),
+            pose_offset_s=num(
+                "pose_offset_s", DEFAULT_POSE_OFFSET_S, min_value=-0.2, max_value=0.2
+            ),
+            masks=masks,
+            pointer_reader=pointer_reader_from_config(camera, cam, masks),
         )
 
     # ------------------------------------------------------------------ detection

@@ -372,6 +372,7 @@ class OracleGateSource(GateEstimator):
     """See the module docstring. Also the shared state the teacher assembler reads."""
 
     provides = frozenset({"target", "curr_gate", "next_lookahead", "oracle"})
+    provenance = "metadata"
 
     def __init__(
         self,

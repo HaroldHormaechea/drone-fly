@@ -75,11 +75,19 @@ def build_student_obs(
     history: StudentHistory,
     dt: float,
     battery: tuple[float, float] | None = None,
+    pointer: Any = None,
 ) -> np.ndarray:
     """The student-obs values (see :mod:`drone_fly.sim.student_obs`); advances ``history``.
 
     ``battery`` = ``(charge, volts_per_cell)`` (``teacher_obs_ref.battery_from_telemetry``);
     ``None`` = a full pack, as the sim without a power model.
+
+    ``pointer`` = the next-gate HUD bearing (body unit vector 3 + availability bit 1; UC70 run-2).
+    When ``None`` it falls back to ``est_k.info["pointer"]`` (the reference / sim path, where
+    :func:`~drone_fly.student.perception_ref.estimate_from_raw` put it) and finally to zeros — the
+    pre-UC74 live reality, where the learned tracker leaves the pointer unavailable (bit = 0).
+    UC74's classic-OpenCV HUD reader fills ``info["pointer"]`` live when a ``camera.pointer`` reader
+    is configured.
     """
     from drone_fly.sim.teacher_obs import FULL_CELL_V
 
@@ -100,10 +108,12 @@ def build_student_obs(
         R, np.asarray(state_k.pos, _F), np.asarray(est_k.target, _F), prev_action,
         bool(info.get("matched", False)), bool(info.get("hand_over", False)), valid, dt,
     )  # fmt: skip
+    ptr_src = pointer if pointer is not None else info.get("pointer")
+    ptr = np.zeros(4, _F) if ptr_src is None else np.asarray(ptr_src, _F).reshape(4)
     out = np.concatenate([
         np.asarray(h30, _F), R[:, 0], R[:, 1], vb, np.asarray(prev_action, _F),
         [_F(arm_remaining_s)], perc, hist,
-        np.asarray(battery if battery is not None else (1.0, FULL_CELL_V), _F),
+        np.asarray(battery if battery is not None else (1.0, FULL_CELL_V), _F), ptr,
     ]).astype(_F)  # fmt: skip
     assert out.shape[0] == DIM
     return out

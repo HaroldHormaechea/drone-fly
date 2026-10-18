@@ -253,8 +253,13 @@ def evaluate_teacher(
     n_envs: int | None = None,
     checkpoint: Path | None = None,
     write: bool = True,
+    obstacles: str | None = None,
 ) -> dict[str, Any]:
-    """Evaluate a teacher run / checkpoint (see the module docstring)."""
+    """Evaluate a teacher run / checkpoint (see the module docstring).
+
+    ``obstacles`` (UC77) None = the run config's ``tracks.obstacles``; an override is recorded
+    and suffixes the report files ``-obstacles-<mode>``.
+    """
     import torch
     import yaml
 
@@ -272,9 +277,10 @@ def evaluate_teacher(
     dev = resolve_device(device or cfg.device)
     actor, side = load_teacher(ckpt, dev)
     conv = conversion_from_sidecar(side)
+    obs_mode = cfg.tracks.obstacles if obstacles is None else obstacles
     pool = build_pool(
         [{"select": s} for s in selectors], "eval", conversion=conv,
-        root=cfg.tracks.root, scenes_root=cfg.tracks.scenes_root,
+        root=cfg.tracks.root, scenes_root=cfg.tracks.scenes_root, obstacles=obs_mode,
     )  # fmt: skip
     keep = [i for i, c in enumerate(pool.courses) if c.meta.get("source") == "liftoff-xml"]
     entries = {}
@@ -287,7 +293,7 @@ def evaluate_teacher(
         "seed": seed, "device": str(dev), "drone": profile.id, "modes": {},
         "obs_schema": f"{side['obs_schema']['name']} v{side['obs_schema']['version']}",
         "course_conversion": side["course_conversion"]["fingerprint"],
-        "counting_mode": "randomized",
+        "counting_mode": "randomized", "obstacles": obs_mode,
     }  # fmt: skip
     max_total = max(pool.courses[i].total_crossings for i in keep)
     batch = n_envs or 4096
@@ -320,6 +326,8 @@ def evaluate_teacher(
         }
     if write:
         name = "+".join(s.split(":", 1)[1] for s in selectors)
+        if obs_mode != cfg.tracks.obstacles:
+            name += f"-obstacles-{obs_mode}"
         d = run / "eval"
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{name}.json").write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
@@ -339,7 +347,8 @@ def markdown(res: dict[str, Any], name: str) -> str:
         f"- run: `{Path(res['run']).name}`, checkpoint `{Path(res['checkpoint']).name}`",
         f"- selectors: {', '.join(res['selectors'])}; {res['episodes']} episodes per track, "
         f"seed {res['seed']}; drone {res['drone']}",
-        f"- observation {res['obs_schema']}, conversion {res['course_conversion']}",
+        f"- observation {res['obs_schema']}, conversion {res['course_conversion']}, course "
+        f"obstacles `{res.get('obstacles', 'all')}`",
         "- counting mode: **randomized** (dynamics randomization 1, random timing, ground starts "
         "at the spawn, mean action, slack 0); nominal is information only",
         "",
@@ -413,10 +422,17 @@ def cmd_teacher_eval(args: argparse.Namespace) -> int:
             args.checkpoint, baseline=getattr(args, "baseline", None), selectors=sel,
             episodes=episodes, seed=EVAL_SEED if args.seed is None else args.seed,
             device=args.device, k1_path=getattr(args, "k1_path", None),
+            obstacles=getattr(args, "obstacles", None),
         )  # fmt: skip
         m = res["macro"]
-        print(f"student noise {_pct(m['student_noise'])}, exact {_pct(m['student_exact'])}; "
-              f"teacher exact {_pct(m['teacher_exact'])}; ratio {_pct(res['teacher_ratio'])}")
+        print(
+            f"student noise {_pct(m['student_noise'])}, exact {_pct(m['student_exact'])}; "
+            f"teacher exact {_pct(m['teacher_exact'])}; ratio {_pct(res['teacher_ratio'])} "
+            f"(obstacles {res.get('obstacles')})"
+        )
+        oc = (res.get("outcomes") or {}).get("student_noise") or {}
+        print("student noise outcomes: "
+              + (", ".join(f"{o} {_pct(v)}" for o, v in oc.items()) or "-"))  # fmt: skip
         if res.get("banner"):
             print(res["banner"])
         print(f"report: {res.get('written')}")
@@ -432,7 +448,7 @@ def cmd_teacher_eval(args: argparse.Namespace) -> int:
     res = evaluate_teacher(
         args.checkpoint, list(args.tracks), episodes=episodes,
         seed=EVAL_SEED if args.seed is None else args.seed, modes=modes,
-        device=args.device, n_envs=args.n_envs,
+        device=args.device, n_envs=args.n_envs, obstacles=getattr(args, "obstacles", None),
     )  # fmt: skip
     for mode, m in res["modes"].items():
         print(f"{mode}: macro completion {_pct(m['macro_completion'])} over {m['tracks']} tracks")

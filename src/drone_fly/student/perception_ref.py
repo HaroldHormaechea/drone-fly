@@ -46,6 +46,7 @@ from drone_fly.sim.perception import (
     TICK_DRAWS,
     TRACKING,
     PerceptionConfig,
+    draw_width,
 )
 
 
@@ -99,10 +100,11 @@ class ReferencePerception:
         self.model = model
         self.cfg = config
         self.exact = config.mode == "exact"
+        self.reacq = config.lost_policy == "reacquire"
         self.spec: VisibilitySpec = model.visibility_spec()
         self.cn = model.class_noise()
         self.fp = model.data["false_positives"]
-        self.reset(0.0, np.zeros(3), np.array([1.0, 0, 0, 0]), np.zeros(2))
+        self.reset(0.0, np.zeros(3), np.array([1.0, 0, 0, 0]), np.zeros(draw_width(EPISODE_DRAWS)))
 
     # ---- state ----
     def reset(self, t: float, pos: Any, quat: Any, draws: Any) -> None:
@@ -119,11 +121,23 @@ class ReferencePerception:
         self.tg = _Slot(seen=float(t), src=float(t))
         self.nx = _Slot(seen=float(t), src=float(t))
         self.ticks_since = 0
+        self.t_last = False  # reacquire: a released target's estimate is kept
+        self.t_good = float(t)  # reacquire: the last good event (match, acquisition, pass)
         self.hand_over = False
         self.passed = False
         self.status = HOLDING
         self.pos = np.asarray(pos, np.float64).copy()
         self.t = float(t)
+        # UC70 run-2: per-episode pointer bias / dropout; the noisy pointer + availability bit; the
+        # per-slot gate memory and the FP temporal streaks (mirrors GatePerception).
+        self.ptr_bias = np.asarray(d["ptr_bias"], np.float64) * c.pointer_bias_sigma_rad
+        self.ptr_dropped = bool(d["ptr_drop"] < c.pointer_dropout_p)
+        self.ptr_body = np.zeros(3)
+        self.ptr_avail = False
+        self.tm_world, self.tm_yaw, self.tm_stamp, self.tm_valid = np.zeros(3), 0.0, float(t), False
+        self.nm_world, self.nm_yaw, self.nm_stamp, self.nm_valid = np.zeros(3), 0.0, float(t), False
+        self.t_streak = 0
+        self.n_streak = 0
 
     def push_pose(self, t: float, pos: Any, quat: Any) -> None:
         self.ring[self.ring_i % RING] = (float(t), np.asarray(pos, np.float64).copy(),
@@ -225,6 +239,48 @@ class ReferencePerception:
         nb[2] = 0.0
         return body, nb / max(np.linalg.norm(nb), 1e-9)
 
+    def _pointer(self, R: np.ndarray, pos: np.ndarray, center: np.ndarray, jit: np.ndarray,
+                 target_valid: bool) -> None:  # fmt: skip
+        """Store the noisy body-frame pointer (3) + availability bit (mirrors
+        :meth:`GatePerception._pointer`)."""
+        rel_b = R.T @ (np.asarray(center, np.float64) - pos)
+        unit = rel_b / max(float(np.linalg.norm(rel_b)), 1e-9)
+        j = np.asarray(jit, np.float64) * self.cfg.pointer_jitter_sigma_rad
+        az = math.atan2(unit[1], unit[0]) + self.ptr_bias[0] + j[0]
+        el = math.asin(float(np.clip(unit[2], -1.0, 1.0))) + self.ptr_bias[1] + j[1]
+        ce = math.cos(el)
+        ptr = np.array([ce * math.cos(az), ce * math.sin(az), math.sin(el)])
+        avail = bool(target_valid) and not self.ptr_dropped
+        self.ptr_body = ptr if avail else np.zeros(3)
+        self.ptr_avail = avail
+
+    def _fp_suppress(self, slot: str, cand: bool, fp_world: np.ndarray, R: np.ndarray,
+                     pos: np.ndarray, t: float, frame: bool) -> bool:  # fmt: skip
+        """Reject a false-positive candidate via the enabled sub-gates (mirrors
+        :meth:`GatePerception._fp_suppress`); all off ⇒ ``False`` (run-1)."""
+        c = self.cfg
+        supp = False
+        if slot == "t" and c.fp_suppress_pointer:
+            fp_dir = np.asarray(fp_world, np.float64) - pos
+            fp_dirn = fp_dir / max(float(np.linalg.norm(fp_dir)), 1e-9)
+            tol_cos = math.cos(math.radians(c.pointer_bearing_tol_deg))
+            supp = supp or (self.ptr_avail and float(np.dot(R @ self.ptr_body, fp_dirn)) < tol_cos)
+        if c.fp_suppress_memory:
+            mw, mv, ms = ((self.tm_world, self.tm_valid, self.tm_stamp) if slot == "t"
+                          else (self.nm_world, self.nm_valid, self.nm_stamp))  # fmt: skip
+            fresh = mv and (t - ms) <= c.gate_memory_fresh_s
+            supp = supp or (fresh and float(np.linalg.norm(np.asarray(fp_world, np.float64)
+                                                           - np.asarray(mw, np.float64)))
+                            > c.fp_memory_tol)  # fmt: skip
+        if c.fp_suppress_temporal:
+            attr = "t_streak" if slot == "t" else "n_streak"
+            streak = getattr(self, attr)
+            if frame:
+                streak = streak + 1 if cand else 0
+                setattr(self, attr, streak)
+            supp = supp or (streak < int(c.fp_temporal_frames))
+        return bool(supp)
+
     # ---- the tick ----
     def step(
         self,
@@ -236,6 +292,8 @@ class ReferencePerception:
         crossed: bool,
         scale: float,
         draws: Any,
+        *,
+        target_valid: bool = True,
     ) -> None:
         """One control tick (``nxt`` None = no valid next passage)."""
         d = unpack(draws, TICK_DRAWS)
@@ -243,6 +301,8 @@ class ReferencePerception:
         pos = np.asarray(pos, np.float64)
         R = quat_matrix_np(quat)
         tg, nx = self.tg, self.nx
+        # UC70 run-2: the noisy next-gate pointer (truth-driven, single-sourced here).
+        self._pointer(R, pos, target["center"], d["ptr_jit"], target_valid)
         # 1. hand-over
         self.hand_over = self.passed = bool(crossed)
         if crossed:
@@ -253,6 +313,13 @@ class ReferencePerception:
             else:
                 tg.acq = tg.fp = tg.active = False
             self.last_event = float(t)
+            if self.reacq:
+                self.t_good = float(t)
+                self.t_last = False
+            if c.gate_memory or c.fp_suppress_memory:  # UC70 run-2: hand-over seeding
+                self.tm_world = np.asarray(self.nm_world, np.float64).copy()
+                self.tm_yaw, self.tm_stamp, self.tm_valid = self.nm_yaw, self.nm_stamp, self.nm_valid
+                self.nm_valid = False
             nx.acq = nx.fp = nx.active = nx.miss = False
             nx.z = np.zeros(4)
         # 2. frame arrival
@@ -273,6 +340,7 @@ class ReferencePerception:
         p_present, p_pick = self.model.acquisition()
         wrong = (not self.exact) and d["fp_any"] < p_present
         fp_relb, fp_nb = self._fp_sample(d, scale) if not self.exact else (relb_t, nb_t)
+        fp_world = pd + Rd @ fp_relb  # the FP candidate's world pose (suppression + promotion)
         if frame:
             if not tg.fp:
                 tg.miss = miss_t
@@ -280,11 +348,19 @@ class ReferencePerception:
             nx.miss = miss_n
             nx.z = z_n
         unacq = frame and not tg.acq
-        pick_fp = unacq and wrong and ((not det_t) or d["fp_pick"] < p_pick)
+        if self.reacq:  # (a) a stale held target re-acquires from this frame's candidates
+            stale = tg.acq and not tg.active and (t - tg.seen > c.drop_after_s)
+            unacq = unacq or (frame and stale and (det_t or wrong))
+        cand_fp = unacq and wrong and ((not det_t) or d["fp_pick"] < p_pick)
+        # UC70 run-2: FP-suppression sub-gates on the target candidate (mirrors GatePerception).
+        # Call _fp_suppress UNCONDITIONALLY (no `and` short-circuit) so the temporal streak is
+        # advanced / reset every frame exactly as the torch twin does.
+        supp_t = self._fp_suppress("t", cand_fp, fp_world, R, pos, float(t), frame)
+        pick_fp = cand_fp and not supp_t
         acq_true = unacq and det_t and not pick_fp
         assoc = float(np.linalg.norm(pos + R @ relb_t - tg.world)) <= c.assoc_limit
         upd_t = (frame and tg.acq and not tg.fp and det_t and assoc) or acq_true
-        if frame and not tg.fp:
+        if (frame and not tg.fp) or acq_true:
             tg.active = upd_t
         if pick_fp:
             tg.active = False
@@ -293,15 +369,22 @@ class ReferencePerception:
         if upd_t or pick_fp:
             tg.src = tc
         tg.acq = tg.acq or acq_true or pick_fp
-        tg.fp = tg.fp or pick_fp
+        tg.fp = False if acq_true else (tg.fp or pick_fp)
+        if self.reacq and (acq_true or pick_fp):
+            self.t_good = float(t)
+            self.t_last = False
         if pick_fp:
-            tg.world = pd + Rd @ fp_relb
+            tg.world = fp_world
             fn = Rd @ fp_nb
             tg.yaw = float(math.atan2(fn[1], fn[0]))
             tg.seen = float(t)
         nframe = frame and tg.acq and not pick_fp
         mis_rate = 0.0 if self.exact else float(self.fp.get("next_misassoc_rate", 0.0))
-        mis = nframe and any_fp and d["next_mis"] < mis_rate
+        cand_mis = nframe and any_fp and d["next_mis"] < mis_rate
+        # UC70 run-2: FP suppression on the next-slot mis-association (memory + temporal only);
+        # unconditional call so the next-slot streak advances exactly as the torch twin.
+        supp_n = self._fp_suppress("n", cand_mis, fp_world, R, pos, float(t), frame)
+        mis = cand_mis and not supp_n
         upd_n = nframe and det_n and not mis
         if nframe:
             nx.active = upd_n or mis
@@ -324,6 +407,24 @@ class ReferencePerception:
             nx.yaw = _travel_yaw(R @ nx.nb, nx.world - pos)
             nx.seen = float(t)
         self.ticks_since = 0 if a_t else self.ticks_since + 1
+        if c.gate_memory or c.fp_suppress_memory:  # UC70 run-2: last CONFIDENT (non-FP) pose
+            if a_t and not tg.fp:
+                self.tm_world = np.asarray(tg.world, np.float64).copy()
+                self.tm_yaw, self.tm_stamp, self.tm_valid = tg.yaw, float(t), True
+            if nx.active and nx.acq and not nx.fp:
+                self.nm_world = np.asarray(nx.world, np.float64).copy()
+                self.nm_yaw, self.nm_stamp, self.nm_valid = nx.yaw, float(t), True
+        if self.reacq:
+            if a_t:
+                self.t_good = float(t)
+            if tg.acq and t - tg.seen > c.lost_timeout_s:  # (b) release, keep the estimate
+                tg.acq = tg.fp = tg.active = False
+                self.t_last = True
+            st = TRACKING if (a_t and not crossed) else HOLDING
+            self.status = LOST if t - self.t_good > c.lost_hard_stop_s else st
+            self.pos = pos
+            self.t = float(t)
+            return
         if tg.acq:
             st = TRACKING if (a_t and not crossed) else HOLDING
             if t - tg.seen > c.lost_timeout_s:
@@ -340,30 +441,40 @@ class ReferencePerception:
     # ---- outputs ----
     def outputs(self) -> dict[str, Any]:
         tg, nx, c = self.tg, self.nx, self.cfg
+        has = tg.acq or self.t_last
+        target = tg.world.copy() if has else self.pos.copy()
+        target_yaw = tg.yaw if has else 0.0
+        target_age = (self.t - tg.src) if tg.acq else c.lost_timeout_s
+        if c.gate_memory:  # UC70 run-2: fresh-memory fallback (mirrors GatePerception.outputs)
+            if self.tm_valid and (self.t - self.tm_stamp) <= c.gate_memory_fresh_s and not tg.acq:
+                target = np.asarray(self.tm_world, np.float64).copy()
+                target_yaw = self.tm_yaw
+                target_age = self.t - self.tm_stamp
+                has = True
         if nx.active and nx.acq:
             mode = NEXT_VISIBLE
         elif nx.acq:
             mode = NEXT_UNSEEN_KNOWN
-        elif tg.acq:
+        elif has:
             mode = NEXT_UNSEEN_TARGET
         else:
             mode = NEXT_UNSEEN_NONE
         nc = (
             nx.world
             if mode <= NEXT_UNSEEN_KNOWN
-            else tg.world
+            else target
             if mode == NEXT_UNSEEN_TARGET
             else self.pos + np.array([1.0, 0, 0])
         )
         return {
             "status": self.status,
-            "target": tg.world.copy() if tg.acq else self.pos.copy(),
-            "target_yaw": tg.yaw if tg.acq else 0.0,
-            "acquired": tg.acq,
+            "target": target,
+            "target_yaw": target_yaw,
+            "acquired": has,
             "next_mode": mode,
             "next_center": np.asarray(nc, np.float64).copy(),
             "next_yaw": nx.yaw,
-            "target_age_s": self.t - tg.src if tg.acq else c.lost_timeout_s,
+            "target_age_s": target_age,
             "next_age_s": self.t - nx.src if nx.acq else c.lost_timeout_s,
             "target_valid": tg.acq,
             "hand_over": self.hand_over,
@@ -371,6 +482,8 @@ class ReferencePerception:
             "matched": tg.active and tg.acq,
             "ticks_since_detection": self.ticks_since,
             "fp_target": tg.fp,
+            "pointer": np.concatenate([np.asarray(self.ptr_body, np.float64),
+                                       [1.0 if self.ptr_avail else 0.0]]),  # fmt: skip
         }
 
     def estimate(self, k: float = 1.0, gate_index: int = 0) -> Any:
@@ -411,5 +524,9 @@ def estimate_from_raw(raw: dict[str, Any], pos: Any, cfg: PerceptionConfig, k: f
             "next_age_s": float(raw["next_age_s"]),
             "target_valid": bool(raw["target_valid"]),
             "hand_over": bool(raw["hand_over"]),
+            # UC70 run-2: the noisy next-gate pointer (body bearing 3 + bit) flows raw -> info ->
+            # the numpy obs builder; the torch builder reads perc["pointer"] (one source).
+            "pointer": None if raw.get("pointer") is None
+            else np.asarray(raw["pointer"], np.float32),
         },
     )

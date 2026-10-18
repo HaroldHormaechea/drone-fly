@@ -1,0 +1,33 @@
+# UC-82 — obstacle-avoidance retrain of the 70-input connectome under the measured obstacle-ray
+# noise (AC3). A warm-started fine-tune of the lineage-10/11/12 avoider
+# (`training/11-count-curriculum/model_readout.pt`, 67 % honest, 0 % barging) with the UC-78
+# documented ray-noise model injected into its 40 obstacle rays.
+#
+# The recipe mirrors the 11-count reproduce flags (PROC_TRACTABLE + PROC_RAYCAST + PROC_SHAPING +
+# PROC_OBS_TERMINAL) on OBSTACLE-BEARING courses (no_obs: false). Because the model is already
+# trained, this is a short fine-tune at full difficulty (curricula off) — see the experiment doc.
+#
+# The blanked-ray AC8 control is `uc82-obstacle-blank` (same recipe, rays replaced by constant
+# clear instead of noise-injected). Build the noise model first:
+#   drone-fly eyes noise-model            # writes artifacts/eyes/ray-noise.yaml
+extends: proc-course-dr
+name: uc82-obstacle-rays
+n_envs: 256            # A3000 6 GB
+budget: 5.0e6          # warm-started fine-tune (~2-4 h)
+seed: 0
+course:
+  no_obs: false        # obstacle-bearing courses (the whole point of UC-82)
+  raycast: true        # the 40 obstacle rays -> extra_dim 70
+  shaping: true        # potential-based clearance shaping (the proven avoider recipe)
+  obs_terminal: true   # any obstacle touch = crash (barging impossible; collision is an outcome)
+  ray_noise: artifacts/eyes/ray-noise.yaml   # AC2 injection (relative to the repo root)
+actor:
+  extra_dim: 70        # == course.extra_dim with raycast on
+curriculum:
+  difficulty_frac: null   # fine-tune: full difficulty + all obstacles on-path from step 0
+  obs_pos_frac: null
+  obs_count_frac: null
+warm_start:
+  checkpoint: training/11-count-curriculum/model_readout.pt   # the true 70-input avoider
+  src_extra_dim: 70        # NOT uc70-diag-run1 (in_dim 61); NOT the 177M exp11_count.pt
+  legacy_v1: false         # the 11 readout is already action-contract v2

@@ -1,0 +1,16 @@
+# UC-79 student information-gap ablation — variant `gates_full` (39 values).
+#
+# student-liftoff-open + the MLP actor + the shortened ablation budget, appending ONLY the full poses
+# of the target, next and next-next gates — the teacher's whole `gates` block (3 × 13), 39 values.
+# Always exact, sim-only, diagnostic, never deployable. Obs dim = 65 + 39 = 104. See
+# student-liftoff-open-priv-baseline.yaml for the budget/equalizer rationale and
+# docs/experiments/uc79-student-information-gap.md.
+extends: student-liftoff-open
+name: student-liftoff-open-priv-gates_full
+n_envs: 2048
+budget: 1.8e7              # EQUAL across all 7 (AC6)
+student:
+  actor: mlp-student
+distill:
+  max_hours: null
+  student_privileged: [gates_full]

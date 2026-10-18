@@ -27,6 +27,17 @@ Each control tick (:meth:`GatePerception.step`), in this order:
    route advances first); at the measured next-gate mis-association rate the next slot takes a
    false positive. Samples come from the fitted (range, azimuth) histogram.
 
+**Lost policy** (``PerceptionConfig.lost_policy``; the live tracker has the same switch):
+
+* ``terminate`` (legacy, the default): a held target unmatched for ``lost_timeout_s`` is ``lost``
+  and the episode ends (``gate_lost``); before the first acquisition, after ``acquire_timeout_s``.
+* ``reacquire`` (UC70 amendment, ADR 0009): (a) a held target unmatched for more than
+  ``drop_after_s`` may be replaced by the acquisition rule on any frame that has a candidate (a
+  true detection, or a false positive with the fitted pick probability); (b) after
+  ``lost_timeout_s`` unmatched it is RELEASED: its last estimate stays the target
+  (``target_valid`` 0) and the slot acquires again. ``lost`` only when nothing good (a match, an
+  acquisition or a pass) happened for ``lost_hard_stop_s``.
+
 Modes: ``noise`` (the model) and ``exact`` (same tracker + frustum + frame clock; every in-frustum
 frame detected, no error, no latency, no false positive).
 
@@ -59,6 +70,7 @@ from drone_fly.sim.noise_model import (
 #: Ticks of pose history (covers the measured detection lag at the slowest control rate).
 RING = 16
 MODES = ("noise", "exact")
+LOST_POLICIES = ("terminate", "reacquire")
 #: Status codes (as the harness's ``tracking`` / ``holding`` / ``lost``).
 TRACKING, HOLDING, LOST = 0, 1, 2
 STATUS_NAMES = ("tracking", "holding", "lost")
@@ -66,6 +78,8 @@ STATUS_NAMES = ("tracking", "holding", "lost")
 #: target, unseen with nothing known (+x).
 NEXT_VISIBLE, NEXT_UNSEEN_KNOWN, NEXT_UNSEEN_TARGET, NEXT_UNSEEN_NONE = range(4)
 #: Per-tick draws: (name, width, kind) with kind "u" (uniform [0, 1)) or "n" (standard normal).
+#: ``ptr_jit`` (UC70 run-2) is the per-tick next-gate-pointer angular jitter (azimuth, elevation);
+#: always drawn, scaled by ``pointer_jitter_sigma_rad`` (0 ⇒ the exact truth bearing).
 TICK_DRAWS: tuple[tuple[str, int, str], ...] = (
     ("jitter", 1, "n"),
     ("skip", 1, "u"),
@@ -79,8 +93,16 @@ TICK_DRAWS: tuple[tuple[str, int, str], ...] = (
     ("fp_r", 1, "u"),
     ("fp_a", 1, "u"),
     ("next_mis", 1, "u"),
+    ("ptr_jit", 2, "n"),
 )
-EPISODE_DRAWS: tuple[tuple[str, int, str], ...] = (("lat", 1, "u"), ("phase", 1, "u"))
+#: ``ptr_drop`` / ``ptr_bias`` (UC70 run-2): the per-episode pointer dropout roll and the
+#: per-episode angular bias (azimuth, elevation); always drawn, config-scaled (0 ⇒ parity-strict).
+EPISODE_DRAWS: tuple[tuple[str, int, str], ...] = (
+    ("lat", 1, "u"),
+    ("phase", 1, "u"),
+    ("ptr_drop", 1, "u"),
+    ("ptr_bias", 2, "n"),
+)
 
 
 def draw_width(spec: tuple[tuple[str, int, str], ...]) -> int:
@@ -268,12 +290,58 @@ class PerceptionConfig:
     #: target only within ``assoc_radius * max(1, aperture)`` of it, both in the harness's
     #: training scale ``k`` -> ``k * assoc_radius * max(1, nominal / k)`` here. ``inf`` = off.
     assoc_limit: float = math.inf
+    #: ``terminate`` | ``reacquire`` (module docstring).
+    lost_policy: str = "terminate"
+    lost_hard_stop_s: float = 6.0
+    drop_after_s: float = 0.5
+    # ---- UC70 run-2 (ADR 0009): all default-OFF ⇒ run-1 behaviour (byte-identical ``outputs()``,
+    # except the always-appended pointer obs block, which is the exact truth bearing at these
+    # defaults). The pointer obs is computed from the TRUTH target centre; its noise is a HUD
+    # proxy. The gate-memory and FP-suppression toggles are perception-internal.
+    #: Next-gate pointer (HUD proxy) per-episode angular bias / per-tick jitter std (rad); 0 ⇒ the
+    #: exact truth bearing.
+    pointer_bias_sigma_rad: float = 0.0
+    pointer_jitter_sigma_rad: float = 0.0
+    #: Per-episode probability the whole episode flies with the pointer unavailable (bit = 0).
+    pointer_dropout_p: float = 0.0
+    #: FP pointer-consistency sub-gate: reject a candidate whose body bearing is more than this far
+    #: off the noisy pointer (degrees). Only consulted when ``fp_suppress_pointer``.
+    pointer_bearing_tol_deg: float = 20.0
+    #: World-frame gate memory: remember each slot's last confident (non-FP) pose and fall back to
+    #: it (while fresh) when the live estimate is lost. ``False`` ⇒ ``outputs()`` run-1-identical.
+    gate_memory: bool = False
+    #: How long a remembered pose stays usable as the fallback target (s).
+    gate_memory_fresh_s: float = 1.5
+    #: False-positive suppression sub-gates on the ``pick_fp`` / ``mis`` acquisition paths.
+    fp_suppress_pointer: bool = False
+    fp_suppress_memory: bool = False
+    fp_suppress_temporal: bool = False
+    #: Memory-consistency sub-gate: reject a candidate more than this far (course units) from the
+    #: remembered pose. Temporal sub-gate: require this many consecutive candidate frames.
+    fp_memory_tol: float = 2.0
+    fp_temporal_frames: int = 2
 
     def __post_init__(self) -> None:
+        if self.lost_policy not in LOST_POLICIES:
+            raise ValueError(
+                f"lost_policy must be one of {LOST_POLICIES}, got {self.lost_policy!r}"
+            )
+        if self.lost_hard_stop_s <= 0 or self.drop_after_s < 0:
+            raise ValueError("lost_hard_stop_s > 0 and drop_after_s >= 0")
         if self.mode not in MODES:
             raise ValueError(f"perception.mode must be one of {MODES}, got {self.mode!r}")
         if self.lost_timeout_s <= 0 or self.acquire_timeout_s < 0 or self.frame_period_s <= 0:
             raise ValueError("lost_timeout_s > 0, acquire_timeout_s >= 0, frame_period_s > 0")
+        if self.pointer_bias_sigma_rad < 0 or self.pointer_jitter_sigma_rad < 0:
+            raise ValueError("pointer bias / jitter sigmas must be >= 0")
+        if not 0.0 <= self.pointer_dropout_p <= 1.0:
+            raise ValueError("pointer_dropout_p must be in [0, 1]")
+        if self.pointer_bearing_tol_deg < 0 or self.fp_memory_tol < 0:
+            raise ValueError("pointer_bearing_tol_deg and fp_memory_tol must be >= 0")
+        if self.gate_memory_fresh_s <= 0:
+            raise ValueError("gate_memory_fresh_s must be > 0")
+        if int(self.fp_temporal_frames) < 1:
+            raise ValueError("fp_temporal_frames must be >= 1")
 
     @classmethod
     def from_model(cls, model: NoiseModel | None, mode: str, **over: Any) -> PerceptionConfig:
@@ -330,6 +398,7 @@ class GatePerception:
         self.cam = TorchCamera.from_block(cam_block)
         self.tab = model.to_tables(self.device, dtype) if model is not None else {}
         self.exact = config.mode == "exact"
+        self.reacq = config.lost_policy == "reacquire"
         z = lambda *s: torch.zeros(*s, dtype=dtype, device=self.device)  # noqa: E731
         b = lambda: torch.zeros(n, dtype=torch.bool, device=self.device)  # noqa: E731
         self.ring_t = torch.zeros(n, RING, dtype=torch.float64, device=self.device)
@@ -355,9 +424,29 @@ class GatePerception:
         self.n_src = torch.zeros(n, dtype=torch.float64, device=self.device)
         self.n_z = z(n, 4)
         self.ticks_since = torch.zeros(n, dtype=torch.long, device=self.device)
+        # reacquire policy: a released target's last estimate is kept; the last good event time
+        self.t_last = b()
+        self.t_good = torch.zeros(n, dtype=torch.float64, device=self.device)
         self.hand_over = b()
         self.passed = b()
         self.status = torch.full((n,), HOLDING, dtype=torch.long, device=self.device)
+        # UC70 run-2 pointer: per-episode bias (az, el) + dropout; the noisy body-frame bearing
+        # (3) + availability bit computed each tick from the truth target centre and emitted in
+        # ``outputs()`` (the SAME value feeds the FP pointer sub-gate).
+        self.ptr_bias = z(n, 2)
+        self.ptr_dropped = b()
+        self.ptr_body = z(n, 3)
+        self.ptr_avail = b()
+        # UC70 run-2 gate memory: per-slot last confident world pose / yaw / stamp (+ validity).
+        self.tm_world, self.tm_yaw = z(n, 3), z(n)
+        self.tm_stamp = torch.zeros(n, dtype=torch.float64, device=self.device)
+        self.tm_valid = b()
+        self.nm_world, self.nm_yaw = z(n, 3), z(n)
+        self.nm_stamp = torch.zeros(n, dtype=torch.float64, device=self.device)
+        self.nm_valid = b()
+        # UC70 run-2 FP temporal persistence: consecutive candidate-frame streaks per slot.
+        self.t_streak = torch.zeros(n, dtype=torch.long, device=self.device)
+        self.n_streak = torch.zeros(n, dtype=torch.long, device=self.device)
 
     # ---- helpers ----
     def _draw(self, spec: tuple, draws: torch.Tensor | None) -> dict[str, torch.Tensor]:
@@ -390,7 +479,7 @@ class GatePerception:
         self.t0 = torch.where(m, t, self.t0)
         self.last_event = torch.where(m, torch.full_like(t, -math.inf), self.last_event)
         for name in ("t_acq", "t_fp", "t_active", "t_miss", "n_known", "n_fp", "n_active",
-                     "n_miss", "hand_over", "passed"):  # fmt: skip
+                     "n_miss", "hand_over", "passed", "t_last"):  # fmt: skip
             setattr(self, name, getattr(self, name) & ~m)
         for name in ("t_relb", "t_nb", "t_world", "t_z", "n_relb", "n_nb", "n_world", "n_z"):
             v = getattr(self, name)
@@ -398,10 +487,30 @@ class GatePerception:
         for name in ("t_yaw", "n_yaw"):
             v = getattr(self, name)
             setattr(self, name, torch.where(m, torch.zeros_like(v), v))
-        for name in ("t_seen", "t_src", "n_seen", "n_src"):
+        for name in ("t_seen", "t_src", "n_seen", "n_src", "t_good"):
             setattr(self, name, torch.where(m, t, getattr(self, name)))
         self.ticks_since = torch.where(m, torch.zeros_like(self.ticks_since), self.ticks_since)
         self.status = torch.where(m, torch.full_like(self.status, HOLDING), self.status)
+        # UC70 run-2: redraw the per-episode pointer bias / dropout; clear the pointer, the gate
+        # memory and the FP streaks of reset envs.
+        self.ptr_bias = torch.where(
+            m1, d["ptr_bias"] * c.pointer_bias_sigma_rad, self.ptr_bias
+        )
+        self.ptr_dropped = torch.where(m, d["ptr_drop"] < c.pointer_dropout_p, self.ptr_dropped)
+        self.ptr_body = torch.where(m1, torch.zeros_like(self.ptr_body), self.ptr_body)
+        self.ptr_avail = self.ptr_avail & ~m
+        for name in ("tm_world", "nm_world"):
+            v = getattr(self, name)
+            setattr(self, name, torch.where(m1, torch.zeros_like(v), v))
+        for name in ("tm_yaw", "nm_yaw"):
+            v = getattr(self, name)
+            setattr(self, name, torch.where(m, torch.zeros_like(v), v))
+        for name in ("tm_stamp", "nm_stamp"):
+            setattr(self, name, torch.where(m, t, getattr(self, name)))
+        self.tm_valid = self.tm_valid & ~m
+        self.nm_valid = self.nm_valid & ~m
+        self.t_streak = torch.where(m, torch.zeros_like(self.t_streak), self.t_streak)
+        self.n_streak = torch.where(m, torch.zeros_like(self.n_streak), self.n_streak)
         p = pos.to(self.dtype)
         self._pos = torch.where(m1, p, self._pos) if hasattr(self, "_pos") else p.clone()
 
@@ -520,6 +629,52 @@ class GatePerception:
         nb = nb / nb.norm(dim=-1, keepdim=True).clamp(min=1e-9)
         return body, nb
 
+    def _pointer(self, R: torch.Tensor, pos: torch.Tensor, center: torch.Tensor,
+                 jit: torch.Tensor, target_valid: torch.Tensor) -> None:  # fmt: skip
+        """Store the noisy body-frame pointer (3) + availability bit for this tick (UC70 run-2).
+
+        The truth bearing ``R^T (centre - pos)`` is normalised, then perturbed by the per-episode
+        bias and per-tick jitter in (azimuth, elevation); zeroed (bit = 0) when the target passage
+        is invalid or the episode drew a dropout. Mirrors ``ReferencePerception._pointer``.
+        """
+        rel_b = _mtv(R, center - pos)
+        unit = rel_b / rel_b.norm(dim=-1, keepdim=True).clamp(min=1e-9)
+        j = jit * self.cfg.pointer_jitter_sigma_rad
+        az = torch.atan2(unit[:, 1], unit[:, 0]) + self.ptr_bias[:, 0] + j[:, 0]
+        el = torch.asin(unit[:, 2].clamp(-1.0, 1.0)) + self.ptr_bias[:, 1] + j[:, 1]
+        ce = torch.cos(el)
+        ptr = torch.stack([ce * torch.cos(az), ce * torch.sin(az), torch.sin(el)], -1)
+        avail = target_valid & ~self.ptr_dropped
+        self.ptr_body = torch.where(avail.unsqueeze(-1), ptr, torch.zeros_like(ptr))
+        self.ptr_avail = avail
+
+    def _fp_suppress(self, slot: str, cand: torch.Tensor, fp_world: torch.Tensor, R: torch.Tensor,
+                     pos: torch.Tensor, t: torch.Tensor, frame: torch.Tensor) -> torch.Tensor:  # fmt: skip
+        """Reject (``True``) a false-positive candidate via the enabled sub-gates (UC70 run-2):
+        pointer-consistency (target slot only), memory-consistency, temporal persistence. Mirrors
+        :meth:`ReferencePerception._fp_suppress`; all sub-gates off ⇒ all ``False`` (run-1)."""
+        c = self.cfg
+        supp = torch.zeros_like(cand)
+        if slot == "t" and c.fp_suppress_pointer:
+            ptr_world = _mv(R, self.ptr_body)
+            fp_dir = fp_world - pos
+            fp_dirn = fp_dir / fp_dir.norm(dim=-1, keepdim=True).clamp(min=1e-9)
+            tol_cos = math.cos(math.radians(c.pointer_bearing_tol_deg))
+            supp = supp | (self.ptr_avail & ((ptr_world * fp_dirn).sum(-1) < tol_cos))
+        if c.fp_suppress_memory:
+            mw, mv, ms = ((self.tm_world, self.tm_valid, self.tm_stamp) if slot == "t"
+                          else (self.nm_world, self.nm_valid, self.nm_stamp))  # fmt: skip
+            fresh = mv & ((t - ms) <= c.gate_memory_fresh_s)
+            supp = supp | (fresh & ((fp_world - mw).norm(dim=-1) > c.fp_memory_tol))
+        if c.fp_suppress_temporal:
+            attr = "t_streak" if slot == "t" else "n_streak"
+            streak = torch.where(frame, torch.where(cand, getattr(self, attr) + 1,
+                                                    torch.zeros_like(getattr(self, attr))),
+                                 getattr(self, attr))  # fmt: skip
+            setattr(self, attr, streak)
+            supp = supp | (streak < int(c.fp_temporal_frames))
+        return supp
+
     # ---- the tick ----
     def step(
         self,
@@ -532,6 +687,8 @@ class GatePerception:
         crossed: torch.Tensor,
         scale: torch.Tensor,
         draws: torch.Tensor | None = None,
+        *,
+        target_valid: torch.Tensor | None = None,
     ) -> None:
         """Advance one control tick (see the module docstring); ``pos``/``quat`` = this tick."""
         d = self._draw(TICK_DRAWS, draws)
@@ -540,6 +697,16 @@ class GatePerception:
         R = quat_matrix(quat.to(self.dtype))
         c = self.cfg
         scale = scale.to(self.dtype)
+        tvalid = (
+            torch.ones(self.n, dtype=torch.bool, device=self.device)
+            if target_valid is None
+            else target_valid.to(torch.bool)
+        )
+        # UC70 run-2: the noisy next-gate pointer — a body-frame unit bearing to the TRUE target
+        # centre with a per-episode bias + per-tick jitter, and an availability bit (truth-driven,
+        # single-sourced here). The same value is read by the FP pointer sub-gate and emitted by
+        # ``outputs()``; parity-strict at sigma = 0 (the exact bearing).
+        self._pointer(R, pos, target["center"], d["ptr_jit"], tvalid)
         # 1. hand-over on a truth advance
         ho = crossed
         take = ho & self.n_known
@@ -558,9 +725,19 @@ class GatePerception:
         self.t_seen = torch.where(take, t, self.t_seen)
         self.t_src = torch.where(take, self.n_src, self.t_src)
         self.last_event = torch.where(ho, t, self.last_event)
+        if self.reacq:  # a pass is a good event; the passed gate's estimate is no target
+            self.t_good = torch.where(ho, t, self.t_good)
+            self.t_last = self.t_last & ~ho
         for name in ("n_known", "n_fp", "n_active", "n_miss"):
             setattr(self, name, getattr(self, name) & ~ho)
         self.n_z = torch.where(ho.unsqueeze(-1), torch.zeros_like(self.n_z), self.n_z)
+        if self.cfg.gate_memory or self.cfg.fp_suppress_memory:  # UC70 run-2: hand-over seeding —
+            ho1 = ho.unsqueeze(-1)  # memory shifts into the target so a briefly-lost gate re-targets
+            self.tm_world = torch.where(ho1, self.nm_world, self.tm_world)
+            self.tm_yaw = torch.where(ho, self.nm_yaw, self.tm_yaw)
+            self.tm_stamp = torch.where(ho, self.nm_stamp, self.tm_stamp)
+            self.tm_valid = torch.where(ho, self.nm_valid, self.tm_valid)
+            self.nm_valid = self.nm_valid & ~ho  # the next slot restarts with no memory
         # 2. frame arrival
         arrive = t >= self.next_frame_t - 1e-9
         step_t = (c.frame_period_s + c.frame_jitter_s * d["jitter"].to(torch.float64)).clamp(
@@ -586,6 +763,9 @@ class GatePerception:
             wrong = d["fp_any"] < self.tab["acq_wrong_present"]
         fp_relb, fp_nb = (self._fp_sample(d, pd, Rd, scale) if not self.exact
                           else (relb_t, nb_t))  # fmt: skip
+        # the false-positive candidate's world pose (shared by the FP-suppression sub-gates and,
+        # when a candidate is promoted below, by the fixed FP target / next mis-association)
+        fp_world = pd + _mv(Rd, fp_relb)
         # Markov / AR state advances on every processed frame
         self.t_miss = torch.where(frame & ~self.t_fp, miss_t, self.t_miss)
         self.t_z = torch.where(frame.unsqueeze(-1), z_t, self.t_z)
@@ -593,28 +773,42 @@ class GatePerception:
         self.n_z = torch.where(frame.unsqueeze(-1), z_n, self.n_z)
         # target slot: acquisition (true or false positive) / association
         unacq = frame & ~self.t_acq
-        pick_fp = unacq & wrong & (~det_t | (d["fp_pick"] < self.tab.get("acq_pick_wrong", 0.5)))
+        if self.reacq:  # (a) a stale held target re-acquires from this frame's candidates
+            stale = self.t_acq & ~self.t_active & (t - self.t_seen > c.drop_after_s)
+            unacq = unacq | (frame & stale & (det_t | wrong))
+        cand_fp = unacq & wrong & (~det_t | (d["fp_pick"] < self.tab.get("acq_pick_wrong", 0.5)))
+        # UC70 run-2: false-positive suppression sub-gates on the target acquisition candidate —
+        # pointer-consistency, memory-consistency, temporal persistence; each toggleable, no new
+        # draws. All off ⇒ ``pick_fp = cand_fp`` (run-1).
+        supp_t = self._fp_suppress("t", cand_fp, fp_world, R, pos, t, frame)
+        pick_fp = cand_fp & ~supp_t
         acq_true = unacq & det_t & ~pick_fp
         new_t = pos + _mv(R, relb_t)
         assoc = (new_t - self.t_world).norm(dim=-1) <= c.assoc_limit
         upd_t = (frame & self.t_acq & ~self.t_fp & det_t & assoc) | acq_true
-        self.t_active = torch.where(frame & ~self.t_fp, upd_t, self.t_active)
+        self.t_active = torch.where((frame & ~self.t_fp) | acq_true, upd_t, self.t_active)
         self.t_active = torch.where(pick_fp, torch.zeros_like(pick_fp), self.t_active)
         self.t_relb = torch.where(upd_t.unsqueeze(-1), relb_t, self.t_relb)
         self.t_nb = torch.where(upd_t.unsqueeze(-1), nb_t, self.t_nb)
         self.t_src = torch.where(upd_t | pick_fp, tc, self.t_src)
         self.t_acq = self.t_acq | acq_true | pick_fp
-        self.t_fp = self.t_fp | pick_fp
-        # a false-positive target is fixed in the world at its sighting
-        fp_world = pd + _mv(Rd, fp_relb)
+        self.t_fp = torch.where(acq_true, torch.zeros_like(acq_true), self.t_fp | pick_fp)
+        if self.reacq:
+            self.t_good = torch.where(acq_true | pick_fp, t, self.t_good)
+            self.t_last = self.t_last & ~(acq_true | pick_fp)
+        # a false-positive target is fixed in the world at its sighting (``fp_world`` above)
         fp_n = _mv(Rd, fp_nb)
         self.t_world = torch.where(pick_fp.unsqueeze(-1), fp_world, self.t_world)
         self.t_yaw = torch.where(pick_fp, torch.atan2(fp_n[:, 1], fp_n[:, 0]), self.t_yaw)
         self.t_seen = torch.where(pick_fp, t, self.t_seen)
         # next slot (only while a target is held)
         nframe = frame & self.t_acq & ~pick_fp
-        mis = nframe & any_fp & (d["next_mis"] < (self.tab.get("fp_next_misassoc", 0.0)
-                                                  if not self.exact else 0.0))  # fmt: skip
+        cand_mis = nframe & any_fp & (d["next_mis"] < (self.tab.get("fp_next_misassoc", 0.0)
+                                                       if not self.exact else 0.0))  # fmt: skip
+        # UC70 run-2: FP suppression on the next-slot mis-association (memory + temporal; the
+        # pointer bears on the TARGET gate, not the next one, so it is not applied here).
+        supp_n = self._fp_suppress("n", cand_mis, fp_world, R, pos, t, frame)
+        mis = cand_mis & ~supp_n
         upd_n = nframe & det_n & ~mis
         self.n_active = torch.where(nframe, upd_n | mis, self.n_active)
         self.n_relb = torch.where(
@@ -641,6 +835,29 @@ class GatePerception:
         self.n_seen = torch.where(a_n, t, self.n_seen)
         self.ticks_since = torch.where(a_t, torch.zeros_like(self.ticks_since),
                                        self.ticks_since + 1)  # fmt: skip
+        if self.cfg.gate_memory or self.cfg.fp_suppress_memory:  # UC70 run-2: remember each slot's
+            conf_t = a_t & ~self.t_fp  # last CONFIDENT (non-FP) pose — for the fallback / FP gate
+            self.tm_world = torch.where(conf_t.unsqueeze(-1), self.t_world, self.tm_world)
+            self.tm_yaw = torch.where(conf_t, self.t_yaw, self.tm_yaw)
+            self.tm_stamp = torch.where(conf_t, t, self.tm_stamp)
+            self.tm_valid = self.tm_valid | conf_t
+            conf_n = a_n & ~self.n_fp
+            self.nm_world = torch.where(conf_n.unsqueeze(-1), self.n_world, self.nm_world)
+            self.nm_yaw = torch.where(conf_n, self.n_yaw, self.nm_yaw)
+            self.nm_stamp = torch.where(conf_n, t, self.nm_stamp)
+            self.nm_valid = self.nm_valid | conf_n
+        if self.reacq:
+            self.t_good = torch.where(a_t, t, self.t_good)
+            # (b) release a target unmatched for lost_timeout: keep its estimate, acquire again
+            rel = self.t_acq & (t - self.t_seen > c.lost_timeout_s)
+            self.t_acq = self.t_acq & ~rel
+            self.t_fp = self.t_fp & ~rel
+            self.t_active = self.t_active & ~rel
+            self.t_last = self.t_last | rel
+            st = torch.where(a_t & ~ho, TRACKING, HOLDING)
+            self.status = torch.where(t - self.t_good > c.lost_hard_stop_s, LOST, st)
+            self._pos = pos
+            return
         # status
         age = t - self.t_seen
         acq_status = torch.where(a_t & ~ho, TRACKING, HOLDING)
@@ -663,26 +880,39 @@ class GatePerception:
         pos = self._pos
         t = t.to(torch.float64)
         c = self.cfg
-        target = torch.where(self.t_acq.unsqueeze(-1), self.t_world, pos)
+        # a target estimate exists: live-held, or (reacquire) the last released one
+        has = self.t_acq | self.t_last
+        target = torch.where(has.unsqueeze(-1), self.t_world, pos)
+        target_yaw = torch.where(has, self.t_yaw, torch.zeros_like(self.t_yaw))
+        t_age = torch.where(self.t_acq, (t - self.t_src).to(self.dtype),
+                            torch.full_like(self.lat, c.lost_timeout_s))  # fmt: skip
+        if c.gate_memory:  # UC70 run-2: fall back to fresh memory when not live-held (before the
+            use_mem = (  # reacquire-released estimate). target_valid stays the LIVE bit.
+                self.tm_valid
+                & ((t - self.tm_stamp) <= c.gate_memory_fresh_s)
+                & ~self.t_acq
+            )
+            target = torch.where(use_mem.unsqueeze(-1), self.tm_world, target)
+            target_yaw = torch.where(use_mem, self.tm_yaw, target_yaw)
+            t_age = torch.where(use_mem, (t - self.tm_stamp).to(self.dtype), t_age)
+            has = has | use_mem
         mode = torch.where(
             self.n_active & self.n_known, NEXT_VISIBLE,
             torch.where(self.n_known, NEXT_UNSEEN_KNOWN,
-                        torch.where(self.t_acq, NEXT_UNSEEN_TARGET, NEXT_UNSEEN_NONE)),
+                        torch.where(has, NEXT_UNSEEN_TARGET, NEXT_UNSEEN_NONE)),
         )  # fmt: skip
         next_center = torch.where((mode <= NEXT_UNSEEN_KNOWN).unsqueeze(-1), self.n_world,
                                   torch.where((mode == NEXT_UNSEEN_TARGET).unsqueeze(-1),
-                                              self.t_world, pos + torch.tensor(
+                                              target, pos + torch.tensor(
                                                   [1.0, 0.0, 0.0], dtype=self.dtype,
                                                   device=self.device)))  # fmt: skip
-        t_age = torch.where(self.t_acq, (t - self.t_src).to(self.dtype),
-                            torch.full_like(self.lat, c.lost_timeout_s))  # fmt: skip
         n_age = torch.where(self.n_known, (t - self.n_src).to(self.dtype),
                             torch.full_like(self.lat, c.lost_timeout_s))  # fmt: skip
         return {
             "status": self.status,
             "target": target,
-            "target_yaw": torch.where(self.t_acq, self.t_yaw, torch.zeros_like(self.t_yaw)),
-            "acquired": self.t_acq,
+            "target_yaw": target_yaw,
+            "acquired": has,
             "next_mode": mode,
             "next_center": next_center,
             "next_yaw": self.n_yaw,
@@ -694,6 +924,7 @@ class GatePerception:
             "matched": self.t_active & self.t_acq,
             "ticks_since_detection": self.ticks_since,
             "fp_target": self.t_fp,
+            "pointer": torch.cat([self.ptr_body, self.ptr_avail.to(self.dtype).unsqueeze(-1)], -1),
         }
 
 

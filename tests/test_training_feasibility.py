@@ -102,7 +102,9 @@ def test_cli_feasibility_only_exits_zero(inputs, tmp_path, monkeypatch, capsys):
                    "--k1-path", str(inputs.k1)])  # fmt: skip
     out = capsys.readouterr().out
     assert rc == 0 and "feasibility.json" in out, out
-    assert cfg.student.world_scale == 6.0
+    from drone_fly.training.config import load_raw
+
+    assert cfg.student.world_scale == float(load_raw("student-liftoff")["student"]["world_scale"])
     found = list((tmp_path / "out").rglob("feasibility.json"))
     assert len(found) == 1 and json.loads(found[0].read_text())["infeasible"] is True
 
