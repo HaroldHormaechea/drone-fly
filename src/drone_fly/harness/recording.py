@@ -68,6 +68,9 @@ LATENCY_STAGES = (
 #: keeps the pre-UC-65 summary shape).
 OPTIONAL_STAGES = frozenset({"overlay"})
 AGE_KEYS = ("telemetry", "frame", "gate", "free_space")
+#: UC-86 per-provider rows: ``perception_s`` / ``ages_s`` keys with this prefix (the runner's
+#: PerceptionRuntime writes ``provider:<name>`` and ``provider:<name>:frame``).
+PROVIDER_PREFIX = "provider:"
 
 
 def _stats_ms(values: list[float]) -> dict[str, float] | None:
@@ -88,11 +91,14 @@ def summarize_ticks(ticks: list[dict[str, Any]], rate_hz: float | None = None) -
     """Per-stage latency / age percentiles (ms) over ``ticks.jsonl`` records.
 
     The depth worker's inference time is counted once per depth frame (it is reported on every
-    tick that reuses the same result).
+    tick that reuses the same result). Per-provider rows (``provider:<name>``) are added only
+    when the ticks carry them.
     """
     series: dict[str, list[float]] = {name: [] for name, _, _ in LATENCY_STAGES}
     ages: dict[str, list[float]] = {k: [] for k in AGE_KEYS}
     seen_depth: set[Any] = set()
+    provider_lat: dict[str, list[float]] = {}
+    provider_age: dict[str, list[float]] = {}
     times: list[float] = []
     missed = 0
     for t in ticks:
@@ -122,6 +128,10 @@ def summarize_ticks(ticks: list[dict[str, Any]], rate_hz: float | None = None) -
             v = (t.get("ages_s") or {}).get(k)
             if v is not None:
                 ages[k].append(float(v))
+        for out, values in ((provider_lat, src["perception_s"]), (provider_age, t.get("ages_s"))):
+            for k, v in (values or {}).items():
+                if k.startswith(PROVIDER_PREFIX) and v is not None:
+                    out.setdefault(k, []).append(float(v))
     n = len(ticks)
     span = (max(times) - min(times)) if len(times) > 1 else 0.0
     return {
@@ -131,9 +141,13 @@ def summarize_ticks(ticks: list[dict[str, Any]], rate_hz: float | None = None) -
         "missed_deadlines": missed,
         "missed_deadline_rate": missed / n if n else 0.0,
         "latency_ms": {
-            name: _stats_ms(v) for name, v in series.items() if v or name not in OPTIONAL_STAGES
+            **{n: _stats_ms(v) for n, v in series.items() if v or n not in OPTIONAL_STAGES},
+            **{k: _stats_ms(v) for k, v in provider_lat.items()},
         },
-        "ages_ms": {k: _stats_ms(v) for k, v in ages.items()},
+        "ages_ms": {
+            **{k: _stats_ms(v) for k, v in ages.items()},
+            **{k: _stats_ms(v) for k, v in provider_age.items()},
+        },
     }
 
 
