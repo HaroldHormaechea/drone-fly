@@ -1,0 +1,16 @@
+# UC-87 deploy-robust — WARM-START FALLBACK (only if the fresh train can't reach completion).
+#
+# Identical to the fresh `uc87-deploy-robust` config (same staged curriculum, DR ranges, memory,
+# penalties, aligned spawn) EXCEPT it warm-starts from model 11 to inherit its completion base. The
+# 28 new memory readout columns are zero-initialised (src_extra_dim 70 → 98), so the policy starts
+# == model 11 and the curriculum ramps the deployment/perception/penalty terms in from there.
+#
+# Use this ONLY if the fresh run fails to establish model-11-level completion in the base stage; the
+# fresh config is the primary recipe (it avoids any task-shock from a frozen prior).
+extends: uc87-deploy-robust
+name: uc87-deploy-robust-warmstart
+
+warm_start:
+  checkpoint: training/11-count-curriculum/model_readout.pt   # the 70-input avoider (repo-root relative)
+  src_extra_dim: 70         # zero-init the 28 memory columns (AC2 back-compat path)
+  legacy_v1: false          # model 11 is already action-contract v2
