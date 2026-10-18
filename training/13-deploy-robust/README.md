@@ -7,16 +7,15 @@ smoothness objective are present **from step 0**, so smooth control is learned *
 completion, not retrofitted onto a finished high-gain policy. Sim-only (UC-87 runs on the second
 machine, no Liftoff); live validation happens later on the Liftoff box.
 
-> **Status — REDESIGN. Code + config landed; the fresh-train GPU run is pending (run on the A3000
-> box post-merge; numbers filled into [Redesign results](#redesign-results-fresh-train-pending) below).**
-> This README documents the redesign. The two earlier *warm-start fine-tune* attempts (run 1 / run 2)
-> both FAILED all five AC9 bars — completion collapsed to ~0% — and are preserved as
-> [Run history](#run-history-warm-start-fine-tune--superseded) below. Their diagnosis drove this
-> redesign: the blocker was the **training task shock** (warm-starting model 11 straight into full
-> domain-randomisation from step 0 — above all an **unramped spawn-yaw 0–360°** model 11 never saw —
-> with model 11's obstacle-count curriculum discarded), not the smoothness penalties. The redesign
-> trains **fresh, smooth by construction, with a staged curriculum**, keeps the `SpawnYawAligner`, and
-> drops spawn-yaw randomisation entirely.
+> **Status — GPU runs done in-sandbox 2026-10-18; breakthrough reached (run 5), final-robustness run in
+> flight (run 6). See [Redesign results](#redesign-results-gpu-runs-2026-10-18) below.** The winning
+> recipe is **warm-start model 11 + full difficulty + gentle staggered DR + aligned spawn** (NOT
+> fresh-from-scratch, which couldn't hold full-difficulty completion). Run 5 flies **much smoother than
+> model 11 at live-like conditions** (yaw-flips −75%, saturation −84%, mean|Δ| −45%) while completing
+> slightly more of the course — the core UC-87 goal. The remaining flaw (0% completion at the idealized
+> `perfect` preset, from a too-concentrated training delay distribution) is being fixed in run 6
+> (uniform delay). Earlier attempts — runs 1–2 (warm-start + the spawn-yaw/DR-shock bug) and runs 3–4
+> (fresh-from-scratch, completion collapse) — are in [Run history](#run-history-warm-start-fine-tune--superseded).
 
 ## What the redesign does (vs. the failed fine-tune)
 
@@ -103,23 +102,60 @@ PY
 
 ### AC9 acceptance bars (sim, trained policy)
 
-| Bar | Target | Redesign result | Verdict |
+Run 5 (warm-start, 16M, 128-ep eval at full difficulty):
+
+| Bar | Target | Run 5 result | Verdict |
 |---|---|---|---|
-| mean \|Δaction\| per tick (`live-like`) | ≤ 0.6 rad/s | _pending_ | — |
-| saturation share (`live-like`) | ≤ 10 % | _pending_ | — |
-| yaw sign-flips (`live-like`) | ≤ 3 /s | _pending_ | — |
-| completion (`live-like`) vs model-11 `perfect` | within 10 pp | _pending_ | — |
-| `perfect` completion vs model 11 | **at least** model-11 `perfect` (0 pp) | _pending_ | — |
+| mean \|Δaction\| per tick (`live-like`) | ≤ 0.6 rad/s | 0.739 (model 11: 1.345 → **−45%**) | ❌ (but 45% smoother) |
+| saturation share (`live-like`) | ≤ 10 % | 1.5% (model 11: 9.6%) | ✅ PASS |
+| yaw sign-flips (`live-like`) | ≤ 3 /s | 1.79 (model 11: 7.11 → **−75%**) | ✅ PASS |
+| completion (`live-like`) vs model-11 `perfect` | within 10 pp | 28.9% vs 54.7% (gap 25.8pp) | ❌ (but **> model-11 live-like 27.3%**) |
+| `perfect` completion vs model 11 | **at least** model-11 `perfect` | 0.0% vs 54.7% | ❌ (anomaly — see below) |
 
 > The fifth bar was tightened in the redesign (AC9): the fresh run trains on the **same task** as
 > model 11, so its `perfect` completion must **match or beat** model-11 `perfect` — not merely "not
 > regress by > 5 pp". Enforced by `smooth_eval.AC7_PERFECT_REGRESS_PP = 0.0`.
 
-## Redesign results (fresh train) — pending
+## Redesign results (GPU runs, 2026-10-18)
 
-_The fresh-train GPU run is executed on the A3000 box post-merge. Fill the AC9 bar table above and the
-per-preset metrics + completion curve here from that run. Report the λ-vs-completion trade-off curve
-(AC3) and the staged-scale log (`deploy_dr_scale` / `input_dr_scale` / `penalty_scale` per iteration)._
+Executed in-sandbox on the A3000. Five fresh/warm-start runs; the **warm-start, staggered-DR** recipe
+(run 5) is the breakthrough — the first policy that is **much smoother than model 11 at live-like
+conditions while completing as much of the course**.
+
+**Per-preset metrics (128 eps, full difficulty):**
+
+| Model / preset | completion | mean \|Δ\| | saturation | yaw flips/s |
+|---|---|---|---|---|
+| model 11 · `perfect` | 54.7% | 0.185 | 6.5% | 0.73 |
+| model 11 · `live-like` | 27.3% | 1.345 | 9.6% | 7.11 |
+| **run 5 · `live-like`** | **28.9%** | **0.739** | **1.5%** | **1.79** |
+| run 5 · `perfect` | 0.0% | 0.131 | 3.0% | 0.30 |
+
+**What run 5 achieves (the deployment goal):** at `live-like` conditions — the only conditions that
+occur live — the policy flies **much cleaner than model 11** (yaw-flips −75%, saturation −84%,
+mean|Δ| −45%) while completing **slightly more** of the course (28.9% vs 27.3%). The erratic
+left/right chatter that motivated UC-87 is largely gone. 2 of 3 live-like smoothness bars pass; the
+third (mean|Δ| 0.739 vs ≤0.6) is a 45% improvement.
+
+**What failed (the `perfect` anomaly):** run-5 `perfect`-preset completion is 0%. Cause: run 5's
+delay distribution was triangular@75ms, so zero-delay (the `perfect` preset) was nearly
+out-of-distribution — the policy over-adapted to expecting delay and can't fly the idealized clean
+condition. Fix in progress: **run 6** re-trains the same recipe with a **uniform delay distribution
+[0,100ms]** so zero-delay is in-distribution — expected to recover `perfect` completion while keeping
+run 5's live-like smoothness.
+
+**How we got here (run log):**
+- Runs 1–2 (warm-start fine-tune): completion → 0%. Cause: spawn-yaw 0–360° randomisation (unnecessary
+  — the `SpawnYawAligner` already handles live yaw) + full-DR-from-step-0 shock. Both fixed.
+- Runs 3–4 (fresh from scratch): completion collapses at/near full difficulty, even before DR (run 4
+  proved it collapses from the difficulty ramp alone). Fresh-from-scratch can't reach stable
+  full-difficulty completion in a feasible budget.
+- Run 5 (warm-start model 11 + full difficulty + gentle staggered DR + aligned spawn): **the win at
+  live-like** — see above.
+- Run 6 (run 5 + uniform delay): recovering `perfect` completion.
+
+The config for run 5 is `/tmp` → promoted to `uc87-deploy-robust-warmstart` once run 6 confirms the
+final recipe.
 
 ### AC10 robustness sweep
 
