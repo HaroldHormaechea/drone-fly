@@ -114,6 +114,45 @@ def test_penalty_is_rate_scaled_by_dt_over_reference():
     torch.testing.assert_close(pen_slow, 2.0 * pen_fast, rtol=1e-6, atol=1e-9)
 
 
+def test_penalty_scale_anneals_only_the_action_rate_lambda():
+    """UC-87 redesign: CourseEnv.penalty_scale multiplies ONLY action_rate_lambda (λ mild→target);
+    saturation_weight is intentionally un-annealed."""
+    lam, w = 0.1, 0.05
+    a = torch.zeros(4, 4, dtype=torch.float64)
+    a[:, 1:] = 2.0
+    # full penalty (scale 1) vs. half-annealed λ (scale 0.5) vs. baseline (no penalties)
+    base = _env()
+    full = _env(lam=lam, w=w)
+    half = _env(lam=lam, w=w)
+    half.penalty_scale = 0.5
+    _, r_base, _, _ = base.step(a.clone())
+    _, r_full, _, _ = full.step(a.clone())
+    _, r_half, _, _ = half.step(a.clone())
+    _, arate, sat = _expected(a, torch.zeros_like(a), lam, w, 1.0)
+    # half: λ scaled by 0.5, saturation weight UNCHANGED
+    exp_half = (0.5 * lam * arate + w * sat)
+    torch.testing.assert_close(r_base - r_half, exp_half)
+    # the difference between full and half isolates exactly half the action-rate term (not sat)
+    torch.testing.assert_close((r_full - r_half) * -1.0, 0.5 * lam * arate - 0.0 * sat)
+
+
+def test_penalty_scale_zero_disables_only_the_action_rate_term():
+    lam, w = 0.1, 0.05
+    a = torch.zeros(4, 4, dtype=torch.float64)
+    a[:, 1:] = 2.0
+    base = _env()
+    env = _env(lam=lam, w=w)
+    env.penalty_scale = 0.0  # λ fully off; saturation guard-rail still active
+    _, r_base, _, _ = base.step(a.clone())
+    _, r_pen, _, _ = env.step(a.clone())
+    _, _arate, sat = _expected(a, torch.zeros_like(a), lam, w, 1.0)
+    torch.testing.assert_close(r_base - r_pen, w * sat)  # only the saturation term remains
+
+
+def test_penalty_scale_default_is_full():
+    assert _env(lam=0.1).penalty_scale == 1.0
+
+
 def test_penalties_are_logged_in_the_episode_tail():
     lam, w = 0.1, 0.05
     # a short episode_s so a timeout row is logged within a few steps

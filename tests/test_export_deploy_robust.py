@@ -10,14 +10,17 @@ the UC-87 deliverable. CPU-hermetic: a tiny synthetic checkpoint + sidecar on ``
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
+import yaml
 
 from drone_fly.harness.errors import ExportError
 from drone_fly.sim.action import ActionSpec, obs_contract_version, sidecar_path, write_sidecar
 from drone_fly.training.export import export_deploy_robust, resolve_contract_checkpoint
 
 SPEC = ActionSpec.v2(1.0, 4.0, max_g=4.0)
+REPO = Path(__file__).resolve().parent.parent
 
 
 def _ckpt(tmp_path, *, extra_dim, ocv, name="model_readout.pt"):
@@ -80,3 +83,15 @@ def test_resolve_contract_checkpoint_from_a_run_folder(tmp_path):
 def test_resolve_contract_checkpoint_missing_raises(tmp_path):
     with pytest.raises(ExportError, match="not found"):
         resolve_contract_checkpoint(tmp_path / "empty-run")
+
+
+# ----------------------------------------------------------------------------- AC11 deliverable cfg
+
+def test_deliverable_harness_config_turns_the_spawn_yaw_aligner_on():
+    """AC11 redesign: the live harness config enables the SpawnYawAligner (the correct spawn-yaw
+    solution now that training spawns ALIGNED) and leaves latency compensation off."""
+    path = REPO / "training" / "13-deploy-robust" / "harness-liftoff.yaml"
+    y = yaml.safe_load(path.read_text())
+    runner = y["runner"]
+    assert runner["align_spawn_yaw"] is True
+    assert runner["latency_compensation"] in (False, "off")  # YAML 1.1 may parse 'off' as False

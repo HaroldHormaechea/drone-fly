@@ -190,3 +190,40 @@ def test_all_gate_randomisers_off_use_the_true_rel():
     env.step(_hover(env.n))
     rel = env.obs()[:, :3]
     torch.testing.assert_close(rel, env._target_pos() - env.pos)
+
+
+# ----------------------------------------------------------------------------- input_dr_scale ramp
+# UC-87 redesign: CourseEnv.input_dr_scale ramps the input-noise magnitude in over the budget. At
+# scale 0 the noise has ZERO EFFECT on the observation (not RNG-identity); it opens to full at 1.
+
+def test_input_dr_scale_zero_zeroes_the_gyro_noise_effect():
+    env = _env(gyro_noise_sigma=0.4, gyro_vibration_sigma=0.3, gyro_vibration_rho=0.6)
+    env.input_dr_scale = 0.0
+    env.reset_all()
+    for _ in range(5):  # even after several steps the coloured-noise memory stays zero
+        env.step(_hover(env.n))
+    torch.testing.assert_close(env.obs()[:, 9:12], env.omega)  # observed omega == true omega
+    assert torch.count_nonzero(env._gyro_obs) == 0
+
+
+def test_input_dr_scale_zero_makes_the_gate_estimate_the_true_rel():
+    env = _env(gate_pos_noise_m=0.06, gate_outlier_p=0.1, gate_staleness_s=0.16, gate_dropout_p=0.3)
+    assert env._gate_on is True  # the path still runs; it just contributes nothing at scale 0
+    env.input_dr_scale = 0.0
+    env.reset_all()
+    env.step(_hover(env.n))
+    torch.testing.assert_close(env._gate_rel, env._target_pos() - env.pos)
+
+
+def test_input_dr_scale_half_scales_the_gyro_sigma():
+    env = _env(n=4096, gyro_noise_sigma=0.4)  # white only, so std is exactly σ·scale
+    env.input_dr_scale = 0.5
+    env.reset_all()
+    env.step(_hover(env.n))
+    injected = env.obs()[:, 9:12] - env.omega
+    assert injected.std().item() == pytest.approx(0.4 * 0.5, rel=0.1)
+
+
+def test_input_dr_scale_default_is_full():
+    env = _env(gyro_noise_sigma=0.4)
+    assert env.input_dr_scale == 1.0  # default ⇒ full magnitude (pre-redesign behaviour)

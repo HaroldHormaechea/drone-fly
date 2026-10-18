@@ -155,31 +155,31 @@ _RAMP_CFG = TimingConfig(
 
 
 def test_scale_zero_is_the_clean_fixed_rate_with_no_delay_or_skip():
-    # scale 0 ⇒ the clean baseline the deploy ramp interpolates from: period = 1/fixed_hz, zero BASE
-    # delay, zero skip. Per-tick jitter is an ORTHOGONAL term the ramp does not touch (covered by
-    # test_sim_timing), so a jitter-free config here isolates the ramp: ticked delay is exactly 0.
-    clean = TimingConfig(
-        control_hz=(16.7, 50.0), action_delay_s=(0.0, 0.100),
-        skip_prob=(0.0, 0.35), delay_jitter_s=0.0,
-    )  # fmt: skip
-    t = _timing(clean, n=4000, scale=0.0)
-    torch.testing.assert_close(t.period_s, torch.full_like(t.period_s, 1.0 / clean.fixed_hz))
+    # scale 0 ⇒ the clean baseline the deploy ramp interpolates from: period = 1/fixed_hz, zero base
+    # delay, zero skip. _RAMP_CFG carries the default per-tick jitter (0.005 s); the fix (5d7330f)
+    # scales that jitter by timing.scale too, so a ticked delay at scale 0 is EXACTLY 0.
+    t = _timing(_RAMP_CFG, n=4000, scale=0.0)
+    torch.testing.assert_close(t.period_s, torch.full_like(t.period_s, 1.0 / _RAMP_CFG.fixed_hz))
     assert torch.all(t.delay_s == 0.0) and torch.all(t.skip_prob == 0.0)
-    # and a tick draws no delay / never skips, and dt is the clean fixed period (no skip doubling)
+    # a tick draws exactly zero delay (jitter scaled out) / never skips; dt == clean period
     dt, delay, skipped = t.tick()
     assert torch.all(delay == 0.0) and not skipped.any()
-    torch.testing.assert_close(dt, torch.full_like(dt, 1.0 / clean.fixed_hz))
+    torch.testing.assert_close(dt, torch.full_like(dt, 1.0 / _RAMP_CFG.fixed_hz))
 
 
-def test_scale_zero_base_delay_is_zero_even_with_jitter_configured():
-    # With jitter configured, scale 0 still zeroes the per-episode BASE delay
-    # and skip; only the orthogonal per-tick jitter remains (bounded, clamped >= 0). Documents that
-    # the deploy ramp scales the base delay/skip/period — not the tick-level jitter.
-    t = _timing(_RAMP_CFG, n=4000, scale=0.0)
-    assert torch.all(t.delay_s == 0.0) and torch.all(t.skip_prob == 0.0)
-    _, delay, skipped = t.tick()
-    assert not skipped.any()  # skip_prob 0 ⇒ never skips at any scale
-    assert torch.all(delay >= 0.0) and delay.max().item() < 0.05  # jitter only, small + clamped
+def test_scale_zero_tick_delay_is_exactly_zero_even_with_large_jitter():
+    # The deploy ramp scales the per-tick jitter too (5d7330f): at scale 0 the ticked delay is a
+    # hard zero no matter how large delay_jitter_s is — scale 0 is TRULY clean (not merely small).
+    cfg = TimingConfig(
+        control_hz=(16.7, 50.0), action_delay_s=(0.0, 0.100),
+        skip_prob=(0.0, 0.35), delay_jitter_s=0.05,  # a deliberately large jitter
+    )  # fmt: skip
+    t = _timing(cfg, n=4000, scale=0.0)
+    for _ in range(3):
+        _, delay, skipped = t.tick()
+        assert torch.all(delay == 0.0) and not skipped.any()
+    # at scale 1 the same jitter DOES move the delay (proving the knob is live, not dead)
+    assert _timing(cfg, n=4000, scale=1.0).tick()[1].std().item() > 0.0
 
 
 def test_scale_one_is_the_full_configured_range():
