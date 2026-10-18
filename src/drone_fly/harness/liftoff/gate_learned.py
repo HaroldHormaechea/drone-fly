@@ -48,6 +48,7 @@ from drone_fly.harness.config import (
 from drone_fly.harness.errors import HarnessConfigError, lazy_import
 from drone_fly.harness.gate_types import GateTypeTable
 from drone_fly.harness.liftoff.gate_cv import (
+    DEFAULT_POSE_OFFSET_S,
     GateDetection,
     TrackingGateEstimator,
     camera_from_config,
@@ -286,6 +287,9 @@ class LearnedGateEstimator(TrackingGateEstimator):
             lost_policy=str(cfg.get("lost_policy", "terminate")),
             lost_hard_stop_s=num("lost_hard_stop_s", 6.0, min_value=0.0, min_exclusive=True),
             drop_after_s=num("drop_after_s", 0.5, min_value=0.0),
+            pose_offset_s=num(
+                "pose_offset_s", DEFAULT_POSE_OFFSET_S, min_value=-0.2, max_value=0.2
+            ),
         )
         est.weights_path = weights_path
         est.warmup()

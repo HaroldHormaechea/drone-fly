@@ -211,6 +211,129 @@ heading alignment.
 
 Follow-up, not covered: the recurrent policy state is not reset on a respawn.
 
+### Gate pose at capture
+
+A gate detection is a camera-frame pose (PnP). It becomes a world position through the drone's
+pose: `centre = pos + R_wc · t_cam`. The learned detector with `async_inference: true` returns the
+last finished detections, which are 6–9 frames (about 150 ms) old. The estimator used to combine
+them with the *current* tick's attitude and position. Its world estimate was then off by
+`pos_now + R_now R_cap^T (G − pos_cap) − G`, which swung about 1 training-m while the drone tilted
+on take-off.
+
+Every image-based gate estimator (opencv and learned) now keeps a short history of the telemetry
+poses (`received_at`, position, attitude). It places each detection with the pose **at its capture
+stamp** (`Frame.stamp`, the same `perf_counter` clock as `received_at`):
+- position is interpolated linearly and attitude by slerp;
+- a stamp outside the history is clamped to it;
+- tracking and the pass rule still use the current pose.
+
+`gates.pose_offset_s` (default `−0.025`, allowed `−0.2..0.2`) shifts the lookup to cover a
+render-to-capture bias. The current pose is used instead (the old behaviour) when:
+- there is no stamp;
+- the history holds fewer than two stamps (the first tick, or just after a respawn reset);
+- the stamp lies more than 0.25 s outside the history. This means the frame and telemetry clocks
+  disagree: it logs one warning and counts it in `gate.info.pose_fallbacks`.
+
+**Measured (V2, 2026-10-18 runs, learned + async):** across 21 matched ticks after take-off on
+gate 0, the error against the gate's at-rest position fell as follows.
+
+| Pose used | Median error | p90 error |
+|---|---|---|
+| Current pose (old) | 0.80 training-m | 1.62 training-m |
+| Pose at capture, offset 0 | 0.013 training-m | 0.50 training-m |
+| Pose at capture, offset −25 ms | 0.011 training-m | 0.23 training-m |
+
+**Fitting `pose_offset_s` from a recording.** Pick a run where the gate was tracked at rest and
+then while the drone tilted. Take the reference gate from the at-rest ticks. Recompute each later
+matched tick's estimate with `_pose_at(capture + offset)`, where capture is `now − target_age_s`.
+Choose the offset with the smallest p90 error. `artifacts/diag/v2_pose.py` in the main checkout
+does this. Change the default only when several runs agree. The default of −0.025 comes from this
+fit: each of the three 2026-10-18 runs with data preferred −25 to −50 ms. A negative offset means
+the image shows the drone slightly earlier than its frame stamp.
+
+### Latency compensation (Smith predictor)
+
+A command reaches the measured state about `runner.latency_delay_s` after it is sent: the gamepad,
+the game's physics and the telemetry all add delay. The memoryless contract policy then reacts to
+an old state and ignores the commands still in flight.
+
+With `runner.latency_compensation` on, the runner forecasts the state the next command will act on
+and gives only that forecast to the assembler. Perception (the gate estimator, free space and the
+spawn-yaw capture) keeps the measured state. The forecast rolls the contract's `plant_step` from
+the measured state (at its `received_at`) to `now + latency_delay_s`, applying at each 20 ms step
+the newest command sent at least `latency_delay_s` earlier. The horizon is capped at 0.2 s.
+- `runner.latency_predict` chooses what the forecast replaces:
+  - `rotation` (default) keeps only the forecast attitude and body rates, which are
+    scale-invariant. Velocity stays as measured, and position is extrapolated as `pos + vel·h`.
+  - `full` uses the whole `plant_step` state, including the training whoop's translational
+    dynamics, which do not match a scaled live world.
+- Every forecast tick records `predicted_state` in `ticks.jsonl`.
+- The first forecast tick adds a `latency_comp:<n>steps` event.
+- A discontinuity (respawn) clears the command history.
+
+**What `latency_delay_s` means.** It is the time from the command being *sent* to the measured
+telemetry responding. It is not the full tick-to-gyro lag, which also includes the ~35 ms loop
+before the send. The default is 0.04 s: the tick-to-gyro lag is about 75 ms on the 2026-10-18 runs,
+minus that loop. Training already randomizes a 0–2 step (0–40 ms) action delay, so the delay is
+compensated in full. Do not shorten it to "leave some" latency.
+
+**Modes:**
+- `off`: no forecast.
+- `auto` (default): currently **off everywhere**. The V1 real-data replay (below) failed. `auto` is
+  also always off on the sim clock (loopback runs stay byte-identical), with `--teacher`, with a
+  student checkpoint, and with an action-spec v2 checkpoint.
+- `on`: forces the forecast for an experiment. It is refused with `--teacher`, with a student
+  checkpoint, and with an action-spec v2 checkpoint, because `plant_step` reads raw v1 actions.
+
+**Why `auto` is off (V1, 2026-10-18):** the five `liftoff-20261018T110*` runs were replayed
+open-loop, about 170 airborne ticks pooled. The forecast was compared with the measured telemetry
+at the forecast time, and with the stale state as the baseline. Median errors:
+
+| D | Attitude (forecast vs stale) | Body rate (forecast vs stale) | Velocity (forecast vs stale) |
+|---|---|---|---|
+| 40 ms | 15.0° vs 15.2° | 6.9 vs 8.3 rad/s | 0.96 vs 0.09 |
+| 75 ms | 31° vs 24.5° | 7.9 vs 8.8 rad/s | 1.66 vs 0.16 |
+
+Why the forecast loses:
+- `plant_step` is the 32 g training whoop, at full gravity and thrust. The live world is scaled
+  (`world_scale` 12 on those runs), so the forecast's velocity is about 10x wrong.
+- Attitude ties up to about 40 ms and is worse beyond that.
+- Command-to-gyro correlation is weak in most of those aggressive, saturating runs.
+
+Re-run in `rotation` mode, pooled median / p90 attitude error (forecast vs stale):
+
+| D | Attitude, forecast | Attitude, stale |
+|---|---|---|
+| 20 ms | 6.4° / 40.1° | 10.2° / 35.7° |
+| 30 ms | 10.2° / 48.1° | 12.0° / 37.9° |
+| 40 ms | 15.0° / 51.9° | 15.2° / 41.7° |
+| 60 ms | 23.2° / 62.5° | 19.4° / 53.5° |
+
+Velocity is by construction the measured value, and position improves at every D (0.004 vs 0.026
+at 40 ms). The median wins up to about 40 ms, but the tail (p90) is always worse, so `auto` stays
+off. The clean run 110334 is better: 9.7° vs 13.2° median and 21° vs 19° p90 at 40 ms.
+
+**Closed-loop sim (V3).** The setup:
+- the 11-count 70-dim policy on the matched whoop plant;
+- a 50 ms control period, a 75 ms actuation delay and a 160 ms gate lag.
+
+What it showed:
+- Without compensation every case crashes within 1.6 s, with or without the pose at capture.
+- With compensation at D = 75 ms it still crashes (3.4 s).
+- D = 100–125 ms flies the full 5 s for gates 2, 3 and 4 training-m out.
+
+The reason is the hold: the policy was trained on 20 ms holds, but the harness holds each command
+for one control period. The command therefore acts over `[t + D, t + D + period]`, so the forecast
+should target about **D + period/2**. Set `latency_delay_s` to the measured delay plus half the
+control period when you experiment with `on`. At the live 20 Hz tick that is about 65 ms, where the
+V1 replay loses.
+
+To revisit it, collect calmer runs and re-run `artifacts/diag/v1_latency.py`: it sweeps D and
+prints the forecast and baseline errors per run and pooled (`V1_MODE=rotation|full`, `V1_DS=` for
+the D grid). Then flip `AUTO_LIVE` in
+`drone_fly.harness.latency_comp` only if the forecast beats the stale state on attitude and
+velocity.
+
 ## 5. Stage (b): 70-dim obstacle model with live depth (acceptance target)
 
 ```powershell
@@ -361,6 +484,8 @@ Record the results:
 | `config 'eyes.weights' is required` / `file not found` | Set `eyes.weights`; use an absolute path in a worktree |
 | `eyes weights ... does not match` | The weights were trained for another camera, `world_scale` or ray cone; use the `liftoff` preset or matching weights. For a 70-dim run at `scaling.world_scale` 10–16 (4.0 puts gate 0 at 9.4 training-m vs 1.6–2.8 in training), set `eyes.world_scale: 4.0` (stage 5c) |
 | Drone flips on take-off with a `model_readout.pt` checkpoint | `runner.align_spawn_yaw` is `false`; keep it `auto` and check the `spawn_yaw:` event in the tick record |
+| Gate target swings while the drone tilts (learned, async) | Check `gate.info.pose_fallbacks`: a rising count means frame and telemetry stamps disagree, so the pose at capture is not used |
+| Twitchy or oscillating control with `latency_compensation: on` | The forecast mispredicts this airframe or scale (see Latency compensation); set it to `off` or `auto` |
 | Stage (c) stops `perception_stale` at once | No eyes estimate yet (history ~0.4 s, or a respawn); check the `eyes:` start-up log line and the GPU duty warning |
 | Overlay not visible over the game | Liftoff is in exclusive fullscreen; switch to borderless |
 | Exit code 3 | A missing extra: install it into `.venv-cuda` with `uv pip` (step 0.1) |

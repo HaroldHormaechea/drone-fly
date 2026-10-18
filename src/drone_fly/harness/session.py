@@ -31,6 +31,7 @@ from drone_fly.harness.config import HarnessConfig, OverlayConfig, find_repo_roo
 from drone_fly.harness.contract import load_contract
 from drone_fly.harness.errors import HarnessConfigError
 from drone_fly.harness.interfaces import BuildContext, Harness
+from drone_fly.harness.latency_comp import LatencyCompensator
 from drone_fly.harness.overlay import (
     OverlayPublisher,
     build_meta,
@@ -399,6 +400,10 @@ def run_harness(
         raise HarnessConfigError(
             "align_spawn_yaw applies only to gpu_prototype contract checkpoints"
         )
+    if (plan is not None or student_plan is not None) and cfg.runner.latency_compensation == "on":
+        raise HarnessConfigError(
+            "latency_compensation applies only to gpu_prototype contract checkpoints"
+        )
 
     contract = load_contract(
         cfg.contract.gpu_prototype_dir, cfg.contract.k1_path, cfg.contract.device
@@ -467,6 +472,24 @@ def run_harness(
     yaw_aligner: SpawnYawAligner | None = None
     if plan is None and student_plan is None:
         yaw_aligner = SpawnYawAligner(enabled=settings.align_spawn_yaw in ("auto", True))
+    # Smith-predictor latency compensation: contract checkpoints only; auto also needs the wall
+    # clock (the loopback's sim clock has no latency) and is resolved again after the model load.
+    latency_comp: LatencyCompensator | None = None
+    if plan is None and student_plan is None:
+        latency_comp = LatencyCompensator(
+            cfg.runner.latency_compensation,
+            cfg.runner.latency_delay_s,
+            plant_step=getattr(contract, "plant_step", None),
+            dt=float(getattr(contract, "DT", 0.02)),
+            eligible=cfg.runner.clock == "wall",
+            predict=cfg.runner.latency_predict,
+        )
+        log.info(
+            "latency compensation %s (runner.latency_compensation: %s, delay %.0f ms)",
+            "on" if latency_comp.enabled else "off",
+            cfg.runner.latency_compensation,
+            cfg.runner.latency_delay_s * 1000.0,
+        )
     runner = HarnessRunner(
         h,
         policy,
@@ -475,6 +498,7 @@ def run_harness(
         settings,
         clock=h.clock,
         yaw_aligner=yaw_aligner,
+        latency_comp=latency_comp,
     )
     recorder = None
     observer: _TickObserver | None = None

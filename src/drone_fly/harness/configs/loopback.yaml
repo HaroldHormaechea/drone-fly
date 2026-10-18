@@ -22,6 +22,9 @@ runner:
   max_duration_s: 28.0      # 1400 ticks = the env's MAX_STEPS episode cap
   max_ticks: null
   align_spawn_yaw: auto     # auto | true | false (the plant spawns at yaw 0: a no-op here)
+  latency_compensation: auto  # off | auto | on (auto: off on the sim clock; loopback unchanged)
+  latency_delay_s: 0.04
+  latency_predict: rotation   # rotation (attitude + rates only) | full
 
 parts:
   state_source: plant
