@@ -1,0 +1,84 @@
+# UC-87 — deploy-robust retraining of the 70-input connectome policy (sim only).
+#
+# A warm-started fine-tune of model 11 (`training/11-count-curriculum/model_readout.pt`, the 70-dim
+# obstacle-aware avoider) that adds everything the policy needs to fly SMOOTHLY under live-like
+# deployment conditions (control timing + actuation delay + input noise), rather than only with
+# perfect sim inputs:
+#   * policy memory  — prev_action(4) + obs_history(2 x 12) appended AFTER raycast (extra_dim 98),
+#     warm-started so the 28 new readout columns start at zero (the fine-tune begins == model 11);
+#   * smoothness     — an action-rate penalty + a small body-rate saturation penalty (AC3);
+#   * deploy timing  — a wider control period (down to ~16.7 Hz / 60 ms) and a 0..100 ms actuation
+#     delay peaked near the measured live ~75 ms, plus a fast-Betaflight rate-loop τ reachable only
+#     via the per-key range override (AC1 / D4) — drones/meteor75 is NOT edited;
+#   * input DR       — gyro/omega noise, floor-visible rays, zeroed obstacle_vision, spawn yaw
+#     0..360 deg, spawn distance 1.5..10 m, and gate-estimate noise/outliers/staleness/dropout (AC4);
+#   * altitude       — a configurable 5 m ceiling + floor-margin shaping (AC5).
+#
+# The empirical AC7/AC8 smoothness numbers are produced POST-MERGE on the GPU box (D6): this repo
+# lands the code + config + a CPU-runnable smooth-eval harness. Build the eyes-v2 ray-noise model
+# before the real run (inherited from uc83): drone-fly eyes noise-model ... -> artifacts/eyes/ray-noise-v2.yaml
+extends: uc83-obstacle-rays-v2
+name: uc87-deploy-robust
+n_envs: 256               # A3000 6 GB
+budget: 8.0e6            # warm-started fine-tune
+
+plant:
+  integrator: exact
+  substeps: 2             # finer physics so the ZOH / delay are resolved under the wider timing
+  # D4: target a fast-Betaflight rate loop (~5 ms) up to a soft ~55 ms+ τ — unreachable along the
+  # profile's nominal->range axis, so it is set here as an absolute per-key override.
+  range_overrides:
+    rates.roll.tau_s: [0.005, 0.083]
+    rates.pitch.tau_s: [0.005, 0.083]
+    rates.yaw.tau_s: [0.005, 0.083]
+
+timing:
+  mode: random
+  control_hz: [16.7, 50.0]        # down to ~60 ms control period (live: 50 Hz target, ~37 Hz eff.)
+  action_delay_s: [0.0, 0.100]    # 0..100 ms actuation delay
+  action_delay_dist: triangular   # concentrated near the measured live ~75 ms
+  action_delay_mode_s: 0.075
+  delay_jitter_s: 0.005
+  skip_prob: [0.0, 0.35]
+
+course:
+  no_obs: false
+  raycast: true
+  shaping: true
+  obs_terminal: true
+  floor: true                     # AC5 floor-margin shaping
+  # --- policy memory (AC2 / D1-D3) ---
+  memory: true
+  history_len: 2
+  # --- smoothness penalties (AC3) ---
+  action_rate_lambda: 0.08        # ~0.05-0.1 relative to the spin term; tune on the GPU run
+  saturation_weight: 0.02
+  saturation_threshold: 0.95      # |tanh(a)| >= 3.8/4.0 is saturated (AC6)
+  # --- altitude envelope (AC5) ---
+  ceiling_z: 5.0
+  # --- input domain randomisation (AC4) ---
+  spawn_yaw: true
+  spawn_distance_m: [1.5, 10.0]
+  gyro_noise_sigma: 0.4           # white gyro noise sigma (rad/s), ~0.3-0.5
+  gyro_vibration_sigma: 0.3       # coloured (AR(1)) vibration amplitude
+  gyro_vibration_rho: 0.6
+  raycast_floor: true             # the floor is visible to the eyes-like rays
+  obstacle_vision_zero: true      # live sees a zeroed obstacle_vision block
+  gate_pos_noise_m: 0.06          # gate estimate noise (~0.06 m)
+  gate_outlier_p: 0.10            # 10 % outliers ...
+  gate_outlier_m: 0.4             # ... at ~0.4 m
+  gate_staleness_s: 0.16          # staleness up to 160 ms
+  gate_dropout_p: 0.30            # ~30 % Markov dropout (hold last estimate)
+
+actor:
+  extra_dim: 98                   # == course.extra_dim (raycast 70 + memory 28)
+
+curriculum:
+  difficulty_frac: null           # fine-tune: full difficulty + all obstacles on-path from step 0
+  obs_pos_frac: null
+  obs_count_frac: null
+
+warm_start:
+  checkpoint: training/11-count-curriculum/model_readout.pt   # the 70-input avoider (relative to repo root)
+  src_extra_dim: 70               # the 28 new memory columns are zero-initialised (AC2)
+  legacy_v1: false                # model 11 is already action-contract v2

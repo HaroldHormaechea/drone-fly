@@ -268,6 +268,18 @@ def _train(
                 "episode_completion": float(eps[:, col("completed")].mean()) if len(eps) else None,
                 "episode_return": float(eps[:, col("return")].mean()) if len(eps) else None,
                 "episode_length_s": float(eps[:, col("length_s")].mean()) if len(eps) else None,
+                # UC-87 AC3: per-tick means of the smoothness terms (per-episode SUM / steps),
+                # shown in the training report so the λ trade-off is visible.
+                "episode_action_rate": (
+                    float((eps[:, col("action_rate")] / np.maximum(eps[:, col("steps")], 1)).mean())
+                    if len(eps)
+                    else None
+                ),
+                "episode_saturation": (
+                    float((eps[:, col("saturation")] / np.maximum(eps[:, col("steps")], 1)).mean())
+                    if len(eps)
+                    else None
+                ),
             }
             run.metrics(row)
             log.info(

@@ -49,7 +49,12 @@ from typing import Any
 import numpy as np
 import yaml
 
-from drone_fly.sim.action import CONTRACT_VERSION, ActionSpec, write_sidecar
+from drone_fly.sim.action import (
+    CONTRACT_VERSION,
+    ActionSpec,
+    obs_contract_version,
+    write_sidecar,
+)
 
 CHECKPOINT_NAME = "model_readout.pt"
 TEACHER_NAME = "teacher.pt"
@@ -192,6 +197,7 @@ class RunDir:
             actor=self.config.actor.kind,
             drone=self.profile.id,
             run_id=self.run_id,
+            obs_contract_version=obs_contract_version(extra_dim),
         )
         return path
 
