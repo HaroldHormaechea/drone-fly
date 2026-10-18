@@ -130,6 +130,7 @@ class FakeStateSource(StateSource):
 
 class FakeGateEstimator(GateEstimator):
     provides = frozenset({"target", "curr_gate", "next_lookahead"})
+    provenance = "screen"  # UC-86: stands in for an on-screen detector (live guard)
 
     def __init__(self, status: str = "tracking", raises: BaseException | None = None) -> None:
         self.status = status
@@ -155,6 +156,7 @@ class FakeGateEstimator(GateEstimator):
 
 class FakeFreeSpaceEstimator(FreeSpaceEstimator):
     provides = frozenset({"obstacle_vision", "raycast"})
+    provenance = "screen"
 
     def __init__(self, age_s: float = 0.0, raises: BaseException | None = None) -> None:
         self.age_s = age_s
