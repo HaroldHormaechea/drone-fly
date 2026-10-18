@@ -197,7 +197,8 @@ def test_mlp_baseline_protocol():
     torch.testing.assert_close(m.mean_action(x), mean)
     assert torch.allclose(std, torch.full_like(std, float(np.exp(-1.5))))
     assert m.frozen_names() == [] and "log_std" in m.trainable_names()
-    assert m.arch() == {"kind": "mlp-student", "hidden": [256, 256, 128]}
+    # UC-79 (e230b84) threaded obs_dim into the MLP actor, so arch() now records it
+    assert m.arch() == {"kind": "mlp-student", "hidden": [256, 256, 128], "obs_dim": m.obs_dim}
     back = student_from_state("mlp-student", m.arch(), m.readout_state_dict())
     torch.testing.assert_close(back.mean_action(x), m.mean_action(x))
     assert isinstance(build_student("mlp-student"), MLPStudent)
