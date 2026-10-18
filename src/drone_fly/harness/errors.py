@@ -53,6 +53,16 @@ class PerceptionCoverageError(HarnessError):
         )
 
 
+class PerceptionContractError(HarnessConfigError):
+    """A perception provider's declaration or output breaks the perception contract (UC-86)."""
+
+    def __init__(self, provider: str, block: str | None, problem: str) -> None:
+        self.provider = provider
+        self.block = block
+        where = f" block {block!r}" if block else ""
+        super().__init__(f"perception provider {provider!r}{where}: {problem}")
+
+
 class EstimatorStop(HarnessError):
     """A gate source ends the attempt on purpose (not a fault): the runner stops with ``reason``.
 

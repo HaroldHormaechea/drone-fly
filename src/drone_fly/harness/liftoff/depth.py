@@ -161,6 +161,7 @@ class DepthResult:
 
 class MonocularDepthFreeSpaceEstimator(FreeSpaceEstimator):
     provides = frozenset({"obstacle_vision", "raycast"})
+    provenance = "screen"
 
     def __init__(
         self,

@@ -256,6 +256,8 @@ def cuda_stream_for(device: str) -> Any:
 
 class EyesFreeSpaceEstimator(FreeSpaceEstimator):
     provides = frozenset({"obstacle_vision", "raycast"})
+    provenance = "screen"
+    gpu_duty = MAX_GPU_DUTY
 
     def __init__(
         self,

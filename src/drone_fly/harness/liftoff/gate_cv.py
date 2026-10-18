@@ -169,6 +169,7 @@ class TrackingGateEstimator(GateEstimator):
     """Detections -> current / next gate tracking (see the module docstring, steps 3-7)."""
 
     provides = frozenset({"target", "curr_gate", "next_lookahead"})
+    provenance = "screen"
 
     def __init__(
         self,
