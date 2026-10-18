@@ -38,6 +38,16 @@ runner:
   # yaw (captured per attempt) so it sees the yaw-0 frame it was trained in. auto = contract
   # checkpoints only; true with --teacher / a student checkpoint is refused.
   align_spawn_yaw: auto
+  # Smith-predictor latency compensation (gpu_prototype v1 contract checkpoints): the policy sees
+  # the state forecast latency_delay_s past now through the commands still in flight (contract
+  # plant_step). off | auto | on. auto is OFF: the real-data replay (2026-10-18) found the whoop
+  # plant mispredicts a scaled Liftoff quad (velocity ~10x worse than the stale state); on forces
+  # it. Refused with --teacher / a student checkpoint and for action-spec v2 checkpoints.
+  latency_compensation: auto
+  latency_delay_s: 0.04     # command sent -> measured response (s, 0..0.3)
+  # rotation: roll only attitude + body rates (scale-invariant); velocity stays measured and the
+  # position is extrapolated pos + vel*h. full: the whole plant_step state (whoop translation).
+  latency_predict: rotation
 
 parts:
   state_source: liftoff-udp       # liftoff-udp | liftoff-csv (replay a recorded CSV)
@@ -145,6 +155,11 @@ gates:
   lost_policy: terminate
   lost_hard_stop_s: 6.0
   drop_after_s: 0.5
+  # Detections are placed in the world with the drone pose AT THEIR CAPTURE STAMP (interpolated
+  # from the telemetry history), shifted by this offset (s, -0.2..0.2) for a render-to-capture
+  # bias. Fit from the 2026-10-18 recordings (-25..-50 ms in all three runs; p90 gate error
+  # 0.50 -> 0.23 training-m vs 0); refit per setup (docs/harness/liftoff-live-session.md).
+  pose_offset_s: -0.025
   pass_area_frac: 0.2       # gate area fraction that, once vanished nearby, counts as a pass
   gates_per_lap: null       # set to count laps
   # `learned` gate estimator (parts.gate_estimator: learned): keypoint net + PnP per gate type.

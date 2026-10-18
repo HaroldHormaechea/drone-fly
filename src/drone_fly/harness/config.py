@@ -204,11 +204,19 @@ class RunnerConfig:
     #: Spawn-yaw frame alignment of gpu_prototype contract policies: "auto" (contract
     #: checkpoints only), True or False. See :mod:`drone_fly.harness.yaw_align`.
     align_spawn_yaw: str | bool = "auto"
+    #: Smith-predictor latency compensation: "off" | "auto" | "on" and the command -> measured
+    #: response delay it compensates. See :mod:`drone_fly.harness.latency_comp`.
+    latency_compensation: str = "auto"
+    latency_delay_s: float = 0.04
+    latency_predict: str = "rotation"
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> RunnerConfig:
         max_ticks = d.get("max_ticks")
         align = d.get("align_spawn_yaw", "auto")
+        latency = d.get("latency_compensation", "auto")
+        if isinstance(latency, bool):  # YAML 1.1 reads a bare off / on as a boolean
+            latency = "on" if latency else "off"
         if not (align == "auto" or isinstance(align, bool)):
             raise HarnessConfigError(
                 f"config 'runner.align_spawn_yaw' must be auto, true or false, got {align!r}"
@@ -245,6 +253,22 @@ class RunnerConfig:
             if max_ticks is None
             else require_int(max_ticks, "runner.max_ticks", min_value=1),
             align_spawn_yaw=align,
+            latency_compensation=require_choice(
+                latency,
+                "runner.latency_compensation",
+                ("off", "auto", "on"),
+            ),
+            latency_delay_s=float(
+                require_number(
+                    d.get("latency_delay_s", 0.04),
+                    "runner.latency_delay_s",
+                    min_value=0.0,
+                    max_value=0.3,
+                )
+            ),
+            latency_predict=require_choice(
+                d.get("latency_predict", "rotation"), "runner.latency_predict", ("rotation", "full")
+            ),
         )
 
 

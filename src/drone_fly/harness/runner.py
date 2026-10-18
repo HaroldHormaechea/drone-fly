@@ -12,9 +12,10 @@ Start
 
 Tick
     abort? -> focus? -> state (stale check, discontinuity -> reset estimators) -> gate update
-    (lost -> fail-safe) -> free-space latest (age check) -> assemble -> policy -> decode ->
-    sink.send -> [overlay publish] -> record. Per-stage latencies (state, perception, inference,
-    actuation, total; plus overlay when a live-overlay publisher is attached), the perception
+    (lost -> fail-safe) -> free-space latest (age check) -> [latency forecast] -> assemble ->
+    policy -> decode -> sink.send -> [overlay publish] -> record. Per-stage latencies (state,
+    perception, inference, actuation, total; plus overlay when a live-overlay publisher is
+    attached), the perception
     split per estimator (gate, free space), estimate ages and missed deadlines are recorded on
     every tick.
 
@@ -32,6 +33,12 @@ Estimator stop (UC69)
     A gate source may end the attempt on purpose by raising
     :class:`~drone_fly.harness.errors.EstimatorStop` from ``update``: the runner stops with its
     reason before anything is sent on that tick (the fail-safe still follows).
+
+Latency compensation (optional)
+    With a :class:`~drone_fly.harness.latency_comp.LatencyCompensator`, perception (gate, free
+    space, the spawn-yaw capture) keeps the measured state and only the assembler gets the state
+    forecast through the commands still in flight; every successfully sent command is recorded.
+    A discontinuity resets it with the estimators.
 
 Fail-safe (latched)
     On stale telemetry, gate lost, a stale free-space estimate, loss of window focus, any
@@ -271,8 +278,12 @@ class HarnessRunner:
         clock: Any = None,
         publisher: Any = None,
         yaw_aligner: Any = None,
+        latency_comp: Any = None,
     ) -> None:
         self.harness = harness
+        #: Optional :class:`~drone_fly.harness.latency_comp.LatencyCompensator`.
+        self.latency_comp = latency_comp
+        self._latency_logged = False
         #: Optional :class:`~drone_fly.harness.yaw_align.SpawnYawAligner` (contract policies).
         self.yaw_aligner = yaw_aligner
         self.policy = policy
@@ -302,6 +313,8 @@ class HarnessRunner:
         """Coverage check -> model load -> (optionally) arm the sink, in that order."""
         self.assembler.check_coverage(self.extra_dim, self.harness.provided_blocks())
         self.policy.load()
+        if self.latency_comp is not None:
+            self.latency_comp.resolve(getattr(self.policy, "contract_version", None))
         if arm:
             self.arm()
 
@@ -492,6 +505,8 @@ class HarnessRunner:
         period = 1.0 / s.rate_hz
         if self.yaw_aligner is not None:
             self.yaw_aligner.reset()  # every run captures its own spawn yaw
+        if self.latency_comp is not None:
+            self.latency_comp.reset()
         self._wait_for_state()
         self._wait_for_focus()
         start = self.clock.now()
@@ -563,6 +578,8 @@ class HarnessRunner:
             record.events.append("discontinuity:estimators_reset")
             if aligner is not None:
                 aligner.reset()  # a respawn: re-capture the spawn yaw from this tick
+            if self.latency_comp is not None:
+                self.latency_comp.reset()  # the in-flight commands belong to the old attempt
         if aligner is not None:
             psi0 = aligner.capture(state)
             if psi0 is not None:
@@ -607,8 +624,17 @@ class HarnessRunner:
         # -- assemble + act --
         pub = self.publisher
         brain: Any = None
+        comp = self.latency_comp
+        policy_state = state
+        if comp is not None and comp.enabled:
+            policy_state = comp.predict(state, t2)
+            if comp.last_steps:
+                record.predicted_state = policy_state.as_state_dict()
+                if not self._latency_logged:
+                    self._latency_logged = True
+                    record.events.append(f"latency_comp:{comp.last_steps}steps")
         try:
-            obs, extra = self.assembler.assemble(state, gate, fs, self.extra_dim)
+            obs, extra = self.assembler.assemble(policy_state, gate, fs, self.extra_dim)
             if aligner is not None:
                 obs, extra = aligner.apply(obs, extra)  # recorded = what the policy sees
             record.obs, record.extra = obs, extra
@@ -629,6 +655,8 @@ class HarnessRunner:
         except Exception as exc:  # noqa: BLE001
             log.exception("action sink failed")
             self._finish(record, STOP_SINK_ERROR, repr(exc))
+        if comp is not None:
+            comp.record(clock.now(), command)
         t4 = clock.now()
 
         record.latency_s = {
