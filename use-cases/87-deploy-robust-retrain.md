@@ -1,92 +1,168 @@
-# Use Case 87: Deploy-robust retraining of the 70-dim connectome policy (sim only)
+# Use Case 87: Deploy-robust training of the connectome policy — smooth by construction (sim only)
+
+> **Revised 2026-10-18 after two failed fine-tune runs.** The original use case fine-tuned model 11
+> with memory + penalties + full domain-randomisation switched on from step 0. Both runs collapsed
+> course completion to ~0% (see `training/13-deploy-robust/README.md`). Root causes, now corrected
+> below: (1) **spawn-yaw randomisation was a mistake** — `harness/yaw_align.py:SpawnYawAligner`
+> already neutralises any live spawn yaw exactly (one per-episode frame rotation into the yaw-0
+> training frame), and live spawns aligned to the first gate anyway; (2) the obstacle-count
+> **curriculum that makes model 11 work was discarded** (fracs set to null); (3) smoothness was
+> **retrofitted** onto a finished high-gain policy instead of learned jointly. This revision trains
+> **fresh, smooth by construction**, with a staged curriculum, and keeps the aligner instead of
+> randomising yaw.
 
 ## Summary
-Fine-tune the 70-dim obstacle-aware connectome policy (`training/11-count-curriculum`) in the GPU sim so it flies smoothly and stably under the conditions it actually meets live in Liftoff. The run happens on the second machine, which has no Liftoff; everything here is sim-only and is validated offline at live-like conditions.
+Train a connectome policy (frozen K1 reservoir + small readout, in the promoted `src/drone_fly/sim`
++ `src/drone_fly/training` path) that flies the obstacle course **and** stays smooth under the
+conditions it meets live in Liftoff — control timing, actuation delay, and noisy inputs — rather
+than only with perfect sim inputs. The policy is trained **from scratch** (no warm-start) with the
+smoothness objective and the memory inputs present from step 0, so smooth control is learned jointly
+with completion, not bolted on afterwards. Sim-only: this runs on the second machine (no Liftoff);
+smoothness is validated offline at live-like conditions, and live validation happens later on the
+Liftoff box.
 
-The 2026-10-18 live campaign showed the policy flies fairly smoothly with perfect inputs in sim, but chatters and flips live.
-
-**Measured on the best live runs:**
-- mean command change 3.0–3.4 rad/s per tick;
-- 10–13 yaw direction flips per second;
-- 67–71% of ticks saturated;
-- 0 real gate passes.
-
-**Where that comes from (attribution):**
-- **Control timing, ~70%+ of the jerkiness:** a 40–50 ms command hold plus ~75 ms actuation delay. The memoryless policy applies a high-gain rate feedback (yaw command ≈ −1.16 × measured yaw rate) that is stable only at training conditions (50 Hz, zero delay, a soft τ≈55 ms rate loop) and oscillates at live timing.
-- **Noisy perception, ~10%:** gate noise, gate dropout, eyes-ray noise.
-- **The intrinsic baseline, ~12–15%.**
-
-**Why the policy can't cope (training side):**
-- **No smoothness incentive:** there is no action-rate or jerk penalty and no action filter.
-- **No memory:** the readout has no previous action and no history, so it can neither filter noise nor adapt to delay.
-- **Unseen live conditions:** training also never saw a non-zero spawn yaw (live spawns at −90°), the live `obstacle_vision` block (zeros), eyes-like rays that hit the floor, or a ceiling (live flights climbed out of the fly zone at ~31 m).
+The 2026-10-18 live campaign showed model 11 flies fairly smoothly with perfect inputs but chatters
+and flips live (measured: mean command change 3.0–3.4 rad/s/tick, 10–13 yaw flips/s, 67–71% ticks
+saturated, 0 real gate passes). Attribution: ~70% control timing (command hold + ~75 ms actuation
+delay acting on a memoryless high-gain rate feedback that is stable only at training timing), ~10%
+noisy perception, ~12–15% intrinsic. The fix is a policy that has **memory** (to filter noise and
+anticipate delay), a **smoothness incentive** in the reward, and training that **progressively
+exposes it to live-like timing and noise** — all learned on top of a solid completion base rather
+than retrofitted.
 
 **What this use case does:**
-1. adds deploy-timing randomisation, a previous-action plus short-history input, an action-rate penalty and input domain randomisation to the training environment;
-2. fine-tunes model 11 with them;
-3. proves offline with smoothness metrics that the new policy meets the acceptance bars at live-like conditions before any live flight. Live validation happens later on the Liftoff machine.
+1. adds policy memory (previous action + short observation history), an action-rate penalty, a
+   staged training curriculum, and deployment/input domain-randomisation *ramps* to the training env;
+2. trains the policy from scratch under that staged curriculum;
+3. proves offline with smoothness metrics that the policy meets the acceptance bars at live-like
+   conditions, without sacrificing course completion, before any live flight.
 
 ## Acceptance Criteria
-1. **Deploy-timing randomisation (training env).** The training environment (gpu_prototype, the gates/obstacle course env used for model 11) samples per episode, all configurable and recorded in the run config:
-   - control period uniform 20–60 ms, with zero-order hold of the action between policy steps (physics stays at DT 0.02 or finer);
+
+1. **Deploy-timing randomisation (training env), ramped in by the curriculum.** The training env
+   samples per episode, all configurable and recorded in the run config, with magnitudes scaled from
+   ~0 to full over a configurable fraction of the budget (see AC "Staged curriculum"):
+   - control period uniform 20–60 ms, with zero-order hold between policy steps (physics stays at
+     DT 0.02 or finer);
    - actuation delay 0–100 ms (distribution centred near 75 ms);
-   - the plant's body-rate loop bandwidth (rate gain / time constant randomised to cover a soft τ≈55 ms loop up to a fast Betaflight-like loop).
+   - the plant's body-rate loop bandwidth (rate time-constant) randomised from a soft τ≈55 ms loop
+     up to a fast Betaflight-like loop, via the per-key range override (profile not edited).
+
 2. **Policy memory: previous action + short history.**
-   - The readout input gains the previous action (4 dims: 3 body rates + collective, in the raw action space) and the last 2–3 observation vectors (or their deltas), stacked at the policy step rate.
-   - The contract's observation layout/version is bumped and documented, the harness assembles the new blocks live from what it already has (the commands it sent, its own observation history), and old checkpoints keep working unchanged on the old contract.
-   - Fine-tuning initialises from `training/11-count-curriculum/model_readout.pt`, with the new input weights zero-initialised so the starting policy equals model 11.
-3. **Action-rate penalty.**
-   - The reward gains λ·‖tanh(a_t) − tanh(a_{t−1})‖² (λ configurable, start ~0.05–0.1 relative to the existing spin term) and a small saturation penalty.
-   - Both are logged per episode, and their effect is shown in the training report.
-4. **Input domain randomisation**, each configurable and logged:
+   - The readout input gains the previous action (4 dims: 3 body rates + collective, raw action
+     space) and the last 2–3 policy-step observation vectors, stacked at the policy-step rate,
+     appended as the **last** block of the extra vector (`extra_dim = 98` at history_len=2).
+   - The observation-contract version is bumped and documented; the harness assembles the new blocks
+     live from what it already has (the commands it sent, its own observation history); old 70-dim
+     checkpoints keep loading unchanged on the old contract.
+   - Because this run trains **from scratch**, the readout (including the memory-input weights) is
+     randomly initialised — there is no warm-start zero-init requirement. (Loading an existing
+     70-dim checkpoint into the 98-dim architecture must still zero-init the new columns, for
+     backward-compat and for any future fine-tune; keep that path and its test.)
+
+3. **Smoothness reward, present from step 0 (mild), annealed to target.**
+   - The reward gains λ·‖tanh(a_t) − tanh(a_{t−1})‖² and a small saturation penalty.
+   - λ starts small so completion can establish, then anneals up to its target over a configurable
+     fraction of the budget (a penalty-anneal knob, mirroring the `log_std` anneal). Both terms are
+     logged per episode and their effect shown in the training report.
+
+4. **Spawn handling — aligned, NOT randomised.**
+   - Training spawns the drone **aligned to the first gate** (yaw 0 in the policy frame), matching
+     model 11 and the live maps (the infinity-loop map spawns looking straight at the first gate).
+   - Live spawn yaw is handled by the existing `SpawnYawAligner` (`runner.align_spawn_yaw`), which
+     rotates world-frame inputs into the yaw-0 frame exactly — it is kept ON for the deliverable, not
+     disabled. **No spawn-yaw domain-randomisation** (the original AC4 0–360° randomisation is
+     removed; it was unnecessary and was the prime driver of the completion collapse).
+
+5. **Input domain randomisation, ramped in by the curriculum**, each configurable and logged:
    - gyro noise (σ≈0.3–0.5 rad/s plus vibration-like coloured noise);
    - gate estimate noise (≈0.06 m plus 10% outliers at ~0.4 m) and staleness (0–160 ms);
-   - Markov gate dropout (≈30% of time tracked, hold-last-estimate while lost);
-   - eyes-like ray noise (≈0.6 miss, ≈0.1 false alarm on clear rays) with the floor visible to the rays;
-   - `obstacle_vision` zeroed;
-   - spawn yaw uniform 0–360°;
-   - spawn distance to the first gate covering 1.5–10 training-m.
-5. **Altitude envelope.** The reward/termination includes a ceiling (configurable, e.g. 4–6 training-m) and floor margin, so the policy learns to stay in the fly zone.
-6. **Smoothness evaluation harness.**
-   - A `drone-fly`-callable (or script) sim evaluation reports, on commanded body rates:
-     - saturation share (|rate| ≥ 3.8);
-     - per-axis sign flips per second (above 0.4 rad/s);
-     - mean |Δaction| per policy tick;
-     - share of command power above 5 Hz;
-     - completion / gates / crashes.
-   - It reports these for the old model 11 and the fine-tuned policy under named condition sets: `perfect` (training defaults), `live-like` (50 ms period, 75 ms delay, fast rate loop, all input noise) and a sweep.
-   - It reuses/ports the 2026-10-18 diagnosis metrics (`artifacts/diag/smooth_metrics.py`, `sim_smooth.py`).
-7. **Acceptance bars (sim, `live-like` conditions, fine-tuned policy):**
+   - Markov gate dropout (≈30% tracked, hold-last-estimate while lost);
+   - eyes-like ray noise with the floor visible to the rays;
+   - `obstacle_vision` zeroed (matches live).
+   Magnitudes ramp from ~0 to full over a configurable budget fraction, after the completion base and
+   the timing ramp.
+
+6. **Staged curriculum (the core of this revision).** A single run with ramps scheduled at different
+   budget fractions, all configurable and logged:
+   - **Base (early):** obstacle-count curriculum (1→N, restoring model 11's `count_curr` recipe) +
+     difficulty ramp + the clearance/terminal/floor shaping, clean timing, aligned spawn, mild λ.
+     Target: reach model-11-level completion with the 98-dim memory policy.
+   - **Deployment (mid):** ramp in AC1 timing/delay/τ.
+   - **Perception (late):** ramp in AC5 input noise/dropout; anneal λ to target.
+   The schedule (fraction boundaries per element) is recorded in the run config and the report.
+
+7. **Altitude envelope.** The reward/termination includes a configurable ceiling and floor margin so
+   the policy stays in the fly zone. (Global default unchanged for existing configs; this run sets
+   its own ceiling.)
+
+8. **Smoothness evaluation harness.** A sim evaluation reports, on commanded body rates: saturation
+   share (|rate| ≥ 3.8), per-axis sign-flips/s (above 0.4 rad/s), mean |Δaction|/policy-tick, share
+   of command power above 5 Hz, completion/gates/crashes — for the trained policy and the model-11
+   baseline, under named condition sets: `perfect` (clean), `live-like` (50 ms period, 75 ms delay,
+   fast rate loop, all input noise), and a sweep. Reuses the 2026-10-18 diagnosis metrics.
+
+9. **Acceptance bars (sim, `live-like`, trained policy):**
    - mean |Δaction| ≤ 0.6 rad/s per tick;
    - saturation ≤ 10%;
    - yaw flips ≤ 3/s;
-   - course completion within 10 percentage points of model 11 under `perfect` conditions.
-   - Under `perfect` conditions the fine-tuned policy must not regress model 11's completion by more than 5 points.
-8. **Robustness sweep.** The report includes a grid over control period × delay × rate-loop bandwidth, plus spawn yaw, showing where the fine-tuned policy stays stable versus model 11.
-9. **Deliverable for the Liftoff machine.**
-   - The fine-tuned checkpoint is exported with its contract version, extra_dim and a short README (training config, metrics).
-   - A harness config for a live flight is provided, with alignment hacks off where no longer needed (e.g. `runner.align_spawn_yaw: false` once yaw is randomised in training; latency compensation off).
-   - Instructions explain how to verify live gate passes against the Liftoff recording plus track geometry (`recordings.completeness_from_pose`), never the harness `gate_passed` event (it fires on overflight).
-10. **Tests.** CPU-only hermetic tests cover:
-    - timing randomisation: ZOH and delay buffers produce the expected action application times;
-    - previous-action/history assembly in sim and harness, and old-contract checkpoints still loading;
-    - reward penalty terms;
-    - each input randomiser's statistics;
-    - the smoothness metrics on synthetic command traces.
+   - `live-like` completion within 10 percentage points of the model-11 `perfect` baseline;
+   - `perfect` completion at least at the model-11 `perfect` baseline (this run should match or beat
+     it, since it trains fresh on the same task — not merely "not regress by >5 pp").
+
+10. **Robustness sweep.** A grid over control period × delay × rate-loop bandwidth, trained policy
+    vs model 11, showing where the trained policy stays stable. (No spawn-yaw axis — spawn is
+    aligned.) Produced once the policy passes the completion bar.
+
+11. **Deliverable for the Liftoff machine.** The trained checkpoint exported with its contract
+    version, extra_dim and a short README (training config, curriculum schedule, metrics). A live
+    harness config with `runner.align_spawn_yaw` **on** (the aligner is the spawn-yaw solution),
+    latency compensation off where no longer needed. Instructions to verify live gate passes against
+    the Liftoff recording + track geometry (`recordings.completeness_from_pose`), never the harness
+    `gate_passed` event.
+
+12. **Tests.** CPU-only hermetic tests cover: timing randomisation (ZOH + delay buffers); the
+    curriculum ramps (timing/DR magnitude and λ as a function of budget fraction); prev-action/
+    history assembly in sim and harness, and old-contract checkpoints still loading; the reward
+    penalty terms; each input randomiser's statistics; the smoothness metrics on synthetic traces.
 
 ## Potential Pitfalls & Open Questions
-- **Risk** — Adding inputs changes the network. Zero-initialising the new input weights keeps the fine-tune start equal to model 11; verify that before training.
-- **Risk** — The action-rate penalty can make the policy sluggish and cost completion. Tune λ against the completion bar (AC7); report the trade-off curve.
-- **Risk** — The sim's rate-loop model may still not match Liftoff/Betaflight. Randomising bandwidth widely is the mitigation; live validation on the Liftoff machine is the real test (out of scope here).
-- **Assumption** — Fine-tuning from model 11 is enough. If it isn't, a from-scratch run with the same environment is the fallback (documented, not required).
-- **Edge case** — The harness must assemble previous action and history identically to the sim: the action actually sent, and history at the policy step rate, not the physics rate. Add a sim↔harness parity test.
-- **Dependency** — The live-side harness changes for the new contract (assembling prev-action/history) land in this repo, but are only exercised live later on the Liftoff machine.
-- **Ambiguity** — The exact noise levels come from the 2026-10-18 live measurements; refine them if new live data arrives.
+- **Risk — from-scratch may need a larger budget** than a fine-tune to reach model-11-level
+  completion. Size the budget to the curriculum; report the completion curve. If fresh-train can't
+  reach the completion base, a warm-start-from-model-11 base for *completion only* (then the
+  smoothness/DR ramps) is the documented fallback.
+- **Risk — the λ / completion trade-off.** Even annealed, too high a target λ costs completion;
+  report the λ-vs-completion curve and tune the target on the GPU run.
+- **Risk — the sim rate-loop model may still not match Liftoff/Betaflight.** Randomising bandwidth
+  widely is the mitigation; live validation on the Liftoff machine is the real test (out of scope).
+- **Open — control parameterisation.** If memory + smoothness reward + curriculum do not fully
+  remove the chatter, revisit the high-gain body-rate feedback / action scaling / rate-command
+  formulation as a follow-up (deferred; try the curriculum first and measure).
+- **Edge case — sim↔harness parity.** The harness must assemble prev-action + history identically to
+  the sim (action actually sent; history at the policy-step rate). Keep the parity test.
+- **Dependency** — the live-side harness changes land here but are exercised live later on the
+  Liftoff box.
 
 ## Original Description
-(Authored by the orchestrator on 2026-10-18 from a discussion with the user.) The user watched the live flights and saw very erratic flight. The model didn't learn to fly like a real pilot (clean lines); it jerks left and right constantly, with inputs swinging from one direction to the opposite. An offline assessment attributed this mostly to deployment conditions (control timing and delay) acting on an intrinsically fragile, memoryless, high-gain rate feedback with no smoothness incentive in training. Retraining must be its own use case, run on the second machine, which has no Liftoff access.
+(Authored 2026-10-18; revised the same day after two failed runs.) The user watched the live flights
+and saw very erratic flight — the model jerks left and right, inputs swinging between opposite
+directions, rather than flying clean lines like a real pilot. An offline assessment attributed this
+mostly to deployment conditions (control timing and delay) acting on an intrinsically fragile,
+memoryless, high-gain rate feedback with no smoothness incentive in training. The first attempt
+fine-tuned model 11 with memory + penalties + full domain-randomisation from step 0; it collapsed
+completion to 0%. On review the user called for rethinking the **full curriculum** and flagged that
+the spawn-yaw randomisation was wrong (the infinity-loop map spawns looking straight at the first
+gate, and the aligner already handles live spawn yaw). This revision trains fresh, smooth by
+construction, with a staged curriculum and no yaw randomisation.
 
 ## Clarifications
-- Q: Which policy should the retraining start from? A: Model 11 (70-dim, obstacle-aware; the one flown live with the eyes).
-- Q: How should the policy get memory? A: Previous action plus a short observation history (small change, close to the current architecture), not the GRU readout.
-- Q: Where does it run? A: The second machine, sim only, no Liftoff; live validation happens later on the Liftoff machine.
+- Q: Fine-tune model 11 or train fresh? A: **Train fresh, smooth by construction** — introduce the
+  memory + mild smoothness penalty + obstacle curriculum jointly from step 0, so the policy never
+  learns to chatter. (Fine-tune is the documented fallback if fresh-train can't reach the completion
+  base.)
+- Q: How is spawn yaw handled? A: Spawn **aligned** to the first gate in training; live spawn yaw is
+  neutralised by the existing `SpawnYawAligner` (kept ON). No spawn-yaw randomisation.
+- Q: How does the policy get memory? A: Previous action + a short observation history appended to the
+  readout input (extra_dim 98), not a GRU readout.
+- Q: Where does it run? A: The second machine, sim only, no Liftoff; live validation later on the
+  Liftoff box.
