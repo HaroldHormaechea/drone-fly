@@ -1,7 +1,7 @@
 """UC-87 D4: the per-key ``range_overrides`` hook on ``DynamicsRandomizer`` (sim/randomization.py),
 threaded through ``PlantConfig`` → ``Plant`` (sim/plant.py).
 
-The profile's ``bounds()`` can only sample along the nominal→profile-range axis, so it cannot reach a
+The profile's ``bounds()`` samples only along the nominal→profile-range axis, so it cannot reach a
 fast-Betaflight rate-loop τ (~5 ms). An absolute per-key ``(min, max)`` override takes precedence
 over ``profile.randomization[key]`` WITHOUT editing ``drones/meteor75``. All CPU, no connectome.
 """
@@ -76,9 +76,8 @@ def test_unknown_override_key_is_rejected():
 
 
 def test_plant_config_threads_the_override_into_the_plant():
-    cfg = PlantConfig(
-        dtype="float64", range_overrides={f"rates.{a}.tau_s": FAST_TAU for a in ("roll", "pitch", "yaw")}
-    )
+    ov = {f"rates.{a}.tau_s": FAST_TAU for a in ("roll", "pitch", "yaw")}
+    cfg = PlantConfig(dtype="float64", range_overrides=ov)
     p = Plant(meteor75(), 4096, "cpu", 0, cfg, randomization_scale=1.0)
     assert p.randomizer.range_overrides["rates.roll.tau_s"] == (0.005, 0.083)
     assert p.params.tau_s.min().item() < PROFILE_MIN  # the plant's sampled τ reaches the fast loop

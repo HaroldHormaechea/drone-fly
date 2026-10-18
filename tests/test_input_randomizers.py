@@ -94,7 +94,7 @@ def test_floor_visible_rays_see_the_ground_when_pointing_down():
     for env in (seen, hidden):
         env.vel = down.expand(env.n, 3).clone()
         env.pos = low.expand(env.n, 3).clone()
-    # with the floor visible some downward rays return < 1 (a hit); hidden ⇒ all clear (no obstacles)
+    # with the floor visible some downward rays return < 1 (a hit); hidden ⇒ all clear (no obs)
     assert (seen._ray_obs() < 0.999).any()
     torch.testing.assert_close(
         hidden._ray_obs(), torch.ones_like(hidden._ray_obs()), atol=1e-6, rtol=0

@@ -9,7 +9,6 @@ the penalty exactly.
 
 from __future__ import annotations
 
-import pytest
 import torch
 
 from drone_fly.sim.action import ActionSpec
@@ -48,7 +47,8 @@ def _env(*, lam=0.0, w=0.0, hz=50.0, n=4, seed=0, log=None, episode_s=28.0):
 
 
 def _expected(a_now, a_prev, lam, w, rscale):
-    ta, tp = torch.tanh(a_now), torch.tanh(a_prev)
+    # compute in the env's working dtype (float32) so tolerances match the env's arithmetic
+    ta, tp = torch.tanh(a_now.float()), torch.tanh(a_prev.float())
     arate = ((ta - tp) ** 2).sum(-1)
     sat = torch.relu(ta[:, 1:4].abs() - THR).sum(-1)
     return (lam * arate + w * sat) * rscale, arate, sat

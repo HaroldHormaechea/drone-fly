@@ -13,15 +13,12 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
 import pytest
 import torch
 
 from drone_fly.sim.plant import Plant, PlantConfig
 from drone_fly.sim.timing import ControlTiming, TimingConfig
 from tests.sim_support import all_envs, meteor75, variant
-
-F64 = PlantConfig(dtype="float64")
 
 
 def _timing(config=None, n=20000, seed=0):

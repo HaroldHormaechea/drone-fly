@@ -19,8 +19,8 @@ from drone_fly.harness.assembler import (
 )
 from drone_fly.sim.action import ActionSpec
 from drone_fly.sim.course import CourseConfig, CourseEnv, StartConfig
-from drone_fly.sim.timing import TimingConfig
 from drone_fly.sim.plant import PlantConfig
+from drone_fly.sim.timing import TimingConfig
 from tests.sim_support import meteor75
 
 V2 = ActionSpec.v2(1.0, 4.0)
