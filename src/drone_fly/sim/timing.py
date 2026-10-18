@@ -214,7 +214,9 @@ class ControlTiming:
         """
         if self.config.mode == "fixed":
             return self.period_s, self.delay_s, torch.zeros_like(self.period_s, dtype=torch.bool)
-        jit = self.config.delay_jitter_s * torch.randn(
+        # UC-87 deployment ramp: scale the per-tick jitter by ``self.scale`` too, so scale 0 is
+        # TRULY clean (no residual jitter delay), matching the resample ramp (delay/skip from 0).
+        jit = float(self.scale) * self.config.delay_jitter_s * torch.randn(
             self.n, generator=self.generator, device=self.device, dtype=self.dtype
         )
         delay = (self.delay_s + jit).clamp(min=0.0)
