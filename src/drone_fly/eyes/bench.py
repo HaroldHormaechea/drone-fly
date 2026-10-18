@@ -4,8 +4,9 @@ Times :meth:`~drone_fly.eyes.infer.EyesEstimator.update` on synthetic full-resol
 (the preset's camera, 2560x1080 for ``liftoff``) moving at a racing speed, after ``warmup``
 iterations: preprocessing, forward and total, as p50 / p95 / p99 in ms, against the live tick
 budget (``1000 / runner.rate_hz`` = 25 ms at 40 Hz). With ``--with-gate-detector`` the learned gate
-detector (``gates.learned.weights``) runs on the same frame each iteration (interleaved, as in the
-live loop) and is timed too; missing weights skip it with a reason (no download).
+detector (``gates.learned.weights`` / ``release``) runs on the same frame each iteration
+(interleaved, as in the live loop) and is timed too; missing weights skip it with a reason (no
+download).
 
 Peak CUDA memory (``max_memory_allocated`` / ``max_memory_reserved``) is reported for the eyes
 alone and for eyes + detector; on CPU these fields are ``null`` with a reason. The connectome
@@ -39,11 +40,12 @@ def _pct_ms(a: list[float]) -> dict[str, float | None]:
 def _detector(view: Any, gate_weights: str | Path | None, device: str):
     """``(callable(image), info)`` or ``(None, {"skipped": reason})``."""
     from drone_fly.harness.config import find_repo_root
+    from drone_fly.harness.liftoff.gate_learned import configured_weights
 
     lc = (view.config.get("gates") or {}).get("learned") or {}
-    raw = gate_weights or lc.get("weights")
+    raw = gate_weights or configured_weights(lc)
     if not raw:
-        return None, {"skipped": "no gates.learned.weights configured"}
+        return None, {"skipped": "no gates.learned.weights / release configured"}
     p = Path(raw).expanduser()
     if not p.is_absolute():
         p = (find_repo_root() or Path.cwd()) / p

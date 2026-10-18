@@ -189,7 +189,8 @@ uptilt). Strategy B is used for the bulk captures.
    the indices come from the operator (a `harness ui shot` of the browser); a wrong pick replays
    another flight, whose pose then fails `captures verify`;
 3. records frames into `artifacts/harness/captures/<Map>/<map>-<date>-replay-<NN>/` for the
-   recording's duration (`harness/liftoff/recorder.py`), then returns to the browser;
+   recording's duration (`harness/liftoff/recorder.py`, driven by
+   `harness/offline/capture_session.py`), then returns to the browser;
 4. rebuilds the pose from the recording XML on the frame clock (resampled to 100 Hz, velocity by
    finite difference, gyro 0) as `telemetry.csv` + a run-layout `frames.csv`, so `load_capture`
    reads it unchanged;

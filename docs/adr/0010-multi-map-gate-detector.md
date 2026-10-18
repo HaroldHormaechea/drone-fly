@@ -9,8 +9,9 @@
   map-level split), [ADR 0009](0009-student-distillation-and-detector-noise.md) (the detector-noise
   model, the held-out window)
 - **Code:** `src/drone_fly/harness/` (`gate_types`, `config`, `configs/gate_types/liftoff.yaml`,
-  `liftoff/gate_learned`, `offline/capture_index`, `offline/capture`, `offline/align`,
-  `offline/autolabel`), `src/drone_fly/tracks/` (`gate_coverage`, `liftoff`, `cli`),
+  `liftoff/gate_learned`, `liftoff/recorder`, `offline/capture_index`, `offline/capture_session`,
+  `offline/capture`, `offline/align`, `offline/autolabel`), `src/drone_fly/tracks/`
+  (`gate_coverage`, `liftoff`, `cli`),
   `src/drone_fly/cli/main.py`
 
 ## Context
@@ -60,6 +61,11 @@ captures live at `artifacts/harness/captures/<Map>/<session>/` with globally uni
 `2026-10-11-infinity-manual` keeps its name and place (v1 metadata and the r5 noise model key on
 it) and gets a `meta.json` through `captures register`. Field reference:
 `harness/offline/capture_index.py`; user steps: `docs/harness/liftoff-captures.md`.
+
+The capture commands (`captures record`, `captures replay`) live in
+`harness/offline/capture_session.py`: they read recording XMLs and the catalogue. The recorder
+they drive (`CaptureRecorder`, `write_pose_capture`) stays in `harness/liftoff/recorder.py`,
+because runtime harness modules never import `offline`.
 
 The reference capture registers as `liftoff-arena-04` (LiftoffArena, train), completeness
 `incomplete` (25 of 33 route crossings, judged from its telemetry with the env pass rule).
@@ -209,6 +215,10 @@ The user answered the plan's open decisions:
 - **D-U4, hand-flown maps:** done - the user flew AutumnFields race 04, which cleared G1 (§ Results).
 
 ## Results
+
+**Status: partial — AC7/AC8 open** (2026-10-18). AC1–6 and AC9 are delivered and merged.
+AC7 is open: the best held-out val_det is 0.503 against the ≥0.70 target. AC8 is open: there is
+no v2 release, and the `liftoff` preset stays on `release: v1`.
 
 ### P1 replay captures (2026-10-13, 17:08-19:15, unattended)
 

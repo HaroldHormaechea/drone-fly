@@ -355,7 +355,7 @@ def _cmd_captures_register(args: argparse.Namespace) -> int:
 
 
 def _cmd_captures_record(args: argparse.Namespace) -> int:
-    from drone_fly.harness.liftoff.recorder import record_manual
+    from drone_fly.harness.offline.capture_session import record_manual
 
     out, res = record_manual(
         args.track,
@@ -398,7 +398,7 @@ def _browser_kwargs(text: str | None) -> dict[str, object]:
 
 
 def _cmd_captures_replay(args: argparse.Namespace) -> int:
-    from drone_fly.harness.liftoff.recorder import record_replay
+    from drone_fly.harness.offline.capture_session import record_replay
 
     out, res = record_replay(
         args.recording,
@@ -1037,7 +1037,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--race", help="Liftoff race XML (gate order)")
     p_eval.add_argument("--capture", help="capture folder to score the learned gate detector on")
     p_eval.add_argument("--labels", help="label folder of --capture (from `harness label`)")
-    p_eval.add_argument("--gate-weights", help="gate-net weights (default: gates.learned.weights)")
+    p_eval.add_argument(
+        "--gate-weights", help="gate-net weights (default: gates.learned.weights / release)"
+    )
     p_eval.add_argument("--device", choices=("auto", "cpu", "cuda"), help="gate-net device")
     p_eval.add_argument(
         "--all-frames", action="store_true", help="score every frame, not only the held-out split"
