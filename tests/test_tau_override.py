@@ -86,3 +86,57 @@ def test_plant_config_threads_the_override_into_the_plant():
 def test_plant_config_from_dict_parses_overrides():
     cfg = PlantConfig.from_dict({"range_overrides": {"rates.roll.tau_s": [0.005, 0.083]}})
     assert cfg.range_overrides["rates.roll.tau_s"] == (0.005, 0.083)
+
+
+# ------------------------------------------------------------------- runtime set_scale ramp
+# UC-87 redesign: DynamicsRandomizer.set_scale rebuilds the sample tables at runtime (deploy ramp).
+
+def test_set_scale_zero_is_the_nominal_plant():
+    overrides = {f"rates.{a}.tau_s": FAST_TAU for a in ("roll", "pitch", "yaw")}
+    r = _rand(1.0, overrides)
+    r.set_scale(0.0)
+    s = r.sample(4096).tau_s
+    nominal = meteor75().rates["roll"].tau_s
+    torch.testing.assert_close(s, torch.full_like(s, nominal), rtol=0, atol=1e-6)  # no DR at all
+
+
+def test_set_scale_opens_the_override_span_as_scale_rises():
+    overrides = {f"rates.{a}.tau_s": FAST_TAU for a in ("roll", "pitch", "yaw")}
+    r = _rand(1.0, overrides)
+    r.set_scale(0.0)
+    assert r.sample(4096).tau_s.min().item() >= PROFILE_MIN - 1e-6  # nominal: no spread below floor
+    r.set_scale(1.0)
+    full = r.sample(8192).tau_s
+    assert full.min().item() < PROFILE_MIN and full.min().item() == pytest.approx(0.005, abs=2e-3)
+
+
+def test_set_scale_matches_the_bounds_formula():
+    overrides = {"rates.roll.tau_s": FAST_TAU}
+    r = _rand(1.0, overrides)
+    r.set_scale(0.5)
+    lo, hi = r.bounds("rates.roll.tau_s")
+    nominal = meteor75().rates["roll"].tau_s
+    assert lo[0] == pytest.approx(nominal + 0.5 * (0.005 - nominal))
+    assert hi[0] == pytest.approx(nominal + 0.5 * (0.083 - nominal))
+
+
+def test_set_scale_rejects_negative():
+    with pytest.raises(ValueError):
+        _rand(1.0).set_scale(-0.1)
+
+
+def test_plant_set_dr_scale_delegates_to_the_randomizer():
+    cfg = PlantConfig(
+        dtype="float64",
+        range_overrides={f"rates.{a}.tau_s": FAST_TAU for a in ("roll", "pitch", "yaw")},
+    )
+    p = Plant(meteor75(), 4096, "cpu", 0, cfg, randomization_scale=1.0)
+    p.set_dr_scale(0.0)
+    p.reset(torch.ones(4096, dtype=torch.bool))  # resample at the new scale
+    nominal = meteor75().rates["roll"].tau_s
+    torch.testing.assert_close(
+        p.params.tau_s, torch.full_like(p.params.tau_s, nominal), rtol=0, atol=1e-6
+    )
+    p.set_dr_scale(1.0)
+    p.reset(torch.ones(4096, dtype=torch.bool))
+    assert p.params.tau_s.min().item() < PROFILE_MIN  # the fast-loop span reopens

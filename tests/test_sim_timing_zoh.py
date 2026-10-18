@@ -21,10 +21,11 @@ from drone_fly.sim.timing import ControlTiming, TimingConfig
 from tests.sim_support import all_envs, meteor75, variant
 
 
-def _timing(config=None, n=20000, seed=0):
+def _timing(config=None, n=20000, seed=0, scale=1.0):
     return ControlTiming(
-        config or TimingConfig(), n, torch.device("cpu"), torch.Generator().manual_seed(seed)
-    )
+        config or TimingConfig(), n, torch.device("cpu"),
+        torch.Generator().manual_seed(seed), scale=scale,
+    )  # fmt: skip
 
 
 def _plant(profile, n=1, *, substeps=2):
@@ -143,3 +144,62 @@ def test_triangular_is_deterministic_for_a_seed():
     a = _timing(cfg, n=256, seed=7)
     b = _timing(cfg, n=256, seed=7)
     assert torch.equal(a.delay_s, b.delay_s)
+
+
+# --------------------------------------------------------------- deployment ramp (scale)
+# UC-87 redesign: ControlTiming.scale ramps the deploy-timing DR in over the budget.
+
+_RAMP_CFG = TimingConfig(
+    control_hz=(16.7, 50.0), action_delay_s=(0.0, 0.100), skip_prob=(0.0, 0.35)
+)
+
+
+def test_scale_zero_is_the_clean_fixed_rate_with_no_delay_or_skip():
+    # scale 0 ⇒ the clean baseline the deploy ramp interpolates from: period = 1/fixed_hz, zero BASE
+    # delay, zero skip. Per-tick jitter is an ORTHOGONAL term the ramp does not touch (covered by
+    # test_sim_timing), so a jitter-free config here isolates the ramp: ticked delay is exactly 0.
+    clean = TimingConfig(
+        control_hz=(16.7, 50.0), action_delay_s=(0.0, 0.100),
+        skip_prob=(0.0, 0.35), delay_jitter_s=0.0,
+    )  # fmt: skip
+    t = _timing(clean, n=4000, scale=0.0)
+    torch.testing.assert_close(t.period_s, torch.full_like(t.period_s, 1.0 / clean.fixed_hz))
+    assert torch.all(t.delay_s == 0.0) and torch.all(t.skip_prob == 0.0)
+    # and a tick draws no delay / never skips, and dt is the clean fixed period (no skip doubling)
+    dt, delay, skipped = t.tick()
+    assert torch.all(delay == 0.0) and not skipped.any()
+    torch.testing.assert_close(dt, torch.full_like(dt, 1.0 / clean.fixed_hz))
+
+
+def test_scale_zero_base_delay_is_zero_even_with_jitter_configured():
+    # With jitter configured, scale 0 still zeroes the per-episode BASE delay
+    # and skip; only the orthogonal per-tick jitter remains (bounded, clamped >= 0). Documents that
+    # the deploy ramp scales the base delay/skip/period — not the tick-level jitter.
+    t = _timing(_RAMP_CFG, n=4000, scale=0.0)
+    assert torch.all(t.delay_s == 0.0) and torch.all(t.skip_prob == 0.0)
+    _, delay, skipped = t.tick()
+    assert not skipped.any()  # skip_prob 0 ⇒ never skips at any scale
+    assert torch.all(delay >= 0.0) and delay.max().item() < 0.05  # jitter only, small + clamped
+
+
+def test_scale_one_is_the_full_configured_range():
+    t = _timing(_RAMP_CFG, n=20000, scale=1.0)
+    hz = 1.0 / t.period_s
+    assert hz.min() >= 16.7 - 1e-6 and hz.max() <= 50.0 + 1e-6 and hz.min() < 18.0
+    assert t.delay_s.max() > 0.09 and t.skip_prob.max() > 0.3
+
+
+def test_scale_interpolates_linearly_between_clean_and_full():
+    # same seed ⇒ same underlying draws; the scaled values are an exact linear blend
+    full = _timing(_RAMP_CFG, n=5000, seed=11, scale=1.0)
+    half = _timing(_RAMP_CFG, n=5000, seed=11, scale=0.5)
+    clean_period = 1.0 / _RAMP_CFG.fixed_hz
+    torch.testing.assert_close(half.delay_s, 0.5 * full.delay_s)
+    torch.testing.assert_close(half.skip_prob, 0.5 * full.skip_prob)
+    torch.testing.assert_close(half.period_s, clean_period + 0.5 * (full.period_s - clean_period))
+
+
+def test_scale_is_monotone_in_delay_magnitude():
+    means = [_timing(_RAMP_CFG, n=8000, seed=3, scale=s).delay_s.mean().item()
+             for s in (0.0, 0.25, 0.5, 1.0)]  # fmt: skip
+    assert means == sorted(means) and means[0] == 0.0 and means[-1] > means[0]

@@ -48,7 +48,8 @@ def test_all_bars_pass_for_a_good_policy():
     assert out["bars"]["saturation"]["bar"] == AC7_SATURATION == 0.10
     assert out["bars"]["yaw_flips"]["bar"] == AC7_YAW_FLIPS == 3.0
     assert out["bars"]["completion_gap"]["bar_pp"] == AC7_COMPLETION_GAP_PP == 0.10
-    assert out["bars"]["perfect_no_regress"]["bar_pp"] == AC7_PERFECT_REGRESS_PP == 0.05
+    # AC9 redesign: the perfect bar is now "at least model-11 perfect" (0 pp regress allowed)
+    assert out["bars"]["perfect_at_least_model11"]["bar_pp"] == AC7_PERFECT_REGRESS_PP == 0.0
 
 
 @pytest.mark.parametrize(
@@ -77,11 +78,13 @@ def test_completion_gap_bar_flips_at_ten_points_below_model11_perfect():
     assert ok["reference"] == 0.80
 
 
-def test_perfect_no_regress_bar_flips_at_five_points_below_model11_perfect():
-    # fine-tuned perfect within 5 pp of 0.80 (≥ ~0.75) passes; clearly below fails
-    ok = evaluate_bars(_livelike(), {"completion": 0.77}, M11P)["bars"]["perfect_no_regress"]
-    bad = evaluate_bars(_livelike(), {"completion": 0.73}, M11P)["bars"]["perfect_no_regress"]
+def test_perfect_bar_requires_at_least_model11_perfect():
+    # AC9 redesign: trained `perfect` completion must MATCH OR BEAT model-11 perfect (0 pp regress).
+    # ≥ 0.80 passes, clearly below fails (values kept off the exact float boundary).
+    ok = evaluate_bars(_livelike(), {"completion": 0.85}, M11P)["bars"]["perfect_at_least_model11"]
+    bad = evaluate_bars(_livelike(), {"completion": 0.75}, M11P)["bars"]["perfect_at_least_model11"]
     assert ok["pass"] is True and bad["pass"] is False
+    assert ok["reference"] == 0.80
 
 
 def test_completion_gap_allows_the_finetuned_to_beat_model11():
@@ -94,9 +97,11 @@ def test_completion_gap_allows_the_finetuned_to_beat_model11():
 
 def test_sweep_grid_is_the_full_cartesian_product():
     grid = sweep_grid()
-    assert len(grid) == 4 * 4 * 4 * 4  # control period × delay × τ × spawn yaw
-    keys = {"control_period_s", "delay_s", "tau_s", "spawn_yaw_deg"}
+    # AC10 redesign: NO spawn-yaw axis (spawn is aligned) — control period × delay × τ only.
+    assert len(grid) == 4 * 4 * 4
+    keys = {"control_period_s", "delay_s", "tau_s"}
     assert all(set(cell) == keys for cell in grid)
+    assert not any("spawn_yaw_deg" in cell for cell in grid)
     # deterministic + unique cells
     tuples = {tuple(c[k] for k in sorted(keys)) for c in grid}
     assert len(tuples) == len(grid)
@@ -108,28 +113,21 @@ def test_sweep_grid_honours_custom_axes():
         control_periods_s=(0.02, 0.05),
         delays_s=(0.0, 0.1),
         tau_s=(0.005,),
-        spawn_yaws_deg=(0.0, 90.0, 180.0),
     )
-    assert len(grid) == 2 * 2 * 1 * 3
+    assert len(grid) == 2 * 2 * 1
     assert grid[0]["control_period_s"] == 0.02 and grid[0]["tau_s"] == 0.005
 
 
-def test_sweep_cell_config_fixes_timing_tau_and_spawn_yaw():
+def test_sweep_cell_config_fixes_timing_and_tau_with_aligned_spawn():
     cfg = _uc87()
-    cell = {"control_period_s": 0.05, "delay_s": 0.075, "tau_s": 0.010, "spawn_yaw_deg": 90.0}
+    cell = {"control_period_s": 0.05, "delay_s": 0.075, "tau_s": 0.010}
     sc = sweep_cell_config(cfg, cell, extra_dim=98)
     assert sc.timing.control_hz == (20.0, 20.0)  # 1 / 0.05
     assert sc.timing.action_delay_s == (0.075, 0.075) and sc.timing.skip_prob == (0.0, 0.0)
     assert all(v == (0.010, 0.010) for v in sc.plant.range_overrides.values())
-    assert sc.course.spawn_yaw is True and sc.course.memory is True
+    # AC10 redesign: spawn is always aligned in the sweep (no yaw axis)
+    assert sc.course.spawn_yaw is False and sc.course.memory is True
     assert sc.actor.extra_dim == 98 and sc.randomization_scale == 1.0
-
-
-def test_sweep_cell_config_disables_spawn_yaw_at_zero_degrees():
-    cfg = _uc87()
-    cell = {"control_period_s": 0.02, "delay_s": 0.0, "tau_s": 0.005, "spawn_yaw_deg": 0.0}
-    sc = sweep_cell_config(cfg, cell, extra_dim=98)
-    assert sc.course.spawn_yaw is False
 
 
 # ----------------------------------------------------------------------------- D5 presets
