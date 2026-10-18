@@ -11,6 +11,8 @@ Threading contracts
   background threads between ``start()`` and ``stop()``. ``latest()`` / ``is_set()`` are called
   from the runner thread and must be thread-safe and non-blocking (latest value wins).
 * :class:`GateEstimator` is called **synchronously** on the runner thread, once per tick.
+* Both estimator roles are perception providers: their contract (blocks, stamp semantics,
+  provenance, lifecycle) is :mod:`drone_fly.harness.perception`.
 * :class:`FreeSpaceEstimator` ``update()`` is called synchronously once per tick and must not
   block on inference; an implementation with a slow model runs it on its own worker thread
   (``start()`` / ``stop()``) and ``update()`` returns an estimate built from the latest
@@ -29,6 +31,11 @@ from typing import Any
 
 import numpy as np
 
+from drone_fly.harness.perception import (  # noqa: F401 - re-exported (UC-86 moved them)
+    FREE_SPACE_BLOCKS,
+    GATE_BLOCKS,
+    PerceptionProvider,
+)
 from drone_fly.harness.types import (
     ContractCommand,
     FlightState,
@@ -37,10 +44,6 @@ from drone_fly.harness.types import (
     GateEstimate,
     TelemetrySample,
 )
-
-#: Perception block names, in contract layout order (``target`` feeds ``rel`` in the obs).
-GATE_BLOCKS = frozenset({"target", "curr_gate", "next_lookahead"})
-FREE_SPACE_BLOCKS = frozenset({"obstacle_vision", "raycast"})
 
 
 class StateSource(ABC):
@@ -82,8 +85,8 @@ class FrameSource(ABC):
         """The most recent frame, or ``None`` before the first one."""
 
 
-class GateEstimator(ABC):
-    """Frame (+ current state) -> gate senses."""
+class GateEstimator(PerceptionProvider, ABC):
+    """Frame (+ current state) -> gate senses (a perception provider, see :mod:`.perception`)."""
 
     #: Subset of :data:`GATE_BLOCKS` this estimator fills.
     provides: frozenset[str] = frozenset()
@@ -96,8 +99,8 @@ class GateEstimator(ABC):
         """Forget tracking state (called on a telemetry discontinuity)."""
 
 
-class FreeSpaceEstimator(ABC):
-    """Frame (+ state, target) -> ``obstacle_vision`` / ``raycast`` senses."""
+class FreeSpaceEstimator(PerceptionProvider, ABC):
+    """Frame (+ state, target) -> ``obstacle_vision`` / ``raycast`` (a perception provider)."""
 
     #: Subset of :data:`FREE_SPACE_BLOCKS` this estimator fills (may be set per instance).
     provides: frozenset[str] = frozenset()

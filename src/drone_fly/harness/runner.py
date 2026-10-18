@@ -17,6 +17,9 @@ Tick
     actuation, total; plus overlay when a live-overlay publisher is attached), the perception
     split per estimator (gate, free space), estimate ages and missed deadlines are recorded on
     every tick.
+    With a :class:`~drone_fly.harness.perception.PerceptionRuntime` (UC-86), right after the
+    perception updates the first estimates are checked against their providers' contract (a
+    violation stops with ``perception_error``) and per-provider latency / age rows are recorded.
 
 Live overlay (UC-65, optional)
     With a publisher, ticks for which ``publisher.wants_brain(k)`` is true call
@@ -51,7 +54,7 @@ from typing import Any, NoReturn
 import numpy as np
 
 from drone_fly.harness.config import require_number
-from drone_fly.harness.errors import EstimatorStop
+from drone_fly.harness.errors import EstimatorStop, PerceptionContractError
 from drone_fly.harness.interfaces import (
     ActionSink,
     Harness,
@@ -266,8 +269,12 @@ class HarnessRunner:
         recorder: Any = None,
         clock: Any = None,
         publisher: Any = None,
+        perception: Any = None,
     ) -> None:
         self.harness = harness
+        #: Optional :class:`~drone_fly.harness.perception.PerceptionRuntime` (UC-86): validates
+        #: the first estimates and records per-provider latency / age. ``None`` = not used.
+        self.perception = perception
         self.policy = policy
         self.assembler = assembler
         self.contract = contract
@@ -564,9 +571,11 @@ class HarnessRunner:
             tg = clock.now()
             record.perception_s["gate"] = tg - t1
             fs: FreeSpaceEstimate | None = None
+            fs_wall: float | None = None
             if h.free_space_estimator is not None:
                 fs = h.free_space_estimator.update(frame, state, gate.target, t1)
-                record.perception_s["free_space"] = clock.now() - tg
+                fs_wall = clock.now() - tg
+                record.perception_s["free_space"] = fs_wall
         except EstimatorStop as stop:  # an intended end of the attempt (oracle episode monitor)
             self._finish(record, stop.reason, stop.detail)
         except Exception as exc:  # noqa: BLE001
@@ -574,6 +583,11 @@ class HarnessRunner:
             self._finish(record, STOP_PERCEPTION_ERROR, repr(exc))
         record.gate = gate
         record.free_space = fs
+        if self.perception is not None:
+            try:
+                self.perception.after_update(record, gate, fs, tg - t1, fs_wall, t1)
+            except PerceptionContractError as exc:
+                self._finish(record, STOP_PERCEPTION_ERROR, str(exc))
         record.ages_s["gate"] = float(t1 - gate.stamp) if gate.stamp else 0.0
         if gate.passed:
             record.events.append(f"gate_passed:{gate.gate_index}:{gate.lap}")

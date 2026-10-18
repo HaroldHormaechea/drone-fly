@@ -212,6 +212,10 @@ The same 70-dim model, with the 40 rays coming from the trained **vision eyes** 
 instead of Depth-Anything: `parts.free_space_estimator: eyes`. The eyes were trained on Liftoff
 frames against the exact training rays, so no depth calibration is involved.
 
+Any other "eyes" (a new net, a plugin from another package) plugs in the same way: see
+[perception-providers.md](perception-providers.md) for the provider contract, the live
+screen-only guard and `drone-fly perception eval` (UC-86).
+
 `artifacts/harness/live-eyes.yaml`:
 ```yaml
 gates:

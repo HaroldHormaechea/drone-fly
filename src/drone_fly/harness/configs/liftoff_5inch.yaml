@@ -188,6 +188,14 @@ oracle:
     yaw_deg: 20.0
     speed_mps: 0.3
 
+# Perception providers (UC-86, docs/harness/perception-providers.md).
+inputs:
+  # auto: screen on live Liftoff (refuses metadata / undeclared-provenance providers such as the
+  # oracle or course gates), any elsewhere | screen | any (offline / diagnostic opt-out)
+  require_provenance: auto
+  # parts.free_space_estimator: composite -> [{provider, blocks?, primary?, options?}, ...]
+  free_space: []
+
 free_space:
   assume_no_obstacles: false  # `none` estimator: set true to fly 12/30-dim models obstacle-free
 
