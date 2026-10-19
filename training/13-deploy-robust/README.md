@@ -7,15 +7,17 @@ smoothness objective are present **from step 0**, so smooth control is learned *
 completion, not retrofitted onto a finished high-gain policy. Sim-only (UC-87 runs on the second
 machine, no Liftoff); live validation happens later on the Liftoff box.
 
-> **Status — GPU runs done in-sandbox 2026-10-18; breakthrough reached (run 5), final-robustness run in
-> flight (run 6). See [Redesign results](#redesign-results-gpu-runs-2026-10-18) below.** The winning
-> recipe is **warm-start model 11 + full difficulty + gentle staggered DR + aligned spawn** (NOT
-> fresh-from-scratch, which couldn't hold full-difficulty completion). Run 5 flies **much smoother than
-> model 11 at live-like conditions** (yaw-flips −75%, saturation −84%, mean|Δ| −45%) while completing
-> slightly more of the course — the core UC-87 goal. The remaining flaw (0% completion at the idealized
-> `perfect` preset, from a too-concentrated training delay distribution) is being fixed in run 6
-> (uniform delay). Earlier attempts — runs 1–2 (warm-start + the spawn-yaw/DR-shock bug) and runs 3–4
-> (fresh-from-scratch, completion collapse) — are in [Run history](#run-history-warm-start-fine-tune--superseded).
+> **Status — SHIPPED (run 5). GPU campaign done in-sandbox 2026-10-18/19.** The deployed checkpoint
+> here (`model_readout.pt`, extra_dim 98, obs-contract v2) is run 5 of 6. Winning recipe: **warm-start
+> model 11 + full difficulty + gentle staggered DR + aligned spawn**
+> (`uc87-deploy-robust-warmstart.yaml`). At **live-like conditions — the only conditions that occur in
+> deployment — it flies much smoother than model 11** (yaw-flips −75%, saturation −84%, mean|Δ| −45%)
+> while completing slightly more of the course (28.9% vs 27.3%). That is the UC-87 goal: clean,
+> non-chattery live flight that still flies the course. **Known limitation:** 0% completion at the
+> idealized `perfect` preset (fixed 50 Hz, zero delay, no noise) — a sim-only condition that never
+> occurs live; run 6 (uniform delay) did not recover it and regressed live-like, so the run-5 recipe
+> stands. Fresh-from-scratch (runs 3–4) couldn't hold full-difficulty completion; runs 1–2 had the
+> spawn-yaw/DR-shock bug — see [Run history](#run-history-warm-start-fine-tune--superseded).
 
 ## What the redesign does (vs. the failed fine-tune)
 
@@ -128,8 +130,10 @@ conditions while completing as much of the course**.
 |---|---|---|---|---|
 | model 11 · `perfect` | 54.7% | 0.185 | 6.5% | 0.73 |
 | model 11 · `live-like` | 27.3% | 1.345 | 9.6% | 7.11 |
-| **run 5 · `live-like`** | **28.9%** | **0.739** | **1.5%** | **1.79** |
+| **run 5 · `live-like`** (SHIPPED) | **28.9%** | **0.739** | **1.5%** | **1.79** |
 | run 5 · `perfect` | 0.0% | 0.131 | 3.0% | 0.30 |
+| run 6 · `live-like` (uniform delay, not shipped) | 23.4% | 1.245 | 5.9% | 4.11 |
+| run 6 · `perfect` (uniform delay, not shipped) | 0.0% | 0.166 | 3.6% | 0.44 |
 
 **What run 5 achieves (the deployment goal):** at `live-like` conditions — the only conditions that
 occur live — the policy flies **much cleaner than model 11** (yaw-flips −75%, saturation −84%,
@@ -137,12 +141,16 @@ mean|Δ| −45%) while completing **slightly more** of the course (28.9% vs 27.3
 left/right chatter that motivated UC-87 is largely gone. 2 of 3 live-like smoothness bars pass; the
 third (mean|Δ| 0.739 vs ≤0.6) is a 45% improvement.
 
-**What failed (the `perfect` anomaly):** run-5 `perfect`-preset completion is 0%. Cause: run 5's
-delay distribution was triangular@75ms, so zero-delay (the `perfect` preset) was nearly
-out-of-distribution — the policy over-adapted to expecting delay and can't fly the idealized clean
-condition. Fix in progress: **run 6** re-trains the same recipe with a **uniform delay distribution
-[0,100ms]** so zero-delay is in-distribution — expected to recover `perfect` completion while keeping
-run 5's live-like smoothness.
+**The `perfect`-preset limitation (investigated, accepted):** run-5 `perfect`-preset completion is 0%.
+First hypothesis — run 5's triangular@75ms delay distribution made zero-delay out-of-distribution — was
+tested by **run 6** (same recipe, uniform delay [0,100ms]). Run 6 did **not** recover `perfect`
+completion (still 0%) **and regressed live-like** (completion 23.4%, mean|Δ| 1.245, sat 5.9%, yaw 4.11
+— all worse than run 5), so the triangular-delay run-5 recipe is kept. The `perfect` 0% is therefore
+not a delay-distribution artifact: the smoothness-trained policy flies very gently (perfect mean|Δ|
+0.131, yaw 0.30) and appears to time out at the fast, zero-delay, noise-free `perfect` preset rather
+than crash. Since `perfect` is a sim idealization that never occurs live (live always has timing,
+delay and noise), this is accepted as a known limitation, not a deployment blocker. A speed/progress
+reward tweak could recover it in future work if a clean-sim number is ever wanted.
 
 **How we got here (run log):**
 - Runs 1–2 (warm-start fine-tune): completion → 0%. Cause: spawn-yaw 0–360° randomisation (unnecessary
@@ -151,11 +159,12 @@ run 5's live-like smoothness.
   proved it collapses from the difficulty ramp alone). Fresh-from-scratch can't reach stable
   full-difficulty completion in a feasible budget.
 - Run 5 (warm-start model 11 + full difficulty + gentle staggered DR + aligned spawn): **the win at
-  live-like** — see above.
-- Run 6 (run 5 + uniform delay): recovering `perfect` completion.
+  live-like — SHIPPED.**
+- Run 6 (run 5 + uniform delay): did not recover `perfect` and regressed live-like → not shipped.
 
-The config for run 5 is `/tmp` → promoted to `uc87-deploy-robust-warmstart` once run 6 confirms the
-final recipe.
+The shipped recipe is [`uc87-deploy-robust-warmstart.yaml`](../../src/drone_fly/training/configs/uc87-deploy-robust-warmstart.yaml)
+(run-5 config). The deployed checkpoint (`model_readout.pt` here) is run 5's, exported via
+`export_deploy_robust`.
 
 ### AC10 robustness sweep
 
