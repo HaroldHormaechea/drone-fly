@@ -699,9 +699,12 @@ class CourseEnv:
         # OBSTACLE-POSITION curriculum: parked PARK m off to the side, sliding onto the path
         off = PARK * (1.0 - max(0.0, min(1.0, float(self.obs_pos_curr))))
         oc = self.P["oc"][self.cid] + self.P["ovec"][self.cid] * off
-        # UC-89: rotate obstacle world centres with the rest of the scene (no-op when off). NOTE:
-        # box obstacles are axis-aligned (AABB) with no stored orientation, so their faces do NOT
-        # rotate — only their centres do. Frame-correct for gates and cylinders; see guard note.
+        # UC-89: rotate obstacle world CENTRES with the rest of the scene (no-op when off). Box
+        # obstacles are stored as axis-aligned AABBs (half-extents + kind, no per-obstacle
+        # orientation) and are treated axis-aligned everywhere — both the raycast (`_cast`) and the
+        # contact check (`step_command`). So the scene rotation moves box centres but leaves their
+        # faces axis-aligned; this adds NO new distribution artifact (the env never rotates box
+        # faces to begin with — analyst-ruled acceptable), and gates/cylinders rotate exactly.
         return self._apply_gstart_rot(oc)
 
     def _target_pos(self) -> torch.Tensor:
