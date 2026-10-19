@@ -97,4 +97,4 @@ Statuses:
 | 85 | [use-cases/85-eyes-v3-depth-backbone.md](use-cases/85-eyes-v3-depth-backbone.md) | Eyes v3 — pretrained monocular-depth backbone for the obstacle-ray estimator | done | 2026-10-17 |
 | 86 | [use-cases/86-pluggable-perception-inputs.md](use-cases/86-pluggable-perception-inputs.md) | Pluggable perception inputs — a contract between "eyes" and the brain | done | 2026-10-18 |
 | 87 | [use-cases/87-deploy-robust-retrain.md](use-cases/87-deploy-robust-retrain.md) | Deploy-robust training of the connectome policy — smooth by construction (sim only) | done | 2026-10-19 |
-| 88 | [use-cases/88-controller-realistic-slew-limiter.md](use-cases/88-controller-realistic-slew-limiter.md) | Controller-realistic command slew-rate limiter (action filter) | pending | 2026-10-19 |
+| 88 | [use-cases/88-controller-realistic-slew-limiter.md](use-cases/88-controller-realistic-slew-limiter.md) | Controller-realistic command slew-rate limiter (action filter) | in-progress | 2026-10-19 |
