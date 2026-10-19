@@ -98,3 +98,4 @@ Statuses:
 | 86 | [use-cases/86-pluggable-perception-inputs.md](use-cases/86-pluggable-perception-inputs.md) | Pluggable perception inputs — a contract between "eyes" and the brain | done | 2026-10-18 |
 | 87 | [use-cases/87-deploy-robust-retrain.md](use-cases/87-deploy-robust-retrain.md) | Deploy-robust training of the connectome policy — smooth by construction (sim only) | done | 2026-10-19 |
 | 88 | [use-cases/88-controller-realistic-slew-limiter.md](use-cases/88-controller-realistic-slew-limiter.md) | Controller-realistic command slew-rate limiter (action filter) | done | 2026-10-19 |
+| 89 | [use-cases/89-grounded-launch-and-placeholder-gate-fix.md](use-cases/89-grounded-launch-and-placeholder-gate-fix.md) | Grounded-launch behavior + placeholder-gate frame bug (live 768 crash) | done | 2026-10-19 |

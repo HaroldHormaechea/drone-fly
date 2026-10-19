@@ -187,6 +187,24 @@ class CourseConfig:
     #: equal to the raw intent, so existing configs/checkpoints are unaffected (AC1/AC5).
     slew_time_s: float | None = None
 
+    # ---- UC-89 grounded-launch frame alignment (default-OFF ⇒ byte-identical) ----
+    #: Fraction of **ground** starts for which the whole course is rigidly rotated about the spawn
+    #: so the start->gate-0 direction becomes world +x — i.e. gate-0 is presented dead-ahead exactly
+    #: as the deploy spawn-yaw aligner presents the live scene (`harness/yaw_align.py`). The drone
+    #: keeps its identity spawn attitude (no spawn-yaw DR); only the observed/flown scene rotates,
+    #: so the heading reference stays observable. ``0.0`` disables it — no RNG is drawn and every
+    #: per-env world read is byte-identical to today. Pair with ``spawn_distance_m`` (≈3.2 at
+    #: world_scale 12 ≈ live 38 m) to place a grounded gate-0 in view at the live geometry.
+    ground_gate_ahead_frac: float = 0.0
+    #: Pre-acquisition neutral window (s). For this long at the start of a **ground** episode the
+    #: policy observes the SAME full-neutral gate the live harness emits on no-detection —
+    #: ``rel = 0`` (hover) and ``curr_gate = [0, 0, aperture]`` (frame-neutral; cos/sin zeroed) —
+    #: then the real gate is acquired. Models the live grounded pre-lock window and makes the sim's
+    #: no-detection semantics identical to ``gate_cv.py`` in BOTH channels (AC2). Only the policy's
+    #: *observation* is held neutral; the true geometry/reward are untouched. ``0.0`` disables it ⇒
+    #: byte-identical.
+    pre_acquire_s: float = 0.0
+
     def __post_init__(self) -> None:
         if not self.reward_reference_dt_s or self.reward_reference_dt_s <= 0:
             raise ValueError("course.reward_reference_dt_s must be positive")
@@ -214,6 +232,10 @@ class CourseConfig:
             not math.isfinite(self.slew_time_s) or self.slew_time_s <= 0
         ):
             raise ValueError("course.slew_time_s must be a positive, finite number when set")
+        if not 0.0 <= self.ground_gate_ahead_frac <= 1.0:
+            raise ValueError("course.ground_gate_ahead_frac must be in [0, 1]")
+        if self.pre_acquire_s < 0:
+            raise ValueError("course.pre_acquire_s must be >= 0")
 
     @property
     def pool_kwargs(self) -> dict[str, Any]:
@@ -513,6 +535,20 @@ class CourseEnv:
         self._slew_on = self._slew_spec.enabled
         self.prev_applied_command = torch.zeros(n, 4, dtype=self.dtype, device=dev)
         self.prev_applied_raw = torch.zeros(n, 4, dtype=self.dtype, device=dev)
+        # UC-89 grounded-launch frame alignment (default-off ⇒ no RNG, byte-identical). Per-env
+        # rigid rotation of the course about the spawn so gate-0 lands on +x. ``_gstart_active``
+        # gates which envs rotate; the rest keep identity (c=1, s=0, θ=0) so ``torch.where`` returns
+        # the original world reads untouched. ``_gstart_cxy`` is the per-env rotation centre.
+        self._gstart_on = config.ground_gate_ahead_frac > 0
+        self._gstart_active = torch.zeros(n, dtype=torch.bool, device=dev)
+        self._gstart_theta = zf.clone()
+        self._gstart_c = torch.ones(n, dtype=self.dtype, device=dev)
+        self._gstart_s = zf.clone()
+        self._gstart_cxy = torch.zeros(n, 2, dtype=self.dtype, device=dev)
+        # UC-89 pre-acquisition neutral window (default-off ⇒ byte-identical). Holds the policy's
+        # observed gate at full neutral for the first ``pre_acquire_s`` of a ground episode.
+        self._preacq_on = config.pre_acquire_s > 0
+        self._preacq_s = float(config.pre_acquire_s)
         # UC-87 AC3 per-episode smoothness accumulators (logged in EPISODE_TAIL).
         self.ep_arate = zf.clone()
         self.ep_sat = zf.clone()
@@ -611,12 +647,36 @@ class CourseEnv:
         return self.plant.t
 
     # ---- per-env course accessors ----
+    def _apply_gstart_rot(self, p3: torch.Tensor) -> torch.Tensor:
+        """UC-89: rigidly rotate the xy of world positions ``p3`` (``(n, 3)`` or ``(n, K, 3)``)
+        about each env's ground-start spawn centre by its stored angle. A strict no-op (byte-exact)
+        for envs without the rotation active and whenever the feature is off (``_gstart_on``),
+        because inactive envs are returned verbatim via ``torch.where`` (no float round-trip)."""
+        if not self._gstart_on:
+            return p3
+        shape = (self.n,) + (1,) * (p3.dim() - 2)  # broadcast over any mid dims (e.g. MO)
+        c = self._gstart_c.view(shape)
+        s = self._gstart_s.view(shape)
+        cx = self._gstart_cxy[:, 0].view(shape)
+        cy = self._gstart_cxy[:, 1].view(shape)
+        active = self._gstart_active.view(shape)
+        x, y = p3[..., 0], p3[..., 1]
+        dx, dy = x - cx, y - cy
+        rx = cx + c * dx - s * dy
+        ry = cy + s * dx + c * dy
+        out = p3.clone()
+        out[..., 0] = torch.where(active, rx, x)
+        out[..., 1] = torch.where(active, ry, y)
+        return out
+
     def _gate(self, idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return (
-            self.P["cen"][self.cid, idx],
-            self.P["yaw"][self.cid, idx],
-            self.P["ap"][self.cid, idx],
-        )
+        cen = self.P["cen"][self.cid, idx]
+        yaw = self.P["yaw"][self.cid, idx]
+        ap = self.P["ap"][self.cid, idx]
+        if self._gstart_on:
+            cen = self._apply_gstart_rot(cen)
+            yaw = torch.where(self._gstart_active, yaw + self._gstart_theta, yaw)
+        return cen, yaw, ap
 
     def _ng(self) -> torch.Tensor:
         return self.P["ng"][self.cid]
@@ -638,7 +698,14 @@ class CourseEnv:
     def _ocen(self) -> torch.Tensor:
         # OBSTACLE-POSITION curriculum: parked PARK m off to the side, sliding onto the path
         off = PARK * (1.0 - max(0.0, min(1.0, float(self.obs_pos_curr))))
-        return self.P["oc"][self.cid] + self.P["ovec"][self.cid] * off
+        oc = self.P["oc"][self.cid] + self.P["ovec"][self.cid] * off
+        # UC-89: rotate obstacle world CENTRES with the rest of the scene (no-op when off). Box
+        # obstacles are stored as axis-aligned AABBs (half-extents + kind, no per-obstacle
+        # orientation) and are treated axis-aligned everywhere — both the raycast (`_cast`) and the
+        # contact check (`step_command`). So the scene rotation moves box centres but leaves their
+        # faces axis-aligned; this adds NO new distribution artifact (the env never rotates box
+        # faces to begin with — analyst-ruled acceptable), and gates/cylinders rotate exactly.
+        return self._apply_gstart_rot(oc)
 
     def _target_pos(self) -> torch.Tensor:
         return self._gate(self.tgt)[0]
@@ -712,6 +779,24 @@ class CourseEnv:
             new_xy = gate0[:, :2] - u * dist
             pos = pos.clone()
             pos[:, :2] = new_xy
+        # UC-89: pick the ground starts whose course is rigidly rotated about the spawn so gate-0 is
+        # dead-ahead (+x). θ = −atan2(gate0 − spawn) rotates the start->gate-0 direction onto +x,
+        # rotation centre is the finalised spawn xy, so gate-0 lands on +x from where the drone is.
+        # Only drawn when the feature is on ⇒ the default path draws no extra RNG.
+        if self._gstart_on:
+            frac = float(self.cfg.ground_gate_ahead_frac)
+            sel = (self._rand(n) < frac) & ground
+            gate0 = self.P["cen"][self.cid, 0]
+            d = (gate0 - pos)[:, :2]
+            theta = -torch.atan2(d[:, 1], d[:, 0])
+            c, s = torch.cos(theta), torch.sin(theta)
+            z_t, one = torch.zeros_like(theta), torch.ones_like(theta)
+            # masked envs take the rotation when selected, else identity; others keep their state.
+            self._gstart_active = torch.where(mask, sel, self._gstart_active)
+            self._gstart_theta = torch.where(mask, torch.where(sel, theta, z_t), self._gstart_theta)
+            self._gstart_c = torch.where(mask, torch.where(sel, c, one), self._gstart_c)
+            self._gstart_s = torch.where(mask, torch.where(sel, s, z_t), self._gstart_s)
+            self._gstart_cxy = torch.where(mask[:, None], pos[:, :2], self._gstart_cxy)
         # UC-87 AC4: randomise the spawn yaw uniformly over 0..2π (rotation about world z).
         quat_arg = None
         if self.cfg.spawn_yaw:
@@ -802,12 +887,21 @@ class CourseEnv:
         return clear.min(dim=1).values.clamp(0.0, CLEAR_CAP)
 
     # ---- observations ----
+    def _pre_acq_mask(self) -> torch.Tensor:
+        """UC-89: ground-start envs still inside the pre-acquisition neutral window (``(n,)`` bool).
+        Empty (all-False) whenever the window is off, so callers stay byte-identical."""
+        return (self.start_mode == START_GROUND) & (self.plant.t < self._preacq_s)
+
     def obs(self) -> torch.Tensor:
         # UC-87 AC4: the perceived (noisy / held) gate-relative vector when gate noise is on, else
         # the true rel; the OBSERVED omega carries the gyro noise (training-only, NOT the plant's
         # true omega). Both default-off ⇒ byte-identical to the model-11 obs.
         rel = self._gate_rel if self._gate_on else (self._target_pos() - self.pos)
         omega = self.omega + self._gyro_obs if self._gyro_on else self.omega
+        if self._preacq_on:
+            # UC-89 AC2: hover-neutral the observed gate rel during the pre-acquisition window (the
+            # live harness emits rel=0 on no-detection). Observation only — reward uses true gate.
+            rel = torch.where(self._pre_acq_mask().unsqueeze(-1), torch.zeros_like(rel), rel)
         return torch.cat([rel, gravity_body(self.quat), self.vel, omega], dim=-1)
 
     def _obstacle_vision(self) -> torch.Tensor:
@@ -967,6 +1061,11 @@ class CourseEnv:
     def extra(self) -> torch.Tensor:
         _, cy, cap = self._gate(self.tgt)
         curr = torch.stack([torch.cos(cy), torch.sin(cy), cap], -1)
+        if self._preacq_on:
+            # UC-89 AC2: frame-neutral curr_gate [0, 0, aperture] during the pre-acquisition
+            # window — identical to the harness no-detection placeholder (cos/sin zeroed, ap kept).
+            neutral = torch.stack([torch.zeros_like(cy), torch.zeros_like(cy), cap], -1)
+            curr = torch.where(self._pre_acq_mask().unsqueeze(-1), neutral, curr)
         feats = [self.obs(), curr, self._next_lookahead(), self._obstacle_vision()]
         if self.cfg.raycast:
             feats.append(self._ray_obs())
@@ -1108,6 +1207,19 @@ class CourseEnv:
 
         t = self.plant.t
         xy_off = self.pos[:, :2].norm(dim=-1)
+        if self._gstart_on:
+            # UC-89: the arena is an origin-centred disk, so it is the one world read NOT relative
+            # to the drone. Map the drone's world xy back into the un-rotated course frame (inverse
+            # of the per-env course rotation about the spawn) before the origin-distance test, so
+            # the arena bounds the rotated scene exactly. Byte-identical for inactive envs.
+            cx, cy = self._gstart_cxy[:, 0], self._gstart_cxy[:, 1]
+            dx, dy = self.pos[:, 0] - cx, self.pos[:, 1] - cy
+            c, s = self._gstart_c, self._gstart_s
+            qx = cx + c * dx + s * dy  # R(−θ) about the spawn centre
+            qy = cy - s * dx + c * dy
+            xy_off = torch.where(
+                self._gstart_active, torch.sqrt(qx * qx + qy * qy), xy_off
+            )
         grace = t > cfg.floor_grace_s + 1e-6
         ground_start = self.start_mode == START_GROUND
         floor_live = torch.where(ground_start, self.plant.lifted, grace)

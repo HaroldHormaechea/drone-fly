@@ -322,7 +322,9 @@ def build_student_obs(
     curr = torch.where(
         acq.unsqueeze(-1),
         torch.stack([torch.cos(y), torch.sin(y), ap], -1),
-        torch.stack([torch.ones_like(y), torch.zeros_like(y), ap], -1),
+        # UC-89: frame-neutral no-detection curr_gate [0, 0, ap] (torch twin of perception_ref /
+        # gate_cv). ~acq branch only — the acquired path and aperture are byte-identical.
+        torch.stack([torch.zeros_like(y), torch.zeros_like(y), ap], -1),
     )
     nc = perc["next_center"].to(dt_) / k
     d = nc - pk

@@ -23,6 +23,8 @@ from drone_fly.sim.action import ActionSpec
 from drone_fly.sim.course import (
     EPISODE_COLUMNS,
     OUTCOMES,
+    START_AIR,
+    START_GROUND,
     TRACTABLE_KW,
     CourseConfig,
     CourseEnv,
@@ -318,3 +320,70 @@ def test_extra_dim_follows_raycast():
     assert CourseConfig(reward_reference_dt_s=REF_DT, raycast=True).extra_dim == 70
     env = _small_env(n=2, raycast=True)
     assert env.extra().shape == (2, 70)
+
+
+# ----------------------------------------------------------------- UC-89 knobs (course / preacq)
+
+
+def test_uc89_course_config_validation():
+    """UC-89: the two new knobs are range-validated (frac in [0,1], pre_acquire_s >= 0)."""
+    with pytest.raises(ValueError, match="ground_gate_ahead_frac"):
+        CourseConfig.from_dict({"reward_reference_dt_s": REF_DT, "ground_gate_ahead_frac": 1.5})
+    with pytest.raises(ValueError, match="ground_gate_ahead_frac"):
+        CourseConfig.from_dict({"reward_reference_dt_s": REF_DT, "ground_gate_ahead_frac": -0.1})
+    with pytest.raises(ValueError, match="pre_acquire_s"):
+        CourseConfig.from_dict({"reward_reference_dt_s": REF_DT, "pre_acquire_s": -0.5})
+    cfg = CourseConfig.from_dict(
+        {"reward_reference_dt_s": REF_DT, "ground_gate_ahead_frac": 0.5, "pre_acquire_s": 1.0}
+    )
+    assert cfg.ground_gate_ahead_frac == 0.5 and cfg.pre_acquire_s == 1.0
+
+
+def test_uc89_knobs_default_off_are_byte_identical():
+    """UC-89 AC6: both knobs default off and draw no RNG, so obs/extra/spawn are byte-identical."""
+    a = _small_env(n=8, seed=5)
+    b = _small_env(n=8, seed=5, ground_gate_ahead_frac=0.0, pre_acquire_s=0.0)
+    assert not a._gstart_on and not a._preacq_on
+    torch.testing.assert_close(a.pos, b.pos, atol=0, rtol=0)
+    torch.testing.assert_close(a.obs(), b.obs(), atol=0, rtol=0)
+    torch.testing.assert_close(a.extra(), b.extra(), atol=0, rtol=0)
+
+
+def test_uc89_pre_acquire_neutral_window_both_channels():
+    """UC-89 AC2: during the pre-acquisition window a ground start observes the SAME full neutral
+    the live harness emits on no-detection -- rel = 0 (hover) in obs AND curr_gate = [0, 0, ap]
+    in extra -- then acquires the real gate once the window passes."""
+    env = _small_env(
+        n=16,
+        pre_acquire_s=0.2,
+        start=StartConfig(mode="mixed", ground_fraction=1.0, arm_delay_s=0.0),
+    )
+    assert torch.all(env.start_mode == START_GROUND) and env._preacq_on
+    assert torch.all(env._pre_acq_mask())  # t = 0 -> inside the window
+
+    obs, extra = env.obs(), env.extra()
+    torch.testing.assert_close(obs[:, :3], torch.zeros(16, 3), atol=0, rtol=0)  # rel hover
+    torch.testing.assert_close(extra[:, :3], torch.zeros(16, 3), atol=0, rtol=0)  # obs in extra
+    torch.testing.assert_close(extra[:, 12:14], torch.zeros(16, 2), atol=0, rtol=0)  # curr_gate dir
+    assert torch.all(extra[:, 14] > 0)  # aperture preserved in the neutral block
+
+    for _ in range(int(0.2 * 50.0) + 2):  # step past the 0.2 s window (1 g hover: it rests)
+        _, _, done, _ = env.step_command(torch.ones(16), torch.zeros(16, 3))
+        assert not done.any()
+    assert not env._pre_acq_mask().any()
+    obs2, extra2 = env.obs(), env.extra()
+    assert torch.any(obs2[:, :3] != 0)  # the real gate is now observed (rel != 0)
+    assert torch.any(extra2[:, 12:14].abs() > 1e-6)  # curr_gate direction is a real (cos,sin)
+
+
+def test_uc89_pre_acquire_leaves_air_starts_untouched():
+    """UC-89 AC2: the neutral window is ground-only -- air starts observe the real gate at t=0."""
+    env = _small_env(
+        n=16,
+        pre_acquire_s=0.5,
+        start=StartConfig(mode="mixed", ground_fraction=0.0, air_z_m=(1.2, 1.2)),
+    )
+    assert torch.all(env.start_mode == START_AIR)
+    assert not env._pre_acq_mask().any()  # air starts are never in the window
+    extra = env.extra()
+    assert torch.any(extra[:, 12:14].abs() > 1e-6)  # real curr_gate, not the neutral placeholder

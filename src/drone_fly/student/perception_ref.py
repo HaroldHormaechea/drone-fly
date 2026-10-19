@@ -504,7 +504,10 @@ def estimate_from_raw(raw: dict[str, Any], pos: Any, cfg: PerceptionConfig, k: f
         y = f32(raw["target_yaw"])
         curr = np.array([np.cos(y), np.sin(y), f32(cfg.nominal_aperture / k)], f32)
     else:
-        curr = np.array([1.0, 0.0, cfg.nominal_aperture / k], f32)
+        # UC-89: frame-neutral no-detection curr_gate [0, 0, ap], mirroring gate_cv.py so a
+        # world-frame [1,0] no longer rotates into a fake off-axis gate under yaw alignment.
+        # No-detection branch only — the acquired path stays byte-identical, aperture unchanged.
+        curr = np.array([0.0, 0.0, cfg.nominal_aperture / k], f32)
     nc = np.asarray(raw["next_center"], np.float64) / k
     if raw["next_mode"] == NEXT_VISIBLE:
         nxt = lookahead_visible(p, nc, float(raw["next_yaw"]))

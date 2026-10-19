@@ -587,3 +587,52 @@ def test_eyes_process_default_factor_is_passthrough():
     np.testing.assert_allclose(out.raycast, 0.6, atol=1e-6)
     np.testing.assert_array_equal(fake.targets[-1], [1, 2, 3])
     assert out.info["eyes_scale_factor"] == 1.0
+
+
+# ----------------------------------------------------------------- UC-89 no-detection placeholder
+
+
+def _neutral_from(psi, ap=0.9):
+    """A no-detection scene at spawn yaw ``psi``: the UC-89 frame-neutral curr_gate [0,0,ap] and a
+    hover target (rel = target - pos = 0), reusing ``_scene``'s state / free space."""
+    st, _, fs = _scene(psi)
+    target = np.asarray(st.pos, np.float32).copy()  # hover in place while no gate is detected
+    curr = np.array([0.0, 0.0, ap], np.float32)  # UC-89: rotation-invariant placeholder
+    nxt = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], np.float32)  # unseen next gate
+    return st, GateEstimate(target, curr_gate=curr, next_lookahead=nxt), fs
+
+
+@pytest.mark.parametrize("psi_deg", PSIS_DEG)  # includes -90 and arbitrary (37, 180)
+def test_uc89_neutral_placeholder_is_frame_invariant(harness_contract, psi_deg):
+    """UC-89 AC1: the no-detection curr_gate [0,0,ap] + hover rel stay neutral under yaw alignment
+    at a -90 deg (and arbitrary) spawn -- it can never become a phantom off-axis gate."""
+    psi = math.radians(psi_deg)
+    st, gate, fs = _neutral_from(psi)
+    obs, extra = ContractObservationAssembler(harness_contract).assemble(st, gate, fs, 30)
+    al = SpawnYawAligner()
+    al.capture(st)
+    o, e = al.apply(obs, extra)
+    # rel (hover) stays zero; curr_gate (cos,sin) stays [0,0]; the aperture is untouched.
+    np.testing.assert_allclose(o[:3], 0.0, atol=1e-6)  # obs rel
+    np.testing.assert_allclose(e[:3], 0.0, atol=1e-6)  # extra rel
+    np.testing.assert_allclose(e[12:14], [0.0, 0.0], atol=1e-6)  # curr_gate direction
+    assert e[14] == pytest.approx(0.9)  # aperture preserved
+
+
+def test_uc89_old_world_frame_placeholder_rotates_into_a_phantom_gate(harness_contract):
+    """Regression guard: the OLD [1,0,ap] world-frame placeholder is NOT frame-neutral -- at a
+    -90 deg spawn it rotates into a ~90 deg off-axis gate (the live-crash bug UC-89 fixes)."""
+    st, _, fs = _scene(math.radians(-90.0))
+    target = np.asarray(st.pos, np.float32).copy()
+    bad = GateEstimate(
+        target,
+        curr_gate=np.array([1.0, 0.0, 0.9], np.float32),  # the pre-fix world-frame [1,0]
+        next_lookahead=np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], np.float32),
+    )
+    obs, extra = ContractObservationAssembler(harness_contract).assemble(st, bad, fs, 30)
+    al = SpawnYawAligner()
+    al.capture(st)
+    _, e = al.apply(obs, extra)
+    # the curr_gate direction is dragged off +x -> a fake side gate the policy steers at
+    assert np.linalg.norm(e[12:14] - np.array([1.0, 0.0])) > 0.5
+    assert abs(e[13]) == pytest.approx(1.0, abs=1e-6)  # rotated onto +/- y at -90 deg
