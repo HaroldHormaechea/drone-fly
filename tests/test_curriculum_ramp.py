@@ -131,14 +131,24 @@ def test_fresh_config_loads_as_a_staged_fresh_train():
     assert cur.difficulty_frac is not None and cur.obs_count_frac is not None
 
 
-def test_warmstart_fallback_config_only_adds_the_warm_start():
-    fresh = load_train_config("uc87-deploy-robust")
+def test_warmstart_config_is_the_proven_run5_recipe():
+    # The warm-start config was PROMOTED to the shipped run-5 winner (the 2026-10-18/19 campaign).
+    # It warm-starts model 11 and keeps difficulty FULL from step 0 (no destabilising ramp — null
+    # fracs), then gently ramps ONLY the deployment/perception DR + the action-rate penalty on top,
+    # earlier and over a shorter window than the fresh recipe. So it is NO LONGER identical to the
+    # fresh curriculum — it has its own staggered schedule.
     ws = load_train_config("uc87-deploy-robust-warmstart")
     ck = ws.warm_start.checkpoint
     assert ck is not None and "11-count-curriculum" in ck
     assert ws.warm_start.src_extra_dim == 70  # zero-init the 28 memory columns
-    # the staged curriculum is identical to the fresh recipe
-    assert ws.curriculum.timing_dr_frac == fresh.curriculum.timing_dr_frac
+    cur = ws.curriculum
+    # difficulty / obstacles held FULL from step 0 (null = no ramp — model 11 already solves them)
+    assert cur.difficulty_frac is None
+    assert cur.obs_pos_frac is None and cur.obs_count_frac is None
+    # the proven run-5 staggered DR + penalty schedule (earlier/shorter than the fresh recipe)
+    assert cur.timing_dr_frac == (0.15, 0.45)
+    assert cur.input_dr_frac == (0.45, 0.75)
+    assert cur.penalty_frac == (0.25, 0.65) and cur.penalty_init_scale == 0.1
     assert ws.course.spawn_yaw is False and ws.actor.extra_dim == 98
 
 
