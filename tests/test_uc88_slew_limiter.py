@@ -466,6 +466,15 @@ def test_runnerconfig_rejects_a_bad_slew_override(bad):
         RunnerConfig.from_dict(_runner_dict(slew_override_s=bad))
 
 
+@pytest.mark.parametrize(("harness", "preset"), [("sim-loopback", None), ("liftoff", "liftoff_arena")])
+def test_a_user_config_may_set_the_slew_override(harness, preset):
+    """The packaged defaults declare the key, so a preset / --config YAML can set it (it used to be
+    rejected as an unknown key)."""
+    assert load_config(harness, preset=preset).runner.slew_override_s is None
+    cfg = load_config(harness, {"runner": {"slew_override_s": 0.5}}, preset=preset)
+    assert cfg.runner.slew_override_s == pytest.approx(0.5)
+
+
 # ============================================================ sidecar write / read (deploy==train)
 
 
