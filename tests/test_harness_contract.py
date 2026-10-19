@@ -234,6 +234,19 @@ def test_supported_extra_dims():
         assert validate_extra_dim(d) == d
 
 
+def test_cli_extra_dim_choices_match_supported():
+    # The CLI hardcodes the choices (no heavy import at startup); keep them in sync with runtime.
+    from drone_fly.cli.main import build_parser
+
+    args = build_parser().parse_args(
+        ["harness", "run", "--harness", "liftoff", "--extra-dim", "98"]
+    )
+    assert args.extra_dim == 98
+    for d in SUPPORTED_EXTRA_DIMS:
+        argv = ["harness", "run", "--harness", "liftoff", "--extra-dim", str(d)]
+        assert build_parser().parse_args(argv).extra_dim == d
+
+
 # ----------------------------------------------------------------------------- action decoding
 
 

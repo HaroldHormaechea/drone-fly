@@ -30,7 +30,7 @@ param(
     [int]$Attempts = 2,
     [int]$RecordEvery = 50,
     [string]$Checkpoint = 'training/07-proc-course-flight/model_readout.pt',
-    [ValidateSet(12, 30, 70)][int]$ExtraDim = 30,
+    [ValidateSet(12, 30, 70, 98)][int]$ExtraDim = 30,
     [string]$Preset = 'liftoff',
     [string]$Config = 'artifacts/harness/live.yaml',
     [string]$MapName = 'infinity-loop',

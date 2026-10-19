@@ -1,7 +1,7 @@
 """``drone-fly`` command line (argparse; imports no heavy backend at startup).
 
     drone-fly harness list
-    drone-fly harness run --harness <name> --checkpoint <model_readout.pt> --extra-dim {12,30,70}
+    drone-fly harness run --harness <name> --checkpoint <model_readout.pt> --extra-dim {12,30,70,98}
                           [--preset <name>] [--config <yaml>] [--k1-path] [--gpu-prototype-dir]
                           [--device] [--duration] [--dry-run] [--output-root] [--no-record]
                           [--overlay [--no-overlay-launch]] [--recordable]
@@ -942,7 +942,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--harness", required=True, help="registered harness name")
     p_run.add_argument("--checkpoint", help="stripped model_readout.pt (or --teacher)")
     p_run.add_argument(
-        "--extra-dim", type=int, choices=(12, 30, 70), help="model extra width (with --checkpoint)"
+        "--extra-dim",
+        type=int,
+        choices=(12, 30, 70, 98),
+        help="model extra width (with --checkpoint)",
     )
     p_run.add_argument(
         "--teacher",
