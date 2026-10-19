@@ -209,6 +209,11 @@ class RunnerConfig:
     latency_compensation: str = "auto"
     latency_delay_s: float = 0.04
     latency_predict: str = "rotation"
+    #: UC-88 command slew-rate limiter override (seconds for a full-range traversal). ``None`` ⇒
+    #: use the checkpoint sidecar's ``action_filter`` as-is; a positive number overrides it (e.g. a
+    #: deploy-only fly-test cap on a checkpoint trained without the filter). See
+    #: :class:`~drone_fly.sim.action.SlewLimiter`.
+    slew_override_s: float | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> RunnerConfig:
@@ -268,6 +273,13 @@ class RunnerConfig:
             ),
             latency_predict=require_choice(
                 d.get("latency_predict", "rotation"), "runner.latency_predict", ("rotation", "full")
+            ),
+            slew_override_s=require_number(
+                d.get("slew_override_s"),
+                "runner.slew_override_s",
+                min_value=0.0,
+                min_exclusive=True,
+                allow_none=True,
             ),
         )
 

@@ -519,6 +519,37 @@ def run_harness(
             cfg.runner.latency_compensation,
             cfg.runner.latency_delay_s * 1000.0,
         )
+    # UC-88 command slew-rate limiter: contract checkpoints only. Built from the checkpoint's
+    # sidecar ``action_filter`` spec, or a RunnerSettings override (e.g. a deploy-only fly-test cap
+    # on a checkpoint trained without the filter). Disabled ⇒ None (the raw command path is used).
+    slew = None
+    if plan is None and student_plan is None:
+        from drone_fly.sim.action import (
+            CONTRACT_VERSION,
+            SlewLimiter,
+            SlewSpec,
+            slew_spec_for_checkpoint,
+            spec_for_checkpoint,
+        )
+
+        aspec = spec_for_checkpoint(checkpoint)
+        sspec = (
+            SlewSpec(settings.slew_override_s)
+            if settings.slew_override_s is not None
+            else slew_spec_for_checkpoint(checkpoint)
+        )
+        if sspec.enabled and aspec.version != CONTRACT_VERSION:
+            raise HarnessConfigError(
+                "the command slew limiter (UC-88) requires a v2 action contract; this checkpoint "
+                f"decodes as v{aspec.version}"
+            )
+        if sspec.enabled:
+            slew = SlewLimiter(sspec, aspec, max_g=aspec.max_g)
+            log.info(
+                "command slew limiter ON: full-range traversal %.3fs (%s)",
+                sspec.traversal_time_s,
+                "config override" if settings.slew_override_s is not None else "checkpoint sidecar",
+            )
     _stamp_provider_names(h, cfg)
     runner = HarnessRunner(
         h,
@@ -529,6 +560,7 @@ def run_harness(
         clock=h.clock,
         yaw_aligner=yaw_aligner,
         latency_comp=latency_comp,
+        slew=slew,
         perception=perception_contract.PerceptionRuntime(h),
     )
     recorder = None

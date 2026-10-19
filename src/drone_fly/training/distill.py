@@ -983,6 +983,12 @@ def student_sidecar(
     extra = {}
     if cfg.base.tracks.obstacles != "all":  # UC77: default sidecars stay unchanged
         extra["course_obstacles"] = cfg.base.tracks.obstacles
+    # UC-88: the slew filter is NOT wired into the student distillation path — the student trains in
+    # StudentCourseEnv (not CourseEnv, which carries the limiter) and StudentConfig has no course
+    # slew knob, so writing an ``action_filter`` key here would claim a filter the student never
+    # trained under (deploy != training). The UC-88 retrain is the PPO warm-start on CourseEnv,
+    # whose sidecar is written by RunDir.save_checkpoint. Add student-side slew only alongside a
+    # StudentCourseEnv limiter if a slew-trained student is needed.
     # UC79: an opt-in privileged (diagnostic) student records its block list + obs dim and is
     # marked non-deployable; the default (empty) path leaves the sidecar byte-identical (AC3).
     priv = tuple(getattr(cfg.distill, "student_privileged", ()))

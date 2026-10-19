@@ -240,6 +240,171 @@ def decode_numpy(
     return Decoded(float(cg), rates, frac)
 
 
+# ----------------------------------------------------------------------------- slew limiter (UC-88)
+
+
+def _is_torch(x: Any) -> bool:
+    """True when ``x`` is a torch tensor, without importing torch at module import time."""
+    return type(x).__module__.split(".", 1)[0] == "torch"
+
+
+@dataclass(frozen=True)
+class SlewSpec:
+    """A controller-realistic command slew-rate limit (UC-88 action filter).
+
+    ``traversal_time_s`` is the time the command would take to cross its FULL per-axis range at the
+    cap — rates span ``2*max_rate_rad_s`` and the collective spans ``max_g`` — so the per-axis
+    per-step cap is ``full_range_axis * dt / traversal_time_s``. ``None`` DISABLES the filter (the
+    default), which is byte-identical to UC-87: the command is passed through unchanged and the
+    policy-memory ``prev_applied_raw`` stays equal to the raw intent.
+    """
+
+    traversal_time_s: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.traversal_time_s is not None:
+            v = float(self.traversal_time_s)
+            if not math.isfinite(v) or v <= 0:
+                raise ValueError(
+                    "SlewSpec.traversal_time_s must be a positive, finite number when set, got "
+                    f"{self.traversal_time_s!r}"
+                )
+
+    @property
+    def enabled(self) -> bool:
+        return self.traversal_time_s is not None
+
+    @classmethod
+    def disabled(cls) -> SlewSpec:
+        return cls(None)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> SlewSpec:
+        if not d:
+            return cls(None)
+        unknown = set(d) - {"traversal_time_s"}
+        if unknown:
+            raise ValueError(f"unknown action_filter keys {sorted(unknown)}")
+        t = d.get("traversal_time_s")
+        return cls(None if t is None else float(t))
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"traversal_time_s": self.traversal_time_s}
+
+
+def command_full_range(
+    spec: ActionSpec, max_g: float | None = None
+) -> tuple[float, float, float, float]:
+    """Per-axis full command range ``(collective_g, rate_x, rate_y, rate_z)`` the slew cap spans:
+    the collective over ``max_g`` and each body rate over ``2*max_rate_rad_s`` (contract v2).
+    ``max_g`` overrides the spec's (the sim passes the plant envelope)."""
+    if spec.version == CONTRACT_VERSION:
+        hi = spec.max_g if max_g is None else max_g
+        if hi is None:
+            raise ValueError("slew limiting a v2 action needs max_g (the training envelope)")
+        mr = 2.0 * float(spec.max_rate_rad_s)
+        return (float(hi), mr, mr, mr)
+    ref = legacy_reference()
+    f = ref.full_stick_rate
+    return (ref.max_g, 2.0 * f[0], 2.0 * f[1], 2.0 * f[2])
+
+
+def raw_of_command(cmd: Any, spec: ActionSpec, *, eps: float = 1e-6) -> Any:
+    """Effective-raw inverse of the decoders: the raw action ``a'`` that decodes to ``cmd`` (the
+    APPLIED command ``[collective_g, rate_x, rate_y, rate_z]``). v2 only (the UC-87 policy memory
+    exists only on v2 checkpoints).
+
+    Collective is the exact affine inverse (``a0' = (cg'-1)/collective_scale_g``); the rates invert
+    ``tanh`` with a symmetric ``eps`` guard (``a_i' = atanh(clip(rate_i'/max_rate_rad_s, -1+eps,
+    1-eps))``). Supports a single ``(4,)`` command or a batch ``(..., 4)``; torch + numpy parity.
+    """
+    if spec.version != CONTRACT_VERSION:
+        raise ValueError("raw_of_command requires a v2 action contract")
+    scale = float(spec.collective_scale_g)
+    mr = float(spec.max_rate_rad_s)
+    if _is_torch(cmd):
+        import torch
+
+        a0 = (cmd[..., 0] - 1.0) / scale
+        r = (cmd[..., 1:4] / mr).clamp(-1.0 + eps, 1.0 - eps)
+        ai = torch.atanh(r)
+        return torch.cat([a0.unsqueeze(-1), ai], dim=-1)
+    c = np.asarray(cmd, dtype=np.float32)
+    a0 = (c[..., 0] - 1.0) / scale
+    r = np.clip(c[..., 1:4] / mr, -1.0 + eps, 1.0 - eps)
+    ai = np.arctanh(r)
+    return np.concatenate([a0[..., None], ai], axis=-1).astype(np.float32)
+
+
+def slew_clamp(
+    prev_cmd: Any,
+    new_cmd: Any,
+    dt: Any,
+    spec: SlewSpec,
+    action_spec: ActionSpec,
+    *,
+    max_g: float | None = None,
+) -> Any:
+    """Clamp the per-axis change ``new_cmd - prev_cmd`` to the slew cap ``full_range * dt /
+    traversal_time_s``, returning the applied command (same type/shape as ``new_cmd``). torch (sim)
+    and numpy (harness) parity. ``dt`` is a scalar, or — for torch — a per-env ``(n,)`` tensor.
+    Pass-through when ``spec`` is disabled (byte-identical to no filter)."""
+    if not spec.enabled:
+        return new_cmd
+    full = command_full_range(action_spec, max_g)
+    T = float(spec.traversal_time_s)
+    if _is_torch(new_cmd):
+        import torch
+
+        full_t = torch.as_tensor(full, dtype=new_cmd.dtype, device=new_cmd.device)
+        if torch.is_tensor(dt):
+            cap = full_t * (dt.to(new_cmd.dtype).reshape(*dt.shape, 1) / T)
+        else:
+            cap = full_t * (float(dt) / T)
+        delta = torch.minimum(torch.maximum(new_cmd - prev_cmd, -cap), cap)
+        return prev_cmd + delta
+    cap = np.asarray(full, dtype=np.float32) * (float(dt) / T)
+    prev = np.asarray(prev_cmd, dtype=np.float32)
+    delta = np.clip(np.asarray(new_cmd, dtype=np.float32) - prev, -cap, cap)
+    return (prev + delta).astype(np.float32)
+
+
+class SlewLimiter:
+    """Stateful per-axis slew-rate limiter over the APPLIED command ``[collective_g, rate_x,
+    rate_y, rate_z]`` for the harness single-env command path (numpy).
+
+    Zero-seeded; ``reset()`` on the same boundaries as the policy-memory ring (run start /
+    telemetry discontinuity). ``step`` clamps one command against the carried previous applied
+    command and updates the carry. Disabled (``spec`` None) ⇒ pass-through + carry == command.
+    """
+
+    def __init__(
+        self, spec: SlewSpec, action_spec: ActionSpec, *, max_g: float | None = None
+    ) -> None:
+        self.spec = spec
+        self.action_spec = action_spec
+        self.max_g = max_g
+        self._prev = np.zeros(4, dtype=np.float32)
+        if spec.enabled:  # validate ranges up front (raises on a v2 spec with no max_g)
+            command_full_range(action_spec, max_g)
+
+    @property
+    def enabled(self) -> bool:
+        return self.spec.enabled
+
+    def reset(self) -> None:
+        self._prev = np.zeros(4, dtype=np.float32)
+
+    def step(self, command4: Any, dt: float) -> np.ndarray:
+        new = np.asarray(command4, dtype=np.float32).reshape(4)
+        applied = np.asarray(
+            slew_clamp(self._prev, new, dt, self.spec, self.action_spec, max_g=self.max_g),
+            dtype=np.float32,
+        ).reshape(4)
+        self._prev = applied.copy()
+        return applied
+
+
 # ----------------------------------------------------------------------------- sidecar
 
 
@@ -314,3 +479,12 @@ def spec_for_checkpoint(checkpoint: str | Path) -> ActionSpec:
     return ActionSpec.from_dict(
         {"version": data.get("contract_version", LEGACY_VERSION), **(data.get("action") or {})}
     )
+
+
+def slew_spec_for_checkpoint(checkpoint: str | Path) -> SlewSpec:
+    """The checkpoint's UC-88 :class:`SlewSpec` from the sidecar ``action_filter`` key (disabled
+    when the key or the whole sidecar is absent, so legacy / UC-87 checkpoints are unaffected)."""
+    data = read_sidecar(checkpoint)
+    if data is None:
+        return SlewSpec(None)
+    return SlewSpec.from_dict(data.get("action_filter"))

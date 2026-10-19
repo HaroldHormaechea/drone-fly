@@ -38,7 +38,13 @@ from typing import Any
 import numpy as np
 import torch
 
-from drone_fly.sim.action import ActionSpec, decode_torch
+from drone_fly.sim.action import (
+    ActionSpec,
+    SlewSpec,
+    decode_torch,
+    raw_of_command,
+    slew_clamp,
+)
 from drone_fly.sim.course_gen import sample_course
 from drone_fly.sim.plant import Plant, PlantConfig
 from drone_fly.sim.quat import gravity_body
@@ -173,6 +179,14 @@ class CourseConfig:
     gate_staleness_s: float = 0.0
     gate_dropout_p: float = 0.0
 
+    # ---- UC-88 command slew-rate limiter (action filter; default-OFF ⇒ UC-87 byte-identical) ----
+    #: Controller-realistic slew cap: the time (s) the applied command would take to cross its FULL
+    #: per-axis range at the cap (rates span ``2·max_rate_rad_s``, collective spans the plant's
+    #: ``max_g``), so the per-axis per-step cap is ``full_range · dt / slew_time_s``. ``None``
+    #: disables the filter — the command passes through unchanged and ``prev_applied_raw`` stays
+    #: equal to the raw intent, so existing configs/checkpoints are unaffected (AC1/AC5).
+    slew_time_s: float | None = None
+
     def __post_init__(self) -> None:
         if not self.reward_reference_dt_s or self.reward_reference_dt_s <= 0:
             raise ValueError("course.reward_reference_dt_s must be positive")
@@ -196,6 +210,10 @@ class CourseConfig:
             raise ValueError("course.gate_outlier_p / gate_dropout_p must be in [0, 1]")
         if not -1.0 < self.gyro_vibration_rho < 1.0:
             raise ValueError("course.gyro_vibration_rho must be in (-1, 1)")
+        if self.slew_time_s is not None and (
+            not math.isfinite(self.slew_time_s) or self.slew_time_s <= 0
+        ):
+            raise ValueError("course.slew_time_s must be a positive, finite number when set")
 
     @property
     def pool_kwargs(self) -> dict[str, Any]:
@@ -482,6 +500,19 @@ class CourseEnv:
             if config.memory
             else None
         )
+        # UC-88 command slew-rate limiter (action filter). THREE distinct state pieces:
+        #  * ``prev_action`` (above)       — the raw INTENT, unchanged; drives the action-rate +
+        #    saturation penalty ONLY (reward path provably untouched on and off).
+        #  * ``prev_applied_command``      — the limiter's command-space carry ``[cg, rates]``
+        #    (enabled only); the clamp ramps from it toward each step's new command.
+        #  * ``prev_applied_raw``          — the effective-raw of the APPLIED command; drives ONLY
+        #    the policy-memory block (``_memory_block``). ≡ raw intent when the filter is OFF (so
+        #    the memory block is byte-identical to UC-87), = a' when ON ("policy observes what was
+        #    actually applied", AC4). Always maintained; zero-seeded like ``prev_action``.
+        self._slew_spec = SlewSpec(config.slew_time_s)
+        self._slew_on = self._slew_spec.enabled
+        self.prev_applied_command = torch.zeros(n, 4, dtype=self.dtype, device=dev)
+        self.prev_applied_raw = torch.zeros(n, 4, dtype=self.dtype, device=dev)
         # UC-87 AC3 per-episode smoothness accumulators (logged in EPISODE_TAIL).
         self.ep_arate = zf.clone()
         self.ep_sat = zf.clone()
@@ -712,6 +743,10 @@ class CourseEnv:
         # zero-seed + per-episode reset). The step-time memory update then skips these done envs.
         zcol = torch.zeros_like(self.prev_action)
         self.prev_action = torch.where(m1, zcol, self.prev_action)
+        # UC-88: zero the slew carry + applied-raw on (re)spawn (same D3 boundary as prev_action),
+        # so a freshly-spawned env ramps its command from 0 and its memory starts clean.
+        self.prev_applied_command = torch.where(m1, zcol, self.prev_applied_command)
+        self.prev_applied_raw = torch.where(m1, zcol, self.prev_applied_raw)
         if self.obs_hist is not None:
             self.obs_hist = torch.where(
                 mask[:, None, None], torch.zeros_like(self.obs_hist), self.obs_hist
@@ -923,8 +958,11 @@ class CourseEnv:
         return self._raycast()
 
     def _memory_block(self) -> torch.Tensor:
-        """The D1 memory block: ``prev_action(4) || obs_history(H*12)`` (newest-first history)."""
-        return torch.cat([self.prev_action, self.obs_hist.reshape(self.n, -1)], dim=-1)
+        """The D1 memory block: ``prev_applied_raw(4) || obs_history(H*12)`` (newest-first history).
+
+        The first slot is the APPLIED command's effective-raw (UC-88 AC4): ≡ the raw intent when the
+        slew filter is off (byte-identical to UC-87), = the post-limiter ``a'`` when it is on."""
+        return torch.cat([self.prev_applied_raw, self.obs_hist.reshape(self.n, -1)], dim=-1)
 
     def extra(self) -> torch.Tensor:
         _, cy, cap = self._gate(self.tgt)
@@ -939,7 +977,10 @@ class CourseEnv:
         return torch.cat(feats, dim=-1)
 
     def metric(self) -> str:
-        return f"compl {float(self.comp_rate) * 100:4.1f}% lap {float(self.lap.float().mean()):.1f}"
+        base = f"compl {float(self.comp_rate) * 100:4.1f}% lap {float(self.lap.float().mean()):.1f}"
+        if self._slew_on:  # UC-88: surface the active slew cap (kept out of the EPISODE_TAIL log)
+            base += f" slew {float(self._slew_spec.traversal_time_s):.2f}s"
+        return base
 
     # ---- step ----
     def step(self, action: torch.Tensor) -> tuple[torch.Tensor, ...]:
@@ -971,6 +1012,28 @@ class CourseEnv:
         dt, delay, skipped = self.timing.tick()
         self.last_dt, self.last_skipped = dt, skipped
         rscale = (dt / cfg.reward_reference_dt_s).to(self.dtype)
+
+        # UC-88: clamp the APPLIED command's per-axis slew to the controller-realistic cap, in
+        # command space, AFTER arming and BEFORE the plant step (so the plant sees exactly what a
+        # real transmitter could produce). ``applied_raw`` is the effective-raw of the applied
+        # command, fed to the policy-memory block (AC4). Default-off ⇒ pass-through, applied_raw ≡
+        # raw intent, byte-identical to UC-87.
+        applied_raw = raw_action
+        if self._slew_on:
+            new_cmd = torch.cat([cg.unsqueeze(-1), rates], dim=-1)
+            applied = slew_clamp(
+                self.prev_applied_command,
+                new_cmd,
+                dt,
+                self._slew_spec,
+                self.action_spec,
+                max_g=float(self.plant.max_g),
+            )
+            self.prev_applied_command = applied
+            cg = applied[:, 0]
+            rates = applied[:, 1:4]
+            if raw_action is not None:
+                applied_raw = raw_of_command(applied, self.action_spec)
 
         prev_dist = (self._target_pos() - self.pos).norm(dim=-1)
         self.plant.step(cg, rates, dt, delay)
@@ -1100,18 +1163,27 @@ class CourseEnv:
         # UC-87: after the respawn (which zeroes memory/DR for done envs), advance the memory ring
         # and the input-DR for the SURVIVORS, so the next obs()/extra() reflect this transition.
         if raw_action is not None:
-            self._update_memory(obs_now, raw_action, done)
+            self._update_memory(obs_now, raw_action, applied_raw, done)
         self._update_input_dr(done)
         return self.obs(), reward, done, tilt
 
     # ---- UC-87 per-step state updates (memory + input domain randomisation) ----
     def _update_memory(
-        self, obs_now: torch.Tensor | None, raw_action: torch.Tensor, done: torch.Tensor
+        self,
+        obs_now: torch.Tensor | None,
+        raw_action: torch.Tensor,
+        applied_raw: torch.Tensor,
+        done: torch.Tensor,
     ) -> None:
-        """Survivors record this step's raw action as ``prev_action`` and push ``obs_now`` into the
-        history ring (newest-first); done envs were already zeroed by :meth:`_spawn`."""
+        """Survivors record this step's state and push ``obs_now`` into the history ring
+        (newest-first); done envs were already zeroed by :meth:`_spawn`.
+
+        ``prev_action`` carries the raw INTENT (drives the penalty); ``prev_applied_raw`` carries
+        the effective-raw of the APPLIED command (drives the memory block, UC-88 AC4). They are
+        identical when the slew filter is off, so the memory stays byte-identical to UC-87."""
         surv = (~done)[:, None]
         self.prev_action = torch.where(surv, raw_action, self.prev_action)
+        self.prev_applied_raw = torch.where(surv, applied_raw, self.prev_applied_raw)
         if self.obs_hist is not None and obs_now is not None:
             rolled = self.obs_hist.roll(1, dims=1)
             rolled[:, 0] = obs_now

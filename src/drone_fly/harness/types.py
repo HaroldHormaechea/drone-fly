@@ -231,6 +231,9 @@ class TickRecord:
     obs: np.ndarray | None = None
     extra: np.ndarray | None = None
     command: ContractCommand | None = None
+    #: UC-88: the effective-raw ``a'`` of the post-slew-limiter applied command (``None`` when the
+    #: slew filter is off — ``command.raw`` already describes the sent command).
+    command_raw: np.ndarray | None = None
     sink_output: dict[str, Any] | None = None
     gate: GateEstimate | None = None
     free_space: FreeSpaceEstimate | None = None
@@ -245,6 +248,8 @@ class TickRecord:
 
     def as_dict(self) -> dict[str, Any]:
         extra = {} if self.predicted_state is None else {"predicted_state": self.predicted_state}
+        if self.command_raw is not None:  # UC-88: only present when the slew filter is on
+            extra["command_raw"] = self.command_raw
         return _jsonable(
             {
                 "tick": self.tick,
