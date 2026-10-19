@@ -228,7 +228,8 @@ def test_extra_dim_validation_refuses_pure_reservoir_and_bad_widths(bad):
 
 
 def test_supported_extra_dims():
-    assert SUPPORTED_EXTRA_DIMS == (12, 30, 70)
+    # UC-87 added the 98-dim memory contract (70 perception + prev_action(4) + obs_history(2*12)).
+    assert SUPPORTED_EXTRA_DIMS == (12, 30, 70, 98)
     for d in SUPPORTED_EXTRA_DIMS:
         assert validate_extra_dim(d) == d
 

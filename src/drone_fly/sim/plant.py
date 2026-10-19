@@ -68,7 +68,7 @@ low-voltage cutoff (motors to idle). Off by default: every UC67 path is unchange
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -101,6 +101,10 @@ class PlantConfig:
     delay_slots: int = 8
     #: Battery + thrust-at-speed model (needs a profile ``power`` block; UC68). Off: UC67 plant.
     power: bool = False
+    #: UC-87 D4: per-key absolute ``(min, max)`` dynamics-randomisation range overrides, keyed as
+    #: ``drone_fly.sim.randomization._LAYOUT`` (e.g. ``rates.roll.tau_s``). Empty ⇒ profile ranges
+    #: only. ``compare=False`` keeps :class:`PlantConfig` hashable despite the dict field.
+    range_overrides: dict[str, tuple[float, float]] = field(default_factory=dict, compare=False)
 
     def __post_init__(self) -> None:
         if self.integrator not in INTEGRATORS:
@@ -120,6 +124,10 @@ class PlantConfig:
         unknown = set(d) - set(cls.__dataclass_fields__)
         if unknown:
             raise ValueError(f"unknown plant keys {sorted(unknown)}")
+        if d.get("range_overrides"):
+            d["range_overrides"] = {
+                str(k): (float(v[0]), float(v[1])) for k, v in d["range_overrides"].items()
+            }
         return cls(**d)
 
 
@@ -194,8 +202,9 @@ class Plant:
         self.input_s = float(profile.latency.input_s)
 
         self.randomizer = DynamicsRandomizer(
-            profile, randomization_scale, self.generator, device=dev, dtype=dt
-        )
+            profile, randomization_scale, self.generator, device=dev, dtype=dt,
+            range_overrides=cfg.range_overrides,
+        )  # fmt: skip
         self.params = self.randomizer.sample(n)
         self.power = None
         if cfg.power:
@@ -234,6 +243,12 @@ class Plant:
         self._update_channel_delay()
 
     # ------------------------------------------------------------------ parameters
+
+    def set_dr_scale(self, scale: float) -> None:
+        """Change the dynamics-randomisation scale at runtime (UC-87 deployment ramp). Delegates to
+        the randomizer; newly-reset envs then draw their dynamics at the new scale. In-flight params
+        are unchanged until their env next resets (``reset`` resamples them)."""
+        self.randomizer.set_scale(scale)
 
     def _update_channel_delay(self) -> None:
         p = self.params

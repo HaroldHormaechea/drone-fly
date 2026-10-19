@@ -50,6 +50,22 @@ SUPPORTED_VERSIONS = (LEGACY_VERSION, CONTRACT_VERSION)
 REFERENCE_DRONE = "meteor75"
 SIDECAR_SUFFIX = ".contract.json"
 
+#: Observation-layout contract version (DISTINCT from the action ``CONTRACT_VERSION`` above). v1 is
+#: the model-11 layout whose ``extra`` is a clean prefix of ``obs||curr||next||obstacle_vision||
+#: raycast`` (extra_dim 12 / 30 / 70). v2 (UC-87) appends the policy-memory block
+#: ``prev_action(4)||obs_history(H*12)`` strictly AFTER raycast (the D2 end-append invariant), e.g.
+#: extra_dim 98 at H=2. Old checkpoints carry no ``obs_contract_version`` key and are read as v1, so
+#: they keep working unchanged (AC2).
+OBS_CONTRACT_VERSION = 2
+#: The model-11 (obs-contract v1) extra widths — a clean prefix of the fixed layout.
+LEGACY_EXTRA_DIMS = (12, 30, 70)
+
+
+def obs_contract_version(extra_dim: int | None) -> int:
+    """The observation-layout contract version an ``extra_dim`` implies: v1 for the model-11 prefix
+    widths (12 / 30 / 70), v2 once the UC-87 memory block is appended (any other width)."""
+    return 1 if extra_dim in LEGACY_EXTRA_DIMS else OBS_CONTRACT_VERSION
+
 
 @dataclass(frozen=True)
 class ActionSpec:
@@ -244,10 +260,15 @@ def write_sidecar(
     world_scale: float | None = None,
     course_conversion: dict[str, Any] | None = None,
     lineage: dict[str, Any] | None = None,
+    obs_contract_version: int | None = None,
     extra: dict[str, Any] | None = None,
 ) -> Path:
     """Write ``<stem>.contract.json``; ``extra`` adds further keys (UC70 student sidecars:
-    ``teacher``, ``noise_model``, ``perception``, ``camera``, ``timing``, ``actor_arch`` ...)."""
+    ``teacher``, ``noise_model``, ``perception``, ``camera``, ``timing``, ``actor_arch`` ...).
+
+    ``obs_contract_version`` (UC-87) records the observation-layout version; it is only written when
+    provided and > 1, so legacy / teacher / student sidecars stay byte-identical.
+    """
     data: dict[str, Any] = {
         "contract_version": spec.version,
         "action": {k: v for k, v in spec.as_dict().items() if k != "version"},
@@ -256,6 +277,8 @@ def write_sidecar(
         "drone": drone,
         "run_id": run_id,
     }
+    if obs_contract_version is not None and obs_contract_version > 1:
+        data["obs_contract_version"] = int(obs_contract_version)
     # UC68 teacher keys (absent from legacy sidecars)
     for key, value in (
         ("obs_schema", obs_schema),

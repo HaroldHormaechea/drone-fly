@@ -42,6 +42,12 @@ class TimingConfig:
     control_hz_set: tuple[float, ...] | None = None
     #: Base observation -> action delay per episode, uniform (s). Live p50 ~28 ms, p95 ~43 ms.
     action_delay_s: tuple[float, float] = (0.0, 0.060)
+    #: Per-episode delay distribution: ``uniform`` (default) or ``triangular`` (peaked at
+    #: ``action_delay_mode_s``, defaulting to the range midpoint) — UC-87's deploy-timing option to
+    #: concentrate the base delay near the measured live ~75 ms rather than spreading it uniformly.
+    action_delay_dist: str = "uniform"
+    #: Triangular peak (s); None ⇒ the midpoint of ``action_delay_s``. Ignored for ``uniform``.
+    action_delay_mode_s: float | None = None
     #: Per-tick Gaussian jitter on the delay (s, std); the delay is clamped at 0.
     delay_jitter_s: float = 0.005  # live compute p50 17.3 ms vs p95 25.5 ms
     #: Per-episode skip probability, uniform. Live: 41/116 = 35 % missed deadlines.
@@ -62,6 +68,10 @@ class TimingConfig:
         dlo, dhi = self.action_delay_s
         if not 0 <= dlo <= dhi:
             raise ValueError(f"timing.action_delay_s needs 0 <= lo <= hi, got {(dlo, dhi)}")
+        if self.action_delay_dist not in ("uniform", "triangular"):
+            raise ValueError("timing.action_delay_dist must be uniform or triangular")
+        if self.action_delay_mode_s is not None and not dlo <= self.action_delay_mode_s <= dhi:
+            raise ValueError("timing.action_delay_mode_s must lie within action_delay_s")
         if self.delay_jitter_s < 0:
             raise ValueError("timing.delay_jitter_s must be >= 0")
         plo, phi = self.skip_prob
@@ -69,6 +79,13 @@ class TimingConfig:
             raise ValueError(f"timing.skip_prob needs 0 <= lo <= hi < 1, got {(plo, phi)}")
         if self.fixed_hz <= 0:
             raise ValueError("timing.fixed_hz must be positive")
+
+    @property
+    def delay_mode_s(self) -> float:
+        """The triangular peak (midpoint of ``action_delay_s`` when unset)."""
+        if self.action_delay_mode_s is not None:
+            return float(self.action_delay_mode_s)
+        return 0.5 * (self.action_delay_s[0] + self.action_delay_s[1])
 
     @classmethod
     def fixed(cls, hz: float) -> TimingConfig:
@@ -88,6 +105,11 @@ class TimingConfig:
         for key in ("delay_jitter_s", "fixed_hz"):
             if key in d:
                 kw[key] = float(d.pop(key))
+        if "action_delay_mode_s" in d:
+            v = d.pop("action_delay_mode_s")
+            kw["action_delay_mode_s"] = None if v is None else float(v)
+        if "action_delay_dist" in d:
+            kw["action_delay_dist"] = str(d.pop("action_delay_dist"))
         if "mode" in d:
             kw["mode"] = str(d.pop("mode"))
         if d:
@@ -118,6 +140,10 @@ class ControlTiming:
     device: torch.device
     generator: torch.Generator | None = None
     dtype: torch.dtype = torch.float64
+    #: UC-87 deployment ramp (0..1). 1.0 ⇒ the full configured ranges (byte-identical default);
+    #: 0.0 ⇒ the clean baseline (fixed ``config.fixed_hz`` period, zero delay, zero skip). The env
+    #: sets this to ``deploy_dr_scale`` before each resample.
+    scale: float = 1.0
     period_s: torch.Tensor = field(init=False)
     delay_s: torch.Tensor = field(init=False)
     skip_prob: torch.Tensor = field(init=False)
@@ -154,8 +180,28 @@ class ControlTiming:
             else:
                 hz = c.control_hz[0] + (c.control_hz[1] - c.control_hz[0]) * self._u()
             period = 1.0 / hz
-            delay = c.action_delay_s[0] + (c.action_delay_s[1] - c.action_delay_s[0]) * self._u()
+            dlo, dhi = c.action_delay_s
+            if c.action_delay_dist == "triangular" and dhi > dlo:
+                # inverse-CDF triangular sampling, peaked at ``delay_mode_s``
+                mode = c.delay_mode_s
+                u = self._u()
+                split = (mode - dlo) / (dhi - dlo)
+                lower = dlo + torch.sqrt(u * (dhi - dlo) * (mode - dlo))
+                upper = dhi - torch.sqrt((1.0 - u) * (dhi - dlo) * (dhi - mode))
+                delay = torch.where(u < split, lower, upper)
+            else:
+                delay = dlo + (dhi - dlo) * self._u()
             skip = c.skip_prob[0] + (c.skip_prob[1] - c.skip_prob[0]) * self._u()
+            # UC-87 deployment ramp: interpolate from the clean baseline toward the sampled values.
+            # The clean period anchor is ``config.fixed_hz`` — the SAME rate the `perfect` preset
+            # uses (``TimingConfig.fixed(PERFECT_HZ)`` in smooth_eval); keep fixed_hz and PERFECT_HZ
+            # consistent if either changes. Delay/skip ramp from 0.
+            s = float(self.scale)
+            if s < 1.0:
+                clean_period = torch.full_like(period, 1.0 / c.fixed_hz)
+                period = clean_period + s * (period - clean_period)
+                delay = s * delay
+                skip = s * skip
         self.period_s = torch.where(mask, period, self.period_s)
         self.delay_s = torch.where(mask, delay, self.delay_s)
         self.skip_prob = torch.where(mask, skip, self.skip_prob)
@@ -168,7 +214,9 @@ class ControlTiming:
         """
         if self.config.mode == "fixed":
             return self.period_s, self.delay_s, torch.zeros_like(self.period_s, dtype=torch.bool)
-        jit = self.config.delay_jitter_s * torch.randn(
+        # UC-87 deployment ramp: scale the per-tick jitter by ``self.scale`` too, so scale 0 is
+        # TRULY clean (no residual jitter delay), matching the resample ramp (delay/skip from 0).
+        jit = float(self.scale) * self.config.delay_jitter_s * torch.randn(
             self.n, generator=self.generator, device=self.device, dtype=self.dtype
         )
         delay = (self.delay_s + jit).clamp(min=0.0)

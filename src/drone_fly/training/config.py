@@ -92,6 +92,28 @@ class CurriculumConfig:
     difficulty_frac: float | None = None
     obs_pos_frac: float | None = None
     obs_count_frac: float | None = None
+    # UC-87 redesign — staged ramps, each a ``[start_frac, end_frac]`` pair (the scale is 0 before
+    # start, linear 0->1 between, 1 after end). ``null`` = off ⇒ the scale is pinned at 1.0 (full
+    # from step 0, the pre-redesign behaviour), so existing configs are unaffected.
+    timing_dr_frac: tuple[float, float] | None = None  # CourseEnv.deploy_dr_scale (AC1/AC6)
+    input_dr_frac: tuple[float, float] | None = None  # CourseEnv.input_dr_scale (AC5/AC6)
+    penalty_frac: tuple[float, float] | None = None  # action-rate λ anneal (AC3)
+    #: Effective action-rate λ-scale ramps ``penalty_init_scale`` -> 1.0 over ``penalty_frac``.
+    penalty_init_scale: float = 1.0
+
+    def __post_init__(self) -> None:
+        for name in ("timing_dr_frac", "input_dr_frac", "penalty_frac"):
+            v = getattr(self, name)
+            if v is None:
+                continue
+            t = tuple(float(x) for x in v)
+            if len(t) != 2 or not (0.0 <= t[0] <= t[1] <= 1.0):
+                raise TrainConfigError(
+                    f"curriculum.{name} must be [start, end] with 0 <= start <= end <= 1, got {v!r}"
+                )
+            object.__setattr__(self, name, t)
+        if not 0.0 <= self.penalty_init_scale <= 1.0:
+            raise TrainConfigError("curriculum.penalty_init_scale must be in [0, 1]")
 
 
 @dataclass(frozen=True)

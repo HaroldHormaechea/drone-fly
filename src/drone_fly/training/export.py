@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,74 @@ def _sha(path: Path) -> str | None:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def resolve_contract_checkpoint(run: str | Path, which: str = "final") -> Path:
+    """The reservoir ``model_readout.pt`` of a run folder (or a direct checkpoint path).
+
+    ``which``: ``final`` -> ``checkpoints/model_readout.pt``; ``it<N>`` -> the periodic checkpoint.
+    """
+    r = Path(run)
+    if r.is_file():
+        return r
+    ck = r / "checkpoints"
+    name = "model_readout.pt" if which == "final" else f"model_readout_{which}.pt"
+    p = ck / name
+    if not p.is_file():
+        raise ExportError(f"checkpoint {p} not found (run folder {r})")
+    return p
+
+
+def export_deploy_robust(
+    run: str | Path, out_dir: str | Path, *, which: str = "final"
+) -> dict[str, Any]:
+    """AC9: bundle the UC-87 deploy-robust reservoir model into a deliverable folder.
+
+    Copies the stripped ``model_readout.pt`` and its ``.contract.json`` sidecar into ``out_dir``
+    (e.g. ``training/13-deploy-robust/``), asserting the sidecar records the memory contract:
+    ``extra_dim == 98`` (> 70) and ``obs_contract_version == 2``. Returns the written meta. The
+    README + live-harness yaml live in ``out_dir`` already (committed); this adds the checkpoint
+    produced on the GPU box.
+    """
+    from drone_fly.harness.assembler import FULL_EXTRA_DIM
+    from drone_fly.sim.action import read_sidecar
+
+    ckpt = resolve_contract_checkpoint(run, which)
+    side = read_sidecar(ckpt)
+    if side is None:
+        raise ExportError(f"{ckpt}: no .contract.json sidecar (not a deployable reservoir model)")
+    extra_dim = side.get("extra_dim")
+    if not isinstance(extra_dim, int) or extra_dim <= FULL_EXTRA_DIM:
+        raise ExportError(
+            f"{ckpt}: extra_dim {extra_dim!r} is not a memory contract (expected > "
+            f"{FULL_EXTRA_DIM}, e.g. 98); this export is for the UC-87 deploy-robust model"
+        )
+    if int(side.get("obs_contract_version", 1)) != 2:
+        raise ExportError(
+            f"{ckpt}: obs_contract_version {side.get('obs_contract_version')!r} != 2 "
+            "(the memory model must record the v2 observation contract)"
+        )
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    side_src = ckpt.with_name(ckpt.stem + ".contract.json")
+    dst_pt = out / "model_readout.pt"
+    dst_side = out / "model_readout.contract.json"
+    shutil.copyfile(ckpt, dst_pt)
+    shutil.copyfile(side_src, dst_side)
+    log.info(
+        "exported deploy-robust model to %s (extra_dim=%d, obs-contract v%s)",
+        out,
+        extra_dim,
+        side.get("obs_contract_version"),
+    )
+    return {
+        "checkpoint": str(dst_pt),
+        "sidecar": str(dst_side),
+        "extra_dim": extra_dim,
+        "contract_version": side.get("contract_version"),
+        "obs_contract_version": side.get("obs_contract_version"),
+        "sha256": _sha(dst_pt),
+    }
 
 
 def resolve_student_checkpoint(run: str | Path, which: str = "val") -> Path:

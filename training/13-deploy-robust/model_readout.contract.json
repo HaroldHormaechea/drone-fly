@@ -1,0 +1,13 @@
+{
+  "contract_version": 2,
+  "action": {
+    "collective_scale_g": 1.0,
+    "max_rate_rad_s": 4.0,
+    "max_g": 2.5
+  },
+  "extra_dim": 98,
+  "actor": "k1-reservoir-aug",
+  "drone": "meteor75",
+  "run_id": "20261018T215712Z-uc87-r5-warmstart",
+  "obs_contract_version": 2
+}

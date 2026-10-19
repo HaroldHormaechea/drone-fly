@@ -1,0 +1,37 @@
+# UC-87 deploy-robust — WARM-START recipe (the PROVEN winner; run 5 of the 2026-10-18/19 campaign).
+#
+# This is the shipped deploy-robust training recipe. The fresh-from-scratch `uc87-deploy-robust`
+# config could NOT hold full-difficulty completion (it collapses as difficulty reaches full, even
+# before DR). Warm-starting model 11 — which already completes ~56% at full difficulty — and keeping
+# difficulty FULL from the start (no destabilising ramp), then gently ramping ONLY the deployment /
+# perception DR + the action-rate penalty on top, is what works.
+#
+# Result vs model 11 at LIVE-LIKE (the conditions that occur in deployment), 128-ep eval, full
+# difficulty: yaw sign-flips 1.79 vs 7.11 (-75%), saturation 1.5% vs 9.6% (-84%), mean|Δ| 0.739 vs
+# 1.345 (-45%), completion 28.9% vs 27.3% (slightly better). I.e. much smoother live flight at
+# equal/better completion — the UC-87 goal. (Known limitation: 0% at the idealised `perfect` preset
+# — a sim-only clean condition that never occurs live; a uniform-delay variant did not recover it and
+# regressed live-like, so this triangular-delay recipe stands. See training/13-deploy-robust/README.)
+#
+# The 28 new memory readout columns are zero-initialised (src_extra_dim 70 -> 98) so the policy starts
+# == model 11; the curriculum then ramps the deployment/perception/penalty terms in from there.
+extends: uc87-deploy-robust
+name: uc87-deploy-robust-warmstart
+budget: 16.0e6
+
+warm_start:
+  checkpoint: training/11-count-curriculum/model_readout.pt   # the 70-input avoider (repo-root relative)
+  src_extra_dim: 70         # zero-init the 28 memory columns (AC2 back-compat path)
+  legacy_v1: false          # model 11 is already action-contract v2
+
+curriculum:
+  # Full difficulty / obstacles from step 0 — model 11 already solves this; NO ramp (null = full).
+  # (Ramping difficulty to full from scratch is what collapsed the fresh runs.)
+  difficulty_frac: null
+  obs_pos_frac: null
+  obs_count_frac: null
+  # Gentle staggered DR on top of the completing warm-start base (brief 0-15% clean settle first).
+  timing_dr_frac: [0.15, 0.45]    # Deployment: timing/delay/τ
+  input_dr_frac: [0.45, 0.75]     # Perception: input noise
+  penalty_frac: [0.25, 0.65]      # anneal action-rate λ in as DR ramps
+  penalty_init_scale: 0.1

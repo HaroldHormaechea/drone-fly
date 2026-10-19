@@ -482,13 +482,25 @@ def run_harness(
         )  # fmt: skip
         policy = stu.StudentPolicyRunner(student_plan, step, contract=contract)
     else:
-        assembler = ContractObservationAssembler(contract)
+        from drone_fly.harness.assembler import ContractMemory
+
+        # UC-87: a 98-style extra_dim gets a policy-memory ring; the runner drives it.
+        assembler = ContractObservationAssembler(
+            contract, memory=ContractMemory.for_extra_dim(extra_dim)
+        )
         policy = ContractPolicyRunner(contract, checkpoint, extra_dim)  # type: ignore[arg-type]
     settings = RunnerSettings.from_config(cfg)
     # Spawn-yaw frame alignment: contract checkpoints only (teacher / student: their own frames).
     yaw_aligner: SpawnYawAligner | None = None
     if plan is None and student_plan is None:
-        yaw_aligner = SpawnYawAligner(enabled=settings.align_spawn_yaw in ("auto", True))
+        from drone_fly.harness.assembler import FULL_EXTRA_DIM
+
+        enabled = settings.align_spawn_yaw in ("auto", True)
+        # UC-87 new-contract default: the memory model (obs-contract v2, extra_dim > 70) is trained
+        # with random spawn yaw, so `auto` no longer engages the aligner (explicit true still does).
+        if settings.align_spawn_yaw == "auto" and (extra_dim or 0) > FULL_EXTRA_DIM:
+            enabled = False
+        yaw_aligner = SpawnYawAligner(enabled=enabled)
     # Smith-predictor latency compensation: contract checkpoints only; auto also needs the wall
     # clock (the loopback's sim clock has no latency) and is resolved again after the model load.
     latency_comp: LatencyCompensator | None = None

@@ -1,0 +1,101 @@
+# UC-87 REDESIGN — deploy-robust FRESH TRAIN of the 98-dim memory policy (sim only).
+#
+# Run-1/run-2 (warm-starting model 11 straight into full domain-randomisation from step 0 — above all
+# an unramped spawn-yaw 0–360° — with the model-11 obstacle-count curriculum discarded) collapsed
+# completion to ~0% (see training/13-deploy-robust/README.md). This is the redesign: train FRESH,
+# smooth by construction, with a STAGED curriculum, keeping the SpawnYawAligner and NO spawn-yaw DR.
+#
+# Stages (ramps scheduled at different budget fractions; see `curriculum` below):
+#   1. Base (early)       — restore model 11's completion recipe on the 98-dim memory policy:
+#                           obstacle-count curriculum (1→N) + difficulty + position ramps, clearance/
+#                           terminal/floor shaping, CLEAN timing, ALIGNED spawn, MILD λ.
+#   2. Deployment (mid)   — ramp in AC1 timing/delay/τ via `timing_dr_frac` (deploy_dr_scale 0→1).
+#   3. Perception (late)  — ramp in AC5 input noise/dropout via `input_dr_frac`; anneal λ to target
+#                           via `penalty_frac` (penalty_scale 0.1→1.0).
+#
+# Completion recipe seeded from model 11 (gpu_prototype/exp11_count-curriculum.py): count_curr 0.5,
+# logstd init -0.5 / final -1.0 / anneal 0.5, clearance-shaping + terminal-contact. exp11 RESUMED a
+# baseline, so a fresh run must restore position + difficulty + count together.
+#
+# The DR ranges (16.7–50 Hz, 0–100 ms triangular@75 ms, τ 0.005–0.083) are unchanged from run-1 —
+# they are now RAMPED IN by the curriculum, not applied from step 0.
+#
+# Empirical AC9/AC10 numbers are produced on the GPU box (D6). Build the eyes-v2 ray-noise model
+# (inherited `course.ray_noise`) before the run: drone-fly eyes noise-model ... -> artifacts/eyes/ray-noise-v2.yaml
+extends: uc83-obstacle-rays-v2
+name: uc87-deploy-robust
+n_envs: 256               # A3000 6 GB
+budget: 24.0e6            # fresh train needs more than the 8M fine-tune (size to the curriculum)
+
+plant:
+  integrator: exact
+  substeps: 2             # finer physics so the ZOH / delay are resolved under the wider timing
+  # D4: a fast-Betaflight rate loop (~5 ms) up to a soft ~55 ms+ τ — unreachable along the profile's
+  # nominal->range axis, so set here as an absolute per-key override. RAMPED IN by deploy_dr_scale
+  # (scale 0 ⇒ τ = profile nominal; scale 1 ⇒ this full span).
+  range_overrides:
+    rates.roll.tau_s: [0.005, 0.083]
+    rates.pitch.tau_s: [0.005, 0.083]
+    rates.yaw.tau_s: [0.005, 0.083]
+
+timing:
+  mode: random
+  control_hz: [16.7, 50.0]        # down to ~60 ms control period (live: 50 Hz target, ~37 Hz eff.)
+  action_delay_s: [0.0, 0.100]    # 0..100 ms actuation delay
+  action_delay_dist: triangular   # concentrated near the measured live ~75 ms
+  action_delay_mode_s: 0.075
+  delay_jitter_s: 0.005
+  skip_prob: [0.0, 0.35]
+  fixed_hz: 50.0                   # the CLEAN baseline the deploy ramp interpolates from (= PERFECT_HZ)
+
+course:
+  no_obs: false
+  raycast: true
+  shaping: true
+  obs_terminal: true
+  floor: true                     # AC7 floor-margin shaping
+  # --- policy memory (AC2) ---
+  memory: true
+  history_len: 2
+  # --- smoothness penalties (AC3; action-rate λ is annealed via penalty_frac, saturation is not) ---
+  action_rate_lambda: 0.08        # TARGET λ (~0.05-0.1); ramped in from penalty_init_scale·λ
+  saturation_weight: 0.02         # small/constant guard-rail — intentionally NOT annealed
+  saturation_threshold: 0.95      # |tanh(a)| >= 3.8/4.0 is saturated (AC8)
+  # --- altitude envelope (AC7) ---
+  ceiling_z: 5.0
+  # --- aligned spawn (AC4): NO spawn-yaw DR; the live SpawnYawAligner handles live yaw ---
+  spawn_yaw: false
+  spawn_distance_m: null
+  # --- input domain randomisation (AC5), RAMPED IN by input_dr_scale (magnitudes = full at scale 1) ---
+  gyro_noise_sigma: 0.4           # white gyro noise sigma (rad/s), ~0.3-0.5
+  gyro_vibration_sigma: 0.3       # coloured (AR(1)) vibration amplitude
+  gyro_vibration_rho: 0.6
+  raycast_floor: true             # the floor is visible to the eyes-like rays
+  obstacle_vision_zero: true      # live sees a zeroed obstacle_vision block
+  gate_pos_noise_m: 0.06          # gate estimate noise (~0.06 m)
+  gate_outlier_p: 0.10            # 10 % outliers ...
+  gate_outlier_m: 0.4             # ... at ~0.4 m
+  gate_staleness_s: 0.16          # staleness up to 160 ms
+  gate_dropout_p: 0.30            # ~30 % Markov dropout (hold last estimate)
+
+actor:
+  extra_dim: 98                   # == course.extra_dim (raycast 70 + memory 28)
+
+ppo:
+  logstd_init: -0.5               # model-11 (exp11) exploration recipe
+  logstd_final: -1.0
+  anneal_start: 0.5
+
+curriculum:
+  # Base stage — restore model 11's completion recipe (exp11): count 1→N, difficulty + position.
+  difficulty_frac: 0.6
+  obs_pos_frac: 0.5
+  obs_count_frac: 0.5
+  # Staged deploy/perception/penalty ramps ([start_frac, end_frac] of the budget).
+  timing_dr_frac: [0.3, 0.6]      # Deployment: ramp AC1 timing/delay/τ after completion establishes
+  input_dr_frac: [0.6, 0.85]      # Perception: ramp AC5 input noise last
+  penalty_frac: [0.5, 0.8]        # AC3: anneal action-rate λ in once completion holds
+  penalty_init_scale: 0.1         # λ starts at 0.1·target (mild), rises to target
+
+warm_start:
+  checkpoint: null                # FRESH train — the readout (incl. memory columns) is random-init

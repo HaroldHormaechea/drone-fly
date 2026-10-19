@@ -111,6 +111,7 @@ class DynamicsRandomizer:
         *,
         device: str | torch.device = "cpu",
         dtype: torch.dtype = torch.float32,
+        range_overrides: dict[str, tuple[float, float]] | None = None,
     ) -> None:
         if not 0.0 <= float(scale):
             raise ValueError(f"randomization scale must be >= 0, got {scale}")
@@ -119,6 +120,16 @@ class DynamicsRandomizer:
         self.generator = generator
         self.device = torch.device(device)
         self.dtype = dtype
+        # UC-87 D4: per-key absolute ``(min, max)`` ranges that take precedence over
+        # ``profile.randomization[key]`` in :meth:`bounds`, so training can target a range the
+        # profile's nominal->range axis cannot reach (e.g. a fast-Betaflight rate-loop τ) WITHOUT
+        # editing the drone profile. Keys use the ``_LAYOUT`` form, e.g. ``rates.roll.tau_s``.
+        self.range_overrides: dict[str, tuple[float, float]] = {
+            k: (float(v[0]), float(v[1])) for k, v in (range_overrides or {}).items()
+        }
+        unknown = set(self.range_overrides) - {k for k, _ in _LAYOUT}
+        if unknown:
+            raise ValueError(f"unknown randomization range_overrides keys {sorted(unknown)}")
         rates = profile.rates
         # nominal values, keyed like profile.randomization; each is a 1- or 3-tuple
         self.nominal: dict[str, tuple[float, ...]] = {
@@ -136,6 +147,11 @@ class DynamicsRandomizer:
             "drag.quadratic_per_m": not isinstance(profile.drag.quadratic_per_m, tuple),
         }
         self.randomized = sorted(profile.randomization)
+        self._iso = iso
+        self._recompute()
+
+    def _recompute(self) -> None:
+        """Rebuild the ``_lo``/``_span``/``_src`` sampling tables for the current ``self.scale``."""
         lo, hi, src = [], [], []
         draws: dict[tuple[str, int], int] = {}
         for key, comp in _LAYOUT:
@@ -144,22 +160,43 @@ class DynamicsRandomizer:
             shift = self.nominal[key][0] if key == "latency.control_to_gyro_s" else 0.0
             lo.append(klo[comp] - shift)
             hi.append(khi[comp] - shift)
-            draw_key = (key, 0 if iso.get(key, False) else comp)
+            draw_key = (key, 0 if self._iso.get(key, False) else comp)
             src.append(draws.setdefault(draw_key, len(draws)))
-        self._lo = torch.tensor(lo, dtype=dtype, device=self.device)
-        self._span = torch.tensor(hi, dtype=dtype, device=self.device) - self._lo
+        self._lo = torch.tensor(lo, dtype=self.dtype, device=self.device)
+        self._span = torch.tensor(hi, dtype=self.dtype, device=self.device) - self._lo
         self._src = torch.tensor(src, dtype=torch.long, device=self.device)
         self._n_draws = len(draws)
 
+    def set_scale(self, scale: float) -> None:
+        """Change the randomisation scale at runtime (UC-87 deployment ramp), rebuilding the sample
+        tables with the same ``bounds`` formula. ``scale=0`` ⇒ nominal plant (no DR, tau = profile
+        nominal); it opens to the full ranges (incl. the tau override span) as scale → config."""
+        s = float(scale)
+        if s < 0.0:
+            raise ValueError(f"randomization scale must be >= 0, got {scale}")
+        if s == self.scale:
+            return
+        self.scale = s
+        self._recompute()
+
     def bounds(self, key: str) -> tuple[tuple[float, ...], tuple[float, ...]]:
-        """Scaled ``(lo', hi')`` per component of ``key`` (equal to the nominal if unlisted)."""
+        """Scaled ``(lo', hi')`` per component of ``key`` (equal to the nominal if unlisted).
+
+        A ``range_overrides[key]`` (UC-87 D4) replaces ``profile.randomization[key]``'s range; the
+        same nominal->range scaling by ``self.scale`` still applies (so ``scale=0`` is nominal).
+        """
         nom = self.nominal[key]
-        rng = self.profile.randomization.get(key)
-        if rng is None:
-            return nom, nom
+        ov = self.range_overrides.get(key)
+        if ov is not None:
+            rng_min, rng_max = ov
+        else:
+            rng = self.profile.randomization.get(key)
+            if rng is None:
+                return nom, nom
+            rng_min, rng_max = rng.min, rng.max
         s = self.scale
-        lo = tuple(n + s * (rng.min - n) for n in nom)
-        hi = tuple(n + s * (rng.max - n) for n in nom)
+        lo = tuple(n + s * (rng_min - n) for n in nom)
+        hi = tuple(n + s * (rng_max - n) for n in nom)
         return lo, hi
 
     def _table(self, n: int) -> torch.Tensor:

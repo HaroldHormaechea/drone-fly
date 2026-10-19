@@ -1,0 +1,28 @@
+# UC-87 deploy-robust — live-flight harness preset for the 98-dim deploy-robust policy.
+#
+# A PRESET overlaid on the packaged default (liftoff_5inch.yaml / liftoff_arena.yaml). Flies the
+# 98-dim memory model (obs-contract v2) exported to this folder:
+#
+#   drone-fly harness run \
+#     --checkpoint training/13-deploy-robust/model_readout.pt \
+#     --extra-dim 98 \
+#     --preset liftoff_arena --config training/13-deploy-robust/harness-liftoff.yaml
+#
+# Alignment:
+#   * runner.align_spawn_yaw: true — the UC-87 REDESIGN trains the policy from an ALIGNED spawn (no
+#     spawn-yaw randomisation; the SpawnYawAligner is the spawn-yaw solution, kept ON). The live frame
+#     therefore MUST be rotated onto the fixed training heading, exactly as model 11 required. (The
+#     earlier run-1/run-2 attempt flipped this to false on the assumption that uniform 0..360 deg
+#     spawn-yaw DR would teach yaw-invariance — that attempt collapsed completion; see README.)
+#   * runner.latency_compensation: off — UC-87 trained WITH the live control timing + ~75 ms
+#     actuation delay and a previous-action/history memory input, so the Smith predictor is
+#     redundant (and the v2 action contract is not eligible for it anyway).
+#
+# Everything else (camera FOV/uptilt, HUD masks, the learned gate detector + eyes free-space
+# estimator, telemetry) is inherited from the base liftoff preset — calibrate the camera block for
+# your resolution/track as usual (see src/drone_fly/harness/configs/liftoff_arena.yaml).
+harness: liftoff
+
+runner:
+  align_spawn_yaw: true
+  latency_compensation: off

@@ -514,6 +514,9 @@ class HarnessRunner:
             self.yaw_aligner.reset()  # every run captures its own spawn yaw
         if self.latency_comp is not None:
             self.latency_comp.reset()
+        mem = getattr(self.assembler, "memory", None)
+        if mem is not None:
+            mem.reset()  # UC-87 policy memory: zero-seed at run start (D3)
         self._wait_for_state()
         self._wait_for_focus()
         start = self.clock.now()
@@ -587,6 +590,9 @@ class HarnessRunner:
                 aligner.reset()  # a respawn: re-capture the spawn yaw from this tick
             if self.latency_comp is not None:
                 self.latency_comp.reset()  # the in-flight commands belong to the old attempt
+            mem = getattr(self.assembler, "memory", None)
+            if mem is not None:
+                mem.reset()  # UC-87: a respawn resets the policy memory (D3 boundary reset)
         if aligner is not None:
             psi0 = aligner.capture(state)
             if psi0 is not None:
@@ -656,6 +662,11 @@ class HarnessRunner:
                 raw, brain = self.policy.act_with_brain(obs, extra)
             else:
                 raw = self.policy.act(obs, extra)
+            mem = getattr(self.assembler, "memory", None)
+            if mem is not None:
+                # UC-87 (D3): record the raw action output and the core obs the policy saw, so the
+                # next tick's memory block holds them — the sim does the same in CourseEnv.step.
+                mem.observe(obs, raw)
             command = decode_action(raw, self.contract, getattr(self.policy, "action_spec", None))
         except Exception as exc:  # noqa: BLE001
             log.exception("policy failed")
