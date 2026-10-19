@@ -71,7 +71,7 @@ from drone_fly.harness.interfaces import (
 )
 from drone_fly.harness.policy import decode_action
 from drone_fly.harness.types import ContractCommand, FreeSpaceEstimate, GateEstimate, TickRecord
-from drone_fly.sim.action import raw_of_command
+from drone_fly.sim.action import legacy_reference, raw_of_command
 
 log = logging.getLogger(__name__)
 
@@ -678,17 +678,29 @@ class HarnessRunner:
                 raw = self.policy.act(obs, extra)
             action_spec = getattr(self.policy, "action_spec", None)
             command = decode_action(raw, self.contract, action_spec)
-            # UC-88: clamp the APPLIED command's slew in command space (after decode, before send),
-            # then re-derive the ContractCommand and the effective-raw ``a'`` the policy actually
-            # applied. The memory sees ``a'`` (AC4); off ⇒ a' == raw and the command is unchanged.
+            # UC-88: clamp the applied command's slew in command space (after decode, before send).
+            # The ACTUATED command is the clamp output verbatim: collective_g / rates are exact (no
+            # decode(raw_of_command(...)) round-trip in the sent values); fraction / thrust derive
+            # from collective_g exactly as the decoder does. The effective-raw a' is computed ONLY
+            # for the policy memory (AC4) + the record. Off => a' == raw, command unchanged.
             mem_action = raw
             if self.slew is not None and self.slew.enabled:
                 applied = self.slew.step(
                     np.array([command.collective_g, *command.rates], dtype=np.float32), period
                 )
-                mem_action = raw_of_command(applied, action_spec)
-                command = decode_action(mem_action, self.contract, action_spec)
-                record.command_raw = np.asarray(mem_action, dtype=np.float32)
+                cg = float(applied[0])
+                rates = np.asarray(applied[1:4], dtype=np.float32)
+                mem_action = np.asarray(raw_of_command(applied, action_spec), dtype=np.float32)
+                frac = float(np.clip(legacy_reference().fraction_for_g(cg), 0.0, 1.0))
+                command = ContractCommand(
+                    raw=mem_action,
+                    collective=frac,
+                    thrust=float(np.float32(frac) * self.contract.MAX_THRUST),
+                    rates=rates,
+                    collective_g=cg,
+                    contract_version=command.contract_version,
+                )
+                record.command_raw = mem_action
             mem = getattr(self.assembler, "memory", None)
             if mem is not None:
                 # UC-87/88 (D3): record the APPLIED raw action (== raw when the slew filter is off)

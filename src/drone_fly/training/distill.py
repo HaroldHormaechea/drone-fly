@@ -983,6 +983,13 @@ def student_sidecar(
     extra = {}
     if cfg.base.tracks.obstacles != "all":  # UC77: default sidecars stay unchanged
         extra["course_obstacles"] = cfg.base.tracks.obstacles
+    # UC-88: carry the command slew-rate filter into the student sidecar so deploy == training; the
+    # default (no slew) leaves the sidecar byte-identical.
+    slew_time_s = getattr(cfg.base.course, "slew_time_s", None)
+    if slew_time_s is not None:
+        from drone_fly.sim.action import SlewSpec
+
+        extra["action_filter"] = SlewSpec(float(slew_time_s)).as_dict()
     # UC79: an opt-in privileged (diagnostic) student records its block list + obs dim and is
     # marked non-deployable; the default (empty) path leaves the sidecar byte-identical (AC3).
     priv = tuple(getattr(cfg.distill, "student_privileged", ()))

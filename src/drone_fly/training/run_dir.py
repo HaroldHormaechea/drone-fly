@@ -52,6 +52,7 @@ import yaml
 from drone_fly.sim.action import (
     CONTRACT_VERSION,
     ActionSpec,
+    SlewSpec,
     obs_contract_version,
     write_sidecar,
 )
@@ -59,6 +60,17 @@ from drone_fly.sim.action import (
 CHECKPOINT_NAME = "model_readout.pt"
 TEACHER_NAME = "teacher.pt"
 RESUME_NAME = "resume.pt"
+
+
+def _slew_sidecar_extra(config: Any) -> dict[str, Any] | None:
+    """UC-88: the ``action_filter`` sidecar key when the training course enabled the slew limiter,
+    else ``None`` so the sidecar stays byte-identical for runs trained without it. Writing it into
+    the checkpoint makes deploy == training by construction (the harness reads it back)."""
+    course = getattr(config, "course", None)
+    slew_time_s = getattr(course, "slew_time_s", None) if course is not None else None
+    if slew_time_s is None:
+        return None
+    return {"action_filter": SlewSpec(float(slew_time_s)).as_dict()}
 
 
 def default_root() -> Path:
@@ -198,6 +210,7 @@ class RunDir:
             drone=self.profile.id,
             run_id=self.run_id,
             obs_contract_version=obs_contract_version(extra_dim),
+            extra=_slew_sidecar_extra(self.config),
         )
         return path
 
