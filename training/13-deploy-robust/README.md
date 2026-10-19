@@ -259,6 +259,31 @@ from drone_fly.harness.offline.recordings import completeness_from_pose
 report = completeness_from_pose(recording, course)   # true gate-by-gate completion from the pose track
 ```
 
+## UC-89 — grounded-launch + placeholder-gate frame fix (retrain pending)
+
+UC-89 fixes two defects the live 768 re-fly exposed in this recipe. The **code + CPU tests ship with
+this change; the retrained checkpoint and its metrics are a post-merge GPU step** (like UC-87/88), so
+the numbers above still describe the pre-UC-89 model until the re-fly lands.
+
+- **No-detection gate contract changed.** The live tracker (`gate_cv.py`) and the sim now emit a
+  **frame-neutral** `curr_gate = [0, 0, aperture]` on genuine no-detection (was `[1, 0, aperture]`, a
+  world-frame yaw-0 direction that the `SpawnYawAligner` rotated into a fake ~90°-off gate at the live
+  −90° spawn). The detected path is byte-identical — only the no-gate branch changed. **Any policy
+  deployed with `align_spawn_yaw: true` must be (re)trained with the matching neutral semantics**
+  (below) so train and deploy agree; the shipped UC-87 model predates this and should be re-flown only
+  after the UC-89 retrain.
+- **Two new default-off `CourseConfig` levers** (byte-identical when unset — existing configs/metrics
+  are unaffected), set by the UC-89 retrain config:
+  - `ground_gate_ahead_frac` (0–1): fraction of **ground** starts whose whole course is rigidly
+    rotated about the spawn so gate-0 is presented dead-ahead (+x), exactly as the live aligner
+    presents the scene. Pair with `spawn_distance_m ≈ 3.2` (world_scale 12 ≈ live 38 m) to put a
+    grounded gate-0 in view at the live geometry. Note: box obstacles rotate by centre only (AABB
+    faces are axis-aligned with no stored orientation); gates and cylinders are fully frame-correct.
+  - `pre_acquire_s` (s): holds the policy's **observed** gate at full neutral (`rel = 0`,
+    `curr_gate = [0, 0, aperture]`) for the first part of a ground episode — the sim twin of the
+    harness no-detection output — modelling the live grounded pre-lock window (observation only; the
+    true geometry/reward are untouched).
+
 ## Files
 
 - `harness-liftoff.yaml` — the live-flight harness preset (committed now; `align_spawn_yaw: true`).

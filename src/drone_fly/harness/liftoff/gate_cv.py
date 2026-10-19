@@ -456,7 +456,11 @@ class TrackingGateEstimator(GateEstimator):
                 curr = curr_gate_block(held.gate)
             else:
                 target = pos.astype(_F)
-                curr = np.array([1.0, 0.0, self.default_aperture], _F)
+                # UC-89: frame-neutral no-gate placeholder. A world-frame [1,0] (yaw 0)
+                # rotates under the spawn-yaw aligner into a fake ~90-deg-off gate; [0,0] is
+                # rotation-invariant so yaw alignment maps it to "no usable gate". target=pos
+                # already gives rel=0 (hover). Only the genuine no-gate branches change.
+                curr = np.array([0.0, 0.0, self.default_aperture], _F)
         elif self.current is not None:
             age = now - self.current.last_seen
             status = "tracking" if match is not None and not passed else "holding"
@@ -469,7 +473,8 @@ class TrackingGateEstimator(GateEstimator):
             limit = self.acquire_timeout_s if self._last_event is None else self.lost_timeout_s
             status = "holding" if since <= limit else "lost"
             target = pos.astype(_F)  # hover in place while (re)acquiring
-            curr = np.array([1.0, 0.0, self.default_aperture], _F)
+            # UC-89: frame-neutral no-gate placeholder (see the reacq branch above).
+            curr = np.array([0.0, 0.0, self.default_aperture], _F)
 
         if next_det is not None:
             nxt = lookahead_visible(pos, next_det.center, next_det.yaw)

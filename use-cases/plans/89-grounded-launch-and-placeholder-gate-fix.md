@@ -1,0 +1,62 @@
+---
+plan_for: use-cases/89-grounded-launch-and-placeholder-gate-fix.md
+work_branch: feat/uc-89-grounded-launch-and-placeholder-gate-fix
+team: drone-fly-uc-89
+approved: 2026-10-19
+---
+
+# UC-89 — Grounded-launch behavior + placeholder-gate frame bug — APPROVED IMPLEMENTATION PROPOSAL
+
+*(Analyst proposal, approved by the challenger after one revision round. TARGET_DIR = `/workspace/drone-fly-uc-89-grounded-launch-and-placeholder-gate-fix`.)*
+
+## Analysis
+
+**Which policy flies live.** The deployed policy (`uc87-deploy-robust-warmstart`) is a **contract policy, extra_dim 98** (= 70 perception + 28 memory), trained by **PPO on `CourseEnv`** (`src/drone_fly/sim/course.py`) — confirmed by `src/drone_fly/training/ppo.py:25,60`, `src/drone_fly/training/distill.py:987-991` ("the UC-88 retrain is the PPO warm-start on CourseEnv"), and `src/drone_fly/training/configs/uc87-deploy-robust.yaml` (`course:` section, `memory: true`, `extra_dim: 98`). It deploys through `ContractObservationAssembler` (`src/drone_fly/harness/assembler.py:122-135`), which takes `curr_gate` straight from the live gate tracker, and the runner **yaw-aligns** the assembled `extra` (`src/drone_fly/harness/runner.py:671-673`). The aligner is **ON** for this policy: `training/13-deploy-robust/harness-liftoff.yaml:27` sets `align_spawn_yaw: true` explicitly, and `src/drone_fly/harness/session.py:498` enables the aligner whenever the flag is `in ("auto", True)` (the `extra_dim>70` auto-disable only applies to the literal `"auto"`).
+
+**Defect #1 — placeholder-gate frame bug — CONFIRMED.**
+On genuine no-detection, the live tracker `src/drone_fly/harness/liftoff/gate_cv.py` emits, at **two** branches (L458-459 reacq-held-None, L471-472 final no-current), `target = pos` (⇒ obs `rel = target − pos = 0`, hover) **and** `curr = np.array([1.0, 0.0, self.default_aperture])`. `curr_gate_block` (`src/drone_fly/harness/course_senses.py:44`) defines curr_gate as `[cos(yaw), sin(yaw), aperture]`, so `[1,0]` is a **world-frame yaw-0 (+x)** direction. The yaw aligner (`src/drone_fly/harness/yaw_align.py`, `EXTRA_XY_PAIRS` includes `curr_gate` at idx 12) rotates curr_gate's (cos,sin) by `−psi0`; at a **−90° live spawn** `[1,0] → [0,1]` = a **fake gate 90° to the side** that the policy confidently steers at. Training never exposed this because `CourseEnv.extra()` (`course.py:969`) always builds curr_gate from the **true** current-gate yaw, and its gate DR (`gate_dropout_p`, staleness — `course.py:1214-1234`) perturbs/holds **only `self._gate_rel`**, never curr_gate; combined with a yaw-0 training spawn (where the aligner is a no-op), the policy never saw a rotated placeholder.
+
+**Defect #2 — grounded-launch gap — CONFIRMED (narrowed to a frame/geometry issue).**
+The arm→idle→launch sequence is already modeled: `course.py _spawn` sets ground `pos.z = rest_z`, `motor = 0`, `arm_until = arm_delay_s` (0.5 s); `step_command` (`course.py:1010-1011`) zeros collective/rates while `t < arm_until`, and the UC-88 slew limiter decays the applied command toward 0 during arming so it ramps from ~0 at lift-off — the *physical* "full roll at lift-off" is already mitigated. The real gap is **frame/geometry**: the training observation is **world-frame with no yaw channel** (`course.py:811`: `rel = _target_pos()−pos` world, `vel` world, `gravity_body(quat)` yaw-invariant, `omega` instantaneous), so **spawn attitude is unobservable** — two level grounded spawns with identical positions but different heading produce byte-identical observations. The policy trains "from an aligned spawn" (+x-forward reference; `harness-liftoff.yaml:12`), but a grounded start presents gate-0 at its **natural world bearing** `atan2(g0)` (`src/drone_fly/tracks/procedural.py:208`), not +x. The live scenario — pad faces the gate, so post-alignment gate-0 is dead-ahead at ~3.2 training-scale (38 m / world_scale 12) — is therefore under-represented, and the policy answers a pad-detected gate with a full roll.
+
+## Proposed Solution
+
+### Fix #1 — frame-neutral no-detection placeholder, both channels (AC1, AC2)
+- **Harness** `src/drone_fly/harness/liftoff/gate_cv.py` (L459 and L472): change `np.array([1.0, 0.0, self.default_aperture])` → `np.array([0.0, 0.0, self.default_aperture])`. A zero (cos,sin) pair is **rotation-invariant** under the yaw aligner (`_rotate_pairs` maps 0→0), so it can never fabricate an off-axis gate — AC1's "neutral input that yaw-alignment maps to no usable gate." `target = pos` already supplies rel=0, so the no-detection state becomes the full neutral `{rel=0 (hover), curr_gate=[0,0,ap]}`. The change is **strictly confined to the two no-gate branches**; the detected/held path (`curr_gate_block(...)`) stays **byte-identical** (AC1 pitfall: don't touch the detected path).
+- **Training parity (CourseEnv)** `src/drone_fly/sim/course.py`: add an **opt-in, default-off** pre-acquisition window — at (ground) starts, hold the gate in the **full neutral** {`_gate_rel = 0` (hover), `curr_gate = [0,0,ap]`} for an initial window, then "acquire" and present the real gate. This makes the no-detection semantics **identical** in training and harness across **both** channels (AC2), and models the live grounded **pre-lock** window (the detector isn't locked at the pad until it acquires) — exactly where the live crash occurs, unifying AC1/AC2/AC3. Default-off ⇒ byte-identical (AC6). The developer designs the exact knob (e.g. a gate-acquire delay); the invariant is the full two-channel neutral.
+- **Aperture parity:** keep the neutral aperture equal on both sides (harness `default_aperture` == the sim nominal aperture used in the neutral) so parity tests stay exact.
+
+### Fix #2 — frame-correct grounded launch (AC3, AC4)
+Change the **observable geometry**, keep **identity attitude**, keep `spawn_yaw: false` untouched (setting the spawn *attitude* is unobservable to this policy and is spawn-yaw DR by another name — the regime `uc87-deploy-robust.yaml:67` and the deploy README deliberately avoid because it collapsed completion).
+- **New default-off `CourseConfig` knob** (e.g. `ground_gate_ahead_frac: float = 0.0`) in `src/drone_fly/sim/course.py`: for that fraction of **ground** starts, apply a **rigid per-env rotation of the entire course about the spawn by `−atan2(g0_xy)`** (g0 = gate0 − start), so the natural `spawn_yaw` becomes 0 and the whole scene is presented +x-forward — exactly as the deploy aligner presents the live scene. The drone stays at **identity attitude** with vel 0 at the (cleared) start, so it is unaffected by the rotation. Pair with the existing `spawn_distance_m` distance knob (set ≈3.2 training-scale in the retrain cfg). General across courses (per-course g0), not chute-specific. Default 0.0 ⇒ byte-identical (AC6).
+- **Mandatory mechanism (rigid full-scene rotation, not the lighter variant):** the deploy aligner rotates *every* gate rigidly, so the training scene must be the **natural course rigidly rotated about the spawn so spawn-forward = +x** — this presents gate-0 **and** gate-1+ in the aligned frame. A lighter "reposition the drone to `gate0 − dist·x̂`" variant would pin gate-0 to +x but leave the downstream gates at their natural bearings, reintroducing a train/deploy frame mismatch for the turn after the launch gate. Use the rigid rotation.
+- **Frame-consistency sweep (critical):** the rotation must be applied to **every** per-env world-position read so obs and reward stay in one frame — `_gate`/`_target_pos`, `_ocen`/`_ovec`, `_next_lookahead`, the raycast obstacle geometry, the gate-pass check, the progress/clearance reward, the **arena/out-of-bounds check** (`xy_off`/`ARENA`, `course.py:1116`), and the **clearance/floor baselines** (`prev_clear`/`prev_floor`, `course.py:489-490`, `737-740`). Recommended implementation: materialize per-env rotated course slices at spawn (preserves the cleared start corridor and faithful downstream geometry). Guard-test: a ground-start env with rotation ON vs. the same course flown un-rotated must produce identical *relative* obs/reward trajectories (just rotated), confirming nothing was left in the old frame.
+
+### Retrain (AC4) — orchestrator GPU step
+Retrain `uc87-deploy-robust-warmstart` with the new knobs enabled (`ground_gate_ahead_frac > 0`, `spawn_distance_m ≈ 3.2`, pre-acquisition neutral on), then run the grounded-start sim eval. The dev-team delivers the **code + CPU tests only**; the GPU run and grounded-start eval are the orchestrator's. Final proof is the live 768 re-fly on the Liftoff box.
+
+### Out of scope (confirmed)
+The UC70 student-obs deploy path (`src/drone_fly/student/obs_ref.py`, `src/drone_fly/sim/student_obs.py`, `src/drone_fly/student/perception_ref.py`) — that is a different (student) deployment, not this policy's live path, and is not needed for AC1/AC2. Detector retraining (the 768 width switch already exposes the blocker).
+
+## Files Affected
+
+**Production code (developer) — `paths.production` = `src/drone_fly/**`:**
+- `src/drone_fly/harness/liftoff/gate_cv.py` — neutralize the two no-gate `curr_gate` placeholders (L459, L472) to `[0.0, 0.0, default_aperture]`; detected/held path untouched.
+- `src/drone_fly/sim/course.py` — (a) new `ground_gate_ahead_frac` field on `CourseConfig` + validation + `from_dict` passthrough + rigid course-about-spawn rotation in `_spawn` with the full frame-consistency sweep; (b) opt-in, default-off pre-acquisition neutral window emitting the full neutral `{rel=0, curr_gate=[0,0,ap]}`. Both default-off ⇒ byte-identical.
+
+**Test code (QA) — `paths.test` = `tests/**`:**
+- `tests/test_harness_gate_cv.py` — **primary, config-independent:** the tracker emits `[0,0,ap]` on genuine no-detection (both no-gate branches); the detected/held path is byte-identical.
+- `tests/test_harness_yaw_align.py` — **secondary:** the no-detection placeholder is frame-invariant under a −90° and arbitrary `psi0` spawn, asserted with `align_spawn_yaw: true` (the deploy contract; `auto`+extra_dim>70 would disable the aligner and mask the bug).
+- `tests/test_sim_ground_start.py` — `ground_gate_ahead_frac` makes gate-0's `rel` land on +x at the configured distance from a ground start; the rotated-vs-unrotated relative-trajectory guard-test; default-off byte-identical; the command ramps from 0 across arm→launch.
+- `tests/test_sim_course.py` — knob validation + default-off byte-identical `extra()`; the pre-acquisition neutral window emits the full neutral in both channels.
+
+## Risks & Considerations
+1. **Retrain dependency (hard).** The fix changes the no-detection curr_gate contract from `[1,0]` to `[0,0]`. The existing warm-start checkpoint expects `[1,0]`; deploying the harness fix against the *old* policy feeds it an OOD neutral. **The `gate_cv.py` change and the retrain must ship together**, and any "works" verdict waits for the live 768 re-fly (sim-to-real pitfall: sim can only show frame-correctness + a clean grounded launch).
+2. **Frame consistency (critical for Fix #2).** An incomplete rotation sweep desyncs obs vs. reward. Guarded by the enumerated read-list above and the rotated-vs-unrotated guard-test.
+3. **Byte-identical guarantees.** The detected/held path and all new default-off paths must remain byte-identical — guarded by the existing parity/loopback tests plus the new default-off assertions. Knobs default to 0.0 / off.
+4. **Spawn clearance.** The recommended rigid rotation about the (already-cleared) start preserves the start corridor; the frame sweep must still keep the gate-pass and arena/clearance checks consistent.
+5. **Don't over-fit the Infinity-Loop chute.** The per-course `g0` rotation is general across courses.
+6. **spawn_yaw interaction.** `ground_gate_ahead_frac` affects only the course geometry of selected ground envs; air starts and `spawn_yaw` behavior are untouched.
+
+## Challenger verdict
+**APPROVE** (after one revision round). v1 proposed changing the spawn *attitude* to face the gate — rejected as **Critical**: unobservable to this world-frame policy (no yaw channel) and spawn-yaw DR by another name, which the shipped `spawn_yaw: false` contract deliberately avoids (it collapsed completion to ~0%). v2's observable-course-frame rigid rotation is correct. AC2 parity addressed via the pre-acquisition window emitting full neutral in both channels. Non-blocking note to developer: use the rigid full-scene rotation (option i), not the drone-reposition variant (option ii); ensure the rotation covers bounds + clearance baselines, not just the obvious reads.
