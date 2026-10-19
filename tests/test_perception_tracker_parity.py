@@ -26,12 +26,15 @@ from drone_fly.harness.types import FlightState, Frame
 from drone_fly.sim.noise_model import camera_visible, gate_axes, gate_corners
 from drone_fly.sim.perception import (
     EPISODE_DRAWS,
+    NEXT_UNSEEN_NONE,
     TICK_DRAWS,
     GatePerception,
     PerceptionConfig,
     assoc_limit,
 )
-from drone_fly.student.perception_ref import ReferencePerception, sample
+from drone_fly.sim.student_obs import HistoryState
+from drone_fly.sim.student_obs import build_student_obs as build_torch
+from drone_fly.student.perception_ref import ReferencePerception, estimate_from_raw, sample
 from tests.student_support import gate_rot, load_model, yaw_quat
 
 GATE = np.array([10.0, 0.0, 0.0])
@@ -302,3 +305,65 @@ def test_association_gate_matches_the_harness_at_any_world_scale(k):
 def test_reference_requires_a_model():
     with pytest.raises(ValueError, match="noise model"):
         ReferencePerception(None, PerceptionConfig(mode="exact"))
+
+
+# ----------------------------------------------------------------- UC-89 neutral-lock (3 peers)
+
+
+def test_uc89_no_detection_neutral_gate_locked_across_all_three_peers(tmp_path):
+    """UC-89 contract lock: on NO detection the curr_gate direction ``(cos, sin)`` is the
+    rotation-invariant neutral ``[0, 0]`` (aperture kept) in ALL THREE perception peers that emit
+    the placeholder -- the harness tracker (``gate_cv``), the numpy ``ReferencePerception``, and
+    the torch ``GatePerception`` twin (``sim.student_obs``). This pins the ``[1,0] -> [0,0]`` fix
+    so the three peers can never silently drift back to a world-frame placeholder that yaw
+    alignment would rotate into a phantom off-axis gate.
+    """
+    model = load_model(tmp_path)
+    cfg = PerceptionConfig.from_model(model, "exact")
+    ap = float(cfg.nominal_aperture)
+
+    # (1) harness gate_cv tracker that never detects -> the genuine no-gate branch.
+    class _Blind(TrackingGateEstimator):
+        def detect(self, image, state):
+            return []
+
+    trk = _Blind(CameraModel(640, 480, 90.0), WorldScale(1.0), default_aperture=ap)
+    st = FlightState(
+        pos=np.zeros(3, np.float32), vel=np.zeros(3, np.float32),
+        quat=np.array([1.0, 0.0, 0.0, 0.0], np.float32), omega=np.zeros(3, np.float32), t=0.0,
+    )  # fmt: skip
+    h = trk.update(None, st, 0.0)
+    np.testing.assert_array_equal(h.curr_gate, np.array([0.0, 0.0, ap], np.float32))
+
+    # (2) numpy ReferencePerception assembly (estimate_from_raw) with acquired=False.
+    pos = np.zeros(3)
+    raw = {
+        "target": pos.copy(), "target_yaw": 0.0, "acquired": False,
+        "next_mode": NEXT_UNSEEN_NONE, "next_center": pos + np.array([1.0, 0.0, 0.0]),
+        "next_yaw": 0.0, "status": 1, "passed": False, "matched": False,
+        "target_valid": False, "hand_over": False,
+        "target_age_s": float(cfg.lost_timeout_s), "next_age_s": float(cfg.lost_timeout_s),
+        "pointer": None,
+    }  # fmt: skip
+    r = estimate_from_raw(raw, pos, cfg, 1.0, 0.0)
+    np.testing.assert_array_equal(r.curr_gate, np.array([0.0, 0.0, ap], np.float32))
+
+    # (3) torch GatePerception twin assembly (sim.student_obs) with acquired=False.
+    F = lambda x: torch.tensor(np.asarray(x), dtype=torch.float32)  # noqa: E731
+    perc = {
+        "target": F([[0.0, 0.0, 0.0]]), "target_yaw": F([0.0]),
+        "acquired": torch.tensor([False]), "next_mode": torch.tensor([NEXT_UNSEEN_NONE]),
+        "next_center": F([[1.0, 0.0, 0.0]]), "next_yaw": F([0.0]),
+        "target_age_s": F([cfg.lost_timeout_s]), "next_age_s": F([cfg.lost_timeout_s]),
+        "target_valid": torch.tensor([False]), "hand_over": torch.tensor([False]),
+        "matched": torch.tensor([False]), "pointer": F([[0.0, 0.0, 0.0, 0.0]]),
+    }  # fmt: skip
+    obs = build_torch(
+        pos=F([[0.0, 0.0, 0.0]]), vel=F([[0.0, 0.0, 0.0]]), quat=F([[1.0, 0.0, 0.0, 0.0]]),
+        omega=F([[0.0, 0.0, 0.0]]), perc=perc, k=1.0, nominal_aperture=ap,
+        lost_timeout_s=float(cfg.lost_timeout_s), prev_action=F([[0.0, 0.0, 0.0, 0.0]]),
+        arm_remaining_s=F([0.0]), history=HistoryState.zeros(1, "cpu"),
+        dt=torch.zeros(1, dtype=torch.float64), battery=None,
+    )  # fmt: skip
+    curr = obs[0, 12:15].numpy()  # h30 layout: obs(12) || curr_gate(3) || ...
+    np.testing.assert_array_equal(curr, np.array([0.0, 0.0, ap], np.float32))

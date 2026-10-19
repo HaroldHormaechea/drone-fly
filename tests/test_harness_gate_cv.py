@@ -15,7 +15,12 @@ import pytest
 
 from drone_fly.harness.config import load_config
 from drone_fly.harness.geometry import CameraModel, quat_to_matrix
-from drone_fly.harness.liftoff.gate_cv import OpenCvGateEstimator, order_corners
+from drone_fly.harness.liftoff.gate_cv import (
+    GateDetection,
+    OpenCvGateEstimator,
+    TrackingGateEstimator,
+    order_corners,
+)
 from drone_fly.harness.scale import WorldScale
 from drone_fly.harness.types import FlightState, Frame
 
@@ -290,3 +295,92 @@ def test_no_frame_means_no_keypoint_fields(cv2):
     assert "detections_px" not in g.info and "frame_size" not in g.info
     blank = est.update(Frame(np.full((480, 640, 3), 40, np.uint8), 0.04, 2), state, 0.04)
     assert blank.info["detections_px"] == [] and blank.info["frame_index"] == 2
+
+
+# ----------------------------------------------------------------------------- UC-89 no-detection
+
+# The frame-neutral no-gate placeholder is config-independent and needs no cv2: a trivial
+# TrackingGateEstimator whose detect() returns a scripted list exercises the tracker's two genuine
+# no-gate branches (reacq held-None + final no-current) and the detected/held path, all on CPU.
+
+
+class _ScriptedEstimator(TrackingGateEstimator):
+    """A tracker whose detections are supplied directly (no image processing / cv2)."""
+
+    def __init__(self, camera, *, dets=None, **kw):
+        super().__init__(camera, WorldScale(1.0), **kw)
+        self._dets = dets or []
+
+    def detect(self, image, state):  # noqa: D401 - scripted
+        return list(self._dets)
+
+
+def _detection(center=(5.0, 0.0, 1.0), yaw=0.3, aperture=1.5):
+    corners = np.array([[10, 10], [90, 10], [90, 90], [10, 90]], np.float64)
+    c = np.asarray(center, np.float64)
+    return GateDetection(
+        corners=corners,
+        area_frac=0.1,
+        t_cam=np.array([0.0, 0.0, float(np.linalg.norm(c))]),
+        n_cam=np.array([0.0, 0.0, -1.0]),
+        center=c,
+        yaw=float(yaw),
+        aperture=float(aperture),
+        distance=float(np.linalg.norm(c)),
+        off_axis=0.0,
+        cls=None,
+        pixel_center=np.array([50.0, 50.0]),
+    )
+
+
+def _blank(i=1, stamp=0.0):
+    return Frame(np.zeros((48, 64, 3), np.uint8), stamp, i)
+
+
+def test_no_detection_emits_frame_neutral_curr_gate_terminate():
+    """UC-89 AC1: genuine no-detection (final no-current branch) emits [0,0,aperture], not [1,0,..].
+
+    A world-frame [1,0] is yaw-0 (+x); the spawn-yaw aligner rotates it into a phantom off-axis
+    gate. [0,0] is rotation-invariant (yaw-alignment maps it to no usable gate), and target=pos
+    gives rel=0 (hover). This is the bug that corrupted every live 512 flight.
+    """
+    cam = CameraModel(640, 480, 90.0)
+    est = _ScriptedEstimator(cam, default_aperture=1.25, acquire_timeout_s=3.0)
+    state = _state(pos=(1.0, 2.0, 1.5))
+    g = est.update(None, state, 0.0)
+    assert g.status == "holding"
+    np.testing.assert_array_equal(g.curr_gate, np.array([0.0, 0.0, 1.25], np.float32))
+    np.testing.assert_array_equal(g.target, state.pos)  # rel = target - pos = 0 (hover)
+    # explicitly: the old world-frame [1,0] placeholder is gone
+    assert not np.array_equal(g.curr_gate[:2], [1.0, 0.0])
+
+
+def test_no_detection_emits_frame_neutral_curr_gate_reacquire():
+    """UC-89 AC1: the reacquire policy's held-None branch also emits the neutral placeholder."""
+    cam = CameraModel(640, 480, 90.0)
+    est = _ScriptedEstimator(
+        cam, default_aperture=0.9, lost_policy="reacquire", lost_hard_stop_s=6.0
+    )
+    state = _state(pos=(0.0, 0.0, 1.0))
+    g = est.update(None, state, 0.0)  # fresh: current is None and nothing released -> held None
+    assert g.status == "holding"
+    np.testing.assert_array_equal(g.curr_gate, np.array([0.0, 0.0, 0.9], np.float32))
+    np.testing.assert_array_equal(g.target, state.pos)
+
+
+def test_detected_curr_gate_block_is_unchanged_by_the_fix():
+    """UC-89 AC1 pitfall: when a gate IS seen the curr_gate stays [cos yaw, sin yaw, aperture] —
+    byte-identical to curr_gate_block; the fix only touches the no-detection branches."""
+    from drone_fly.harness.course import Gate
+    from drone_fly.harness.course_senses import curr_gate_block
+
+    cam = CameraModel(640, 480, 90.0)
+    det = _detection(center=(5.0, 0.0, 1.0), yaw=0.3, aperture=1.5)
+    est = _ScriptedEstimator(cam, dets=[det], default_aperture=0.9)
+    g = est.update(_blank(1), _state(pos=(0.0, 0.0, 1.0)), 0.0)
+    assert g.status == "tracking" and not g.passed
+    expected = curr_gate_block(Gate(np.asarray(det.center), det.yaw, det.aperture))
+    np.testing.assert_array_equal(g.curr_gate, expected)
+    np.testing.assert_allclose(g.curr_gate[:2], [np.cos(0.3), np.sin(0.3)], atol=1e-6)
+    assert g.curr_gate[2] == pytest.approx(1.5)  # the gate's own aperture, not default_aperture
+    assert not np.array_equal(g.curr_gate[:2], [0.0, 0.0])  # NOT the neutral placeholder
