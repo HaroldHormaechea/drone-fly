@@ -48,6 +48,9 @@ runner:
   # rotation: roll only attitude + body rates (scale-invariant); velocity stays measured and the
   # position is extrapolated pos + vel*h. full: the whole plant_step state (whoop translation).
   latency_predict: rotation
+  # UC-88: override the checkpoint sidecar's command slew cap (full-range traversal time, s).
+  # null = use the sidecar's action_filter (no cap when the sidecar has none).
+  slew_override_s: null
 
 parts:
   state_source: liftoff-udp       # liftoff-udp | liftoff-csv (replay a recorded CSV)

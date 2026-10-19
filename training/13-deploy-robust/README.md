@@ -12,6 +12,12 @@
 > because training with the clamp taught the policy to emit aggressive intent and lean on the limiter.
 > So the shipped fix is **run 5 + the deploy-side cap**, not the retrain. Tune `traversal_time_s` after
 > flying (0.35 s clips 21%, 0.5 s clips 33%). Limiter code + 46 tests: PR #104.
+>
+> **Live tuning (2026-10-19): the sidecar cap is now 0.5 s.** Flown live on Infinity Loop (3 attempts
+> per cap): 0.25 s capped the command (0 full-rate reversals) but the airframe stayed rough (in-air
+> roll/pitch p95 400-550 deg/s). 0.5 s brought it to 224-234 deg/s, with tick-to-tick changes of
+> 52-100 deg/s (210-360 uncapped), and gave the best model-13 flight so far (33 s airborne, 206 m).
+> Gates are still 0/33 in every flight. Override per run with `runner.slew_override_s`.
 
 A **fresh** (no warm-start) connectome policy — frozen K1 reservoir + a small readout — trained to fly
 the obstacle course **and** stay smooth under the conditions it actually meets live in Liftoff (control
