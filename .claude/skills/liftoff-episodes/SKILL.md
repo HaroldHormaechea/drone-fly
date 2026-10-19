@@ -42,7 +42,10 @@ cd C:\dev\drone-fly
   `<MapName>-model-<model>-attempt-<n>` →
   `%USERPROFILE%\AppData\LocalLow\LuGus Studios\Liftoff\Recordings\Race\<name>.xml`.
 - Run folders (telemetry, frames, obs/actions, latency) go to `artifacts/harness/liftoff/runs/`;
-  summarise with `drone-fly harness latency-report <run>` or read `meta.json` / `ticks.jsonl`.
+  summarise what the drone did with `drone-fly harness flight-report <run> [--recording <name>]`
+  (heights / distances / speeds in Liftoff metres from `telemetry.csv`, plus the ground-truth gate
+  count from the saved recording) and timing with `drone-fly harness latency-report <run>`.
+  Never read distances off `ticks.jsonl` `state.pos`: it is scaled down by `scaling.world_scale`.
 - Single steps: `drone-fly harness ui launch | last-session | reset | save-recording --name N | quit`,
   plus `harness run ... --save-recording NAME` for one attempt.
 

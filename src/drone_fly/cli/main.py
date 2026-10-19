@@ -44,6 +44,7 @@
     drone-fly harness ui launch|last-session|reset|retry|save-recording --name N|
                           select-drone --name N [--slot S] [--level L]|quit|shot [--out]
     drone-fly harness latency-report <run dir> [--recompute]
+    drone-fly harness flight-report <run dir> [--recording NAME|xml] [--trackdata-root] [--json]
     drone-fly harness overlay [--port N] [--monitor M] [--layout default|mask_confined]
                           [--replay <run dir>] [--fps F] [--k1-path] [--preset] [--config]
                           [--harness]
@@ -909,6 +910,14 @@ def _cmd_latency_report(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_flight_report(args: argparse.Namespace) -> int:
+    from drone_fly.harness.flight_report import flight_markdown, flight_report
+
+    report = flight_report(args.run, recording=args.recording, trackdata_root=args.trackdata_root)
+    print(json.dumps(report, indent=2) if args.json else flight_markdown(report))
+    return EXIT_OK
+
+
 def _cmd_overlay(args: argparse.Namespace) -> int:
     from drone_fly.overlay.app import run_overlay
 
@@ -1305,6 +1314,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--recompute", action="store_true", help="recompute from ticks.jsonl (ignore the summary)"
     )
     p_lat.set_defaults(func=_cmd_latency_report)
+
+    p_flt = hsub.add_parser(
+        "flight-report", help="what a run physically did, in Liftoff metres (telemetry.csv)"
+    )
+    p_flt.add_argument("run", help="harness run folder")
+    p_flt.add_argument(
+        "--recording",
+        help="saved Liftoff recording (name under Recordings/Race, or .xml path): adds the "
+        "ground-truth gate count (recording pose vs the track)",
+    )
+    p_flt.add_argument("--trackdata-root", help="trackdata root (gate count)")
+    p_flt.add_argument("--json", action="store_true", help="print the raw figures as JSON")
+    p_flt.set_defaults(func=_cmd_flight_report)
 
     p_ovl = hsub.add_parser(
         "overlay",
