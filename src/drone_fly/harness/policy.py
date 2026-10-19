@@ -88,6 +88,9 @@ class ContractPolicyRunner(PolicyRunner):
         self.sha256: str | None = None
         #: The checkpoint's action contract (sidecar; v1 when absent), set by :meth:`load`.
         self.action_spec: Any = None
+        #: The checkpoint's UC-88 command slew-rate limit (sidecar ``action_filter``; disabled when
+        #: absent), set by :meth:`load`. The runner builds a :class:`SlewLimiter` from it.
+        self.slew_spec: Any = None
 
     @property
     def contract_version(self) -> int | None:
@@ -105,11 +108,12 @@ class ContractPolicyRunner(PolicyRunner):
                 "the K1 connectome was not found (artifacts/pruned/k1 is absent from this "
                 "checkout). Pass --k1-path, set contract.k1_path, or set DRONE_FLY_K1_PATH."
             )
-        from drone_fly.sim.action import read_sidecar, spec_for_checkpoint
+        from drone_fly.sim.action import SlewSpec, read_sidecar, spec_for_checkpoint
 
         try:
             self.action_spec = spec_for_checkpoint(self.checkpoint)
             side = read_sidecar(self.checkpoint) or {}
+            self.slew_spec = SlewSpec.from_dict(side.get("action_filter"))
         except ValueError as exc:
             raise HarnessConfigError(
                 f"invalid contract sidecar of {self.checkpoint}: {exc}"

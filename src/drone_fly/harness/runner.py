@@ -71,6 +71,7 @@ from drone_fly.harness.interfaces import (
 )
 from drone_fly.harness.policy import decode_action
 from drone_fly.harness.types import ContractCommand, FreeSpaceEstimate, GateEstimate, TickRecord
+from drone_fly.sim.action import raw_of_command
 
 log = logging.getLogger(__name__)
 
@@ -188,6 +189,9 @@ class RunnerSettings:
     disarm_confirm_s: float = 2.0
     #: Spawn-yaw frame alignment switch ("auto" | True | False); session.py builds the aligner.
     align_spawn_yaw: str | bool = "auto"
+    #: UC-88 command slew-rate override (full-range traversal seconds); None ⇒ use the checkpoint
+    #: sidecar's ``action_filter``. session.py resolves it into the :class:`SlewLimiter`.
+    slew_override_s: float | None = None
 
     @classmethod
     def from_config(cls, cfg: Any) -> RunnerSettings:
@@ -221,6 +225,7 @@ class RunnerSettings:
                 )
             ),
             align_spawn_yaw=getattr(r, "align_spawn_yaw", "auto"),
+            slew_override_s=getattr(r, "slew_override_s", None),
         )
 
 
@@ -283,10 +288,14 @@ class HarnessRunner:
         yaw_aligner: Any = None,
         latency_comp: Any = None,
         perception: Any = None,
+        slew: Any = None,
     ) -> None:
         self.harness = harness
         #: Optional :class:`~drone_fly.harness.latency_comp.LatencyCompensator`.
         self.latency_comp = latency_comp
+        #: Optional UC-88 :class:`~drone_fly.sim.action.SlewLimiter` on the command path (``None``
+        #: or disabled ⇒ the raw command is sent and the policy memory sees the raw intent).
+        self.slew = slew
         self._latency_logged = False
         #: Optional :class:`~drone_fly.harness.yaw_align.SpawnYawAligner` (contract policies).
         self.yaw_aligner = yaw_aligner
@@ -517,6 +526,8 @@ class HarnessRunner:
         mem = getattr(self.assembler, "memory", None)
         if mem is not None:
             mem.reset()  # UC-87 policy memory: zero-seed at run start (D3)
+        if self.slew is not None:
+            self.slew.reset()  # UC-88 slew carry: zero-seed at run start (same boundary as memory)
         self._wait_for_state()
         self._wait_for_focus()
         start = self.clock.now()
@@ -548,6 +559,7 @@ class HarnessRunner:
     def _tick(self, k: int, result: RunResult) -> TickRecord:
         h = self.harness
         s = self.settings
+        period = 1.0 / s.rate_hz  # UC-88: the policy-step dt the slew cap is scaled by
         clock = self.clock
         t0 = clock.now()
         record = TickRecord(tick=k, wall_time=time.time(), sim_time=t0)
@@ -593,6 +605,8 @@ class HarnessRunner:
             mem = getattr(self.assembler, "memory", None)
             if mem is not None:
                 mem.reset()  # UC-87: a respawn resets the policy memory (D3 boundary reset)
+            if self.slew is not None:
+                self.slew.reset()  # UC-88: a respawn resets the slew carry (same D3 boundary)
         if aligner is not None:
             psi0 = aligner.capture(state)
             if psi0 is not None:
@@ -662,12 +676,25 @@ class HarnessRunner:
                 raw, brain = self.policy.act_with_brain(obs, extra)
             else:
                 raw = self.policy.act(obs, extra)
+            action_spec = getattr(self.policy, "action_spec", None)
+            command = decode_action(raw, self.contract, action_spec)
+            # UC-88: clamp the APPLIED command's slew in command space (after decode, before send),
+            # then re-derive the ContractCommand and the effective-raw ``a'`` the policy actually
+            # applied. The memory sees ``a'`` (AC4); off ⇒ a' == raw and the command is unchanged.
+            mem_action = raw
+            if self.slew is not None and self.slew.enabled:
+                applied = self.slew.step(
+                    np.array([command.collective_g, *command.rates], dtype=np.float32), period
+                )
+                mem_action = raw_of_command(applied, action_spec)
+                command = decode_action(mem_action, self.contract, action_spec)
+                record.command_raw = np.asarray(mem_action, dtype=np.float32)
             mem = getattr(self.assembler, "memory", None)
             if mem is not None:
-                # UC-87 (D3): record the raw action output and the core obs the policy saw, so the
-                # next tick's memory block holds them — the sim does the same in CourseEnv.step.
-                mem.observe(obs, raw)
-            command = decode_action(raw, self.contract, getattr(self.policy, "action_spec", None))
+                # UC-87/88 (D3): record the APPLIED raw action (== raw when the slew filter is off)
+                # and the core obs the policy saw, so the next tick's memory block holds them — the
+                # sim does the same in CourseEnv.step.
+                mem.observe(obs, mem_action)
         except Exception as exc:  # noqa: BLE001
             log.exception("policy failed")
             self._finish(record, STOP_POLICY_ERROR, repr(exc))
