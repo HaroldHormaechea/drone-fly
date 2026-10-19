@@ -1,5 +1,18 @@
 # 13 — deploy-robust (UC-87 smooth-by-construction fresh train of the 98-dim avoider)
 
+> **UC-88 update (2026-10-19) — deploy-side slew-rate limiter added.** The UC-87 run-5 checkpoint
+> shipped here, but its live Liftoff flight was still erratic: its command slew is fine on *average*
+> (live-like body-rate slew mean 15.3 rad/s·s⁻¹) but its **peaks are controller-impossible** — p99 ≈ 79,
+> **max ≈ 156 rad/s·s⁻¹ (a full stick swing in ~one 50 Hz tick)**. UC-88 adds a hard slew-rate limiter
+> (action filter) and this checkpoint's sidecar now carries `action_filter: {traversal_time_s: 0.25}`,
+> so the deploy harness caps every axis to a full-range traversal no faster than 0.25 s (32 rad/s·s⁻¹) —
+> clipping the worst **12.4%** of ticks (the slams) while leaving the other 87.6% untouched. The policy
+> itself is unchanged (run 5, 28.9% live-like completion). **A retrain WITH the limiter in-loop
+> (`uc88-slew`) was tried and was WORSE** — completion halved to 13.3% and raw output got rougher,
+> because training with the clamp taught the policy to emit aggressive intent and lean on the limiter.
+> So the shipped fix is **run 5 + the deploy-side cap**, not the retrain. Tune `traversal_time_s` after
+> flying (0.35 s clips 21%, 0.5 s clips 33%). Limiter code + 46 tests: PR #104.
+
 A **fresh** (no warm-start) connectome policy — frozen K1 reservoir + a small readout — trained to fly
 the obstacle course **and** stay smooth under the conditions it actually meets live in Liftoff (control
 timing, actuation delay, noisy inputs), rather than only with perfect sim inputs. Memory inputs and the
