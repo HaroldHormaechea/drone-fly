@@ -214,6 +214,8 @@ The check (`src/drone_fly/harness/liftoff/gate_range.py`):
   catch. It is the distributed 40-60 m radial over-estimate. Even giving up 65 % of the detections
   only buys −20 % on the tune runs.
 - The held-out runs were not re-tuned.
+- **Note (QA).** With a ≥ 90 % retention floor and a p90 metric, filtering can only pass this
+  rule if the outliers make up at least about 10 % of a bin; here they are about 2 %.
 
 ### Pass B (tracker replay; secondary)
 
@@ -277,3 +279,92 @@ The AC4 noise rule failed, so re-fly with the **default `range_mode: pnp`**: use
 latency compensation off). Expect about the same gate passes as UC-89 (0/33): perception gives the
 right gate z. Verify passes from telemetry / the recording against the track, never with
 `gate_passed`. Then run this tool's logged-target pass on the new flights for the live gate-z error.
+
+## AC7 live re-fly (2026-10-20)
+
+- **Setup.** Model 14 (`training/14-grounded-launch`) on Infinity Loop with
+  `artifacts/harness/live-m14-w768.yaml` unchanged: default `range_mode: pnp`, detector width 768,
+  `align_spawn_yaw: true`, latency compensation off. Six attempts, without screen video or overlay.
+- **Replays.** The Liftoff replays `infinity-loop-model-m14-uc91-20261020-1518-attempt-{1..6}.xml`
+  are md5-unique, so none is stale.
+- **Run folders.** `artifacts/harness/liftoff/runs/liftoff-20261020T131928882921Z`, `…T132021348430Z`,
+  `…T132112603966Z`, `…T132217725873Z`, `…T132300929730Z`, `…T132355179495Z`.
+
+### Result: 0/33 gates
+
+Gates were counted from the recording pose against the track, never from `gate_passed`.
+
+| attempt | gates | airborne (s) | missed deadlines | stop |
+|---|---|---|---|---|
+| 1 | 0 | 3.5-28.7 | 254 / 847 | stale_telemetry |
+| 2 | 0 | 3.1-25.9 | 316 / 750 | stale_telemetry |
+| 3 | 0 | 3.0-41.2 | 306 / 1319 | stale_telemetry |
+| 4 | 0 | 3.0-19.3 | 213 / 535 | stale_telemetry |
+| 5 | 0 | 3.0-30.2 | 294 / 894 | stale_telemetry |
+| 6 | 0 | 3.1-43.2 | 469 / 1323 | stale_telemetry |
+
+### The miss at gate 0 is a policy overflight
+
+Gate 0's aperture centre is at (0.07, −0.07, **1.84**) m (contract frame). The aperture is
+6.18 × 3.69 m, so a pass needs about |dx| < 3.1 m and 0 < z < 3.7 m at the plane crossing.
+
+The table is computed from `telemetry.csv`, first telemetry segment (no respawn). Times are seconds
+since telemetry start; the drone spawns at (0, 37.7, 0.9).
+
+| attempt | closest horizontal approach to gate 0 | at t | drone z there | z − 1.84 | gate-0 plane crossing (dx, z) | max z |
+|---|---|---|---|---|---|---|
+| 1 | 6.8 m | 7.6 s | 12.6 m | **+10.7 m** | −6.9 m, 12.5 m | 24.2 m |
+| 2 | 11.5 m | 6.9 s | 15.2 m | **+13.3 m** | not crossed | 24.8 m |
+| 3 | 9.7 m | 6.9 s | 14.7 m | **+12.9 m** | −10.2 m, 14.9 m | 28.5 m |
+| 4 | 7.5 m | 7.0 s | 12.7 m | **+10.9 m** | −8.0 m, 12.6 m | 19.2 m |
+| 5 | 6.9 m | 6.8 s | 12.5 m | **+10.6 m** | −7.2 m, 11.9 m | 28.7 m |
+| 6 | 4.6 m | 7.1 s | 12.7 m | **+10.9 m** | −4.6 m, 12.8 m | 28.9 m |
+
+Every attempt reaches gate 0 about 7 s after start, 10.6-13.3 m above its centre and 4.6-11.5 m to
+the side. This is the same picture as UC-89 (7-13 m too high, 5-10 m to the side).
+
+### Live gate error on the re-fly flights (`backprojection-eval`, mode `pnp`, no tuning)
+
+| range | Pass A: n | z median | z sd | p90 \|z\| | radial median | logged target: n | z median | p90 \|z\| |
+|---|---|---|---|---|---|---|---|---|
+| 18-25 m | 68 | +0.77 | 4.09 | 5.91 | −1.64 | 256 | −1.21 | 5.51 |
+| 25-40 m | 661 | +0.01 | 2.23 | 2.85 | −0.20 | 1176 | +0.01 | 3.30 |
+| 40-60 m | 887 | −0.82 | 2.80 | 3.60 | +4.09 | 402 | +0.11 | 8.46 |
+| > 60 m | 1433 | −0.00 | 1.49 | 1.04 | −0.10 | 280 | +1.27 | 12.43 |
+
+- **Pass A counts.** 3,215 detections were re-solved and 216 were partial. 154 (4.8 %) match no
+  arch, about twice uc-89's share, and 10 are ambiguous.
+- **Pass B fidelity.** 80 % within 0.5 m (per run 94 / 62 / 94 / 72 / 89 / 69 %), median 0.00 m.
+- **Report.** `artifacts/harness/reports/uc91-backprojection/ac7-refly/20261020T132650Z/`.
+- **The gate-z error is the same as on the uc-89 runs.** Out to 40 m the policy sees gate z right
+  to about a centimetre in median. The z-median errors it sees are at most 1.3 m, against the
+  10.6-13.3 m it flies above the gate.
+
+**NaN targets (new finding; not caused by UC-91).** In attempts 2 and 6, the live `gate.target`
+and the policy observation were NaN for 57 and 40 ticks (97 in total; 72 of them while a gate was
+held).
+
+- **When.** Ticks 989-1066 and 1736-1792: the last about 2 s of each run, after the airborne
+  window, with the drone at z 2.0 and 0.1 m.
+- **Cause.** Each NaN run starts on a 4-keypoint `inflatable_arch` detection whose IPPE solution
+  was non-finite and was then tracked. `detection_from_pose` only checks `t_cam[2] <= 0`, which is
+  False for NaN.
+- **Effect.** It does not explain the gate-0 miss, which happens about 7 s after start. It is a
+  robustness bug: a non-finite `t_cam` / `n_cam` should be dropped as unsolvable.
+- **Fixed.** `gate_cv.TrackingGateEstimator.detection_from_pose` now drops a detection whose
+  `t_cam` or `n_cam` is non-finite, so a NaN solve no longer reaches the tracker or the policy.
+- **Evaluator handling.** The evaluator skips non-finite PnP solutions in Pass A and counts NaN
+  logged targets separately.
+
+### Conclusion
+
+- **0/33 with correct perception.** Model 14 scores 0/33 again with the unchanged perception. On
+  the new flights, the gate z it is given is correct in median within 60 m.
+- **Policy overflight.** The drone still crosses gate 0's plane 10.6-13.3 m above the aperture
+  centre.
+- **No perception change.** No perception or calibration change from UC-91 would alter this.
+  `range_mode: pnp_checked` failed its pre-registered rule and stays off.
+- **Where the next fix lies.** It is in the policy: altitude holding / descent onto the gate (the
+  UC-90 reward work, then a retrained model). The one perception action item is the NaN-PnP guard
+  above.
+

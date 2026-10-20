@@ -289,8 +289,12 @@ class TrackingGateEstimator(GateEstimator):
         cls: str | None = None,
         pixel_center: np.ndarray | None = None,
     ) -> GateDetection | None:
-        """Camera-frame gate pose -> world :class:`GateDetection` (``None`` behind the camera)."""
-        if t_cam[2] <= 0:
+        """Camera-frame gate pose -> world :class:`GateDetection`.
+
+        ``None`` behind the camera, or for a non-finite PnP solution (UC-91: a degenerate 4-point
+        IPPE solve returned NaN, which ``t_cam[2] <= 0`` let through to the tracker).
+        """
+        if not (np.isfinite(t_cam).all() and np.isfinite(n_cam).all()) or t_cam[2] <= 0:
             return None
         pos, quat = self._pose_at(self._det_stamp, state)  # the pose the frame was captured at
         r_wc = quat_to_matrix(quat) @ camera.body_to_camera().T  # camera -> world

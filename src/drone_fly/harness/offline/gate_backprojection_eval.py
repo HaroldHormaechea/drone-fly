@@ -653,12 +653,19 @@ def pass_b(
 def target_records(
     rows: list[dict[str, Any]], truth: Truth, key: str, valid_key: str
 ) -> list[dict[str, Any]]:
-    """Per-tick held targets vs truth (``matched`` / ``ambiguous`` / ``unmatched``)."""
+    """Per-tick held targets vs truth (``matched`` / ``ambiguous`` / ``unmatched``).
+
+    A non-finite target (a NaN PnP solution the live tracker held) is its own category,
+    ``nonfinite``, outside every range bin.
+    """
     out = []
     for r in rows:
         if not r[valid_key]:
             continue
         est = r[key]
+        if not np.isfinite(est).all():
+            out.append({"run": r["run"], "tick": r["tick"], "category": "nonfinite", "bin": None})
+            continue
         best, ang, amb = match_by_bearing(r["pos"], est, truth.centers)
         rec = {
             "run": r["run"],
@@ -682,13 +689,17 @@ def target_records(
 
 def fidelity(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Replayed ``pnp`` target vs the logged target (metres)."""
-    both = [r for r in rows if r["valid"] and r["logged_valid"]]
+    held = [r for r in rows if r["valid"] and r["logged_valid"]]
+    both = [
+        r for r in held if np.isfinite(r["target"]).all() and np.isfinite(r["logged_target"]).all()
+    ]
     agree = sum(r["valid"] == r["logged_valid"] for r in rows)
     dev = np.array([float(np.linalg.norm(r["target"] - r["logged_target"])) for r in both])
     share = float(np.mean(dev <= FIDELITY_TOL_M)) if len(dev) else 0.0
     return {
         "ticks": len(rows),
         "held_both": len(both),
+        "nonfinite_ticks": len(held) - len(both),
         "held_agreement": agree / max(len(rows), 1),
         "share_within_m": share,
         "tol_m": FIDELITY_TOL_M,
@@ -816,13 +827,14 @@ def _err_stats(recs: list[dict[str, Any]]) -> dict[str, Any]:
 def binned_stats(recs: list[dict[str, Any]]) -> dict[str, Any]:
     """Error statistics of matched (unambiguous) records per range bin, plus ``<40`` / ``>40``."""
     m = [r for r in recs if r["category"] == "matched"]
-    out = {b: _err_stats([r for r in m if r["bin"] == b]) for b in BIN_LABELS}
+    out: dict[str, Any] = {b: _err_stats([r for r in m if r["bin"] == b]) for b in BIN_LABELS}
     out["<40"] = _err_stats([r for r in m if r["range_m"] < FAR_M])
     out[">40"] = _err_stats([r for r in m if r["range_m"] >= FAR_M])
     for k, v in out.items():
         v["thin"] = v["n"] < THIN_BIN_N
         if k in BIN_LABELS:
             v["ambiguous"] = sum(1 for r in recs if r["category"] == "ambiguous" and r["bin"] == k)
+    out["nonfinite"] = sum(1 for r in recs if r["category"] == "nonfinite")
     return out
 
 
@@ -1263,6 +1275,8 @@ def _set_section(name: str, res: dict[str, Any]) -> list[str]:
         L += stats_table(st)
     L += ["", "### Logged target (the live gate.target the policy saw, per tick)", ""]
     L += stats_table(res["logged_target"])
+    if res["logged_target"].get("nonfinite"):
+        L += ["", f"Non-finite (NaN) logged targets: {res['logged_target']['nonfinite']} ticks."]
     if "pass_c" in res:
         L += ["", "### Pass C (detector re-run on the saved frames)", ""]
         L.append(
