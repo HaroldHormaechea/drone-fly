@@ -667,7 +667,7 @@ def _cmd_gates_backprojection_eval(args: argparse.Namespace) -> int:
         with_frames=args.with_frames,
         device=None if args.device in (None, "auto") else args.device,
         out_dir=args.out,
-        check=check,
+        check=None if args.tune_runs else check,  # tuning starts from the physics points
         invocation="drone-fly " + " ".join(sys.argv[1:]),
     )
     print(gbe.summary(rep))
