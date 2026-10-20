@@ -1,0 +1,21 @@
+# UC-89 AC4 retrain: the proven UC-87 warm-start recipe + the new grounded-launch knobs ON, so the
+# policy learns to lift off from a grounded start toward a gate dead-ahead (the live 768 failure mode)
+# and sees the frame-correct no-detection neutral during the pre-lock window. Ships together with the
+# UC-89 harness fix (the no-detection curr_gate contract moved [1,0]->[0,0]).
+#
+# Changes vs uc87-deploy-robust-warmstart (everything else — warm-start model 11, full difficulty,
+# staggered timing/input/penalty DR, 0.5s deploy slew cap, 16M — is inherited unchanged):
+#   * ground_gate_ahead_frac: rigidly rotate the course about the spawn for most GROUND starts so
+#     gate-0 lands dead-ahead (+x) at the live geometry, exactly as the deploy spawn-yaw aligner
+#     presents the live scene. Teaches the grounded launch-toward-gate the policy was missing.
+#   * spawn_distance_m: put the first gate ~3.2 training-scale ahead (= 38 m / world_scale 12), the
+#     measured live pad->gate distance, with some spread for generality.
+#   * pre_acquire_s: hold the gate in the full no-detection neutral (rel=0, curr_gate=[0,0,ap]) for an
+#     initial ground window, modeling the live detector pre-lock at the pad (sim twin of the harness).
+extends: uc87-deploy-robust-warmstart
+name: uc89-grounded-launch
+
+course:
+  ground_gate_ahead_frac: 0.8      # 80% of ground starts get gate-0 rotated dead-ahead (+x)
+  spawn_distance_m: [2.5, 4.0]     # first gate ~2.5-4.0 ahead (live ~3.2), some spread for generality
+  pre_acquire_s: 0.3               # pre-lock neutral window at ground starts (sim twin of harness no-detect)

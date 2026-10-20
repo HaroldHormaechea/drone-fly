@@ -1,0 +1,27 @@
+# UC-89 grounded-launch — live-flight harness preset for the 98-dim grounded-launch checkpoint.
+#
+# EXPERIMENTAL / DIAGNOSTIC. Same contract and alignment as training/13-deploy-robust (98-dim memory
+# model, obs-contract v2, action-contract v2, 0.5 s deploy slew cap in the sidecar); the only
+# difference is the policy weights were retrained with the UC-89 grounded-launch knobs on
+# (ground_gate_ahead_frac, spawn_distance_m, pre_acquire_s) so it learns to lift off from a grounded
+# start toward a gate dead-ahead. Flies via:
+#
+#   drone-fly harness run \
+#     --checkpoint training/14-grounded-launch/model_readout.pt \
+#     --extra-dim 98 \
+#     --preset liftoff_arena --config training/14-grounded-launch/harness-liftoff.yaml
+#
+# Alignment (unchanged from 13-deploy-robust):
+#   * runner.align_spawn_yaw: true — the policy trains from an ALIGNED spawn (SpawnYawAligner ON); the
+#     live frame is rotated onto the fixed training heading. Do NOT set false.
+#   * runner.latency_compensation: off — trained with the live timing + ~75 ms actuation delay +
+#     memory input, so the Smith predictor is redundant (and ineligible for the v2 action contract).
+#
+# Everything else (camera FOV/uptilt, HUD masks, the learned gate detector + eyes free-space
+# estimator, telemetry) is inherited from the base liftoff preset — and for this diagnostic the
+# gate detector should be run at input width 768 (the UC-89 live finding).
+harness: liftoff
+
+runner:
+  align_spawn_yaw: true
+  latency_compensation: off

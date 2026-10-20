@@ -1,0 +1,16 @@
+{
+  "contract_version": 2,
+  "action": {
+    "collective_scale_g": 1.0,
+    "max_rate_rad_s": 4.0,
+    "max_g": 2.5
+  },
+  "extra_dim": 98,
+  "actor": "k1-reservoir-aug",
+  "drone": "meteor75",
+  "run_id": "20261019T141904Z-uc89-grounded-launch",
+  "obs_contract_version": 2,
+  "action_filter": {
+    "traversal_time_s": 0.5
+  }
+}

@@ -83,3 +83,5 @@ events.out.tfevents.*
 # added post-merge from the GPU run)
 !training/13-deploy-robust/
 !training/13-deploy-robust/**
+!training/14-grounded-launch/
+!training/14-grounded-launch/**
