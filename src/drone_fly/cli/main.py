@@ -649,6 +649,31 @@ def _cmd_gates_diagnose(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_gates_backprojection_eval(args: argparse.Namespace) -> int:
+    import sys
+
+    from drone_fly.harness.config import load_config
+    from drone_fly.harness.liftoff.gate_range import RangeCheck
+    from drone_fly.harness.offline import gate_backprojection_eval as gbe
+
+    cfg = load_config(args.harness, args.config, preset=args.preset or "liftoff")
+    check = RangeCheck.from_config((cfg.section("gates").get("learned") or {}).get("range_check"))
+    rep = gbe.run_backprojection_eval(
+        args.runs,
+        args.track,
+        trackdata_root=args.trackdata,
+        tune_runs=args.tune_runs,
+        modes=tuple(m.strip() for m in args.modes.split(",") if m.strip()),
+        with_frames=args.with_frames,
+        device=None if args.device in (None, "auto") else args.device,
+        out_dir=args.out,
+        check=check,
+        invocation="drone-fly " + " ".join(sys.argv[1:]),
+    )
+    print(gbe.summary(rep))
+    return EXIT_OK
+
+
 def _cmd_gates_draft_types(args: argparse.Namespace) -> int:
     import yaml
 
@@ -1210,6 +1235,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_gx.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     _common(p_gx)
     p_gx.set_defaults(func=_cmd_gates_diagnose)
+    p_gb = gsub.add_parser(
+        "backprojection-eval",
+        help="UC-91: gate-centre error vs range on recorded live runs, per range mode",
+    )
+    p_gb.add_argument("--runs", nargs="+", required=True,
+                      help="held-out run folders (explicit; never listed)")  # fmt: skip
+    p_gb.add_argument("--track", required=True, help="the runs' track XML (ground truth)")
+    p_gb.add_argument("--trackdata", help="trackdata root (default: the track XML's folder)")
+    p_gb.add_argument("--tune-runs", nargs="+",
+                      help="run folders range_check is tuned on (not --runs)")  # fmt: skip
+    p_gb.add_argument("--modes", default="pnp,pnp_checked", help="range modes to compare")
+    p_gb.add_argument("--with-frames", action="store_true",
+                      help="Pass C: re-run the detector on the saved frames")  # fmt: skip
+    p_gb.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    p_gb.add_argument("--out", default="artifacts/harness/reports/uc91-backprojection",
+                      help="report folder (a UTC-stamped subfolder is created)")  # fmt: skip
+    _common(p_gb)
+    p_gb.set_defaults(func=_cmd_gates_backprojection_eval)
 
     p_train = hsub.add_parser(
         "train-gates", help="train the learned gate detector on labels (alias, single-map UC64)"

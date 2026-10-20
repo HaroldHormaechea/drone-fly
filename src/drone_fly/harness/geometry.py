@@ -19,7 +19,7 @@ against ``raycast()``; ground-truth casting always calls ``contract.raycast()`` 
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -132,13 +132,16 @@ def contract_to_unity_quat(q_wxyz: np.ndarray) -> np.ndarray:
 class CameraModel:
     """Pinhole camera from horizontal FOV + resolution, pitched up by ``uptilt_deg``.
 
-    Square pixels; principal point at the image centre. ``vfov`` follows from the aspect.
+    Square pixels. The principal point is the image centre unless ``principal_point`` gives
+    ``(cx, cy)`` in pixels at this resolution (UC-91; Liftoff renders a centred camera, so its
+    configs leave it unset). ``vfov`` follows from the aspect.
     """
 
     width: int
     height: int
     hfov_deg: float
     uptilt_deg: float = 0.0
+    principal_point: tuple[float, float] | None = None
 
     @property
     def fx(self) -> float:
@@ -150,10 +153,14 @@ class CameraModel:
 
     @property
     def cx(self) -> float:
+        if self.principal_point is not None:
+            return float(self.principal_point[0])
         return self.width / 2.0
 
     @property
     def cy(self) -> float:
+        if self.principal_point is not None:
+            return float(self.principal_point[1])
         return self.height / 2.0
 
     @property
@@ -198,5 +205,8 @@ class CameraModel:
         )
 
     def scaled_to(self, width: int, height: int) -> CameraModel:
-        """Same FOV/uptilt for a different capture resolution."""
-        return CameraModel(width, height, self.hfov_deg, self.uptilt_deg)
+        """Same FOV/uptilt (and proportional principal point) for a different capture resolution."""
+        pp = self.principal_point
+        if pp is not None:
+            pp = (pp[0] * width / self.width, pp[1] * height / self.height)
+        return replace(self, width=width, height=height, principal_point=pp)

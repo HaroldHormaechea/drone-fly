@@ -35,7 +35,7 @@ or a wrong FOV / uptilt fails the margin or the camera check). CPU + OpenCV only
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -348,9 +348,7 @@ def search(
     """Grid search (uptilt x offset), baseline at the best cell, and the verdict."""
     grid = np.zeros((len(uptilts_deg), len(offsets_s)))
     counts = np.zeros_like(grid, dtype=np.int64)
-    cams = [
-        CameraModel(camera.width, camera.height, camera.hfov_deg, float(u)) for u in uptilts_deg
-    ]
+    cams = [replace(camera, uptilt_deg=float(u)) for u in uptilts_deg]
     for j, off in enumerate(offsets_s):
         poses = [track.at(fr.stamp + float(off)) for fr in frames]
         for i, cam in enumerate(cams):
@@ -403,7 +401,7 @@ def camera_check(
     grid = np.zeros((len(ups), len(hfs)))
     for i, u in enumerate(ups):
         for j, h in enumerate(hfs):
-            cam = CameraModel(camera.width, camera.height, float(h), float(u))
+            cam = replace(camera, hfov_deg=float(h), uptilt_deg=float(u))
             grid[i, j] = score_pose_set(frames, poses, cam, masks, edges)[0]
     i, j = np.unravel_index(int(np.argmax(grid)), grid.shape)
     bu, bh = float(ups[i]), float(hfs[j])
@@ -531,8 +529,7 @@ def align_capture(
         track_xml = root / meta["track"]["file"]
     cam_cfg = camera_config(cfg.section("camera"), meta)
     camera = camera_from_config(cam_cfg)
-    camera = CameraModel(camera.width, camera.height, camera.hfov_deg,
-                         camera.uptilt_deg + uptilt_bias_deg)  # fmt: skip
+    camera = replace(camera, uptilt_deg=camera.uptilt_deg + uptilt_bias_deg)
     masks = FrameMasks.from_config(cam_cfg)
     table = GateTypeTable.from_config(cfg.get("gate_types"))
     gates = placed_gates(parse_track_items(track_xml), table)
@@ -550,7 +547,7 @@ def align_capture(
     if check_camera and frames and res.margin >= MARGIN_MIN:
         # the camera under test: the capture's, with the searched uptilt when --search-uptilt
         # measured it (verify_capture then records that uptilt in meta.camera)
-        tested = CameraModel(camera.width, camera.height, camera.hfov_deg, res.uptilt_deg)
+        tested = replace(camera, uptilt_deg=res.uptilt_deg)
         res.camera = camera_check(frames, track, tested, masks, edges, res.offset_s)
         res.reasons += res.camera["reasons"]
         res.verified = not res.reasons

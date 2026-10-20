@@ -100,3 +100,4 @@ Statuses:
 | 88 | [use-cases/88-controller-realistic-slew-limiter.md](use-cases/88-controller-realistic-slew-limiter.md) | Controller-realistic command slew-rate limiter (action filter) | done | 2026-10-19 |
 | 89 | [use-cases/89-grounded-launch-and-placeholder-gate-fix.md](use-cases/89-grounded-launch-and-placeholder-gate-fix.md) | Grounded-launch behavior + placeholder-gate frame bug (live 768 crash) | done | 2026-10-19 |
 | 90 | [use-cases/90-gate-approach-altitude-tracking.md](use-cases/90-gate-approach-altitude-tracking.md) | Gate-approach altitude tracking (stop climbing over the gate) | done | 2026-10-20 |
+| 91 | [use-cases/91-gate-altitude-backprojection-fix.md](use-cases/91-gate-altitude-backprojection-fix.md) | Gate-altitude back-projection fix (perception/calibration) | in-progress | 2026-10-20 |

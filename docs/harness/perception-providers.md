@@ -217,6 +217,10 @@ drone-fly eyes compare --v1 depth/perception_eval_held-out.json --v2 eyes/percep
 The train split is refused, and so are maps the provider trained on (when its `meta` carries
 `split_maps`).
 
+For the `learned` gate estimator's world gate positions (how a detection becomes a 3-D gate centre,
+the `gates.learned.range_mode` options, and gate-centre error vs range on recorded live runs) see
+[gate-backprojection.md](gate-backprojection.md).
+
 ## The example plugin, end to end
 
 `drone_fly.harness.examples.brightness:BrightnessRaysProvider` is a teaching example (never fly

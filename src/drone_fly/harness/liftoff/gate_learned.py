@@ -10,7 +10,11 @@ Per frame (:meth:`LearnedGateEstimator.detect`, image already masked by the base
 3. planar PnP (IPPE, OpenCV) of those keypoints against the class's object points from the
    ``gate_types`` table -> camera-frame pose -> world :class:`GateDetection` with the class's
    aperture. Tracking, pass, lost and acquire semantics are the base class's
-   (:class:`~drone_fly.harness.liftoff.gate_cv.TrackingGateEstimator`).
+   (:class:`~drone_fly.harness.liftoff.gate_cv.TrackingGateEstimator`);
+4. UC-91 ``gates.learned.range_mode``: ``pnp`` (default) keeps every solved detection;
+   ``pnp_checked`` drops detections whose PnP range disagrees with the size-based range or whose
+   gate plane tilts out of upright (:mod:`~drone_fly.harness.liftoff.gate_range`, knobs under
+   ``gates.learned.range_check``). ``info["range_rejections"]`` counts drops per reason.
 
 Network outputs are cached per ``frame.index`` (the loop may tick faster than frames arrive), and
 ``info["inference_s"]`` records the CUDA-synchronised network time of the latest frame.
@@ -53,6 +57,12 @@ from drone_fly.harness.liftoff.gate_cv import (
     TrackingGateEstimator,
     camera_from_config,
     solve_planar_pnp,
+)
+from drone_fly.harness.liftoff.gate_range import (
+    REJECT_REASONS,
+    RangeCheck,
+    evaluate_detection,
+    range_mode_from_config,
 )
 from drone_fly.harness.liftoff.masks import FrameMasks
 from drone_fly.harness.liftoff.pointer_cv import pointer_reader_from_config
@@ -276,6 +286,8 @@ class LearnedGateEstimator(TrackingGateEstimator):
         masks: FrameMasks | None = None,
         pointer_reader: Any = None,
         async_inference: bool = False,
+        range_mode: str = "pnp",
+        range_check: RangeCheck | None = None,
         **tracker: Any,
     ) -> None:
         scale = scale or WorldScale(1.0)
@@ -314,6 +326,9 @@ class LearnedGateEstimator(TrackingGateEstimator):
         self._stopping = False
         self._worker_error: BaseException | None = None
         self._latest_index: int | None = None
+        self.range_mode = range_mode_from_config(range_mode)
+        self.range_check = range_check or RangeCheck()
+        self.range_rejections = dict.fromkeys(REJECT_REASONS, 0)
 
     @classmethod
     def from_config(cls, cfg: dict[str, Any], ctx: Any) -> LearnedGateEstimator:
@@ -366,6 +381,8 @@ class LearnedGateEstimator(TrackingGateEstimator):
             async_inference=require_bool(
                 lc.get("async_inference", False), "gates.learned.async_inference"
             ),
+            range_mode=range_mode_from_config(lc.get("range_mode", "pnp")),
+            range_check=RangeCheck.from_config(lc.get("range_check")),
             assoc_radius=num("assoc_radius", 1.0, min_value=0.0, min_exclusive=True),
             lost_timeout_s=num("lost_timeout_s", 1.0, min_value=0.0, min_exclusive=True),
             acquire_timeout_s=num("acquire_timeout_s", 3.0, min_value=0.0),
@@ -501,6 +518,9 @@ class LearnedGateEstimator(TrackingGateEstimator):
         lag = self.detection_lag_frames()
         if lag is not None:
             info["detection_lag_frames"] = lag
+        if self.range_mode != "pnp":
+            info["range_mode"] = self.range_mode
+            info["range_rejections"] = dict(self.range_rejections)
         return info
 
     # ------------------------------------------------------------------ detection
@@ -545,6 +565,15 @@ class LearnedGateEstimator(TrackingGateEstimator):
                 cls=gtype.cls,
                 pixel_center=d["center"],
             )
-            if det is not None:
-                out.append(det)
+            if det is None:
+                continue
+            if self.range_mode == "pnp_checked":
+                verdict = evaluate_detection(
+                    t_cam, det.n_world, kp[keep], gtype.object_points()[keep],
+                    gtype.object_points(), camera, self.range_check, self.masks,
+                )  # fmt: skip
+                if not verdict["accepted"]:
+                    self.range_rejections[verdict["reason"]] += 1
+                    continue
+            out.append(det)
         return out

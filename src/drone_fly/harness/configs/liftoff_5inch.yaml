@@ -106,6 +106,9 @@ camera:
   resolution: null          # [w, h] the FOV refers to; null = use the captured frame size
   hfov_deg: 120.0           # Liftoff camera FOV (horizontal). CALIBRATE
   uptilt_deg: 25.0          # FPV camera angle. CALIBRATE
+  # [cx, cy] principal point in pixels at `resolution` (UC-91); null = the image centre (Liftoff
+  # renders a centred pinhole camera; docs/harness/gate-backprojection.md).
+  principal_point: null
   # Screen regions ignored by gate detection, auto-labelling and depth sampling (HUD, ghost list).
   # Each {name, rect: [x, y, w, h]} in pixels at `resolution` (required when masks are set).
   masks: []
@@ -176,6 +179,16 @@ gates:
     min_keypoints: 4        # visible keypoints needed for PnP
     max_detections: 8
     async_inference: false  # true: run the network on a worker thread (loop uses the latest result)
+    # UC-91 range mode: pnp (PnP range from the gate-type geometry; every solved detection kept) |
+    # pnp_checked (also drop detections whose PnP range disagrees with the size-based range or whose
+    # gate plane is not upright). docs/harness/gate-backprojection.md has the evidence.
+    range_mode: pnp
+    range_check:
+      size_ratio_min: 0.47      # r_pnp / r_size; < 1 for oblique gates: sqrt(cos 60 deg) x (1 - 2.5 sd)
+      size_ratio_max: 1.33      # 1 + 2.5 sd; sd 0.131 = PnP 12.8 % (+) size range 3 % at 50 m
+      max_normal_tilt_deg: 30.0 # gate-plane normal out of horizontal; null disables
+      edge_margin_px: 8.0       # keypoints this close to the border / a mask -> size range invalid
+      min_hull_frac: 0.5        # kept hull / full class hull below this -> size range invalid
 
 # Gate styles: itemID regex -> class + dimensions (Liftoff metres, Unity-local x right / y up).
 # Shared by the offline tools (route parsing, auto-labelling, scoring) and the learned estimator
