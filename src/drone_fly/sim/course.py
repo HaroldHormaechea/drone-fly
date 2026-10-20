@@ -205,6 +205,28 @@ class CourseConfig:
     #: byte-identical.
     pre_acquire_s: float = 0.0
 
+    # ---- UC-90 gate-approach altitude-tracking reward (default-OFF ⇒ byte-identical) ----
+    #: Weight on the proximity-gated vertical-alignment penalty that pulls the drone's altitude
+    #: toward the **current target gate's** z on approach (live, the UC-89 deploy policy climbs a
+    #: median +11 m OVER gate 0 instead of levelling to its height). Keyed on ``_target_pos()``
+    #: AFTER the gate-advance step, so it tracks whichever gate is being approached and generalizes
+    #: to all gates. ``0.0`` disables the term — it is stateless and draws no RNG when off, so the
+    #: reward, ``ep_return`` and ``extra()`` are byte-identical to today for existing configs and
+    #: old checkpoints. The retrain tunes the weight (and ``gate_alt_radius_m``).
+    #:
+    #: AC4 (domain-randomizing the *observed* gate z so the policy tolerates the noisy live
+    #: estimate) is intentionally DEFERRED, not silently omitted: the existing ``gate_pos_noise_m``
+    #: DR path already perturbs the observed gate ``rel`` in all three axes (incl. z), so a
+    #: dedicated gate-z-noise knob is redundant for this use case.
+    gate_alt_weight: float = 0.0
+    #: Horizontal proximity window for the altitude term, in **sim world units** — the same units
+    #: as gate centres / progress distance / ``PASS_SLACK`` / the arena, NOT the metre-denominated
+    #: ``FLOOR_*`` constants (the ``_m`` suffix mirrors ``spawn_distance_m``'s convention). The
+    #: penalty fades linearly from full weight at the gate centre to 0 once the horizontal distance
+    #: reaches this radius, so it bites only on the approach, never across the whole course. The
+    #: default is a starting point; the retrain tunes it jointly with ``gate_alt_weight``.
+    gate_alt_radius_m: float = 3.0
+
     def __post_init__(self) -> None:
         if not self.reward_reference_dt_s or self.reward_reference_dt_s <= 0:
             raise ValueError("course.reward_reference_dt_s must be positive")
@@ -236,6 +258,10 @@ class CourseConfig:
             raise ValueError("course.ground_gate_ahead_frac must be in [0, 1]")
         if self.pre_acquire_s < 0:
             raise ValueError("course.pre_acquire_s must be >= 0")
+        if self.gate_alt_weight < 0:
+            raise ValueError("course.gate_alt_weight must be >= 0")
+        if self.gate_alt_radius_m <= 0:
+            raise ValueError("course.gate_alt_radius_m must be > 0")
 
     @property
     def pool_kwargs(self) -> dict[str, Any]:
@@ -1188,6 +1214,32 @@ class CourseEnv:
             floor_now = (self.pos[:, 2] - FLOOR_KILL_Z).clamp(0.0, FLOOR_CAP)
             reward = reward + FLOOR_BETA * (floor_now - self.prev_floor)
             self.prev_floor = floor_now
+
+        # UC-90: gate-approach altitude-tracking penalty. Pulls the drone's altitude toward the
+        # CURRENT target gate's z as it closes in horizontally, so it levels off at gate height
+        # instead of climbing over the gate. ``_target_pos()`` is read AFTER the gate-advance above
+        # (same ``self.tgt`` the progress/pass logic uses), so this keys on whichever gate is now
+        # being approached and generalizes to every gate, not just gate 0. The penalty is
+        # proximity-gated (linear fade to 0 at ``gate_alt_radius_m``) and symmetric in the vertical
+        # error (above or below the gate penalized equally). It composes additively and does NOT
+        # double-count the other shaping: progress rewards 3D distance reduction across the whole
+        # course, clearance measures obstacle-surface distance, and floor measures absolute height
+        # above the kill plane — none of them is a gate-relative z-alignment signal, so this is a
+        # separate summand (like gap/floor), not a re-weighting of an existing one. Stateless and
+        # guarded by ``gate_alt_weight > 0`` ⇒ no reset state, no RNG drawn when off ⇒ default-off
+        # byte-identical. ``zerr`` is deliberately NOT clamped: the +11 m overshoot is exactly the
+        # large-error case that needs a full descent gradient; proximity gating plus a modest
+        # retrain weight bound the term. Rate-scaled by ``rscale`` like the other dense terms, so it
+        # folds into ``ep_return`` consistently. ``_apply_gstart_rot`` rotates only x/y, so the
+        # gate-z term is invariant to the UC-89 scene rotation; and proximity gating keeps it ≈0 at
+        # a grounded launch (gate 0 is ahead at ~3.2, not overhead), so it does not fight the climb
+        # off the pad.
+        if cfg.gate_alt_weight > 0:
+            gp = self._target_pos()
+            h = (gp[:, :2] - self.pos[:, :2]).norm(dim=-1)
+            prox = (1.0 - h / cfg.gate_alt_radius_m).clamp(0.0, 1.0)
+            zerr = (self.pos[:, 2] - gp[:, 2]).abs()
+            reward = reward - cfg.gate_alt_weight * prox * zerr * rscale
 
         # UC-87 AC3: action-rate + saturation penalties (rate-scaled, like the dense terms). The
         # previous raw action is ``self.prev_action`` (zero at episode start); it is updated to
