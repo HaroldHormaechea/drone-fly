@@ -264,6 +264,92 @@ def test_gate_detection_n_world_is_an_optional_trailing_field():
     assert d.n_world is None and d.cls is None
 
 
+# ----------------------------------------------------------------------------- non-finite PnP guard
+
+NAN3 = np.array([np.nan, np.nan, np.nan])
+
+
+def _good_solution():
+    pos, quat = np.array([0.0, 0.0, 6.0]), attitude(pitch=10.0)
+    px = project(LIVE, pos, quat, gate_world_points([40.0, 2.0, 1.84], 186.0)[0])
+    t_cam, n_cam = solve_planar_pnp(OBJ, px, LIVE)
+    return pos, quat, px, t_cam, n_cam
+
+
+@pytest.mark.parametrize(
+    "t_bad, n_bad",
+    [
+        (NAN3, None),
+        (np.array([np.nan, 0.0, 30.0]), None),  # NaN with a positive depth: once let through
+        (np.array([0.0, 0.0, np.inf]), None),
+        (np.array([-np.inf, 0.0, 30.0]), None),
+        (None, NAN3),
+        (None, np.array([0.0, np.inf, 1.0])),
+    ],
+)
+def test_detection_from_pose_rejects_non_finite_pnp(t_bad, n_bad):
+    pos, quat, px, t_cam, n_cam = _good_solution()
+    est = PoseOnly(LIVE, WorldScale(1.0), default_aperture=ARCH.min_aperture)
+    est._det_stamp = None
+    t = t_cam if t_bad is None else t_bad
+    n = n_cam if n_bad is None else n_bad
+    det = est.detection_from_pose(t, n, px, 0.01, state_of(pos, quat), LIVE, ARCH.min_aperture)
+    assert det is None
+
+
+def test_detection_from_pose_keeps_a_finite_solution_unchanged():
+    pos, quat, px, t_cam, n_cam = _good_solution()
+    est = PoseOnly(LIVE, WorldScale(1.0), default_aperture=ARCH.min_aperture)
+    est._det_stamp = None
+    det = est.detection_from_pose(
+        t_cam, n_cam, px, 0.01, state_of(pos, quat), LIVE, ARCH.min_aperture
+    )
+    assert det is not None
+    np.testing.assert_allclose(det.center, [40.0, 2.0, 1.84], atol=0.05)
+    np.testing.assert_array_equal(det.t_cam, t_cam)
+    assert np.isfinite(det.n_world).all() and np.isfinite(det.yaw) and np.isfinite(det.distance)
+
+
+class ScriptedPnP(TrackingGateEstimator):
+    """Places scripted camera-frame PnP solutions the way the learned estimator does."""
+
+    def __init__(self, solutions, px, **kw):
+        super().__init__(LIVE, WorldScale(1.0), default_aperture=ARCH.min_aperture, **kw)
+        self.solutions, self.px = solutions, px
+
+    def detect(self, image, state):
+        out = []
+        for t_cam, n_cam in self.solutions:
+            det = self.detection_from_pose(
+                t_cam, n_cam, self.px, 0.01, state, LIVE, ARCH.min_aperture, cls=ARCH.cls
+            )
+            if det is not None:
+                out.append(det)
+        return out
+
+
+@pytest.mark.parametrize("lost_policy", ["terminate", "reacquire"])
+def test_tracker_never_yields_a_nan_target_from_a_nan_solution(lost_policy):
+    from drone_fly.harness.types import Frame
+
+    pos, quat, px, t_cam, n_cam = _good_solution()
+    frame = Frame(np.zeros((1080, 2560, 3), np.uint8), 0.0, 1)
+    nan_only = [(np.array([np.nan, np.nan, 30.0]), n_cam), (t_cam, NAN3)]
+    est = ScriptedPnP(nan_only, px, lost_policy=lost_policy)
+    for k in range(5):
+        ge = est.update(frame, state_of(pos, quat, k * 0.05), k * 0.05)
+        assert np.isfinite(ge.target).all() and np.isfinite(ge.curr_gate).all()
+        assert np.isfinite(ge.next_lookahead).all()
+        assert ge.info["detections"] == 0 and not ge.info["target_valid"]
+    # a NaN solution next to a good one: the good one is tracked, the target stays finite
+    est = ScriptedPnP([nan_only[0], (t_cam, n_cam), nan_only[1]], px, lost_policy=lost_policy)
+    for k in range(5):
+        ge = est.update(frame, state_of(pos, quat, k * 0.05), k * 0.05)
+        assert ge.info["detections"] == 1 and ge.info["target_valid"]
+        np.testing.assert_allclose(ge.target, [40.0, 2.0, 1.84], atol=0.05)
+        assert np.isfinite(ge.curr_gate).all() and np.isfinite(ge.next_lookahead).all()
+
+
 def _align_inputs():
     from drone_fly.harness.offline import align
 
