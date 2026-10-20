@@ -1,0 +1,25 @@
+# UC-92 altitude-descent eval — isolates the DESCENT behaviour the retrain targets.
+#
+# Extends the m13 PRIMARY so the course (tall gates, DR, memory, action contract) matches the trained
+# distribution, then changes ONLY the eval conditions:
+#   * start mixed with a LOW ground fraction (0.2) and a HIGH air-start band (air_z_m [5.0, 9.0]), so
+#     most episodes begin well ABOVE the gates and must DESCEND to them — the exact failure mode (the
+#     live policy climbs ~6.5 units and overflies all gates). ground_fraction 0.2 keeps a few grounded
+#     launches for coverage.
+#   * ceiling_z 12.0 — well above the 9.0 top of the air-start band, so a high spawn never trips the
+#     ceiling crash. This ISOLATES "did it descend to the gate?" from "did it crash into the ceiling?"
+#     (the retrain is about descent, not the crash bound).
+#   * vspread_frac null ⇒ vspread_scale pinned at 1.0 (FULL tall gates) for the whole eval — the gates
+#     are evaluated at their full designed vertical spread, not a ramped-in fraction.
+extends: uc92-altitude-robust-warmstart-m13
+name: uc92-altitude-descent-eval
+
+course:
+  ceiling_z: 12.0           # above the air-start band so high spawns don't ceiling-crash
+  start:
+    mode: mixed
+    ground_fraction: 0.2    # mostly air starts; keep a few grounded launches
+    air_z_m: [5.0, 9.0]     # spawn high ABOVE the gates ⇒ the policy must descend to them
+
+curriculum:
+  vspread_frac: null        # full tall gates for eval (scale pinned at 1.0, no ramp)

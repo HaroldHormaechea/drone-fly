@@ -227,6 +227,21 @@ class CourseConfig:
     #: default is a starting point; the retrain tunes it jointly with ``gate_alt_weight``.
     gate_alt_radius_m: float = 3.0
 
+    # ---- UC-92 vertically-spread gates (default-OFF ⇒ byte-identical) ----
+    #: Per-course TALL-band center range ``(lo, hi)`` (sim world units). When set, each course gets
+    #: a second, taller set of gate z's (``"gate_z_tall"`` in the pool, lerped onto the base heights
+    #: at runtime via ``vspread_scale``); the base heights (``cen`` z) stay today's 0–2 slab.
+    #: ``None`` disables the spread entirely — no extra RNG is drawn in ``course_gen``, the pool
+    #: carries no ``czt`` array, and every world read is byte-identical to today (old
+    #: checkpoints/configs decode unchanged). MUST be a tuple (``from_dict`` coerces the YAML list)
+    #: so it stays hashable for the pool cache key — mirrors ``spawn_distance_m``.
+    gate_z_center_range: tuple[float, float] | None = None
+    #: Sinusoid amplitude of the TALL band (base uses today's fixed 0.98). Ignored when spread off.
+    gate_z_amp: float = 0.98
+    #: Clip bounds for the TALL band z (base keeps today's fixed [0, 2]). Ignored when spread off.
+    gate_z_max: float = 2.0
+    gate_z_min: float = 0.0
+
     def __post_init__(self) -> None:
         if not self.reward_reference_dt_s or self.reward_reference_dt_s <= 0:
             raise ValueError("course.reward_reference_dt_s must be positive")
@@ -262,6 +277,14 @@ class CourseConfig:
             raise ValueError("course.gate_alt_weight must be >= 0")
         if self.gate_alt_radius_m <= 0:
             raise ValueError("course.gate_alt_radius_m must be > 0")
+        if self.gate_z_amp < 0:
+            raise ValueError("course.gate_z_amp must be >= 0")
+        if self.gate_z_min > self.gate_z_max:
+            raise ValueError("course.gate_z_min must be <= course.gate_z_max")
+        if self.gate_z_center_range is not None:
+            lo, hi = self.gate_z_center_range
+            if not 0 <= lo <= hi:
+                raise ValueError("course.gate_z_center_range needs 0 <= lo <= hi")
 
     @property
     def pool_kwargs(self) -> dict[str, Any]:
@@ -272,6 +295,13 @@ class CourseConfig:
             kw.update(laps_lo=2, laps_hi=5)
         if self.variety:
             kw["with_variety"] = True
+        # UC-92: forward the vertical-spread knobs ONLY when active, so the off-path pool key and
+        # sample_course call are byte-identical to today (the knobs never enter ckw when off).
+        if self.gate_z_center_range is not None:
+            kw["gate_z_center_range"] = self.gate_z_center_range
+            kw["gate_z_amp"] = self.gate_z_amp
+            kw["gate_z_max"] = self.gate_z_max
+            kw["gate_z_min"] = self.gate_z_min
         return kw
 
     @property
@@ -289,6 +319,10 @@ class CourseConfig:
         start = StartConfig.from_dict(d.pop("start", None))
         if d.get("spawn_distance_m") is not None:
             d["spawn_distance_m"] = tuple(float(x) for x in d["spawn_distance_m"])
+        # UC-92: a YAML list is unhashable and would crash the pool cache key — coerce to a tuple
+        # exactly as spawn_distance_m above.
+        if d.get("gate_z_center_range") is not None:
+            d["gate_z_center_range"] = tuple(float(x) for x in d["gate_z_center_range"])
         unknown = set(d) - set(cls.__dataclass_fields__)
         if unknown:
             raise ValueError(f"unknown course keys {sorted(unknown)}")
@@ -343,6 +377,10 @@ def build_pool(
     ovec = np.zeros((P, MO, 3), np.float32)
     otype = np.zeros((P, MO), np.int64)
     omask = np.zeros((P, MO), bool)
+    # UC-92: when vertical spread is active EVERY course carries a per-gate TALL z (gate_z_tall).
+    # Pack it into a parallel ``czt`` array. Off-path it stays None ⇒ no ``czt`` key in the pool.
+    has_vspread = ckw.get("gate_z_center_range") is not None
+    czt = np.zeros((P, NG_MAX), np.float32) if has_vspread else None
     for p in range(P):
         c = sample_course(base + p, **ckw)
         n = c["n_gates"]
@@ -353,6 +391,9 @@ def build_pool(
             yaw[p, i] = g["yaw"]
             ap[p, i] = g["aperture"]
             gmask[p, i] = True
+        if has_vspread:
+            for i, zt in enumerate(c["gate_z_tall"]):
+                czt[p, i] = zt
         start[p] = c["start"]
         for j, o in enumerate(c["obstacles"][:MO]):
             oc[p, j] = o["center"]
@@ -383,6 +424,8 @@ def build_pool(
         "otype": otype[order],
         "omask": omask[order],
     }
+    if czt is not None:
+        pool["czt"] = czt[order]  # UC-92 per-gate tall z, sorted with the pool
     if no_obs:
         pool["omask"] = np.zeros_like(pool["omask"])  # obstacle-free tier
     _POOLS[key] = pool
@@ -512,6 +555,11 @@ class CourseEnv:
         self.cone = torch.as_tensor(ray_cone(), device=dev, dtype=self.dtype)
         self.ngates = NG_MAX
         self.extra_dim = config.extra_dim
+        # UC-92 vertical-spread runtime scale (default 1.0 = full-tall; the train loop ramps it from
+        # 0 via CurriculumConfig.vspread_frac). Active only when the pool carries a ``czt`` array
+        # (i.e. the config set gate_z_center_range); otherwise _gate is byte-identical to today.
+        self.vspread_scale = 1.0
+        self._vspread_on = "czt" in pool
         self.difficulty = 1.0  # curriculum: fraction of the sorted pool that can be drawn
         self.obs_pos_curr = 1.0  # 0 = obstacles parked PARK m off-path, 1 = on-path
         self.obs_count_curr = 1.0  # 0 = at most 1 obstacle active, 1 = all active
@@ -699,6 +747,14 @@ class CourseEnv:
         cen = self.P["cen"][self.cid, idx]
         yaw = self.P["yaw"][self.cid, idx]
         ap = self.P["ap"][self.cid, idx]
+        if self._vspread_on:
+            # UC-92: lerp gate z from the base slab toward the per-gate TALL target by the current
+            # vspread_scale (clamped to [0,1]). This is the SINGLE gate accessor, so the lifted z
+            # reaches target/obs/gate-pass/reward alike. Runs BEFORE the gstart xy-rotation below.
+            czt = self.P["czt"][self.cid, idx]
+            scale = min(max(float(self.vspread_scale), 0.0), 1.0)
+            cen = cen.clone()
+            cen[..., 2] = cen[..., 2] + scale * (czt - cen[..., 2])
         if self._gstart_on:
             cen = self._apply_gstart_rot(cen)
             yaw = torch.where(self._gstart_active, yaw + self._gstart_theta, yaw)

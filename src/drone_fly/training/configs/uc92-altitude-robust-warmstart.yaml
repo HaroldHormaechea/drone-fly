@@ -1,0 +1,32 @@
+# UC-92 altitude-robust gates — FALLBACK recipe (warm-start model 11). Run ONLY if the m13 PRIMARY
+# (uc92-altitude-robust-warmstart-m13) misses the success criteria. On a single 6 GB card the runs
+# are sequential; QA retrains + evals the PRIMARY first.
+#
+# Identical gate-vertical-spread knobs as the PRIMARY, but warm-starts model 11 (training/
+# 11-count-curriculum, the 70-input avoider) instead of model 13, exactly as the proven
+# uc87-deploy-robust-warmstart does (inherited: warm_start model 11, src_extra_dim 70 zero-init of the
+# 28 memory columns). Because model 11 is NOT yet deploy-robust, the inherited UC-87
+# deployment/perception/penalty DR ramps are KEPT (they ramp alongside the new vspread ramp) so the
+# policy learns altitude robustness AND deploy robustness together — rather than assuming the base is
+# already robust (the PRIMARY's assumption, valid only for model 13).
+extends: uc87-deploy-robust-warmstart
+name: uc92-altitude-robust-warmstart
+budget: 16.0e6
+n_envs: 256                 # A3000 6 GB
+
+# warm_start (model 11, src_extra_dim 70, zero-init the 28 memory columns) is inherited unchanged
+# from uc87-deploy-robust-warmstart — do NOT override it here.
+
+course:
+  # --- UC-92 vertical gate spread (same band as the PRIMARY) ---
+  gate_z_center_range: [1.0, 3.8]
+  gate_z_amp: 1.1
+  gate_z_max: 5.0
+  gate_z_min: 0.0
+  # --- altitude envelope: lift the ceiling so the tall gates fit with approach margin ---
+  ceiling_z: 6.5
+
+curriculum:
+  # Ramp the gate vertical spread ALONGSIDE the inherited UC-87 timing/input/penalty DR ramps (those
+  # are left as-is from uc87-deploy-robust-warmstart so model 11 gains deploy robustness too).
+  vspread_frac: [0.1, 0.7]

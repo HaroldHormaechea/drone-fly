@@ -98,11 +98,15 @@ class CurriculumConfig:
     timing_dr_frac: tuple[float, float] | None = None  # CourseEnv.deploy_dr_scale (AC1/AC6)
     input_dr_frac: tuple[float, float] | None = None  # CourseEnv.input_dr_scale (AC5/AC6)
     penalty_frac: tuple[float, float] | None = None  # action-rate λ anneal (AC3)
+    #: UC-92: ramps CourseEnv.vspread_scale 0->1 over ``[start, end]`` — gates lerp from the base
+    #: 0–2 slab up to their tall band. ``null`` ⇒ 1.0 (full-tall from step 0); the spread is only
+    #: realised when the course config also sets ``gate_z_center_range`` (else the scale is inert).
+    vspread_frac: tuple[float, float] | None = None
     #: Effective action-rate λ-scale ramps ``penalty_init_scale`` -> 1.0 over ``penalty_frac``.
     penalty_init_scale: float = 1.0
 
     def __post_init__(self) -> None:
-        for name in ("timing_dr_frac", "input_dr_frac", "penalty_frac"):
+        for name in ("timing_dr_frac", "input_dr_frac", "penalty_frac", "vspread_frac"):
             v = getattr(self, name)
             if v is None:
                 continue

@@ -203,6 +203,7 @@ def _train(
         # UC-87 redesign staged ramps (default 1.0 when the frac is None ⇒ old configs unchanged).
         env.deploy_dr_scale = _ramp_between(frac, cur.timing_dr_frac)
         env.input_dr_scale = _ramp_between(frac, cur.input_dr_frac)
+        env.vspread_scale = _ramp_between(frac, cur.vspread_frac)  # UC-92 gate vertical-spread ramp
         pen = _ramp_between(frac, cur.penalty_frac)
         env.penalty_scale = cur.penalty_init_scale + pen * (1.0 - cur.penalty_init_scale)
         tap_b = torch.zeros(roll, n, ac.feat_dim, device=dev)
@@ -286,6 +287,7 @@ def _train(
                 # are visible in the training report (AC3/AC6).
                 "deploy_dr_scale": float(env.deploy_dr_scale),
                 "input_dr_scale": float(env.input_dr_scale),
+                "vspread_scale": float(env.vspread_scale),  # UC-92 gate vertical-spread ramp
                 "penalty_scale": float(env.penalty_scale),
                 "episodes": int(len(eps)),
                 "episode_completion": float(eps[:, col("completed")].mean()) if len(eps) else None,

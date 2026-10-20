@@ -1,0 +1,48 @@
+# UC-92 altitude-robust gates — PRIMARY recipe (warm-start model 13, the deploy-robust avoider).
+#
+# Run this FIRST. Problem: `course_gen` hardcodes gate heights to a flat 0–2 training-unit slab, so
+# the policy never trained outside it. Live it climbs ~6.5 units and overflies every gate (0/33).
+# This retrain gives the gates a real vertical spread, RAMPED IN gradually (the naive
+# high-spawn-onto-flat-gates attempt failed — no altitude reward gradient + forgetting). The base
+# heights stay today's slab; a per-course TALL band (gate_z_center_range) is lerped on top at runtime
+# by `vspread_scale`, which the curriculum ramps 0->1 over `vspread_frac`.
+#
+# Warm-starts model 13 (training/13-deploy-robust = the UC-87 run-5 98-dim memory avoider) at
+# src_extra_dim 98 — an IDENTITY copy (model 13 already carries the 98 memory columns; no zero-init).
+# The full deployment/perception DR, memory, smoothness penalties and spawn alignment are inherited
+# from uc87-deploy-robust-warmstart.
+#
+# Notes:
+#   * Obstacles are NOT lerped with the gates — only gate z rises. The obstacle PARK/size/count
+#     curricula are inherited and unchanged; altitude robustness is isolated to the gates.
+#   * Training headroom: ceiling_z is lifted to 6.5 (from the inherited 5.0) so the taller gates
+#     (center up to 3.8 + amp 1.1 ⇒ ~4.9, clipped at gate_z_max 5.0) sit comfortably below the
+#     crash ceiling with margin for approach overshoot.
+extends: uc87-deploy-robust-warmstart
+name: uc92-altitude-robust-warmstart-m13
+budget: 16.0e6
+n_envs: 256                 # A3000 6 GB
+
+warm_start:
+  checkpoint: training/13-deploy-robust/model_readout.pt   # the 98-dim deploy-robust avoider
+  src_extra_dim: 98         # identity warm-start (model 13 already carries the memory columns)
+  legacy_v1: false          # model 13 is action-contract v2
+
+course:
+  # --- UC-92 vertical gate spread (the new knobs; base heights stay today's 0–2 slab) ---
+  gate_z_center_range: [1.0, 3.8]   # per-course TALL-band center (sim world units)
+  gate_z_amp: 1.1                   # TALL-band sinusoid amplitude (base stays 0.98)
+  gate_z_max: 5.0                   # clip the TALL band at 5.0
+  gate_z_min: 0.0                   # clip floor (today's default)
+  # --- altitude envelope: lift the ceiling so the tall gates fit with approach margin ---
+  ceiling_z: 6.5
+
+curriculum:
+  # Model 13 is already deploy-robust ⇒ keep its DR + penalties FULL from step 0. These MUST be
+  # pinned null explicitly: `_merge` deep-merges the curriculum block key-by-key, so without them
+  # the run would INHERIT uc87's timing/input/penalty ramps and switch model 13's DR OFF at step 0.
+  # The ONLY ramp here is the new gate vertical spread, eased in over 10%->70% of the budget.
+  timing_dr_frac: null
+  input_dr_frac: null
+  penalty_frac: null
+  vspread_frac: [0.1, 0.7]

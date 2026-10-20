@@ -31,8 +31,23 @@ def _rng(seed):
     return np.random.default_rng(seed)
 
 
-def _gen_centers(r, ng, target_chord):
-    """One candidate loop of gate centers (perturbed circle + smooth varied heights + chicane)."""
+def _gen_centers(
+    r,
+    ng,
+    target_chord,
+    gate_z_center_range=None,
+    gate_z_amp=0.98,
+    gate_z_max=GATE_Z_MAX,
+    gate_z_min=GATE_Z_MIN,
+):
+    """One candidate loop of gate centers (perturbed circle + smooth varied heights + chicane).
+
+    Returns ``(centers, c0, cz_tall)``. ``cz_tall`` is ``None`` unless the vertical-spread knobs
+    are active (``gate_z_center_range`` set): a per-gate TALL target z drawn from the k/phase/znoise
+    as the base heights but around a per-course ``center`` in ``gate_z_center_range`` with amplitude
+    ``gate_z_amp``, clipped to ``[gate_z_min, gate_z_max]``. The base ``cz`` is byte-identical to
+    today whenever spread is off (no extra RNG is drawn), so old pools/checkpoints are unchanged.
+    """
     R = target_chord / (2 * math.sin(math.pi / ng))
     ang = np.array([2 * math.pi * i / ng for i in range(ng)]) + r.normal(0, 0.05, ng)
     # ABSOLUTE radial perturbation (metres, independent of R): spacing doesn't blow up on big loops
@@ -45,9 +60,18 @@ def _gen_centers(r, ng, target_chord):
     # SMOOTH heights: full 0..2 range but bounded adjacent change (1-2 sinusoids + small noise)
     k = int(r.integers(1, 3))
     phase = r.uniform(0, 2 * math.pi)
-    cz = 1.0 + 0.98 * np.sin(k * ang + phase) + r.normal(0, 0.08, ng)
+    znoise = r.normal(0, 0.08, ng)  # captured so the TALL loop reuses the SAME per-gate noise
+    cz = 1.0 + 0.98 * np.sin(k * ang + phase) + znoise  # base: today's literals (stays `cen` z)
     cz = np.clip(cz, GATE_Z_MIN, GATE_Z_MAX)
-    return np.stack([cx, cy, cz], axis=1), c0
+    cz_tall = None
+    if gate_z_center_range is not None:
+        # Vertical spread ON: a per-course center lifts the whole loop into a taller band, reusing
+        # the base k/phase/znoise so base->tall is a smooth vertical lerp per gate at runtime.
+        lo, hi = gate_z_center_range
+        center = float(r.uniform(lo, hi))
+        cz_tall = center + gate_z_amp * np.sin(k * ang + phase) + znoise
+        cz_tall = np.clip(cz_tall, gate_z_min, gate_z_max)
+    return np.stack([cx, cy, cz], axis=1), c0, cz_tall
 
 
 def sample_course(
@@ -60,21 +84,34 @@ def sample_course(
     ap_hi=APERTURE_MAX,
     with_tunnels=False,
     with_variety=False,
+    gate_z_center_range=None,
+    gate_z_amp=0.98,
+    gate_z_max=GATE_Z_MAX,
+    gate_z_min=GATE_Z_MIN,
 ):
     r = _rng(seed)
     ng = int(r.integers(ng_lo, ng_hi))  # gate count range (default 5..20)
     laps = int(r.integers(laps_lo, laps_hi))  # lap range (default 2..3)
-    # rejection-sample a loop whose every consecutive spacing (incl. the closing link) is in [1,5]
-    centers, c0 = None, 0
+    # rejection-sample a loop whose every consecutive spacing (incl. the closing link) is in [1,5].
+    # With vertical spread on, BOTH the base loop and the TALL loop (same xy, tall z) must satisfy
+    # the spacing bound so the gates stay flyable across the whole base->tall ramp.
+    centers, c0, cz_tall = None, 0, None
     for _try in range(40):
         tc = r.uniform(1.8, 3.0)
-        cand, c0 = _gen_centers(r, ng, tc)
+        cand, c0, cand_tall = _gen_centers(
+            r, ng, tc, gate_z_center_range, gate_z_amp, gate_z_max, gate_z_min
+        )
         sp = [float(np.linalg.norm(cand[(i + 1) % ng] - cand[i])) for i in range(ng)]
-        if all(MIN_SPACING <= d <= MAX_SPACING for d in sp):
-            centers = cand
+        ok = all(MIN_SPACING <= d <= MAX_SPACING for d in sp)
+        if ok and cand_tall is not None:
+            tall = np.stack([cand[:, 0], cand[:, 1], cand_tall], axis=1)
+            spt = [float(np.linalg.norm(tall[(i + 1) % ng] - tall[i])) for i in range(ng)]
+            ok = all(MIN_SPACING <= d <= MAX_SPACING for d in spt)
+        if ok:
+            centers, cz_tall = cand, cand_tall
             break
     if centers is None:
-        centers = cand  # fallback: best-effort (rare)
+        centers, cz_tall = cand, cand_tall  # fallback: best-effort (rare)
 
     # gate orientation: yaw = travel direction (prev -> next tangent), projected to xy
     yaw = np.zeros(ng)
@@ -260,7 +297,7 @@ def sample_course(
 
     # spacing, incl. the lap-closing gateN->gate0 link
     spac = [float(np.linalg.norm(centers[(i + 1) % ng] - centers[i])) for i in range(ng)]
-    return {
+    out = {
         "seed": int(seed),
         "n_gates": ng,
         "laps": laps,
@@ -269,3 +306,8 @@ def sample_course(
         "obstacles": obstacles,
         "spacing": spac,
     }
+    # Only emit the TALL-z target when vertical spread is active. Keeping the key absent off-path
+    # preserves the exact dict shape the verbatim-port parity test asserts against the prototype.
+    if cz_tall is not None:
+        out["gate_z_tall"] = cz_tall.tolist()
+    return out
