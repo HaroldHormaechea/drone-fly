@@ -32,6 +32,7 @@ from drone_fly.harness.liftoff.gate_learned import (  # noqa: E402
     resolve_weights_path,
     weights_table,
 )
+from drone_fly.harness.liftoff.gate_range import RangeCheck  # noqa: E402
 from drone_fly.harness.liftoff.masks import FrameMasks, MaskRegion  # noqa: E402
 from drone_fly.harness.scale import WorldScale  # noqa: E402
 from drone_fly.harness.types import FlightState, Frame  # noqa: E402
@@ -650,3 +651,81 @@ def test_tracker_semantics_acquire_track_hold_lost_and_pass():
     est2.update(Frame(img, 0.0, 1), state, 0.0)
     passed = est2.update(None, _state(pos=(15.0, 0.0, 1.74)), 0.1)
     assert passed.passed and passed.gate_index == 1
+
+
+# ----------------------------------------------------------------------------- UC-91 range mode
+
+
+def test_range_mode_defaults_to_pnp_and_leaves_tick_info_unchanged():
+    pytest.importorskip("cv2")
+    state = _state()
+    kp, c = _projected_arch([15.0, 1.0, 1.74], math.radians(10), state)
+    est = ScriptedEstimator(lambda: [_raw(kp, c)])
+    assert est.range_mode == "pnp" and est.range_check == RangeCheck()
+    ge = est.update(Frame(np.zeros((H, W, 3), np.uint8), 0.0, 1), state, 0.0)
+    assert ge.info["matched"]
+    assert "range_mode" not in ge.info and "range_rejections" not in ge.info
+
+
+def test_range_mode_and_range_check_pass_through_from_config(tmp_path):
+    w = make_weights(tmp_path / "w.pt")
+    cfg, ctx = _ctx(w, input_width=128)
+    est = registry.build_part("gate_estimator", "learned", cfg.section("gates"), ctx)
+    assert est.range_mode == "pnp" and est.range_check.max_normal_tilt_deg == 45.0  # shipped
+    cfg, ctx = _ctx(
+        w,
+        input_width=128,
+        range_mode="pnp_checked",
+        range_check={"size_ratio_min": 0.6, "max_normal_tilt_deg": None},
+    )
+    est = registry.build_part("gate_estimator", "learned", cfg.section("gates"), ctx)
+    assert est.range_mode == "pnp_checked"
+    assert est.range_check.size_ratio_min == 0.6 and est.range_check.max_normal_tilt_deg is None
+    assert est.range_check.size_ratio_max == 1.33  # untouched knobs keep the shipped values
+    assert est.extra_info()["range_rejections"] == {"size_ratio": 0, "normal_tilt": 0}
+
+
+def test_range_mode_config_validation(tmp_path):
+    w = make_weights(tmp_path / "w.pt")
+    for bad, match in (
+        ({"range_mode": "size"}, "range_mode"),
+        ({"range_check": {"size_ratio_min": 2.0, "size_ratio_max": 1.0}}, "size_ratio_min"),
+        ({"range_check": {"bogus": 1}}, "unknown"),
+        ({"range_check": {"max_normal_tilt_deg": 95}}, "max_normal_tilt_deg"),
+    ):
+        with pytest.raises(HarnessConfigError, match=match):  # at load (unknown key) or build
+            cfg, ctx = _ctx(w, input_width=128, **bad)
+            registry.build_part("gate_estimator", "learned", cfg.section("gates"), ctx)
+
+
+def test_pnp_checked_drops_rejected_detections_and_counts_each_check():
+    pytest.importorskip("cv2")
+    state = _state()
+    kp, c = _projected_arch([15.0, 0.5, 1.74], math.radians(8), state)
+    frame = Frame(np.zeros((H, W, 3), np.uint8), 0.0, 1)
+    # a permissive check keeps exactly what pnp keeps
+    keep = ScriptedEstimator(lambda: [_raw(kp, c)], range_mode="pnp_checked",
+                             range_check=RangeCheck(edge_margin_px=0.0))  # fmt: skip
+    base = ScriptedEstimator(lambda: [_raw(kp, c)]).detect_frame(frame, state)
+    kept = keep.detect_frame(frame, state)
+    assert len(kept) == len(base) == 1
+    np.testing.assert_allclose(kept[0].center, base[0].center)
+    assert keep.range_rejections == {"size_ratio": 0, "normal_tilt": 0}
+    # a correct frontal pose has r_pnp / r_size ~ 1: a band above 1 rejects it on size_ratio
+    strict = RangeCheck(size_ratio_min=1.2, size_ratio_max=1.5, edge_margin_px=0.0)
+    rej = ScriptedEstimator(lambda: [_raw(kp, c)], range_mode="pnp_checked", range_check=strict)
+    ge = rej.update(frame, state, 0.0)
+    assert ge.info["detections"] == 0 and not ge.info["matched"]
+    assert ge.info["range_mode"] == "pnp_checked"
+    assert ge.info["range_rejections"] == {"size_ratio": 1, "normal_tilt": 0}
+    # the same (cached) raw detection is re-checked on every tick and counted again
+    ge = rej.update(frame, state, 0.05)
+    assert ge.info["range_rejections"]["size_ratio"] == 2
+    # truncated-box fallback: the upper half alone is below min_hull_frac, so the size check is
+    # skipped and the same strict band no longer rejects (only the tilt check applies)
+    vis = np.array([0, 0, 0, 0, 1, 1, 1, 1, 1, 1], float)
+    fall = ScriptedEstimator(lambda: [_raw(kp, c, vis)], range_mode="pnp_checked",
+                             range_check=RangeCheck(size_ratio_min=1.2, size_ratio_max=1.5,
+                                                    min_hull_frac=0.9))  # fmt: skip
+    assert len(fall.detect_frame(frame, state)) == 1
+    assert fall.range_rejections == {"size_ratio": 0, "normal_tilt": 0}

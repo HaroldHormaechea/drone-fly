@@ -100,13 +100,25 @@ def order_corners(pts: np.ndarray) -> np.ndarray:
 
 
 def camera_from_config(cam: dict[str, Any]) -> CameraModel:
-    """:class:`CameraModel` from the ``camera`` section (1920x1080 when no resolution is set)."""
+    """:class:`CameraModel` from the ``camera`` section (1920x1080 when no resolution is set).
+
+    ``camera.principal_point: [cx, cy]`` (pixels at ``resolution``, inside the image) overrides
+    the image-centre principal point (UC-91); unset keeps the centre.
+    """
     res = cam.get("resolution")
     width, height = (
         (1920, 1080)
         if res is None
         else (int(v) for v in require_vector(res, "camera.resolution", 2))
     )
+    pp = cam.get("principal_point")
+    if pp is not None:
+        cx, cy = require_vector(pp, "camera.principal_point", 2)
+        if not (0.0 <= cx <= width and 0.0 <= cy <= height):
+            raise HarnessConfigError(
+                f"camera.principal_point {[cx, cy]} must lie inside the {width}x{height} image"
+            )
+        pp = (cx, cy)
     return CameraModel(
         width,
         height,
@@ -118,6 +130,7 @@ def camera_from_config(cam: dict[str, Any]) -> CameraModel:
                 cam.get("uptilt_deg", 0.0), "camera.uptilt_deg", min_value=-90.0, max_value=90.0
             )
         ),
+        principal_point=pp,
     )
 
 
@@ -153,6 +166,7 @@ class GateDetection:
     off_axis: float  # radians between the optical axis and the centre
     cls: str | None = None  # gate class (gate-type table); None for single-style detectors
     pixel_center: np.ndarray | None = None  # gate centre in the image (pixels)
+    n_world: np.ndarray | None = None  # gate plane normal in the world (camera normal, rotated)
 
     @property
     def center_px(self) -> np.ndarray:
@@ -275,14 +289,19 @@ class TrackingGateEstimator(GateEstimator):
         cls: str | None = None,
         pixel_center: np.ndarray | None = None,
     ) -> GateDetection | None:
-        """Camera-frame gate pose -> world :class:`GateDetection` (``None`` behind the camera)."""
-        if t_cam[2] <= 0:
+        """Camera-frame gate pose -> world :class:`GateDetection`.
+
+        ``None`` behind the camera, or for a non-finite PnP solution (UC-91: a degenerate 4-point
+        IPPE solve returned NaN, which ``t_cam[2] <= 0`` let through to the tracker).
+        """
+        if not (np.isfinite(t_cam).all() and np.isfinite(n_cam).all()) or t_cam[2] <= 0:
             return None
         pos, quat = self._pose_at(self._det_stamp, state)  # the pose the frame was captured at
         r_wc = quat_to_matrix(quat) @ camera.body_to_camera().T  # camera -> world
         center = pos + r_wc @ (np.asarray(t_cam, np.float64) / self.scale.factor)
         d = center - pos
-        nh = (r_wc @ np.asarray(n_cam, np.float64))[:2]
+        n_world = r_wc @ np.asarray(n_cam, np.float64)
+        nh = n_world[:2]
         if np.linalg.norm(nh) < 1e-6:
             nh = d[:2]
         if np.dot(nh, d[:2]) < 0:
@@ -299,6 +318,7 @@ class TrackingGateEstimator(GateEstimator):
             off_axis=float(np.arctan2(np.linalg.norm(t_cam[:2]), t_cam[2])),
             cls=cls,
             pixel_center=None if pixel_center is None else np.asarray(pixel_center, np.float64),
+            n_world=n_world,
         )
 
     # ------------------------------------------------------------------ pose history
